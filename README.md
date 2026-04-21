@@ -57,6 +57,24 @@ For nearest-neighbor circuits on the cycle graph, $p_c \approx 0.16$, and the tr
 
 The MIPT has a direct manifestation in the structure of stabilizer generators. Define the **average active count** *ā* as the mean number of generators with nontrivial Pauli support on a given qubit. Empirically:
 
-- **Volume-law** ($p < p_c$): $\overline{a} \sim n^\alpha$ with $\alpha \approx 0.9$ — generators have extensive support spanning most of the system.
-- **Area-law** ($p > p_c$): $\overline{a} = \mathcal{O}(1)$ — generators are localized, each touching only a constant number of qubits independent of system size.
+- **Volume-law** ($p < p_c$): $\bar{a} \sim n^\alpha$ with $\alpha \approx 0.9$ — generators have extensive support spanning most of the system.
+- **Area-law** ($p > p_c$): $\bar{a} = \mathcal{O}(1)$ — generators are localized, each touching only a constant number of qubits independent of system size.
+
+The transition in $\bar{a}$ occurs at the same critical point $p_c$ as the entanglement transition, because both are controlled by the same correlation length divergence.
+
+
+### From Sparsity to Speedup
+
+Standard tableau simulators (CHP, Stim, AG algorithm) process every gate by scanning **all $2n$ generators**, regardless of how many actually have support on the gate qubits. The per-gate cost is $\Theta(n)$, giving per-layer cost $\Theta(n^2)$ and total circuit cost $\Theta(n^3)$.
+
+
+SparseGF2 maintains an **inverted index**: for each qubit $q$, a list of generators with nontrivial Pauli support on $q$. A gate on $(q_i, q_j)$ touches only the generators in `inv[q_i] ∪ inv[q_j]`, which has expected size $\bar{a}$. The per-gate cost is $\Theta(\bar{a})$, giving:
+
+| | Per gate | Per layer | Total (depth D) |
+|---|---|---|---|
+| **AG/Stim** | $\Theta(n)$ | $\Theta(n^2)$ | $\Theta(n^2D)$ |
+| **SparseGF2** | $\Theta(\bar{a})$ | $\Theta(n\cdot \bar{a})$ | $\Theta(n\cdot \bar{a}\cdot D)$ |
+
+
+In the area-law phase where $\bar{a}= \mathcal{O}(1)$: SparseGF2 achieves $\Theta(n)$ per layer and $\Theta(n^2)$ total for depth $D = \Theta(n) — an **$\Theta(n)$ asymptotic speedup** over standard simulators.
 
