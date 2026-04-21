@@ -7,6 +7,57 @@
 
 SparseGF2 is a Clifford circuit simulator built from scratch to exploit the *sparsity phase transition* in stabilizer generators. In the area-law phase of the measurement-induced phase transition (MIPT), stabilizer generators have $\mathcal{O}(1)$ support independent of system size. SparseGF2 exploits this structure with a hybrid sparse-index data structure that achieves **$\mathcal{O}(n)$ per-layer cost** in the area-law phase, versus the $\mathcal{O}(n^2)$ per-layer cost of standard tableau simulators.
 
+## Getting Started
+
+### Installation
+
+
+```bash
+git clone https://github.com/sjbevins/SparseGF2-v1.git
+cd SparseGF2-v1
+pip install -e ".[all]"
+```
+
+Requires Python $\geq$ 3.11. Core dependencies (`numpy`, `numba`, `stim`) are hard requirements. Optional extras:
+- `[plotting]` — `matplotlib`
+- `[analysis]` — `networkx`, `scipy` (for tanner-graph utilities)
+- `[dev]` — `pytest`, `pytest-cov`
+
+
+### Basic Usage
+
+
+```python
+import numpy as np
+import stim
+from sparsegf2 import SparseGF2, warmup, symplectic_from_stim_tableau
+
+warmup()
+
+# Enumerate the complete 11,520-element 2-qubit Clifford group
+symps = np.stack([symplectic_from_stim_tableau(t) for t in stim.Tableau.iter_all(2)])
+
+n = 64
+rng = np.random.default_rng(42)
+sim = SparseGF2(n)
+
+depth = 8 * n   # 512 layers at n=64
+for layer in range(depth):
+    # Brickwork: even matchings on even layers, odd matchings on odd layers
+    offset = layer % 2
+    for q in range(offset, n - 1, 2):
+        ci = rng.integers(0, len(symps))
+        sim.apply_gate(q, q + 1, symps[ci])
+    # Z-basis measurement at rate p
+    p = 0.2
+    for q in range(n):
+        if rng.random() < p:
+            sim.apply_measurement_z(q)
+
+print(f"k = {sim.compute_k()}, abar = {sim.get_active_count():.2f}")
+```
+
+
 ## Benchmarks
 
 ### Speedup over Stim (n=512, nearest-neighbor brickwork, 8n depth)
