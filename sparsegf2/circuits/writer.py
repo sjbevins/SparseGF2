@@ -1,15 +1,15 @@
 """
-RunWriter — serializes a run to the standardized ``runs/<run_id>/`` tree.
+RunWriter: serializes a run to the standardized runs/<run_id>/ tree.
 
-Design notes
-------------
+Notes:
 - All per-cell writes are single-owner: the driver accumulates all
-  ``SampleRecord`` objects for one ``(n, p)`` cell before invoking the writer.
-  No locking, no shards (at this MVP scope).
-- Parquet files use pyarrow; HDF5 files use h5py with blosc compression
-  (falling back to gzip when blosc is not registered).
-- Every file carries enough embedded metadata (schema_version, encoding,
-  attrs) to be interpreted without external documentation.
+  SampleRecord objects for one (n, p) cell before invoking the writer.
+- Parquet files use pyarrow; HDF5 files use h5py with gzip compression
+  and byte-shuffle.
+- Every file carries embedded metadata (schema_version, encoding, attrs)
+  to be interpreted without external documentation.
+- One graph_n{n:04d}.g6 per size for deterministic graphs; the canonical
+  per-size mapping is also in manifest.json under n_to_graph6.
 """
 from __future__ import annotations
 
@@ -290,16 +290,18 @@ class RunWriter:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "data").mkdir(exist_ok=True)
 
-        # Write deterministic graph.g6 if applicable
+        # Write deterministic graph.g6 files if applicable. One file per size
+        # (graph_n{n:04d}.g6) so that analysis tools reconstructing a graph for
+        # a particular n pick up the correct encoding. The canonical per-size
+        # mapping is also recorded in manifest.json under n_to_graph6.
         graph_info = _collect_graph_info(self.cfg)
         if not graph_info["is_stochastic"]:
-            # One-line graph6 for the smallest size (others are in manifest's n_to_graph6)
-            probe = parse_graph_spec(
-                self.cfg.circuit.graph_spec,
-                self.cfg.sizes[0],
-                seed=self.cfg.circuit.base_seed,
-            )
-            (self.run_dir / "graph.g6").write_text(probe.graph6 + "\n")
+            for n in self.cfg.sizes:
+                probe = parse_graph_spec(
+                    self.cfg.circuit.graph_spec, n,
+                    seed=self.cfg.circuit.base_seed,
+                )
+                (self.run_dir / f"graph_n{n:04d}.g6").write_text(probe.graph6 + "\n")
 
         self._started_utc = _dt.datetime.now(tz=_dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"

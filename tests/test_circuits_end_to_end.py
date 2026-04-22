@@ -36,7 +36,8 @@ def test_end_to_end_sweep(tmp_path: Path):
     run_dir = SweepDriver(cfg, progress=False).run()
     assert run_dir.exists()
     assert (run_dir / "manifest.json").exists()
-    assert (run_dir / "graph.g6").exists()
+    # One graph_n{n:04d}.g6 per size in a deterministic sweep
+    assert list(run_dir.glob("graph_n*.g6"))
     assert (run_dir / "index.parquet").exists()
     # Two sizes x three p values = 6 cell dirs
     cells = list((run_dir / "data").glob("n=*/p=*"))

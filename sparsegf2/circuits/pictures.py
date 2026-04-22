@@ -1,18 +1,11 @@
 """
 Physics-picture initialization for graph-defined circuits.
 
-MVP supports only the ``purification`` picture: 2n qubits (n system + n
-reference), initialized as n Bell pairs; the circuit acts only on the system
-qubits. ``SparseGF2(n)`` already lands in this state via its constructor's
-``_init_bell_pairs`` pass, so the picture initializer here is a thin wrapper
-that exists mainly to give future pictures (``single_ref``, ``pure_state``)
-a uniform entry point.
-
-Future pictures
----------------
-When added, each picture will be a function ``init_<name>(n, **kwargs)``
-returning an initialized :class:`SparseGF2`-compatible simulator, plus an
-entry in :data:`PICTURES` so the validator and CLI see the new option.
+Currently supports the ``purification`` picture: 2n qubits (n system + n
+reference), initialized as n Bell pairs; the circuit acts only on the
+system qubits (Gullans-Huse 2020, Phys. Rev. X 10, 041020). SparseGF2(n)
+already lands in this state via its constructor, so init_picture is a thin
+wrapper giving a uniform entry point for future pictures.
 """
 from __future__ import annotations
 
@@ -41,8 +34,7 @@ def init_picture(
     n : int
         Number of system qubits.
     use_min_weight_pivot, check_inputs, hybrid_mode
-        Forwarded to :class:`SparseGF2`. Defaults match the production
-        settings used by ``graph-construction/runner.py``.
+        Forwarded to :class:`SparseGF2`.
 
     Returns
     -------

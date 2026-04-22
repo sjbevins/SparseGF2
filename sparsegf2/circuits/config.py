@@ -141,14 +141,16 @@ class CircuitConfig:
     def expected_gate_to_meas_ratio(self) -> float:
         """Expected ratio of gate-applications to measurement-applications.
 
-        In the uniform measurement mode, each of the n qubits is independently
-        measured with probability p per layer, giving ``n*p`` measurements per
-        layer on average. Each layer applies ``n/2`` two-qubit gates, so the
-        expected gate-to-meas ratio is ``(n/2) / (n*p) = 1 / (2p)`` (equivalently:
-        1 gate per 2p measurements in expectation) for ``p > 0``. Returned here
-        as ``2p`` so downstream code can compare to an observed ratio directly.
+        In uniform measurement mode each of the n qubits is independently
+        measured with probability p per layer, giving n*p measurements per
+        layer on average; each layer applies n/2 two-qubit gates. So the
+        expected gate-to-measurement ratio is (n/2) / (n*p) = 1/(2p) for
+        p > 0. The runner stores this same value in
+        SampleRecord.gate_to_meas_ratio_expected.
         """
-        return 2.0 * float(self.p)
+        if self.p <= 0.0:
+            return float("inf")
+        return 1.0 / (2.0 * float(self.p))
 
     def to_dict(self) -> dict:
         """Serializable dict for manifest.json."""

@@ -37,6 +37,33 @@ _ISWAP_SYMPLECTIC = np.array([
 ], dtype=np.uint8)
 
 
+def _gf2_inverse_4x4(M: np.ndarray) -> np.ndarray:
+    """GF(2) inverse of a 4x4 invertible symplectic matrix via Gauss-Jordan.
+
+    Raises ValueError if M is singular over GF(2). For Clifford symplectic
+    matrices, invertibility is guaranteed.
+    """
+    A = (np.asarray(M) & 1).astype(np.uint8).copy()
+    if A.shape != (4, 4):
+        raise ValueError(f"expected (4,4) matrix, got {A.shape}")
+    I = np.eye(4, dtype=np.uint8)
+    aug = np.concatenate([A, I], axis=1)  # (4, 8)
+    for col in range(4):
+        pivot = -1
+        for r in range(col, 4):
+            if aug[r, col]:
+                pivot = r
+                break
+        if pivot < 0:
+            raise ValueError("matrix is not GF(2)-invertible")
+        if pivot != col:
+            aug[[col, pivot]] = aug[[pivot, col]]
+        for r in range(4):
+            if r != col and aug[r, col]:
+                aug[r] ^= aug[col]
+    return aug[:, 4:].astype(np.uint8)
+
+
 class StabilizerTableau:
     """GF(2) stabilizer tableau with bit-packed uint64 storage.
 
@@ -216,12 +243,19 @@ class StabilizerTableau:
         self.apply_clifford_2q(q0, q1, _ISWAP_SYMPLECTIC)
 
     def apply_clifford_2q(self, q0: int, q1: int, symplectic_4x4: np.ndarray):
-        """Apply arbitrary 2-qubit Clifford via its 4x4 GF(2) symplectic matrix."""
+        """Apply arbitrary 2-qubit Clifford via its 4x4 GF(2) symplectic matrix.
+
+        If ``track_inverse`` is set, the inverse tableau is updated with the
+        GF(2) inverse of the symplectic matrix. CNOT/CZ/SWAP are GF(2) self-
+        inverse, but a generic 2-qubit Clifford is not; pass the inverse
+        explicitly via ``apply_clifford_2q_with_inverse`` or rely on the
+        GF(2) inverse computed here.
+        """
         self._check_two_qubits(q0, q1)
         self._apply_2q_to_pair(self.x, self.z, q0, q1, symplectic_4x4)
         if self.track_inverse:
-            # All Clifford gates are self-inverse at GF(2) level
-            self._apply_2q_to_pair(self.inv_x, self.inv_z, q0, q1, symplectic_4x4)
+            inv_symp = _gf2_inverse_4x4(symplectic_4x4)
+            self._apply_2q_to_pair(self.inv_x, self.inv_z, q0, q1, inv_symp)
 
     # ------------------------------------------------------------------
     # Measurement

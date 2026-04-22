@@ -98,8 +98,10 @@ class ValidationReport:
                     lines.append(f"  n={n}  (none -- no perfect matching)")
             else:
                 modes = self.available_modes_by_n.get(n, [])
-                mark = "[ok]  " if modes else "[FAIL]"
-                lines.append(f"  n={n}  {mark}  " + (", ".join(modes) if modes else "(none)"))
+                # Passing sizes always have non-empty modes (validate_config
+                # only appends to ok_sizes when the requested mode is in
+                # modes_here). Report [ok] unconditionally.
+                lines.append(f"  n={n}  [ok]    " + ", ".join(modes))
         lines.append("")
         lines.append("Suggested fixes:")
         lines.append("  (a) remove the offending sizes from --sizes")
