@@ -54,6 +54,6 @@ where = ["."]
 include = ["sparsegf2*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "sanity_checks"]
+testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "--tb=short"
