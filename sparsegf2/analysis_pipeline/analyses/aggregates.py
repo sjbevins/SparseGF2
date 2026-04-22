@@ -49,8 +49,15 @@ DEFAULT_PARAMS: Dict = {
 def wilson_interval(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     """Wilson score interval for a binomial proportion.
 
-    Returns ``(lower, upper)`` both in ``[0, 1]``. Defined even for ``k ∈ {0, n}``,
-    where it gives a proper non-degenerate interval (unlike the normal-approx).
+    Reference: Wilson, E. B. (1927), "Probable inference, the law of
+    succession, and statistical inference", Journal of the American
+    Statistical Association 22 (158), 209-212. See Brown, Cai, DasGupta
+    (2001), "Interval Estimation for a Binomial Proportion", Statistical
+    Science 16, 101-133, for why Wilson is preferred over the normal
+    approximation (particularly for small n or proportions near 0 / 1).
+
+    Returns ``(lower, upper)`` both in ``[0, 1]``. Defined even for
+    ``k ∈ {0, n}``, where it gives a proper non-degenerate interval.
     """
     if n == 0:
         return 0.0, 1.0

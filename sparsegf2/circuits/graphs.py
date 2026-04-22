@@ -221,6 +221,12 @@ def _complete_edges(n: int) -> List[Edge]:
 def _complete_one_factorization(n: int) -> Optional[List[Matching]]:
     """Standard round-robin 1-factorization of K_n for even n.
 
+    Reference: Anderson 2001, "1-Factorizations of Complete Graphs" (and
+    every combinatorics textbook that discusses tournament scheduling).
+    For even n, the 1-factorization consists of n-1 perfect matchings
+    whose edge union is the complete edge set of K_n; this is the round-
+    robin tournament schedule.
+
     The algorithm fixes vertex ``n-1`` and rotates the remaining ``n-1`` vertices
     through ``n-1`` rounds. In round ``r``:
 

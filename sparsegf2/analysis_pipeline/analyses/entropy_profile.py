@@ -1,9 +1,18 @@
 """
-``entropy_profile`` analysis — S(A_ell) for ell = 1..n/2 at a canonical start.
+Entropy-profile analysis: S(A_ell) for ell = 1..n/2 at a canonical start.
 
-Writes one fixed-length ``uint16`` array per sample. Canonical starting
-position is 0 for MVP; future work can add the four canonical starts
-(0, n/4, n/2, 3n/4) and store a ``(4, n/2)`` array per sample.
+Entropies are computed via the Fattal-Cubitt-Yamamoto-Bravyi-Chuang formula
+(arXiv:quant-ph/0406168, Theorem 1): S(A) = rank(M|_A) - |A|.
+
+For a volume-law state S(A_ell) grows linearly with ell (up to saturation
+at ell = n/2); for an area-law state S(A_ell) saturates at O(1). The
+boundary law S(A_ell) ~ log(ell) is the MIPT fingerprint — see
+Li-Chen-Fisher 2019 (arXiv:1901.08092), Skinner-Ruhman-Nahum 2019
+(arXiv:1808.05953).
+
+Writes one fixed-length uint16 array per sample. The canonical starting
+position is 0; this can be relaxed to the four canonical starts
+(0, n/4, n/2, 3n/4) by storing a (4, n/2) array per sample.
 """
 from __future__ import annotations
 

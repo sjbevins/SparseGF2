@@ -59,6 +59,10 @@ def ci95_bootstrap(values: np.ndarray,
 def wilson(values: np.ndarray, z: float = 1.96) -> Tuple[float, float]:
     """Wilson score interval half-widths for a binomial proportion.
 
+    Reference: Wilson, E. B. (1927), Journal of the American Statistical
+    Association 22, 209-212. Brown, Cai, DasGupta (2001), Stat. Sci. 16,
+    101-133 on why Wilson is preferred to the normal approximation.
+
     Values must be in ``{0, 1}``. Returns ``(phat - lower, upper - phat)``
     so that ``phat ± half-widths`` reproduces the Wilson interval.
     """

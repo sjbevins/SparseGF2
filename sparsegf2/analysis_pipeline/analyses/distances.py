@@ -1,14 +1,28 @@
 """
-``distances`` analysis — d_cont (contiguous) and d_min (true code distance).
+Distances analysis: d_cont (contiguous distance) and d_min upper bound.
 
-Ports algorithms from ``studies/code_quality_sweep._compute_d_cont`` and
-``benchmarks/benchmark_rate_distance_dmin._compute_d_min``.
+References:
+  Gullans & Huse 2020, "Dynamical Purification Phase Transition Induced by
+    Quantum Measurements", Phys. Rev. X 10, 041020 (arXiv:1905.05195).
+  Skinner, Ruhman, Nahum 2019, "Measurement-Induced Phase Transitions in
+    the Dynamics of Entanglement", Phys. Rev. X 9, 031009 (arXiv:1808.05953).
+
+Both quantities use the purification-picture mutual information:
+  I(A; R) = S(A) + S(R) - S(A ∪ R).
+In the CHP tableau S(R) = k (Fattal et al. 2004, arXiv:quant-ph/0406168,
+Thm. 1) and S(A ∪ R) = S(system \\ A) by purity of the system+reference
+state, so I(A; R) = S(A) + k - S(system \\ A).
 
 d_cont : smallest contiguous block A_ell on the ring such that I(A_ell; R) > 0.
-         Binary-searched from four canonical starting positions (0, n/4, n/2, 3n/4).
-d_min  : smallest |A| (any subset) such that I(A; R) > 0. Exhaustive search up
-         to |A| = ``d_min_max_exhaustive`` (default 3), then greedy shrink from
-         the arc that realizes d_cont. d_min <= d_cont always.
+         Binary-searched from four canonical starting positions (0, n/4, n/2,
+         3n/4); this is an UPPER BOUND on the true contiguous distance (a full
+         n-start sweep would give the exact value).
+d_min  : upper bound on the minimum code distance. Exhaustive search up to
+         |A| = ``d_min_max_exhaustive`` (default 3) over all subsets of size
+         <= that bound, then greedy shrink starting from the arc that realizes
+         d_cont. This is an upper bound because greedy shrink from a
+         contiguous arc cannot discover non-contiguous low-weight logicals;
+         d_min <= d_cont always.
 """
 from __future__ import annotations
 
@@ -44,7 +58,13 @@ DEFAULT_PARAMS = {
 # ══════════════════════════════════════════════════════════════
 
 def _has_info(sim, n: int, k: int, A) -> bool:
-    """Return True iff I(A; R) = S(A) + k - S(sys \\ A) > 0."""
+    """Return True iff I(A; R) = S(A) + k - S(sys \\ A) > 0.
+
+    Purification-picture mutual information: since the full system+reference
+    state is pure, S(A ∪ R) = S(system \\ A). Entropies are computed by the
+    Fattal-Cubitt-Yamamoto-Bravyi-Chuang formula (arXiv:quant-ph/0406168
+    Thm. 1). See module docstring for the derivation.
+    """
     if not A:
         return False
     A_set = set(int(q) for q in A)

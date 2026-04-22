@@ -1,29 +1,36 @@
 """
-SparseGF2: Sparse Stabilizer Simulator with PLT + Inverted Indices + Min-Weight Pivot.
+SparseGF2: sparse stabilizer simulator with PLT, inverted indices, and
+min-weight pivot selection.
+
+Implements the CHP algorithm of Aaronson & Gottesman, "Improved Simulation
+of Stabilizer Circuits", Phys. Rev. A 70, 052328 (2004),
+arXiv:quant-ph/0406196. Gate updates (Table I there) are applied here
+via 2x2 and 4x4 GF(2) symplectic matrices under the row-vector convention
+(x', z') = (x, z) @ S; measurement follows Sec. V (rank-1 branch when an
+anticommuting stabilizer exists, deterministic branch otherwise).
+
+Phase tracking is not kept: the simulator represents the GF(2) symplectic
+part only. This is correct for stabilizer-group-level observables (rank,
+entropy via Fattal-Cubitt-Yamamoto-Bravyi-Chuang, code distance, weight
+spectra) and for the MIPT observables used throughout sparsegf2.circuits.
+
+Data structures (specification: docs/reference_manual.tex, Chapters 3-5):
+
+1. Dense Pauli Lookup Table (PLT): 2n x n uint8 array, O(1) random access
+   to any (generator, qubit) Pauli entry.
+2. Position maps (inv_pos, inv_x_pos): 2n x n int32 arrays, O(1) removal
+   from inverted indices.
+3. Sparse support lists (supp_q, supp_len): per-generator list of qubits
+   in its support.
+4. Min-weight pivot: select lightest anticommuting generator during
+   measurement, reducing per-layer measurement cost from O(n*p*abar^2)
+   to O(n*abar).
+
+Memory: O(n^2) allocated (PLT + position maps), O(n*abar) touched per layer.
 
 The default mode is pure-sparse (no automatic mode switching). Pass
 ``hybrid_mode=True`` to enable sparse<->dense mode switching based on the
 average active count a_bar.
-
-See ``docs/reference_manual.tex`` (Chapters 3–5) for the full algorithm
-and data-structure specification. Key components:
-
-1. Dense Pauli Lookup Table (PLT): 2n x n uint8 array, O(1) random access
-   to any (generator, qubit) Pauli entry. Eliminates O(s_r) _find_in_row.
-
-2. Position maps (inv_pos, inv_x_pos): 2n x n int32 arrays, O(1) removal
-   from inverted indices. Eliminates O(a_bar) _remove_from_inv scans.
-
-3. Sparse support lists (supp_q, supp_len): For each generator, explicit
-   list of qubits in its support. Used to iterate over source during
-   measurement XOR in O(wt(source)) instead of O(n).
-
-4. Min-weight pivot: Select lightest anticommuting generator during
-   measurement, reducing per-layer measurement cost from O(n*p*abar^2)
-   to O(n*abar).
-
-Memory: O(n^2) allocated (PLT + position maps), O(n*abar) touched/layer.
-Per-layer cost: Theta(n * abar) with high probability.
 """
 import numpy as np
 import numba
@@ -1066,9 +1073,12 @@ class SparseGF2:
     def compute_k(self):
         """Code dimension k = rank(M_sys) - n.
 
-        Where ``M_sys`` is the 2n x 2n symplectic matrix of the full
-        purification tableau restricted to the n system-qubit columns.
-        Computed via a Numba-JIT bit-packed GF(2) rank kernel.
+        M_sys is the 2n x 2n symplectic matrix of the full purification
+        tableau restricted to the n system-qubit columns. This is the
+        reference-entropy S(R) = k computed via the Fattal-Cubitt-
+        Yamamoto-Bravyi-Chuang formula (arXiv:quant-ph/0406168, Thm. 1):
+        S(A) = rank(M|_A) - |A|. Computed via a Numba-JIT bit-packed
+        GF(2) rank kernel.
 
         Returns
         -------
@@ -1132,9 +1142,10 @@ class SparseGF2:
     def compute_subsystem_entropy(self, qubits):
         """Compute entanglement entropy S(A) for a subsystem A.
 
-        Uses the formula ``S(A) = rank(M|_A) - |A|``, where ``M|_A`` is
-        the stabilizer symplectic matrix restricted to the 2|A| columns
-        (X and Z) of the qubits in A.
+        Uses the Fattal-Cubitt-Yamamoto-Bravyi-Chuang formula (arXiv:
+        quant-ph/0406168, Theorem 1): ``S(A) = rank(M|_A) - |A|``, where
+        ``M|_A`` is the stabilizer symplectic matrix restricted to the
+        2|A| columns (X and Z) of the qubits in A.
 
         Parameters
         ----------
@@ -1169,8 +1180,13 @@ class SparseGF2:
     def compute_tmi(self):
         """Compute tripartite mutual information I_3(A:B:C).
 
-        For an approximately equal tripartition of system qubits:
+        For an approximately equal tripartition of the n system qubits:
           I_3 = S(A) + S(B) + S(C) - S(AB) - S(AC) - S(BC) + S(ABC)
+
+        Reference: Hosur, Qi, Roberts, Yoshida, "Chaos in quantum
+        channels", JHEP 2016:4 (arXiv:1511.04021), Eq. 24. See also
+        Kitaev & Preskill 2006 and Levin & Wen 2006 in the topological-
+        entanglement-entropy context.
 
         Returns
         -------
