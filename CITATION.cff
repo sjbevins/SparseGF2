@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use SparseGF2 in your research, please cite it as below."
+title: "SparseGF2: a sparse GF(2) stabilizer simulator for quantum error correction research"
+authors:
+  - family-names: Bevins
+    given-names: Sam
+version: 0.2.0
+date-released: 2026-04-16
+url: "https://github.com/sjbevins/SparseGF2-v1"
+license: MIT
+type: software
+keywords:
+  - quantum
+  - stabilizer
+  - clifford
+  - simulator
+  - quantum-error-correction
+  - measurement-induced-phase-transition
+  - gf2
