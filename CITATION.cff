@@ -6,7 +6,7 @@ authors:
     given-names: Sam
 version: 0.2.0
 date-released: 2026-04-16
-url: "https://github.com/sjbevins/SparseGF2-v1"
+url: "https://github.com/sjbevins/SparseGF2"
 license: MIT
 type: software
 keywords:

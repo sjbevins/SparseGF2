@@ -91,22 +91,20 @@ df = pl.scan_parquet("runs/<id>/data/**/samples.parquet", hive_partitioning=True
 df.filter(pl.col("n") == 128).group_by("p").agg(pl.col("obs.k").mean()).collect()
 ```
 
-## Matching modes — authoritative reference
+## Matching modes
 
-This section is the canonical definition of each matching mode, referenced
-the authoritative reference for each mode.
+In the `matching` gating mode, gates are applied in **matchings**: sets of
+edges sharing no vertex, so every gate in a layer acts on a disjoint pair
+of qubits. A **perfect matching** is a matching in which every vertex
+participates (so it has exactly `n/2` edges).
 
-In the `matching` gating mode, gates are applied in **matchings** — sets
-of edges sharing no vertex — so that every gate in a layer acts on a
-disjoint pair of qubits. A **perfect matching** is a matching in which
-every vertex participates (so it has exactly `n/2` edges).
-
-For a graph `G` with chromatic index `χ'(G)`, Vizing's theorem gives
-`χ'(G) ∈ {Δ(G), Δ(G)+1}`. When `G` is regular and *class 1* (i.e.
-`χ'(G) = Δ(G)`), the edges decompose into `Δ(G)` perfect matchings; this
-decomposition is called a **1-factorization**. Both the cycle (even `n`)
-and the complete graph `K_n` (even `n`) are class 1 and admit
-1-factorizations. Odd `n` has no perfect matching for either family.
+For a graph `G` with chromatic index `χ'(G)`, Vizing's theorem (Vizing
+1964) gives `χ'(G) ∈ {Δ(G), Δ(G)+1}`. When `G` is regular and *class 1*
+(i.e. `χ'(G) = Δ(G)`), the edges decompose into `Δ(G)` perfect matchings;
+this decomposition is called a **1-factorization**. Both the cycle (even
+`n`) and the complete graph `K_n` (even `n`) are class 1 and admit
+1-factorizations (Anderson 2001). Odd `n` has no perfect matching for
+either family.
 
 Each circuit period is `χ'` gate layers long. Within a period, the three
 matching modes differ only in *how* the layer-to-matching assignment is
@@ -159,8 +157,8 @@ At each layer, sample a uniformly random perfect matching of `G` from
 
 | Graph      | Even `n`                                                                                           | Odd `n`                         |
 |------------|----------------------------------------------------------------------------------------------------|---------------------------------|
-| `cycle`    | all three modes work; `fresh` and `palette` are degenerate (only 2 matchings exist)                | ✗ no perfect matching           |
-| `complete` | all three modes work; all three are genuinely distinct                                             | ✗ no perfect matching           |
+| `cycle`    | all three modes work; `fresh` and `palette` are degenerate (only 2 matchings exist)                | no perfect matching             |
+| `complete` | all three modes work; all three are genuinely distinct                                             | no perfect matching             |
 
 If you request a mode that is incompatible with the graph at some size,
 the pre-flight validator aborts the run with exit code 2 before any

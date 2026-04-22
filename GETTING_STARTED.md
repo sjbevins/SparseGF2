@@ -61,8 +61,8 @@ the plotting primitive, and reproduction of the benchmark figures.
 From a fresh clone:
 
 ```bash
-git clone https://github.com/sjbevins/SparseGF2-v1.git
-cd SparseGF2-v1
+git clone https://github.com/sjbevins/SparseGF2.git
+cd SparseGF2
 pip install -e ".[all]"
 ```
 
