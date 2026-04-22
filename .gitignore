@@ -1,0 +1,44 @@
+# Build artefacts
+*.egg-info/
+build/
+dist/
+*.whl
+*.tar.gz
+
+# Bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+
+# Numba caches
+*.nbc
+*.nbi
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated run directories
+runs/
+/runs/
+sanity_checks/_runs/
+
+# Audit scratch
+AUDIT_REPORT.md

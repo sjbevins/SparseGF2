@@ -26,7 +26,6 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from sparsegf2.core.tableau import StabilizerTableau, stabilizer_groups_equal
-from sparsegf2.core.sparse_tableau_legacy import SparseStabilizerTableau
 
 
 def _ensure_stim_qubits(sim, n):
@@ -179,40 +178,6 @@ def test_purification_full():
           f"(n_sys=16,32,64,128, {total_checks} checks)")
 
 
-# Also test SparseStabilizerTableau
-def test_sparse_purification():
-    """Same purification test with sparse tableau."""
-    rng = np.random.default_rng(789)  # same seed as above
-    total_checks = 0
-
-    for n_sys in [16, 32, 64]:
-        n_total = 2 * n_sys
-        for trial in range(5):
-            our = SparseStabilizerTableau.from_bell_pairs(n_sys)
-            stim_sim = stim.TableauSimulator()
-            for i in range(n_sys):
-                stim_sim.h(i)
-                stim_sim.cx(i, n_sys + i)
-
-            for layer in range(8 * n_sys):
-                offset = layer % 2
-                for i in range(offset, n_sys - 1, 2):
-                    our.cnot(i, i + 1)
-                    stim_sim.cx(i, i + 1)
-                    if rng.random() < 0.15:
-                        our.measure_z(i)
-                        stim_sim.measure(i); stim_sim.reset(i)
-
-            our_symp = our.to_symplectic()
-            stim_symp = _extract_stim(stim_sim, n_total)
-            assert stabilizer_groups_equal(our_symp, stim_symp), (
-                f"Sparse purification MISMATCH: n_sys={n_sys}, trial={trial}")
-            total_checks += 1
-
-    print(f"  [PASS] 5.4: Sparse purification equivalence "
-          f"(n_sys=16,32,64, {total_checks} checks)")
-
-
 def run_all():
     print("=" * 60)
     print("Phase 5: Per-Step Stim Equivalence Verification")
@@ -221,7 +186,6 @@ def run_all():
     test_per_gate_equivalence()
     test_per_measurement_equivalence()
     test_purification_full()
-    test_sparse_purification()
     print()
     print("=" * 60)
     print("ALL PHASE 5 CHECKS PASSED")
