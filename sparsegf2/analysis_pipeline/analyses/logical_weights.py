@@ -1,24 +1,39 @@
 """
-``logical_weights`` analysis — minimum-weight logical operator per Pauli type.
+``logical_weights`` analysis: minimum-weight logical operator per Pauli type.
 
 For each sample, compute the minimum-weight logical operator of pure Pauli
-type X, Y, and Z acting on the SYSTEM qubits. A pure-T operator on subset A
-is a logical iff it (a) commutes with every stabilizer and (b) is not itself
-a stabilizer.
+type X, Y, or Z acting on the SYSTEM qubits of the emergent code produced
+by the purification-picture simulation.
 
-This is stronger than ``d_min`` (which is type-agnostic) and strictly weaker
-than a full decoder: it tells you whether the emergent code has a CSS-like
-structure (pure-X and pure-Z logicals exist) or is genuinely non-CSS (pure-X
-distance much larger than d_min implies logicals that mix X and Z).
+Definition (Aaronson-Gottesman 2004 Sec. IV; Fattal-Cubitt-Yamamoto-
+Bravyi-Chuang 2004). For the 2n-qubit pure state (system + reference)
+stabilized by 2n generators, the emergent code on system has:
+  - code stabilizer group = {v on system : v (x) I_ref is in the full
+    stabilizer group}. Equivalently, the symplectic orthogonal complement
+    of the row-span of system parts of the 2n generators (see derivation
+    below).
+  - logical group = normalizer of code stabilizer / code stabilizer.
+
+A system Pauli v is a LOGICAL operator iff:
+  (a) v lies in the row-span of the 2n system-parts (i.e. v equals the
+      system-part of some full-state stabilizer), AND
+  (b) v does NOT commute with every one of the 2n full-state stabilizers
+      (i.e. v is not itself a code stabilizer).
+
+Reason: in the purification picture, v is a logical iff there exists a
+non-identity reference Pauli P_R such that v (x) P_R is a full-state
+stabilizer. Projecting to the system gives condition (a). The presence
+of a non-trivial P_R is detected via condition (b): v (x) I_ref commutes
+with every stabilizer iff v is in the code-stabilizer subgroup, so v
+being a logical requires (b) to fail.
 
 Algorithm: exhaustive subset enumeration up to
-``max_exhaustive = min(max_exhaustive_param, d_cont_bound)``. For each ``|A|``,
-enumerate all ``C(n, |A|)`` subsets and test commutation + non-stabilizer.
-Columns whose search exhausts without finding a logical are filled with the
-sentinel value ``n + 1``.
+``max_exhaustive = min(max_exhaustive_param, d_cont_bound)``. For each |A|,
+enumerate C(n, |A|) subsets and test conditions (a) and (b). Columns whose
+search exhausts without finding a logical are filled with sentinel ``n + 1``.
 
-EXPENSIVE: compute cost is ``C(n, d)`` checks, which grows combinatorially.
-Default ``max_exhaustive_param = 4`` keeps cost tractable for n ≤ 128.
+EXPENSIVE: compute cost is C(n, d) checks, which grows combinatorially.
+Default ``max_exhaustive_param = 4`` keeps cost tractable for n <= 128.
 """
 from __future__ import annotations
 
@@ -110,16 +125,19 @@ def _pauli_vec_for_type_and_A(pauli: str, A: Sequence[int], n: int
 
 def _commutes_with_all(stab_x: np.ndarray, stab_z: np.ndarray,
                        v_x: np.ndarray, v_z: np.ndarray) -> bool:
-    """True iff the operator (v_x, v_z) commutes with every row of (stab_x, stab_z).
+    """True iff v (x) I_ref commutes with every full-state stabilizer.
 
-    ``stab_x, stab_z`` have shape ``(N, n)``; each row is one generator of the
-    (stabilizer + destabilizer) tableau. A Pauli is a logical operator of the
-    emergent code iff it commutes with all *stabilizer* rows. Here we test
-    commutation with the full tableau set — this is correct for the
-    purification picture where every row is a stabilizer of the
-    system+reference state.
+    stab_x, stab_z have shape (2n, n); each row is the system-part of one
+    full-state stabilizer generator. For a pure-system Pauli v (no reference
+    support), its commutator with a full stabilizer S = S_sys (x) S_ref is
+    controlled solely by the system part: <v (x) I_ref, S> = <v, S_sys>. So
+    this is computed with system-part inner products alone.
+
+    Passing this test means v is in the CODE STABILIZER group (it is the
+    system part of a stabilizer whose reference part is I_ref). FAILING this
+    test is therefore the test-for-non-stabilizer-ness used in the logical
+    operator check.
     """
-    # sympl inner = stab_x @ v_z + stab_z @ v_x  (mod 2), per row
     inner = (stab_x @ v_z + stab_z @ v_x) & 1
     return bool(np.all(inner == 0))
 
@@ -180,17 +198,25 @@ def _min_weight_logical_type(
     stab_x: np.ndarray, stab_z: np.ndarray,
     n: int, pauli: str, max_depth: int,
 ) -> int:
-    """Return min |A| such that pure-Pauli A is a logical, or ``n+1`` if none found.
+    """Return min |A| such that the pure-Pauli on A is a logical, or n+1 if none.
 
-    Exhaustive enumeration up to ``max_depth``. Returns ``0`` if k == 0
-    (no logical exists — returned by caller when appropriate).
+    A pure-Pauli v on subset A is a LOGICAL of the emergent code iff:
+      (a) v is in the row-span of (stab_x | stab_z) -- the system-parts of the
+          2n full-state stabilizer generators -- AND
+      (b) v does NOT commute with every full-state stabilizer (so v (x) I_ref
+          is not itself a code stabilizer).
+
+    See module docstring for the derivation.
     """
     for d in range(1, max_depth + 1):
         for A in itertools.combinations(range(n), d):
             v_x, v_z = _pauli_vec_for_type_and_A(pauli, A, n)
-            if not _commutes_with_all(stab_x, stab_z, v_x, v_z):
+            # (a) v must be the system-part of some full-state stabilizer.
+            if not _is_in_row_span(stab_x, stab_z, v_x, v_z):
                 continue
-            if _is_in_row_span(stab_x, stab_z, v_x, v_z):
+            # (b) v must not itself be a code stabilizer (i.e. v must fail
+            # commutation with at least one full stabilizer's system-part).
+            if _commutes_with_all(stab_x, stab_z, v_x, v_z):
                 continue
             return d
     return n + 1
