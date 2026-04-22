@@ -209,10 +209,11 @@ def _apply_gate_1q_kernel(plt, inv_x, inv_x_len, inv_x_pos, inv, inv_len, q, S2)
             _remove_from_inv_x(inv_x, inv_x_len, inv_x_pos, q, r)
 
 
-# Standard 2x2 symplectic matrices for common single-qubit Cliffords
-_H_SYMP = np.array([[0, 1], [1, 0]], dtype=np.uint8)   # H: X<->Z
-_S_SYMP = np.array([[1, 0], [1, 1]], dtype=np.uint8)    # S: X->Y (xz: x'=x, z'=x^z)
-_SQRT_X_SYMP = np.array([[1, 1], [0, 1]], dtype=np.uint8)  # sqrt(X): Z->Y (xz: x'=x^z, z'=z)
+# Standard 2x2 symplectic matrices for common single-qubit Cliffords.
+# Row-vector convention: (x', z') = (x, z) @ S. Aaronson-Gottesman 2004 Table I.
+_H_SYMP = np.array([[0, 1], [1, 0]], dtype=np.uint8)       # H: X<->Z
+_S_SYMP = np.array([[1, 1], [0, 1]], dtype=np.uint8)       # S: X->Y, Z->Z  (x'=x, z'=x^z)
+_SQRT_X_SYMP = np.array([[1, 0], [1, 1]], dtype=np.uint8)  # sqrt(X): X->X, Z->Y (x'=x^z, z'=z)
 
 # CX (CNOT) 4x4 symplectic matrix: X_c->X_c X_t, Z_t->Z_c Z_t
 _CX_SYMP = np.array([[1,1,0,0],[0,1,0,0],[0,0,1,0],[0,0,1,1]], dtype=np.uint8)
@@ -273,42 +274,27 @@ def _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len, inv_pos, inv_x_pos, q):
 
 @numba.njit(cache=True)
 def _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len, inv_x_pos, q):
-    """Apply S gate on qubit q: x' = x XOR z, z' = z.
+    """Apply the S (phase) gate on qubit q: x' = x, z' = x XOR z.
 
-    The symplectic convention (row-vector times matrix) gives:
-      (x, z) @ [[1, 0], [1, 1]] = (x + z, z)
+    Follows Aaronson-Gottesman 2004, Table I (S row): the Pauli action is
+      S X S^dagger = Y,  S Y S^dagger = -X,  S Z S^dagger = Z.
+    In GF(2) symplectic form (phase-free) this is (x, z) -> (x, x^z):
+      X (1,0) -> (1,1) = Y,  Y (1,1) -> (1,0) = X,  Z (0,1) -> (0,1) = Z.
+    Equivalently ``(x, z) @ [[1, 1], [0, 1]] = (x, x+z)`` under the
+    row-vector convention used throughout this file.
 
-    So x-bit flips for generators with z-bit=1 on qubit q.
-    Generators with only X-support (x=1, z=0) are unaffected.
-    Generators with Z (0,1) -> Y (1,1): gain x-support
-    Generators with Y (1,1) -> X (1,0): lose z-support... no, x changes.
-    Actually: Y (x=1,z=1) -> x'=1^1=0, z'=1 -> Z (0,1): loses x-support.
+    Only the z-bit of generators with x=1 on qubit q changes; x is
+    preserved for all generators. The x-support set (inv_x) is unchanged,
+    and no generator gains or loses total support on q.
 
-    Since x-bit can change, inv_x must be updated.
-    Since nonzero status cannot change (z' = z is unchanged, and if
-    generator had support, z or x was nonzero; new_x = x^z, new_z = z;
-    if z=1, new entry is nonzero; if z=0, x must be 1 and new_x=1^0=1,
-    still nonzero), inv and support lists are unchanged.
-
-    O(a_q) to iterate generators on qubit q.
+    Cost: O(inv_x_len[q]) -- iterate only the x-support list.
     """
-    for idx in range(inv_len[q]):
-        r = inv[q, idx]
+    for idx in range(inv_x_len[q]):
+        r = inv_x[q, idx]
         xz = plt[r, q]
-        z_bit = xz & 1
-        if z_bit == 0:
-            # z=0 means x'=x^0=x, no change
-            continue
-        # z=1: x' = x ^ 1 (flip x-bit), z' = z = 1
-        old_x = (xz >> 1) & 1
-        new_x = old_x ^ 1
-        plt[r, q] = (new_x << 1) | 1  # z-bit stays 1
-
-        # Update inv_x: x-bit changed
-        if new_x and not old_x:
-            _add_to_inv_x(inv_x, inv_x_len, inv_x_pos, q, r)
-        elif not new_x and old_x:
-            _remove_from_inv_x(inv_x, inv_x_len, inv_x_pos, q, r)
+        # x=1 is guaranteed by walking inv_x[q]; flip z.
+        new_z = (xz & 1) ^ 1
+        plt[r, q] = (1 << 1) | new_z  # x stays 1, z flipped
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -999,24 +985,19 @@ class SparseGF2:
         self.apply_h(q)
 
     def apply_measurement_y(self, q):
-        """Measure qubit q in the Y basis.
+        """Measure qubit q in the Y basis (phase-free).
 
-        Conjugates the Y eigenbasis to the Z eigenbasis via ``H`` then
-        ``S``, measures Z, then inverts with ``S`` then ``H`` (at GF(2)
-        level ``S = S^\\dagger``). The gate sequence applied is
-        ``apply_h(q), apply_s(q), apply_measurement_z(q), apply_s(q),
-        apply_h(q)``.
-
-        Known issue (v0.2.0): the sparse-kernel ``apply_s`` called after
-        ``apply_measurement_z`` can produce a stabilizer group that diverges
-        from Stim. Planned fix in a future release; avoid Y-basis measurement
-        in the interim.
+        Rotates the Y eigenbasis to the Z eigenbasis via ``S`` then ``H``:
+        under row-vector symplectic evolution, ``H S^dagger`` sends Y->Z
+        (Aaronson-Gottesman 2004 Table I; phase-free, so S^dagger = S). The
+        gate sequence applied is
+        ``apply_s(q), apply_h(q), apply_measurement_z(q), apply_h(q), apply_s(q)``.
         """
-        self.apply_h(q)
         self.apply_s(q)
+        self.apply_h(q)
         self.apply_measurement_z(q)
-        self.apply_s(q)
         self.apply_h(q)
+        self.apply_s(q)
 
     def run_layer(self, gate_qi, gate_qj, gate_symp, meas_qubits):
         """Run a full layer of gates and measurements.
@@ -1452,9 +1433,9 @@ def _run_circuit_batch_kernel(plt, supp_q, supp_len, supp_pos,
                     S2[1, 0] == 1 and S2[1, 1] == 0):
                 _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len,
                                 inv_pos, inv_x_pos, q)
-            # Check for S: [[1,0],[1,1]]
-            elif (S2[0, 0] == 1 and S2[0, 1] == 0 and
-                      S2[1, 0] == 1 and S2[1, 1] == 1):
+            # Check for S: [[1,1],[0,1]] (Aaronson-Gottesman 2004 Table I)
+            elif (S2[0, 0] == 1 and S2[0, 1] == 1 and
+                      S2[1, 0] == 0 and S2[1, 1] == 1):
                 _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len,
                                 inv_x_pos, q)
             else:
@@ -1499,19 +1480,19 @@ def _run_circuit_batch_kernel(plt, supp_q, supp_len, supp_pos,
                 _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len,
                                 inv_pos, inv_x_pos, q)
             elif basis == 2:
-                # Y-basis: HS, Z-meas, SH
-                _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len,
-                                inv_pos, inv_x_pos, q)
+                # Y-basis: S, H, measure_Z, H, S  (phase-free: S = S^dagger)
                 _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len,
                                 inv_x_pos, q)
+                _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len,
+                                inv_pos, inv_x_pos, q)
                 _measure_z_kernel(plt, supp_q, supp_len, supp_pos,
                                   inv, inv_len, inv_x, inv_x_len,
                                   inv_pos, inv_x_pos, q, use_min_weight_pivot,
                                   comm_buf, others_buf)
-                _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len,
-                                inv_x_pos, q)
                 _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len,
                                 inv_pos, inv_x_pos, q)
+                _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len,
+                                inv_x_pos, q)
             else:
                 # Z-basis (also covers M, MR, R since phase is not tracked)
                 _measure_z_kernel(plt, supp_q, supp_len, supp_pos,
