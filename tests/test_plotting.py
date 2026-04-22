@@ -17,9 +17,7 @@ from sparsegf2.plotting import plot_vs_p, pick_error_metric
 from sparsegf2.plotting.errors import sem, wilson, ci95_bootstrap
 
 
-# ══════════════════════════════════════════════════════════════
 # Fixture
-# ══════════════════════════════════════════════════════════════
 
 @pytest.fixture(scope="module")
 def plot_run(tmp_path_factory):
@@ -41,9 +39,7 @@ def plot_run(tmp_path_factory):
     return run_dir
 
 
-# ══════════════════════════════════════════════════════════════
 # Error metric unit tests
-# ══════════════════════════════════════════════════════════════
 
 def test_sem_matches_numpy():
     rng = np.random.default_rng(0)
@@ -82,9 +78,7 @@ def test_pick_error_metric_explicit_override():
         pick_error_metric("nonsense", np.array([0.0]))
 
 
-# ══════════════════════════════════════════════════════════════
 # Plot smoke tests
-# ══════════════════════════════════════════════════════════════
 
 def test_plot_vs_p_basic(plot_run: Path, tmp_path: Path):
     out = tmp_path / "basic.png"

@@ -36,9 +36,7 @@ from sparsegf2.circuits.graphs import parse_graph_spec
 SCHEMA_VERSION = "1.0.0"
 
 
-# ══════════════════════════════════════════════════════════════
 # Helpers
-# ══════════════════════════════════════════════════════════════
 
 def _format_n(n: int) -> str:
     return f"n={int(n):04d}"
@@ -89,9 +87,7 @@ def auto_run_id(cfg: RunConfig, git_hash: Optional[str] = None) -> str:
     return f"{date}_{slug}__{h}"
 
 
-# ══════════════════════════════════════════════════════════════
 # Manifest
-# ══════════════════════════════════════════════════════════════
 
 def _build_manifest(
     cfg: RunConfig,
@@ -176,9 +172,7 @@ def _collect_graph_info(cfg: RunConfig) -> Dict[str, object]:
     return info
 
 
-# ══════════════════════════════════════════════════════════════
 # Parquet schema for samples.parquet
-# ══════════════════════════════════════════════════════════════
 
 _SAMPLES_COLUMNS = [
     # identity
@@ -227,18 +221,14 @@ def _records_to_arrow(records: List[SampleRecord]) -> pa.Table:
     return pa.Table.from_pydict(data, schema=_SAMPLES_SCHEMA)
 
 
-# ══════════════════════════════════════════════════════════════
 # HDF5 helpers
-# ══════════════════════════════════════════════════════════════
 
 def _h5_compression() -> Dict[str, object]:
     """Preferred compression for HDF5 datasets."""
     return {"compression": "gzip", "compression_opts": 4, "shuffle": True}
 
 
-# ══════════════════════════════════════════════════════════════
 # RunWriter
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class _RunState:

@@ -26,9 +26,7 @@ from sparsegf2.circuits import CircuitConfig, CircuitBuilder
 from sparsegf2.circuits.pictures import init_picture
 
 
-# ══════════════════════════════════════════════════════════════
 # Helpers (mirrors test_stim_rref_verification.py conventions)
-# ══════════════════════════════════════════════════════════════
 
 _CLIFF_TABS = []        # list[stim.Tableau] — two-qubit tableaus
 _CLIFF_SYMP = None      # ndarray[11520, 4, 4] uint8 — symplectic matrices
@@ -94,9 +92,7 @@ def _extract_sparse_matrix(sim: SparseGF2) -> np.ndarray:
     return sim.extract_sys_matrix()
 
 
-# ══════════════════════════════════════════════════════════════
 # Runners (shared gate schedule driven by CircuitBuilder)
-# ══════════════════════════════════════════════════════════════
 
 def _run_sparse(cfg: CircuitConfig, sample_seed: int) -> SparseGF2:
     builder = CircuitBuilder(cfg, sample_seed=sample_seed)
@@ -142,9 +138,7 @@ def _assert_rref_match(sim_sparse: SparseGF2, sim_stim: stim.TableauSimulator,
     )
 
 
-# ══════════════════════════════════════════════════════════════
 # Parameterized parity tests
-# ══════════════════════════════════════════════════════════════
 
 GRAPHS = ("cycle", "complete")
 MODES = ("round_robin", "palette", "fresh")

@@ -27,10 +27,8 @@ Edge = Tuple[int, int]
 Matching = List[Edge]
 
 
-# ══════════════════════════════════════════════════════════════
 # graph6 encoding (Brendan McKay's standard format)
 # Reference: https://users.cecs.anu.edu.au/~bdm/data/formats.txt
-# ══════════════════════════════════════════════════════════════
 
 def _graph6_N(n: int) -> str:
     """Encode the vertex count as the graph6 N(n) prefix."""
@@ -85,9 +83,7 @@ def graph6_encode(n: int, edges) -> str:
     return _graph6_N(n) + "".join(chars)
 
 
-# ══════════════════════════════════════════════════════════════
 # GraphTopology
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class GraphTopology:
@@ -156,9 +152,7 @@ class GraphTopology:
         return len(self.one_factorization)
 
 
-# ══════════════════════════════════════════════════════════════
 # Cycle graph
-# ══════════════════════════════════════════════════════════════
 
 def _cycle_edges(n: int) -> List[Edge]:
     """Edges of the n-cycle: (i, i+1 mod n) for i in 0..n-1, canonicalized."""
@@ -209,9 +203,7 @@ def cycle_graph(n: int) -> GraphTopology:
     )
 
 
-# ══════════════════════════════════════════════════════════════
 # Complete graph
-# ══════════════════════════════════════════════════════════════
 
 def _complete_edges(n: int) -> List[Edge]:
     """All n(n-1)/2 edges of K_n."""
@@ -283,9 +275,7 @@ def complete_graph(n: int) -> GraphTopology:
     )
 
 
-# ══════════════════════════════════════════════════════════════
 # Parser
-# ══════════════════════════════════════════════════════════════
 
 _GRAPH_CONSTRUCTORS = {
     "cycle": cycle_graph,

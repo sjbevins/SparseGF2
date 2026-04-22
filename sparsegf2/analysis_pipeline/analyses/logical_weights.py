@@ -76,9 +76,7 @@ _SCHEMA = pa.schema([
 ])
 
 
-# ══════════════════════════════════════════════════════════════
 # Symplectic helpers
-# ══════════════════════════════════════════════════════════════
 
 def _extract_symplectic(sim, n: int) -> Tuple[np.ndarray, np.ndarray]:
     """Return (x_bits, z_bits) of shape (2n, n) for the system qubits.
@@ -119,9 +117,7 @@ def _pauli_vec_for_type_and_A(pauli: str, A: Sequence[int], n: int
     return x, z
 
 
-# ══════════════════════════════════════════════════════════════
 # Commutation + stabilizer-containment tests
-# ══════════════════════════════════════════════════════════════
 
 def _commutes_with_all(stab_x: np.ndarray, stab_z: np.ndarray,
                        v_x: np.ndarray, v_z: np.ndarray) -> bool:
@@ -190,9 +186,7 @@ def _is_in_row_span(stab_x: np.ndarray, stab_z: np.ndarray,
     return bool(np.all(target == 0))
 
 
-# ══════════════════════════════════════════════════════════════
 # Min-weight type-restricted logical search
-# ══════════════════════════════════════════════════════════════
 
 def _min_weight_logical_type(
     stab_x: np.ndarray, stab_z: np.ndarray,
@@ -222,9 +216,7 @@ def _min_weight_logical_type(
     return n + 1
 
 
-# ══════════════════════════════════════════════════════════════
 # Cell entry point
-# ══════════════════════════════════════════════════════════════
 
 def run_cell(ctx: CellContext, params: dict, force: bool = False) -> CellRunResult:
     output = ctx.analysis_dir / OUTPUT_FILENAME

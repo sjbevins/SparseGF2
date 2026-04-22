@@ -80,9 +80,7 @@ def wilson(values: np.ndarray, z: float = 1.96) -> Tuple[float, float]:
     return float(phat - lower), float(upper - phat)
 
 
-# ══════════════════════════════════════════════════════════════
 # Registry + auto-selection
-# ══════════════════════════════════════════════════════════════
 
 ERROR_METRICS: Dict[str, Callable[[np.ndarray], Tuple[float, float]]] = {
     "sem": sem,

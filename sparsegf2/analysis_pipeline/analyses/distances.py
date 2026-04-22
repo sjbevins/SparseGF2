@@ -53,9 +53,7 @@ DEFAULT_PARAMS = {
 }
 
 
-# ══════════════════════════════════════════════════════════════
 # Mutual-information primitive
-# ══════════════════════════════════════════════════════════════
 
 def _has_info(sim, n: int, k: int, A) -> bool:
     """Return True iff I(A; R) = S(A) + k - S(sys \\ A) > 0.
@@ -74,9 +72,7 @@ def _has_info(sim, n: int, k: int, A) -> bool:
     return (S_A + int(k) - S_B) > 0
 
 
-# ══════════════════════════════════════════════════════════════
 # d_cont (contiguous distance) + the arc that realizes it
-# ══════════════════════════════════════════════════════════════
 
 def _compute_d_cont_with_arc(sim, n: int, k: int, starts_frac: List[float]):
     if k == 0:
@@ -99,9 +95,7 @@ def _compute_d_cont_with_arc(sim, n: int, k: int, starts_frac: List[float]):
     return int(best_d), best_arc
 
 
-# ══════════════════════════════════════════════════════════════
 # d_min (true code distance) — exhaustive low-weight + greedy shrink
-# ══════════════════════════════════════════════════════════════
 
 def _compute_d_min(sim, n: int, k: int, d_cont: int, arc_cont, max_exhaustive: int):
     """Upper bound on the minimum code distance of the emergent code.
@@ -153,9 +147,7 @@ def _compute_d_min(sim, n: int, k: int, d_cont: int, arc_cont, max_exhaustive: i
     return int(len(A))
 
 
-# ══════════════════════════════════════════════════════════════
 # Cell entry point
-# ══════════════════════════════════════════════════════════════
 
 _SCHEMA = pa.schema([
     ("sample_seed", pa.int64()),

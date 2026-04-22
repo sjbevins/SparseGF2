@@ -17,9 +17,7 @@ from typing import List, Optional
 import numpy as np
 
 
-# ══════════════════════════════════════════════════════════════
 # Enumerations (validated in __post_init__ of the dataclasses)
-# ══════════════════════════════════════════════════════════════
 
 GATING_MODES = ("matching",)                          # MVP: only "matching"
 MATCHING_MODE_NAMES = ("round_robin", "palette", "fresh")
@@ -29,9 +27,7 @@ PICTURE_NAMES = ("purification",)                     # MVP: only "purification"
 GRAPH_SPECS_MVP = ("cycle", "complete")
 
 
-# ══════════════════════════════════════════════════════════════
 # CircuitConfig — per-cell knobs
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class CircuitConfig:
@@ -157,9 +153,7 @@ class CircuitConfig:
         return asdict(self)
 
 
-# ══════════════════════════════════════════════════════════════
 # RunConfig — sweep-level knobs
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class RunConfig:
@@ -241,9 +235,7 @@ class RunConfig:
         return CircuitConfig(**cfg_dict)
 
 
-# ══════════════════════════════════════════════════════════════
 # SampleRecord — per-sample data produced by a SimulationRunner
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class SampleRecord:

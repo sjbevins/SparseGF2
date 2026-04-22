@@ -42,9 +42,7 @@ DEFAULT_PARAMS: Dict = {
 }
 
 
-# ══════════════════════════════════════════════════════════════
 # Wilson interval
-# ══════════════════════════════════════════════════════════════
 
 def wilson_interval(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     """Wilson score interval for a binomial proportion.
@@ -68,9 +66,7 @@ def wilson_interval(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     return ((center - half) / denom, (center + half) / denom)
 
 
-# ══════════════════════════════════════════════════════════════
 # Helpers
-# ══════════════════════════════════════════════════════════════
 
 def _is_binary(series: pl.Series) -> bool:
     """Heuristic: a column is "binary" for Wilson-interval purposes iff its
@@ -185,9 +181,7 @@ def _conditional_mask(df: pl.DataFrame, cond_col: str, cond_op: str) -> pl.Serie
     return pl.Series(values=[True] * len(df))
 
 
-# ══════════════════════════════════════════════════════════════
 # Derived columns
-# ══════════════════════════════════════════════════════════════
 
 def _add_derived_columns(df: pl.DataFrame, n: int) -> pl.DataFrame:
     """Add k_over_n, d_cont_over_n, d_min_over_n columns when source cols exist."""
@@ -205,9 +199,7 @@ def _add_derived_columns(df: pl.DataFrame, n: int) -> pl.DataFrame:
     return df
 
 
-# ══════════════════════════════════════════════════════════════
 # Per-cell stats
-# ══════════════════════════════════════════════════════════════
 
 def _cell_row(
     df: pl.DataFrame, n: int, p: float,
@@ -241,9 +233,7 @@ def _safe_op(op: str) -> str:
               .replace("=", "eq").replace("!", "ne").replace(" ", ""))
 
 
-# ══════════════════════════════════════════════════════════════
 # Entry point
-# ══════════════════════════════════════════════════════════════
 
 def run_run(run_dir: Path, params: dict, force: bool = False) -> RunRunResult:
     """Always recomputes (MVP policy per spec §9 — caching is a post-MVP concern).

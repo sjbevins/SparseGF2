@@ -117,9 +117,7 @@ class ValidationReport:
         return [n for n, _ in self.incompatible]
 
 
-# ══════════════════════════════════════════════════════════════
 # Public API
-# ══════════════════════════════════════════════════════════════
 
 def validate_config(cfg: RunConfig) -> ValidationReport:
     """Validate a :class:`RunConfig` against its graph and matching mode.

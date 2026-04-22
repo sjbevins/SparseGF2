@@ -191,9 +191,7 @@ def gf2_rank_packed(data, n_cols):
     return pivot_row
 
 
-# ═══════════════════════════════════════════════════════════════
 # Hybrid dense/sparse conversion kernels
-# ═══════════════════════════════════════════════════════════════
 
 @njit(cache=True)
 def plt_to_packed(plt, x_packed, z_packed, n, N):

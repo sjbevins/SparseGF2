@@ -23,9 +23,7 @@ from sparsegf2.circuits.config import CircuitConfig, SampleRecord
 from sparsegf2.circuits.pictures import init_picture
 
 
-# ══════════════════════════════════════════════════════════════
 # Clifford table cache
-# ══════════════════════════════════════════════════════════════
 
 FULL_CLIFFORD_GROUP_SIZE = 11520
 _CLIFFORD_CACHE: Optional[np.ndarray] = None
@@ -85,9 +83,7 @@ def get_clifford_table(
     return symp[:n_cliffords]
 
 
-# ══════════════════════════════════════════════════════════════
 # Tableau extraction
-# ══════════════════════════════════════════════════════════════
 
 def _extract_xz_packed(sim: SparseGF2) -> Tuple[np.ndarray, np.ndarray]:
     """Extract bit-packed symplectic (X, Z) tableau from the simulator state.
@@ -117,9 +113,7 @@ def _extract_xz_packed(sim: SparseGF2) -> Tuple[np.ndarray, np.ndarray]:
     return x_packed, z_packed
 
 
-# ══════════════════════════════════════════════════════════════
 # SimulationRunner
-# ══════════════════════════════════════════════════════════════
 
 class SimulationRunner:
     """Run one circuit schedule through SparseGF2 and collect observables.

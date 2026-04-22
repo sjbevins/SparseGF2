@@ -27,9 +27,7 @@ from sparsegf2.circuits.matching import select_matching
 from sparsegf2.circuits.measurements import sample_measurements
 
 
-# ══════════════════════════════════════════════════════════════
 # CircuitLayer record
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class CircuitLayer:
@@ -48,9 +46,7 @@ class CircuitLayer:
         return len(self.meas_qubits)
 
 
-# ══════════════════════════════════════════════════════════════
 # CircuitBuilder
-# ══════════════════════════════════════════════════════════════
 
 class CircuitBuilder:
     """Generate the circuit schedule for one ``(n, p, sample_seed)`` realization.

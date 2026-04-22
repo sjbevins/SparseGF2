@@ -29,9 +29,7 @@ from sparsegf2.plotting.style import rc_preset
 Source = Union[Path, str, Iterable[Union[Path, str]]]
 
 
-# ══════════════════════════════════════════════════════════════
 # Public API
-# ══════════════════════════════════════════════════════════════
 
 def plot_vs_p(
     source: Source,

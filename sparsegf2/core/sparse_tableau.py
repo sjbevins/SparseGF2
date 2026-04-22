@@ -51,9 +51,7 @@ def _max_inv(n):
     return 2 * n + 64
 
 
-# ═══════════════════════════════════════════════════════════════
 # Initialization
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _init_bell_pairs(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -101,9 +99,7 @@ def _init_bell_pairs(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x
         # Z has x=0, no inv_x entry
 
 
-# ═══════════════════════════════════════════════════════════════
 # O(1) inverted-index operations via position maps
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _add_to_inv(inv, inv_len, inv_pos, q, r):
@@ -146,9 +142,7 @@ def _remove_from_inv_x(inv_x, inv_x_len, inv_x_pos, q, r):
     inv_x_pos[r, q] = -1
 
 
-# ═══════════════════════════════════════════════════════════════
 # Support list operations
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _add_to_support(supp_q, supp_len, supp_pos, r, q):
@@ -177,9 +171,7 @@ def _remove_from_support(supp_q, supp_len, supp_pos, r, q):
 _build_gate_lut = build_gate_lut
 
 
-# ═══════════════════════════════════════════════════════════════
 # Single-qubit gate application: O(a_q) per gate
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _apply_gate_1q_kernel(plt, inv_x, inv_x_len, inv_x_pos, inv, inv_len, q, S2):
@@ -226,9 +218,7 @@ _SQRT_X_SYMP = np.array([[1, 0], [1, 1]], dtype=np.uint8)  # sqrt(X): X->X, Z->Y
 _CX_SYMP = np.array([[1,1,0,0],[0,1,0,0],[0,0,1,0],[0,0,1,1]], dtype=np.uint8)
 
 
-# ═══════════════════════════════════════════════════════════════
 # Specialized single-qubit gate kernels (H, S)
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _apply_h_kernel(plt, inv, inv_len, inv_x, inv_x_len, inv_pos, inv_x_pos, q):
@@ -304,9 +294,7 @@ def _apply_s_kernel(plt, inv, inv_len, inv_x, inv_x_len, inv_x_pos, q):
         plt[r, q] = (1 << 1) | new_z  # x stays 1, z flipped
 
 
-# ═══════════════════════════════════════════════════════════════
 # Specialized CX (CNOT) kernel
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _apply_cx_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -407,9 +395,7 @@ def _apply_cx_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x
         plt[r, qt] = new_xz_t
 
 
-# ═══════════════════════════════════════════════════════════════
 # Two-qubit gate application: O(a_bar) per gate
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _apply_gate_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -496,9 +482,7 @@ def _apply_gate_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv
         plt[r, qj] = new_xz_j
 
 
-# ═══════════════════════════════════════════════════════════════
 # Sparse XOR: O(wt(source)) per eliminated row
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _sparse_xor_rows(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -539,9 +523,7 @@ def _sparse_xor_rows(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x
             _add_to_support(supp_q, supp_len, supp_pos, target, q)
 
 
-# ═══════════════════════════════════════════════════════════════
 # Clear generator
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _clear_generator(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -559,9 +541,7 @@ def _clear_generator(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x
     supp_len[r] = 0
 
 
-# ═══════════════════════════════════════════════════════════════
 # Measurement with minimum-weight pivot
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _measure_z_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_x_len,
@@ -641,10 +621,8 @@ def _measure_z_kernel(plt, supp_q, supp_len, supp_pos, inv, inv_len, inv_x, inv_
     _add_to_inv(inv, inv_len, inv_pos, q, pivot)
 
 
-# ═══════════════════════════════════════════════════════════════
 # Bit manipulation helper (used by compute_subsystem_entropy)
 # GF(2) rank is now consolidated in numba_kernels.gf2_rank_packed
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _set_bit(packed, row, col, val):
@@ -657,9 +635,7 @@ def _set_bit(packed, row, col, val):
         packed[row, w] &= ~mask
 
 
-# ═══════════════════════════════════════════════════════════════
 # Main simulator class
-# ═══════════════════════════════════════════════════════════════
 
 class SparseGF2:
     """Pure-Python sparse stabilizer simulator with optional hybrid mode.
@@ -1353,9 +1329,7 @@ class SparseGF2:
         )
 
 
-# ═══════════════════════════════════════════════════════════════
 # Batch random-edge circuit kernel (eliminates Python loop overhead)
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _run_random_edge_circuit(plt, supp_q, supp_len, supp_pos,
@@ -1409,9 +1383,7 @@ def _run_random_edge_circuit(plt, supp_q, supp_len, supp_pos,
                           comm_buf, others_buf)
 
 
-# ═══════════════════════════════════════════════════════════════
 # Generalized batched circuit kernel
-# ═══════════════════════════════════════════════════════════════
 
 @numba.njit(cache=True)
 def _run_circuit_batch_kernel(plt, supp_q, supp_len, supp_pos,

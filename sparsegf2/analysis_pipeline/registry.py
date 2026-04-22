@@ -64,9 +64,7 @@ def make_entry(
     )
 
 
-# ══════════════════════════════════════════════════════════════
 # Read/write
-# ══════════════════════════════════════════════════════════════
 
 def read_cell_registry(cell_analysis_dir: Path) -> Dict[str, dict]:
     """Return the ``entries`` mapping of a cell registry, empty dict if absent."""

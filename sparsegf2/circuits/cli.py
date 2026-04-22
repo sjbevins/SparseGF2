@@ -21,9 +21,7 @@ from sparsegf2.circuits.driver import SweepDriver
 from sparsegf2.circuits.validator import CompatibilityError
 
 
-# ══════════════════════════════════════════════════════════════
 # Depth-mode CLI aliases
-# ══════════════════════════════════════════════════════════════
 
 _DEPTH_ALIASES = {
     "O(n)": "O(n)",
@@ -47,9 +45,7 @@ def _parse_depth_mode(s: str) -> str:
     return canonical
 
 
-# ══════════════════════════════════════════════════════════════
 # argparse builder
-# ══════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -126,9 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-# ══════════════════════════════════════════════════════════════
 # main()
-# ══════════════════════════════════════════════════════════════
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)

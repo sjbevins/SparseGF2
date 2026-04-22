@@ -9,9 +9,7 @@ from sparsegf2.circuits.graphs import (
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # Basic structure
-# ══════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("n", [4, 8, 16, 32])
 def test_cycle_structure(n):
@@ -38,9 +36,7 @@ def test_complete_structure(n):
     assert np.all(deg == n - 1)
 
 
-# ══════════════════════════════════════════════════════════════
 # 1-factorization
-# ══════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("n", [4, 6, 8, 12, 16])
 def test_cycle_one_factorization(n):
@@ -103,9 +99,7 @@ def test_odd_complete_no_pm():
     assert g.fresh_matching_sampler is None
 
 
-# ══════════════════════════════════════════════════════════════
 # Fresh matching samplers
-# ══════════════════════════════════════════════════════════════
 
 def test_complete_fresh_uniform_k4():
     """Chi-squared uniformity check on the 3 perfect matchings of K_4."""
@@ -137,9 +131,7 @@ def test_cycle_fresh_two_choices():
     assert seen == palette
 
 
-# ══════════════════════════════════════════════════════════════
 # graph6 encoding
-# ══════════════════════════════════════════════════════════════
 
 def test_graph6_small_cycle():
     # Known graph6 encoding for C_4
@@ -156,9 +148,7 @@ def test_graph6_rejects_self_loop():
         graph6_encode(3, [(0, 0), (1, 2)])
 
 
-# ══════════════════════════════════════════════════════════════
 # parse_graph_spec
-# ══════════════════════════════════════════════════════════════
 
 def test_parse_graph_spec_cycle():
     g = parse_graph_spec("cycle", 16)

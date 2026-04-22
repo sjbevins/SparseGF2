@@ -76,9 +76,7 @@ def savefig(fig, name):
 
 print("\nGenerating figures...")
 
-# ══════════════════════════════════════════════════════════════
 # 1. Runtime vs p with P(k>0) (NN)
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     if not ma: continue
@@ -101,9 +99,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_runtime_Pk_vs_p_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 2. abar vs p for multiple n (NN and ATA)
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     if not ma: continue
@@ -126,9 +122,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_abar_vs_p_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 3. Scaling exponent gamma(p) for both models side by side
-# ══════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 for idx, model in enumerate(["NN", "ATA"]):
     ax = axes[idx]
@@ -158,9 +152,7 @@ for idx, model in enumerate(["NN", "ATA"]):
 fig.tight_layout()
 savefig(fig, "fig_scaling_exponents_gamma_alpha.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 4. Log-log runtime vs n at selected p
-# ══════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 sel_ps = [0.04, 0.10, 0.155, 0.20, 0.30]
 mks = ['v', 's', 'D', 'o', '^']
@@ -185,9 +177,7 @@ for idx, model in enumerate(["NN", "ATA"]):
 fig.tight_layout()
 savefig(fig, "fig_loglog_runtime_vs_n.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 5. Heatmap: runtime(n, p) for NN
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -206,9 +196,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_heatmap_runtime_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 6. Heatmap: abar(n, p)
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -227,9 +215,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_heatmap_abar_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 7. Code rate k/n vs p
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -245,9 +231,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_code_rate_vs_p_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 8. Runtime per layer vs p (removes depth factor)
-# ══════════════════════════════════════════════════════════════
 import math
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
@@ -268,9 +252,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_per_layer_cost_vs_p_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 9. abar vs n (log-log) at selected p — shows alpha exponent
-# ══════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 for idx, model in enumerate(["NN", "ATA"]):
     ax = axes[idx]
@@ -294,9 +276,7 @@ for idx, model in enumerate(["NN", "ATA"]):
 fig.tight_layout()
 savefig(fig, "fig_abar_vs_n_loglog.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 10. Runtime / n^2 vs p (normalized — flat in area-law = O(n^2))
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -312,9 +292,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_runtime_over_n2_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 11. Stim comparison: runtime vs p with speedup
-# ══════════════════════════════════════════════════════════════
 if stim_data:
     sizes_s = sorted(set(r["n"] for r in stim_data))
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 9), sharex=True,
@@ -337,9 +315,7 @@ if stim_data:
     fig.tight_layout()
     savefig(fig, "fig_stim_comparison_full.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 12. Stim speedup vs n at fixed area-law p
-# ══════════════════════════════════════════════════════════════
 if stim_data:
     fig, ax = plt.subplots(figsize=(8, 5))
     for p_sel in [0.20, 0.25, 0.30, 0.40]:
@@ -356,9 +332,7 @@ if stim_data:
     fig.tight_layout()
     savefig(fig, "fig_speedup_vs_n_area_law.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 13. Runtime variance across seeds (error bars)
-# ══════════════════════════════════════════════════════════════
 model = "NN"
 ma = [r for r in agg if r["model"] == model]
 sizes_sel = [64, 128, 256, 512]
@@ -378,9 +352,7 @@ ax.legend(fontsize=9); ax.grid(alpha=0.2)
 fig.tight_layout()
 savefig(fig, "fig_runtime_error_bars_nn.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 14. Per-gate cost: runtime / (D * n/2) vs p
-# ══════════════════════════════════════════════════════════════
 for model in ["NN"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -398,9 +370,7 @@ for model in ["NN"]:
     fig.tight_layout()
     savefig(fig, "fig_per_gate_cost_nn.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 15. NN vs ATA comparison at fixed n
-# ══════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 for idx, n_sel in enumerate([64, 256, 512]):
     ax = axes[idx]
@@ -418,9 +388,7 @@ fig.suptitle("NN vs ATA Runtime Comparison", fontsize=14, y=1.02)
 fig.tight_layout()
 savefig(fig, "fig_nn_vs_ata_comparison.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 16. Heatmap: P(k>0) as phase diagram
-# ══════════════════════════════════════════════════════════════
 for model in ["NN", "ATA"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))
@@ -438,9 +406,7 @@ for model in ["NN", "ATA"]:
     fig.tight_layout()
     savefig(fig, f"fig_phase_diagram_{model.lower()}.pdf")
 
-# ══════════════════════════════════════════════════════════════
 # 17. Combined: runtime + abar + Pk on 3-panel figure
-# ══════════════════════════════════════════════════════════════
 for model in ["NN"]:
     ma = [r for r in agg if r["model"] == model]
     sizes = sorted(set(r["n"] for r in ma))

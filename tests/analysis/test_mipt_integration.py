@@ -98,9 +98,7 @@ def _get_sweep():
     return _sweep_cache
 
 
-# ═══════════════════════════════════════════════════════════════════
 # C1. PHASE TRANSITION DETECTION
-# ═══════════════════════════════════════════════════════════════════
 
 class TestPhaseTransitionDetection:
     """Verify abar, var_w, cv_w trends across the MIPT transition."""
@@ -147,9 +145,7 @@ class TestPhaseTransitionDetection:
         )
 
 
-# ═══════════════════════════════════════════════════════════════════
 # C2. IDENTITY ROBUSTNESS
-# ═══════════════════════════════════════════════════════════════════
 
 class TestIdentityRobustness:
     """Weight mass identity n*abar = 2n*wbar must hold for every sample."""
@@ -183,9 +179,7 @@ class TestIdentityRobustness:
                 )
 
 
-# ═══════════════════════════════════════════════════════════════════
 # C3. STABILIZER/DESTABILIZER SYMMETRY
-# ═══════════════════════════════════════════════════════════════════
 
 class TestStabilizerDestabilizerSymmetry:
     """In volume-law phase, stabilizer and destabilizer weights should be similar."""
@@ -221,9 +215,7 @@ class TestStabilizerDestabilizerSymmetry:
         )
 
 
-# ═══════════════════════════════════════════════════════════════════
 # C4. TANNER GRAPH CONSISTENCY
-# ═══════════════════════════════════════════════════════════════════
 
 class TestTannerGraphConsistency:
     """Tanner graph edge count must equal weight_mass = n * abar."""
@@ -249,9 +241,7 @@ class TestTannerGraphConsistency:
                 )
 
 
-# ═══════════════════════════════════════════════════════════════════
 # C5. OBSERVE() SWEEP COMPATIBILITY
-# ═══════════════════════════════════════════════════════════════════
 
 class TestObserveSweep:
     """observe() must return a complete dict of finite scalar values."""

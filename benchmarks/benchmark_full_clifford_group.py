@@ -29,9 +29,7 @@ from sparsegf2.gates.clifford import symplectic_from_stim_tableau
 OUT_DIR = REPO_ROOT / "benchmarks" / "results"
 OUT_DIR.mkdir(exist_ok=True)
 
-# ═══════════════════════════════════════════════════════════════
 # Configuration
-# ═══════════════════════════════════════════════════════════════
 
 SIZES = [64, 128, 256, 512]
 
@@ -46,9 +44,7 @@ SEEDS_PER_POINT = 2       # Seeds for timing (mean of 2, faster for large n)
 RREF_VERIFY_SEED = 0      # Single seed for RREF verification
 
 
-# ═══════════════════════════════════════════════════════════════
 # Build the FULL two-qubit Clifford group
-# ═══════════════════════════════════════════════════════════════
 
 def build_full_clifford_group():
     """Build symplectic matrices for ALL 11,520 two-qubit Cliffords."""
@@ -64,9 +60,7 @@ def build_full_clifford_group():
     return all_tabs, symp
 
 
-# ═══════════════════════════════════════════════════════════════
 # Circuit schedule generation
-# ═══════════════════════════════════════════════════════════════
 
 def generate_schedule(n, p, seed, n_cliff):
     """Generate a NN brickwork circuit schedule.
@@ -97,9 +91,7 @@ def generate_schedule(n, p, seed, n_cliff):
     return schedule
 
 
-# ═══════════════════════════════════════════════════════════════
 # GF(2) RREF for verification
-# ═══════════════════════════════════════════════════════════════
 
 def gf2_rref(mat):
     """Compute reduced row echelon form over GF(2). Returns (rref, rank)."""
@@ -139,9 +131,7 @@ def extract_stim_sys_matrix(sim_st, n):
     return mat
 
 
-# ═══════════════════════════════════════════════════════════════
 # Run benchmark
-# ═══════════════════════════════════════════════════════════════
 
 def run_one(n, p, seed, TABS, SYMP, n_cliff, verify_rref=False):
     """Run one (n, p, seed) point through both simulators.

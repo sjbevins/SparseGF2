@@ -19,9 +19,7 @@ from sparsegf2.analysis_pipeline import (
 from sparsegf2.circuits import CircuitConfig, RunConfig, SweepDriver
 
 
-# ══════════════════════════════════════════════════════════════
 # Session fixture: one small run shared by most tests
-# ══════════════════════════════════════════════════════════════
 
 @pytest.fixture(scope="module")
 def small_run(tmp_path_factory):
@@ -39,9 +37,7 @@ def small_run(tmp_path_factory):
     return SweepDriver(cfg, progress=False).run()
 
 
-# ══════════════════════════════════════════════════════════════
 # Rehydrate parity
-# ══════════════════════════════════════════════════════════════
 
 def test_rehydrate_parity(small_run: Path):
     """Rehydrated tableau reproduces the same observe() scalars as the live sim."""
@@ -85,9 +81,7 @@ def test_rehydrate_parity(small_run: Path):
             assert abs(a - b) < 1e-9, f"{k}: live={a} rehydrated={b}"
 
 
-# ══════════════════════════════════════════════════════════════
 # End-to-end cell-scope analyses
-# ══════════════════════════════════════════════════════════════
 
 def test_full_pipeline_produces_all_outputs(small_run: Path):
     report = run_pipeline(AnalysisConfig(run_dir=small_run, verbose=False))
@@ -119,9 +113,7 @@ def test_samples_parquet_still_parses(small_run: Path):
     assert len(df) == 2 * 3 * 3    # 2 sizes x 3 p x 3 samples
 
 
-# ══════════════════════════════════════════════════════════════
 # Analysis-specific content checks
-# ══════════════════════════════════════════════════════════════
 
 def test_distances_p_zero_sanity(tmp_path: Path):
     """At p=0 the reference state is maximally entangled with the system:
@@ -202,9 +194,7 @@ def test_aggregates_has_conditional_means(small_run: Path):
     assert cond_cols, "expected conditional columns suffixed with _cond"
 
 
-# ══════════════════════════════════════════════════════════════
 # Resume / idempotency
-# ══════════════════════════════════════════════════════════════
 
 def test_skip_and_force_behavior(tmp_path: Path):
     cfg = RunConfig(

@@ -42,9 +42,7 @@ from sparsegf2.circuits.validator import validate_config
 from sparsegf2.circuits.writer import RunWriter
 
 
-# ══════════════════════════════════════════════════════════════
 # Worker entry point (module-level so it can be pickled)
-# ══════════════════════════════════════════════════════════════
 
 def _worker_run_batch(args):
     """Run one batch of samples for a single (n, p) cell in a worker process."""
@@ -70,9 +68,7 @@ def _worker_run_batch(args):
     return records
 
 
-# ══════════════════════════════════════════════════════════════
 # Driver
-# ══════════════════════════════════════════════════════════════
 
 class SweepDriver:
     """Top-level orchestrator for a single sweep."""

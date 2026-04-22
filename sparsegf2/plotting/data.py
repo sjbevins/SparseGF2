@@ -26,9 +26,7 @@ from sparsegf2.plotting.aliases import DERIVED_ALIASES, resolve_alias
 from sparsegf2.plotting.errors import ERROR_METRICS, pick_error_metric
 
 
-# ══════════════════════════════════════════════════════════════
 # Column-name sanitizer
-# ══════════════════════════════════════════════════════════════
 
 def _sanitize(name: str) -> str:
     """Replace dots with underscores for SQL-safe identifiers."""
@@ -54,9 +52,7 @@ def _apply_rename_map(expr: str, rename_map: dict) -> str:
     return expr
 
 
-# ══════════════════════════════════════════════════════════════
 # Load
-# ══════════════════════════════════════════════════════════════
 
 def _load_one(run_dir: Path, include_analyses: bool = True) -> pl.DataFrame:
     """Load one run's samples + analysis columns into a single eager DataFrame."""
@@ -112,9 +108,7 @@ def _load(
     return pl.concat(parts, how="diagonal_relaxed")
 
 
-# ══════════════════════════════════════════════════════════════
 # Derived columns
-# ══════════════════════════════════════════════════════════════
 
 def _ensure_column(df: pl.DataFrame, name: str) -> pl.DataFrame:
     """Materialize an aliased derived column when missing."""
@@ -126,9 +120,7 @@ def _ensure_column(df: pl.DataFrame, name: str) -> pl.DataFrame:
     return df.with_columns(expr)
 
 
-# ══════════════════════════════════════════════════════════════
 # Filter
-# ══════════════════════════════════════════════════════════════
 
 def _apply_filter(df: pl.DataFrame, expr: Optional[str]) -> pl.DataFrame:
     """Apply a user filter string to a DataFrame using polars' SQL engine.
@@ -147,9 +139,7 @@ def _apply_filter(df: pl.DataFrame, expr: Optional[str]) -> pl.DataFrame:
     return result.rename(inverse) if inverse else result
 
 
-# ══════════════════════════════════════════════════════════════
 # Aggregate
-# ══════════════════════════════════════════════════════════════
 
 def _aggregate(
     df: pl.DataFrame,

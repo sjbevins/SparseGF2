@@ -12,9 +12,7 @@ from sparsegf2.circuits.validator import (
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # Matching modes
-# ══════════════════════════════════════════════════════════════
 
 def test_round_robin_cycles_through_palette():
     g = complete_graph(6)
@@ -88,9 +86,7 @@ def test_available_modes_odd_cycle():
     assert available_modes(g) == []
 
 
-# ══════════════════════════════════════════════════════════════
 # Validator
-# ══════════════════════════════════════════════════════════════
 
 def _cfg(**overrides) -> RunConfig:
     defaults = dict(

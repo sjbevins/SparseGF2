@@ -33,9 +33,7 @@ from sparsegf2.analysis_pipeline.analyses._common import (
 from sparsegf2.analysis_pipeline.config import AnalysisConfig
 
 
-# ══════════════════════════════════════════════════════════════
 # Report
-# ══════════════════════════════════════════════════════════════
 
 @dataclass
 class PipelineReport:
@@ -80,9 +78,7 @@ class PipelineReport:
         return self.summary()
 
 
-# ══════════════════════════════════════════════════════════════
 # Cell discovery
-# ══════════════════════════════════════════════════════════════
 
 def _discover_cells(
     run_dir: Path,
@@ -119,9 +115,7 @@ def _load_cell_tableaus(cell_dir: Path) -> Optional[Tuple[int, np.ndarray, np.nd
     return n, seeds, x_stack, z_stack
 
 
-# ══════════════════════════════════════════════════════════════
 # Worker for per-cell processing
-# ══════════════════════════════════════════════════════════════
 
 def _process_cell(
     cell_dir_str: str,
@@ -175,9 +169,7 @@ def _process_cell(
     return results
 
 
-# ══════════════════════════════════════════════════════════════
 # Main entry
-# ══════════════════════════════════════════════════════════════
 
 def _active_cell_analyses(cfg: AnalysisConfig) -> List[str]:
     cell_mods = cell_scope_analyses()
@@ -270,9 +262,7 @@ def run_pipeline(cfg: AnalysisConfig) -> PipelineReport:
     return report
 
 
-# ══════════════════════════════════════════════════════════════
 # Manifest summary update
-# ══════════════════════════════════════════════════════════════
 
 def _update_manifest_summary(run_dir: Path) -> None:
     """Scan the tree and update manifest.json::analysis_summary."""
@@ -307,9 +297,7 @@ def _update_manifest_summary(run_dir: Path) -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=False))
 
 
-# ══════════════════════════════════════════════════════════════
 # Logging
-# ══════════════════════════════════════════════════════════════
 
 def _log_cell(cell: Path, results: Iterable[CellRunResult]) -> None:
     cell_name = f"{cell.parent.name}/{cell.name}"
