@@ -127,5 +127,5 @@ SparseGF2 maintains an **inverted index**: for each qubit $q$, a list of generat
 | **SparseGF2** | $\Theta(\bar{a})$ | $\Theta(n\cdot \bar{a})$ | $\Theta(n\cdot \bar{a}\cdot D)$ |
 
 
-In the area-law phase where $\bar{a}= \mathcal{O}(1)$: SparseGF2 achieves $\Theta(n)$ per layer and $\Theta(n^2)$ total for depth $D = \Theta(n) — an **$\Theta(n)$ asymptotic speedup** over standard simulators.
+In the area-law phase where $\bar{a}= \mathcal{O}(1)$: SparseGF2 achieves $\Theta(n)$ per layer and $\Theta(n^2)$ total for depth $D = \Theta(n)$, an **$\Theta(n)$ asymptotic speedup** over standard simulators.
 
