@@ -63,6 +63,15 @@ class CircuitConfig:
     # ---- RNG ----
     base_seed: int = 42
 
+    # ---- Single-ref timeseries recording ----
+    # If True and picture=="single_ref", the runner records the reference-qubit
+    # entropy S(qubit n) at the initial state and after every circuit layer,
+    # producing a (total_layers+1,) uint8 array per sample. The writer persists
+    # this to ``timeseries.h5`` alongside ``samples.parquet`` so analysis can
+    # compute the survival probability P(t) = <S(t)> and the characteristic
+    # purification time ``tau`` (time at which P drops through 0.5).
+    record_time_series: bool = False
+
     def __post_init__(self) -> None:
         # Graph spec
         if self.graph_spec not in GRAPH_SPECS_MVP:
@@ -117,6 +126,17 @@ class CircuitConfig:
         if not isinstance(self.base_seed, (int, np.integer)):
             raise ValueError(f"base_seed must be an integer; got {self.base_seed!r}")
         self.base_seed = int(self.base_seed)
+        # record_time_series: must be bool and only meaningful for single_ref
+        if not isinstance(self.record_time_series, bool):
+            raise ValueError(
+                f"record_time_series must be bool; got {self.record_time_series!r}"
+            )
+        if self.record_time_series and self.picture != "single_ref":
+            raise ValueError(
+                "record_time_series=True is only meaningful for "
+                "picture='single_ref'; got picture="
+                f"{self.picture!r}"
+            )
 
     # --------------------------------------------------------------
     # Derived quantities
@@ -292,6 +312,9 @@ class SampleRecord:
     tableau_z_packed: Optional[np.ndarray] = None
     tableau_signs: Optional[np.ndarray] = None        # uint8[2n], if available
     realization_layers: Optional[list] = None         # list of CircuitLayer-like dicts
+    # single_ref time series: S(qubit n) at t = 0, 1, ..., total_layers.
+    # Length = total_layers + 1. Integer 0 or 1. Routed to timeseries.h5.
+    ref_entropy_timeseries: Optional[np.ndarray] = None
 
 
 __all__ = [

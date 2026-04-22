@@ -6,6 +6,42 @@ All notable changes to the SparseGF2 package.
 
 ### Added
 
+- **Per-layer reference-qubit entropy time-series recording** for the
+  single_ref picture, enabling purification-time (`tau`) analysis.
+  - `CircuitConfig.record_time_series` (bool, default False, only
+    valid when `picture == "single_ref"`). When True, the runner
+    records `S(qubit n)` at `t = 0` (initial Bell pair) and after each
+    of the ``T = total_layers`` circuit layers, producing a uint8
+    array of shape ``(T + 1,)`` per sample.
+  - `SampleRecord.ref_entropy_timeseries` side-data field holds the
+    per-sample array.
+  - `RunWriter._write_timeseries_h5` persists all per-sample traces for
+    each `(n, p)` cell into `timeseries.h5` with datasets ``S_of_t``,
+    ``sample_seed``, ``t_axis``.
+  - CLI flag `--record-time-series` on `python -m sparsegf2.circuits`.
+- **Purification-time (tau) analysis and auto-detecting pipeline** in
+  `sparsegf2.analysis.single_ref`:
+  - `detect_picture(run_dir)`: reads `picture` from `manifest.json`.
+  - `has_timeseries(run_dir)`: True iff any cell has `timeseries.h5`.
+  - `load_timeseries(run_dir)`: loads every cell's timeseries.h5 into a
+    `{(n, p): CellTimeseries}` dict.
+  - `compute_tau(cell, threshold=0.5)`: characteristic time at which
+    `P(t) = <S(t)>` crosses `threshold` (linear interpolation).
+  - `plot_purification_decay(ts, ...)`: `P(t)` vs `t` curves.
+  - `plot_tau_scaling(ts, ...)`: `tau` vs `n`, one curve per p.
+  - `analyze_single_ref(run_dir)`: top-level entry point that auto-
+    detects the picture, always writes `crossing_plot.png`, and writes
+    `purification_decay.png` + `tau_scaling.png` when time-series data
+    is present.
+- `tests/test_single_ref.py`: pytest-compatible validation agent with
+  19 parametrized assertions across `n in {4, 6, 8}` and `p in {0, 1}`
+  on the all-to-all (complete) graph, covering ref-qubit isolation,
+  integer `k in {0, 1}`, analytic endpoints, and time-series shape/
+  initial/terminal-value invariants.
+- `DOCS.md`: new "The Single-Qubit Probe Protocol" section with the
+  n+1 qubit layout, `obs.k` interpretation, schema of `timeseries.h5`,
+  analysis-pipeline usage, and validation-agent description.
+
 - **`single_ref` physics picture** for MIPT research with a single-qubit
   reference probe. In this picture the simulator allocates `n + 1`
   qubits (vs `2n` in `purification`): `n` system qubits plus one

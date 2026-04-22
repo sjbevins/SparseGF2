@@ -37,6 +37,13 @@ from sparsegf2.analysis.single_ref import (
     load_samples as load_single_ref_samples,
     aggregate_entropy as aggregate_single_ref_entropy,
     plot_crossing as plot_single_ref_crossing,
+    load_timeseries as load_single_ref_timeseries,
+    compute_tau as compute_single_ref_tau,
+    plot_purification_decay as plot_single_ref_purification_decay,
+    plot_tau_scaling as plot_single_ref_tau_scaling,
+    analyze_single_ref,
+    detect_picture,
+    has_timeseries,
 )
 
 __all__ = [
@@ -51,4 +58,11 @@ __all__ = [
     'load_single_ref_samples',
     'aggregate_single_ref_entropy',
     'plot_single_ref_crossing',
+    'load_single_ref_timeseries',
+    'compute_single_ref_tau',
+    'plot_single_ref_purification_decay',
+    'plot_single_ref_tau_scaling',
+    'analyze_single_ref',
+    'detect_picture',
+    'has_timeseries',
 ]

@@ -332,6 +332,10 @@ class RunWriter:
             self._write_realizations_h5(d / "realizations.h5", records)
             self._state.any_realizations = True
 
+        # timeseries.h5 — present when single_ref was run with record_time_series
+        if any(r.ref_entropy_timeseries is not None for r in records):
+            self._write_timeseries_h5(d / "timeseries.h5", records, n)
+
         self._state.cells_written.append({
             "n": int(n), "p": float(p), "n_samples": len(records),
         })
@@ -373,6 +377,50 @@ class RunWriter:
             f.create_dataset("sample_seed", data=seeds)
             if signs_stack is not None:
                 f.create_dataset("signs", data=signs_stack, chunks=(1, N), **comp)
+
+    def _write_timeseries_h5(
+        self, path: Path, records: List[SampleRecord], n: int
+    ) -> None:
+        """Persist per-layer reference-qubit entropy traces for single_ref runs.
+
+        Dataset layout:
+          - ``S_of_t``      uint8[S, total_layers+1]: S(qubit n) at t=0..T.
+          - ``sample_seed`` int64[S]: sample seeds, aligned with rows of S_of_t.
+          - ``t_axis``      int32[total_layers+1]: 0, 1, ..., total_layers.
+        """
+        ts_records = [
+            r for r in records if r.ref_entropy_timeseries is not None
+        ]
+        if not ts_records:
+            return
+        S = len(ts_records)
+        T_plus_1 = int(ts_records[0].ref_entropy_timeseries.shape[0])
+        ts_stack = np.zeros((S, T_plus_1), dtype=np.uint8)
+        seeds = np.zeros(S, dtype=np.int64)
+        for i, r in enumerate(ts_records):
+            arr = np.asarray(r.ref_entropy_timeseries, dtype=np.uint8)
+            if arr.shape != (T_plus_1,):
+                raise ValueError(
+                    "ref_entropy_timeseries has inconsistent length across "
+                    f"samples: got {arr.shape} expected ({T_plus_1},)"
+                )
+            ts_stack[i] = arr
+            seeds[i] = int(r.sample_seed)
+
+        with h5py.File(path, "w") as f:
+            f.attrs["schema_version"] = SCHEMA_VERSION
+            f.attrs["encoding_version"] = "1.0"
+            f.attrs["n"] = int(n)
+            f.attrs["n_samples"] = int(S)
+            f.attrs["total_layers"] = int(T_plus_1 - 1)
+            comp = _h5_compression()
+            f.create_dataset(
+                "S_of_t", data=ts_stack, chunks=(1, T_plus_1), **comp
+            )
+            f.create_dataset("sample_seed", data=seeds)
+            f.create_dataset(
+                "t_axis", data=np.arange(T_plus_1, dtype=np.int32)
+            )
 
     def _write_realizations_h5(
         self, path: Path, records: List[SampleRecord]

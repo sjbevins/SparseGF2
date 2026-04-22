@@ -109,6 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Persist end-of-circuit tableaus to tableaus.h5 per cell.")
     p.add_argument("--save-realizations", action="store_true",
                    help="Persist full circuit layer trace to realizations.h5 per cell.")
+    p.add_argument("--record-time-series", action="store_true",
+                   help="single_ref only: record S(qubit n) at every layer and "
+                        "write timeseries.h5 per cell (for purification-time "
+                        "analysis).")
 
     # Output location
     p.add_argument("--output", type=Path, default=Path("runs"),
@@ -140,6 +144,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         depth_factor=args.depth_factor,
         n_cliffords=args.n_cliffords,
         base_seed=args.base_seed,
+        record_time_series=args.record_time_series,
     )
     run_cfg = RunConfig(
         circuit=circuit,

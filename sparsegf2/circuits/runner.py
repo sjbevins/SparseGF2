@@ -187,6 +187,15 @@ class SimulationRunner:
         t_meas = 0.0
 
         realization_layers = [] if save_realization else None
+        record_timeseries = bool(
+            cfg.picture == "single_ref" and cfg.record_time_series
+        )
+        ref_ts: Optional[list] = None
+        if record_timeseries:
+            # Pre-allocate with (total_layers + 1) entries; index 0 is the
+            # initial-state entropy (should be 1 for the Bell pair).
+            ref_ts = []
+            ref_ts.append(int(sim.compute_subsystem_entropy([cfg.n])))
 
         t_all_0 = time.perf_counter()
         for layer in builder.layers():
@@ -210,6 +219,8 @@ class SimulationRunner:
                     "cliff_indices": np.asarray(layer.cliff_indices, dtype=np.int64),
                     "meas_qubits": list(layer.meas_qubits),
                 })
+            if ref_ts is not None:
+                ref_ts.append(int(sim.compute_subsystem_entropy([cfg.n])))
         t_total = time.perf_counter() - t_all_0
 
         # Observables. The set depends on the picture:
@@ -277,6 +288,9 @@ class SimulationRunner:
             record.tableau_z_packed = zp
             # signs are not tracked by SparseGF2's phase-free GF(2) representation;
             # leave as None for MVP.
+
+        if ref_ts is not None:
+            record.ref_entropy_timeseries = np.asarray(ref_ts, dtype=np.uint8)
 
         return record
 
