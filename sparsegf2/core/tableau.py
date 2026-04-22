@@ -317,6 +317,41 @@ class StabilizerTableau:
             np.hstack([sys_x_dense, sys_z_dense]))
         return sys_packed.rank()
 
+    def compute_subsystem_entropy(self, qubits) -> int:
+        """Entanglement entropy S(A) for a subsystem A on an arbitrary-size state.
+
+        Uses the Fattal-Cubitt-Yamamoto-Bravyi-Chuang formula (arXiv:quant-
+        ph/0406168, Thm. 1): S(A) = rank(M|_A) - |A|, where M|_A is the
+        stabilizer symplectic matrix restricted to the 2|A| columns (X and Z)
+        of the qubits in A. Phase-free integer output.
+        """
+        qlist = list(qubits)
+        if not qlist:
+            return 0
+        # Deduplicate while preserving order, to avoid double-counting columns.
+        seen = set()
+        A = []
+        for q in qlist:
+            self._check_qubit(q)
+            if q not in seen:
+                seen.add(q)
+                A.append(q)
+        nA = len(A)
+        sub_x = self.x.to_dense()[:, A]
+        sub_z = self.z.to_dense()[:, A]
+        packed = PackedBitMatrix.from_dense(np.hstack([sub_x, sub_z]))
+        return int(packed.rank()) - nA
+
+    # Runner-compatibility aliases (same spelling as SparseGF2).
+
+    def apply_gate(self, qi: int, qj: int, symplectic_4x4: np.ndarray) -> None:
+        """Alias of :meth:`apply_clifford_2q` matching the SparseGF2 API."""
+        self.apply_clifford_2q(qi, qj, symplectic_4x4)
+
+    def apply_measurement_z(self, q: int) -> None:
+        """Alias of :meth:`measure_z` matching the SparseGF2 API."""
+        self.measure_z(q)
+
     def copy(self) -> "StabilizerTableau":
         """Deep copy."""
         tab = StabilizerTableau.__new__(StabilizerTableau)

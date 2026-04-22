@@ -23,7 +23,7 @@ GATING_MODES = ("matching",)                          # MVP: only "matching"
 MATCHING_MODE_NAMES = ("round_robin", "palette", "fresh")
 MEASUREMENT_MODE_NAMES = ("uniform",)                 # MVP: only "uniform"
 DEPTH_MODES = ("O(n)", "O(log_n)")                    # MVP
-PICTURE_NAMES = ("purification",)                     # MVP: only "purification"
+PICTURE_NAMES = ("purification", "single_ref")
 GRAPH_SPECS_MVP = ("cycle", "complete")
 
 
@@ -125,6 +125,9 @@ class CircuitConfig:
     def total_layers(self) -> int:
         """Total number of circuit layers implied by depth_mode + depth_factor.
 
+        Depth scales with the system-qubit count n (the reference qubit(s)
+        are idle throughout), so this is identical for both pictures.
+
         - ``O(n)``     -> ``depth_factor * n``
         - ``O(log_n)`` -> ``depth_factor * max(1, ceil(log2(n)))``
         """
@@ -133,6 +136,20 @@ class CircuitConfig:
         if self.depth_mode == "O(log_n)":
             return max(1, self.depth_factor * max(1, int(math.ceil(math.log2(self.n)))))
         raise AssertionError(f"Unhandled depth_mode {self.depth_mode!r}")
+
+    def total_qubits(self) -> int:
+        """Total number of physical qubits in the simulator for this picture.
+
+        - ``purification`` : ``2n`` (n system + n reference qubits, one
+          Bell pair per system qubit).
+        - ``single_ref``   : ``n + 1`` (n system qubits + 1 reference
+          qubit, initial Bell pair between qubit 0 and qubit n).
+        """
+        if self.picture == "purification":
+            return 2 * self.n
+        if self.picture == "single_ref":
+            return self.n + 1
+        raise AssertionError(f"Unhandled picture {self.picture!r}")
 
     def expected_gate_to_meas_ratio(self) -> float:
         """Expected ratio of gate-applications to measurement-applications.

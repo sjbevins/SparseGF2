@@ -2,6 +2,45 @@
 
 All notable changes to the SparseGF2 package.
 
+## [Unreleased]
+
+### Added
+
+- **`single_ref` physics picture** for MIPT research with a single-qubit
+  reference probe. In this picture the simulator allocates `n + 1`
+  qubits (vs `2n` in `purification`): `n` system qubits plus one
+  reference qubit at index `n`. Initialization is `|0...0>` followed by
+  `H(0); CNOT(0 -> n)`, producing a Bell pair on qubits `(0, n)` with
+  the rest in `|0>`. The circuit acts only on qubits `0..n-1`; the
+  probe observable is `S(qubit n)`, stored in `obs.k` (integer 0 or 1).
+  Curves of `<S(qubit n)>` vs `p` for different `n` cross at the MIPT
+  critical point `p_c`.
+  - `sparsegf2.circuits.config`: `"single_ref"` added to
+    `PICTURE_NAMES`; `CircuitConfig.total_qubits()` returns `n + 1` for
+    `single_ref` and `2n` for `purification`.
+  - `sparsegf2.circuits.pictures.init_picture("single_ref", n)` returns
+    an initialized `StabilizerTableau` (dense, supports arbitrary qubit
+    count); `init_picture("purification", n)` continues to return a
+    `SparseGF2`.
+  - `sparsegf2.circuits.runner` dispatches the observable set on the
+    configured picture: `obs.k = S(qubit n)` for `single_ref`.
+  - `sparsegf2.analysis.single_ref` adds `load_single_ref_samples`,
+    `aggregate_single_ref_entropy`, and `plot_single_ref_crossing`.
+  - `tests/validate_single_ref.py`: standalone QA agent that sweeps
+    `{all-to-all, brickwork} x {n=4, 8, 12} x {p=0.0, 1.0}`, verifies
+    the reference qubit is never involved in any gate or measurement,
+    asserts per-sample `k` is an integer in `{0, 1}`, and checks the
+    analytic limits `S(p=0) = 1`, `S(p=1) = 0`.
+- Runner-compatible aliases on `StabilizerTableau`: `apply_gate` (alias
+  of `apply_clifford_2q`) and `apply_measurement_z` (alias of
+  `measure_z`), plus a new `compute_subsystem_entropy(qubits)` method
+  implementing `S(A) = rank(M|_A) - |A|` (FCYBC 2004 Thm. 1) for
+  arbitrary-size states.
+- `DOCS.md`: new top-level reference file, starting with a
+  `single_ref` section (what it is, how it differs from `purification`,
+  `samples.parquet` schema impact, analysis API, validation, example
+  CLI, literature references).
+
 ## [0.2.1] - 2026-04-22
 
 ### Fixed

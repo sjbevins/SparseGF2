@@ -33,6 +33,11 @@ from sparsegf2.analysis.tanner_graph import (
     build_tanner_hypergraph,
     plot_tanner_graph,
 )
+from sparsegf2.analysis.single_ref import (
+    load_samples as load_single_ref_samples,
+    aggregate_entropy as aggregate_single_ref_entropy,
+    plot_crossing as plot_single_ref_crossing,
+)
 
 __all__ = [
     'WeightStats',
@@ -43,4 +48,7 @@ __all__ = [
     'build_tanner_hypergraph',
     'plot_tanner_graph',
     'observe',
+    'load_single_ref_samples',
+    'aggregate_single_ref_entropy',
+    'plot_single_ref_crossing',
 ]

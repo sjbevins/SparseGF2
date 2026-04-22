@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from sparsegf2 import SparseGF2, warmup
+from sparsegf2 import SparseGF2, StabilizerTableau, warmup
 from sparsegf2.circuits.builder import CircuitBuilder
 from sparsegf2.circuits.config import CircuitConfig, SampleRecord
 from sparsegf2.circuits.pictures import init_picture
@@ -85,30 +85,50 @@ def get_clifford_table(
 
 # Tableau extraction
 
-def _extract_xz_packed(sim: SparseGF2) -> Tuple[np.ndarray, np.ndarray]:
+def _extract_xz_packed(sim) -> Tuple[np.ndarray, np.ndarray]:
     """Extract bit-packed symplectic (X, Z) tableau from the simulator state.
 
-    Returns ``(x_packed, z_packed)`` of shape ``(2n, ceil(n/64))`` with uint64
-    dtype, matching the on-disk ``tableaus.h5`` layout.
+    For :class:`SparseGF2` (purification picture): returns ``(x_packed,
+    z_packed)`` of shape ``(2n, ceil(n/64))`` with uint64 dtype, matching
+    the on-disk ``tableaus.h5`` layout.
+
+    For :class:`StabilizerTableau` (single_ref picture): returns
+    ``(x_packed, z_packed)`` of shape ``(n+1, ceil((n+1)/64))`` — one row
+    per stabilizer generator and one bit per physical qubit.
     """
+    if isinstance(sim, StabilizerTableau):
+        N = sim.n
+        n_cols = sim.n
+        n_words = (n_cols + 63) >> 6
+        x_dense = sim.x.to_dense().astype(np.uint8)
+        z_dense = sim.z.to_dense().astype(np.uint8)
+        x_packed = np.zeros((N, n_words), dtype=np.uint64)
+        z_packed = np.zeros((N, n_words), dtype=np.uint64)
+        for r in range(N):
+            for q in range(n_cols):
+                if x_dense[r, q]:
+                    x_packed[r, q >> 6] |= np.uint64(1) << np.uint64(q & 63)
+                if z_dense[r, q]:
+                    z_packed[r, q >> 6] |= np.uint64(1) << np.uint64(q & 63)
+        return x_packed, z_packed
+
     n = sim.n
     N = sim.N
     n_words = (n + 63) >> 6
 
-    # Sync PLT if the simulator is currently in dense mode, so plt is authoritative.
     if getattr(sim, "_dense_mode", False):
         from sparsegf2.core.numba_kernels import packed_to_plt
         packed_to_plt(sim.x_packed, sim.z_packed, sim.plt, n, N)
 
-    plt = sim.plt  # uint8[N, n], bit 1 = X, bit 0 = Z
+    plt = sim.plt
     x_packed = np.zeros((N, n_words), dtype=np.uint64)
     z_packed = np.zeros((N, n_words), dtype=np.uint64)
     for r in range(N):
         for q in range(n):
             xz = int(plt[r, q])
-            if xz & 2:  # X-bit set -> X or Y
+            if xz & 2:
                 x_packed[r, q >> 6] |= np.uint64(1) << np.uint64(q & 63)
-            if xz & 1:  # Z-bit set -> Z or Y
+            if xz & 1:
                 z_packed[r, q >> 6] |= np.uint64(1) << np.uint64(q & 63)
     return x_packed, z_packed
 
@@ -192,13 +212,32 @@ class SimulationRunner:
                 })
         t_total = time.perf_counter() - t_all_0
 
-        # --- Observables ---
-        k = int(sim.compute_k())
-        abar = float(sim.get_active_count())
-        bandwidth = int(sim.compute_bandwidth())
-        tmi = float(sim.compute_tmi())
-        half = list(range(cfg.n // 2))
-        entropy_half = float(sim.compute_subsystem_entropy(half)) if half else 0.0
+        # Observables. The set depends on the picture:
+        #   purification : k = S(reference block) is the emergent-code rate;
+        #                  other observables are the system-wide diagnostics
+        #                  defined on SparseGF2.
+        #   single_ref   : k = S(qubit n) is a single bit (0 or 1) diagnosing
+        #                  MIPT; the other SparseGF2-only observables are set
+        #                  to zero / nan since they are not defined on a
+        #                  dense StabilizerTableau of size n+1.
+        if cfg.picture == "single_ref":
+            k = int(sim.compute_subsystem_entropy([cfg.n]))
+            abar = 0.0
+            bandwidth = 0
+            tmi = 0.0
+            half = list(range(cfg.n // 2))
+            entropy_half = (
+                float(sim.compute_subsystem_entropy(half)) if half else 0.0
+            )
+        else:
+            k = int(sim.compute_k())
+            abar = float(sim.get_active_count())
+            bandwidth = int(sim.compute_bandwidth())
+            tmi = float(sim.compute_tmi())
+            half = list(range(cfg.n // 2))
+            entropy_half = (
+                float(sim.compute_subsystem_entropy(half)) if half else 0.0
+            )
 
         # --- Diagnostics ---
         avg_gates = total_gates / max(total_layers, 1)

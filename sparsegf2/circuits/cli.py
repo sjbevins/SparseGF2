@@ -60,7 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--graph", required=True, choices=GRAPH_SPECS_MVP,
                    help="Graph topology.")
     p.add_argument("--picture", default="purification", choices=PICTURE_NAMES,
-                   help="Physics picture (MVP: purification).")
+                   help="Physics picture: purification (2n qubits, full tableau) "
+                        "or single_ref (n+1 qubits, single-qubit probe).")
     p.add_argument("--gating", default="matching", choices=GATING_MODES,
                    dest="gating_mode",
                    help="Gating mode (MVP: matching).")
