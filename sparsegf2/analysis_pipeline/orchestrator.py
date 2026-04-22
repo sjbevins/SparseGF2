@@ -166,7 +166,7 @@ def _process_cell(
         try:
             res = mod.run_cell(ctx, params=params, force=force)
             results.append(res)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             results.append(CellRunResult(
                 name=name, status="error", output_path=None,
                 n_samples=ctx.n_samples, params=params,
@@ -244,7 +244,7 @@ def run_pipeline(cfg: AnalysisConfig) -> PipelineReport:
                     _promote_cell_errors(cell, results)
                     if cfg.verbose:
                         _log_cell(cell, results)
-                except Exception as e:                  # noqa: BLE001
+                except Exception as e:
                     report.errors.append(
                         f"cell {cell} failed: {type(e).__name__}: {e}"
                     )
@@ -260,7 +260,7 @@ def run_pipeline(cfg: AnalysisConfig) -> PipelineReport:
             if cfg.verbose:
                 print(f"[{name}] {res.status} ({res.runtime_s:.2f}s) {res.message}",
                       flush=True)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             report.errors.append(f"{name}: {type(e).__name__}: {e}")
 
     # Update run manifest with analysis_summary

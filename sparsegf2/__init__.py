@@ -1,4 +1,4 @@
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 from sparsegf2.core.sparse_tableau import SparseGF2, warmup
 from sparsegf2.core.tableau import StabilizerTableau
 from sparsegf2.gates.clifford import symplectic_from_stim_tableau

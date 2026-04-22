@@ -4,8 +4,14 @@ title: "SparseGF2: a sparse GF(2) stabilizer simulator for quantum error correct
 authors:
   - family-names: Bevins
     given-names: Sam
-version: 0.2.0
-date-released: 2026-04-16
+version: 0.2.1
+date-released: 2026-04-22
+repository-code: "https://github.com/sjbevins/SparseGF2"
+abstract: >-
+  A sparse stabilizer-tableau simulator over GF(2) with Numba-accelerated
+  kernels and a graph-defined random-Clifford + measurement circuits
+  subpackage targeted at measurement-induced phase transition (MIPT)
+  research.
 url: "https://github.com/sjbevins/SparseGF2"
 license: MIT
 type: software
