@@ -196,9 +196,25 @@ class SimulationRunner:
         # until_purified needs per-layer S(ref) to decide when to stop.
         need_s_per_layer = record_timeseries or is_until_purified
         ref_ts: Optional[list] = None
+
+        # Warmup (pre-scrambling) phase: gate-only layers applied before
+        # the main gate+measurement loop. The trace index t=0 is taken
+        # AFTER the warmup so that "t/n=0" in analysis corresponds to the
+        # scrambled initial state the user actually cares about.
+        warmup_gates = 0
+        t_warmup_0 = time.perf_counter()
+        for wlayer in builder.warmup_layers_iter():
+            if wlayer.n_gates:
+                for i, (qi, qj) in enumerate(wlayer.gate_pairs):
+                    ci = int(wlayer.cliff_indices[i]) % n_symp
+                    sim.apply_gate(qi, qj, symp[ci])
+                warmup_gates += wlayer.n_gates
+        t_warmup = time.perf_counter() - t_warmup_0
+
         if record_timeseries:
             # Pre-allocate with (total_layers + 1) entries; index 0 is the
-            # initial-state entropy (should be 1 for the Bell pair).
+            # post-warmup entropy (still 1, since warmup applies no
+            # measurements and cannot collapse the Bell-pair correlation).
             ref_ts = []
             ref_ts.append(int(sim.compute_subsystem_entropy([cfg.n])))
 

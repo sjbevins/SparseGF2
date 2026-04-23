@@ -72,6 +72,16 @@ class CircuitConfig:
     # purification time ``tau`` (time at which P drops through 0.5).
     record_time_series: bool = False
 
+    # ---- Warmup (pre-scrambling) layers ----
+    # Number of gate-only layers to apply at the start of the circuit before
+    # the main gate+measurement loop begins. Only valid for
+    # picture='single_ref'. The Bell-pair correlation between qubit 0 and
+    # the reference is spread across many system qubits during warmup, so
+    # at t=0 of the main run the reference is already entangled with a
+    # random subset of the system rather than only qubit 0.
+    # record_time_series records S(qubit n) at t=0 == END OF WARMUP.
+    warmup_layers: int = 0
+
     def __post_init__(self) -> None:
         # Graph spec
         if self.graph_spec not in GRAPH_SPECS_MVP:
@@ -143,6 +153,17 @@ class CircuitConfig:
                 "picture='single_ref' (the termination condition is "
                 "S(reference qubit) = 0); got picture="
                 f"{self.picture!r}"
+            )
+        if not isinstance(self.warmup_layers, (int, np.integer)) or self.warmup_layers < 0:
+            raise ValueError(
+                f"warmup_layers must be a non-negative integer; "
+                f"got {self.warmup_layers!r}"
+            )
+        self.warmup_layers = int(self.warmup_layers)
+        if self.warmup_layers > 0 and self.picture != "single_ref":
+            raise ValueError(
+                "warmup_layers > 0 is only meaningful for "
+                f"picture='single_ref'; got picture={self.picture!r}"
             )
 
     # --------------------------------------------------------------
@@ -218,6 +239,11 @@ class RunConfig:
     output_root: Path = field(default_factory=lambda: Path("runs"))
     run_id: Optional[str] = None                      # auto-generated when None
 
+    # When set, cell_config(n, p) overrides the circuit's warmup_layers
+    # with round(warmup_scale_over_n * n) so warmup depth scales with
+    # system size. Only applies when picture='single_ref'.
+    warmup_scale_over_n: Optional[float] = None
+
     save_tableaus: bool = False
     save_realizations: bool = False
     save_rng_state: bool = False
@@ -274,10 +300,19 @@ class RunConfig:
         return self.total_cells() * self.n_samples_per_cell
 
     def cell_config(self, n: int, p: float) -> CircuitConfig:
-        """Return a copy of ``circuit`` with ``n`` and ``p`` overridden."""
+        """Return a copy of ``circuit`` with ``n`` and ``p`` overridden.
+
+        If ``warmup_scale_over_n`` is set, also overrides
+        ``warmup_layers`` with ``round(warmup_scale_over_n * n)`` so the
+        pre-scrambling depth scales linearly with system size.
+        """
         cfg_dict = self.circuit.to_dict()
         cfg_dict["n"] = int(n)
         cfg_dict["p"] = float(p)
+        if self.warmup_scale_over_n is not None:
+            cfg_dict["warmup_layers"] = int(
+                round(self.warmup_scale_over_n * n)
+            )
         return CircuitConfig(**cfg_dict)
 
 

@@ -83,6 +83,50 @@ class CircuitBuilder:
 
     # --------------------------------------------------------------
 
+    def warmup_layers_iter(self) -> Iterator[CircuitLayer]:
+        """Yield ``CircuitConfig.warmup_layers`` gate-only layers.
+
+        These apply the same gate schedule as :meth:`layers` but with no
+        measurement candidates (``meas_qubits`` is always empty). The RNG
+        is consumed before the main ``layers()`` iterator runs, so the
+        main layers still begin at their canonical ``t = 0`` for the
+        gating scheduler (e.g. ``round_robin``'s matching index cycles
+        through its 1-factorization continuously).
+        """
+        cfg = self.config
+        if cfg.warmup_layers <= 0:
+            return
+        edges = (
+            self.graph.edges if cfg.gating_mode == "random_edge" else None
+        )
+        n_edges = len(edges) if edges is not None else 0
+        for t in range(cfg.warmup_layers):
+            if cfg.gating_mode == "matching":
+                pairs = select_matching(self.graph, cfg.matching_mode, t, self.rng)
+            elif cfg.gating_mode == "random_edge":
+                if n_edges == 0:
+                    pairs = []
+                else:
+                    j = int(self.rng.integers(0, n_edges))
+                    u, v = edges[j]
+                    pairs = [(int(u), int(v))]
+            else:
+                raise RuntimeError(
+                    f"Unhandled gating_mode {cfg.gating_mode!r}"
+                )
+            n_pairs = len(pairs)
+            if n_pairs:
+                cliff_idx = self.rng.integers(
+                    0, cfg.n_cliffords, size=n_pairs, dtype=np.int64
+                )
+            else:
+                cliff_idx = np.zeros(0, dtype=np.int64)
+            yield CircuitLayer(
+                gate_pairs=pairs,
+                cliff_indices=cliff_idx,
+                meas_qubits=[],
+            )
+
     def layers(self) -> Iterator[CircuitLayer]:
         """Yield ``CircuitLayer`` objects, one per layer, in simulation order."""
         T = self.config.total_layers()
