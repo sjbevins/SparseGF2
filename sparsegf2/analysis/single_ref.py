@@ -337,19 +337,23 @@ def plot_tau_scaling(
 def plot_psurv_vs_tn_grid(
     ts: Dict[Tuple[int, float], CellTimeseries],
     *,
-    ncols: int = 5,
+    ncols: int = 4,
     out_path: Optional[Union[str, Path]] = None,
     show: bool = False,
     title: Optional[str] = None,
+    max_markers: int = 40,
 ):
-    """Grid of subplots, one per ``p``: ``P(t) = <S(t)>`` vs rescaled
-    time ``t / n`` with one curve per system size ``n``.
+    """Grid of subplots, one per ``p``: scatter-with-band of
+    ``<S(t)>`` vs rescaled time ``t / n`` for each system size ``n``.
 
-    The standard Gullans-Huse purification-time diagnostic. Below the
-    critical rate ``p_c`` the purification time scales as ``tau ~ n``,
-    so curves for different ``n`` collapse under ``t / n``. Above
-    ``p_c`` the scaling is logarithmic / finite-n-dependent and the
-    curves separate.
+    The standard Gullans-Huse purification-time diagnostic. Below
+    ``p_c`` the purification time scales as ``tau ~ n``, so the
+    curves collapse under ``t / n``. Above ``p_c`` they separate.
+
+    Uses a connecting line, subsampled scatter markers (at most
+    ``max_markers`` per curve), and a shaded ``mean +/- SEM`` band
+    where SEM is the standard error of the sample mean of ``S(t)``
+    at each time point across realisations.
     """
     import matplotlib.pyplot as plt
 
@@ -362,7 +366,7 @@ def plot_psurv_vs_tn_grid(
     nrows = int(np.ceil(n_plots / ncols))
     fig, axes = plt.subplots(
         nrows, ncols,
-        figsize=(2.9 * ncols, 2.4 * nrows),
+        figsize=(3.1 * ncols, 2.4 * nrows),
         sharex=False, sharey=True,
     )
     axes = np.atleast_2d(axes)
@@ -379,19 +383,40 @@ def plot_psurv_vs_tn_grid(
             if cell is None:
                 continue
             t_over_n = cell.t_axis.astype(np.float64) / float(n_val)
-            ax.plot(
+            S_of_t = cell.S_of_t.astype(np.float64)
+            mean_S = S_of_t.mean(axis=0)
+            M = int(S_of_t.shape[0])
+            if M > 1:
+                std_S = S_of_t.std(axis=0, ddof=1)
+                sem_S = std_S / np.sqrt(M)
+            else:
+                sem_S = np.zeros_like(mean_S)
+            col = n_to_color[n_val]
+            ax.fill_between(
                 t_over_n,
-                cell.P_of_t,
-                linewidth=1.2,
-                color=n_to_color[n_val],
-                label=f"n={n_val}",
+                np.clip(mean_S - sem_S, 0.0, 1.0),
+                np.clip(mean_S + sem_S, 0.0, 1.0),
+                color=col, alpha=0.20, linewidth=0,
+            )
+            ax.plot(t_over_n, mean_S, color=col, linewidth=0.9, alpha=0.8)
+            if t_over_n.size > max_markers:
+                mark_idx = np.unique(
+                    np.linspace(0, t_over_n.size - 1, max_markers)
+                    .round().astype(int)
+                )
+            else:
+                mark_idx = np.arange(t_over_n.size)
+            ax.scatter(
+                t_over_n[mark_idx], mean_S[mark_idx],
+                s=14, color=col, edgecolors="white", linewidths=0.4,
+                zorder=3,
             )
         ax.set_title(f"p = {p_val:.3f}", fontsize=9)
         ax.axhline(0.5, color="0.6", linestyle=":", linewidth=0.7)
         ax.set_ylim(-0.02, 1.05)
         ax.grid(True, alpha=0.25)
         if c == 0:
-            ax.set_ylabel(r"$P(t)$", fontsize=9)
+            ax.set_ylabel(r"$\langle S(t) \rangle$", fontsize=9)
         if r == nrows - 1:
             ax.set_xlabel(r"$t / n$", fontsize=9)
 
@@ -400,7 +425,8 @@ def plot_psurv_vs_tn_grid(
         axes[r, c].set_visible(False)
 
     handles = [
-        plt.Line2D([0], [0], color=n_to_color[n], linewidth=2, label=f"n={n}")
+        plt.Line2D([0], [0], color=n_to_color[n], linewidth=2,
+                   marker="o", markersize=5, label=f"n={n}")
         for n in sizes
     ]
     fig.legend(handles=handles, loc="upper center",
@@ -416,29 +442,90 @@ def plot_psurv_vs_tn_grid(
     return fig, axes
 
 
+def _per_sample_tau(cell: CellTimeseries):
+    """Per-sample purification times for a cell.
+
+    Returns a tuple ``(taus, n_purified, n_total)``: ``taus`` is a 1-D
+    numpy array of the first-zero index in each row of ``S_of_t``
+    (dtype int64) for samples that purified; censored samples are
+    omitted. ``n_purified`` is the count; ``n_total`` is the number
+    of rows in the trace stack.
+    """
+    S = cell.S_of_t
+    n_total = int(S.shape[0])
+    taus = []
+    for i in range(n_total):
+        zeros = np.where(S[i] == 0)[0]
+        if zeros.size:
+            taus.append(int(zeros[0]))
+    return np.asarray(taus, dtype=np.int64), len(taus), n_total
+
+
 def compute_tau_over_n_vs_p(
     ts: Dict[Tuple[int, float], CellTimeseries],
     *,
     threshold: float = 0.5,
 ) -> pl.DataFrame:
-    """Tabulate ``tau / n`` vs ``p`` with one row per ``(n, p)``.
+    """Tabulate ``tau`` and ``tau / n`` per ``(n, p)`` with uncertainty.
 
-    ``tau`` is the smallest ``t`` at which ``P(t) = <S(t)>`` reaches or
-    drops through ``threshold`` (linear interpolation between adjacent
-    time points). If ``P(t)`` never crosses the threshold within the
-    sampled window, ``tau`` is null and the row's ``capped`` flag is
-    ``True``.
+    Two complementary summaries are produced and joined into a single
+    row per cell:
+
+    - ``tau_interp`` / ``tau_interp_over_n``: the classical Gullans-Huse
+      estimator, the smallest ``t`` at which the ensemble mean
+      ``<S(t)>`` reaches ``threshold`` (linear interpolation between
+      adjacent time points). ``None`` if ``<S(t)>`` never crosses the
+      threshold within the sampled window.
+    - ``tau_mean`` / ``tau_mean_over_n`` (main): the ensemble mean of
+      per-sample first-zero times, averaged across realisations that
+      actually purified. ``tau_sem`` is the standard error of that
+      mean; ``tau_sem_over_n`` = ``tau_sem / n``. ``censor_frac`` is
+      the fraction of samples that never purified within the cap.
+      The cell is ``capped`` iff every sample was censored.
     """
     rows = []
     for (n_val, p_val), cell in ts.items():
-        tau = compute_tau(cell, threshold=threshold)
+        tau_interp = compute_tau(cell, threshold=threshold)
+        taus, n_purified, n_total = _per_sample_tau(cell)
+        if n_purified > 0:
+            tau_mean = float(taus.mean())
+            if n_purified > 1:
+                tau_std = float(taus.std(ddof=1))
+                tau_sem = tau_std / np.sqrt(n_purified)
+            else:
+                tau_std = 0.0
+                tau_sem = 0.0
+            tau_mean_over_n = tau_mean / float(n_val)
+            tau_sem_over_n = tau_sem / float(n_val)
+        else:
+            tau_mean = None
+            tau_std = None
+            tau_sem = None
+            tau_mean_over_n = None
+            tau_sem_over_n = None
         rows.append({
             "n": int(n_val),
             "p": float(p_val),
-            "tau": float(tau) if tau is not None else None,
-            "tau_over_n": float(tau) / float(n_val) if tau is not None else None,
+            # interp-at-threshold summary (legacy)
+            "tau_interp": float(tau_interp) if tau_interp is not None else None,
+            "tau_interp_over_n": (
+                float(tau_interp) / float(n_val)
+                if tau_interp is not None else None
+            ),
+            # per-sample mean + SEM summary (main)
+            "tau_mean": tau_mean,
+            "tau_std": tau_std,
+            "tau_sem": tau_sem,
+            "tau_mean_over_n": tau_mean_over_n,
+            "tau_sem_over_n": tau_sem_over_n,
+            # back-compat aliases matching the previous schema
+            "tau": tau_mean,
+            "tau_over_n": tau_mean_over_n,
+            "n_purified": int(n_purified),
+            "n_total": int(n_total),
+            "censor_frac": 1.0 - n_purified / max(1, n_total),
             "cap": int(cell.t_axis.size - 1),
-            "capped": tau is None,
+            "capped": n_purified == 0,
         })
     return pl.DataFrame(rows).sort(["p", "n"])
 
@@ -451,11 +538,13 @@ def plot_tau_over_n_vs_p(
     title: Optional[str] = None,
     ax=None,
 ):
-    """Plot ``tau / n`` vs ``p`` with one line per system size ``n``.
+    """Scatter plot of ``tau / n`` vs ``p`` with SEM error bands.
 
-    In the area-law (large-p) phase ``tau / n -> 0`` as ``n -> infinity``;
-    in the volume-law phase ``tau / n`` approaches a positive value (or
-    the cap is hit first, shown as open triangular markers).
+    Each point is the per-sample mean purification time ``<tau>``
+    divided by ``n``; the shaded band around each line is
+    ``+/- tau_sem / n`` where the SEM is computed across realisations
+    that actually purified. Cells whose entire ensemble was censored
+    are omitted.
     """
     import matplotlib.pyplot as plt
 
@@ -473,14 +562,32 @@ def plot_tau_over_n_vs_p(
         p = sub["p"].to_numpy()
         tn = np.array(
             [x if x is not None else np.nan
-             for x in sub["tau_over_n"].to_list()],
+             for x in sub["tau_mean_over_n"].to_list()],
+            dtype=np.float64,
+        )
+        sem = np.array(
+            [x if x is not None else np.nan
+             for x in sub["tau_sem_over_n"].to_list()],
             dtype=np.float64,
         )
         finite = tn[np.isfinite(tn)]
         if finite.size:
             max_plotted = max(max_plotted, float(finite.max()))
-        ax.plot(p, tn, marker="o", markersize=5, linewidth=1.5,
-                color=col, label=f"n={n_val}")
+        # Shaded SEM band (only where both mean and sem are finite).
+        mask = np.isfinite(tn) & np.isfinite(sem)
+        if mask.any():
+            ax.fill_between(
+                p[mask],
+                np.clip(tn[mask] - sem[mask], 0.0, None),
+                tn[mask] + sem[mask],
+                color=col, alpha=0.18, linewidth=0,
+            )
+        ax.plot(p, tn, color=col, linewidth=0.9, alpha=0.6)
+        ax.scatter(
+            p[mask], tn[mask],
+            s=28, color=col, edgecolors="white", linewidths=0.5,
+            zorder=4, label=f"n={n_val}",
+        )
 
     # Overlay a marker at the cap value for any (n, p) that was censored.
     # We plot this in a second pass so the y-range is already established.
