@@ -395,10 +395,10 @@ class RunWriter:
             return
         S = len(ts_records)
         T_plus_1 = int(ts_records[0].ref_entropy_timeseries.shape[0])
-        ts_stack = np.zeros((S, T_plus_1), dtype=np.uint8)
+        ts_stack = np.zeros((S, T_plus_1), dtype=np.uint16)
         seeds = np.zeros(S, dtype=np.int64)
         for i, r in enumerate(ts_records):
-            arr = np.asarray(r.ref_entropy_timeseries, dtype=np.uint8)
+            arr = np.asarray(r.ref_entropy_timeseries, dtype=np.uint16)
             if arr.shape != (T_plus_1,):
                 raise ValueError(
                     "ref_entropy_timeseries has inconsistent length across "

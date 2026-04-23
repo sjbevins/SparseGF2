@@ -191,7 +191,10 @@ def load_timeseries(run_dir: Union[str, Path]) -> Dict[Tuple[int, float], CellTi
         except (IndexError, ValueError):
             continue
         with h5py.File(ts_path, "r") as f:
-            S_of_t = np.asarray(f["S_of_t"][:], dtype=np.uint8)
+            # Accept either uint8 (older single_ref data) or uint16
+            # (purification with n > 255). Normalize to uint16 for
+            # downstream analysis.
+            S_of_t = np.asarray(f["S_of_t"][:], dtype=np.uint16)
             t_axis = np.asarray(f["t_axis"][:], dtype=np.int32)
             seeds = np.asarray(f["sample_seed"][:], dtype=np.int64)
         out[(n, p)] = CellTimeseries(

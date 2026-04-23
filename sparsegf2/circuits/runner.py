@@ -338,7 +338,7 @@ class SimulationRunner:
             # leave as None for MVP.
 
         if ref_ts is not None:
-            record.ref_entropy_timeseries = np.asarray(ref_ts, dtype=np.uint8)
+            record.ref_entropy_timeseries = np.asarray(ref_ts, dtype=np.uint16)
 
         return record
 
