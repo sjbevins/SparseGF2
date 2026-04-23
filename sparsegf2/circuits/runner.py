@@ -188,7 +188,8 @@ class SimulationRunner:
 
         realization_layers = [] if save_realization else None
         record_timeseries = bool(
-            cfg.picture == "single_ref" and cfg.record_time_series
+            cfg.record_time_series
+            and cfg.picture in ("single_ref", "purification")
         )
         is_until_purified = bool(
             cfg.picture == "single_ref" and cfg.depth_mode == "until_purified"
@@ -211,12 +212,21 @@ class SimulationRunner:
                 warmup_gates += wlayer.n_gates
         t_warmup = time.perf_counter() - t_warmup_0
 
+        # Choose the per-layer observable based on the picture:
+        #   single_ref   : S(qubit n) in {0, 1}
+        #   purification : k = S(R) in [0, n]
+        if cfg.picture == "purification":
+            def _compute_s_per_layer():
+                return int(sim.compute_k())
+        else:
+            def _compute_s_per_layer():
+                return int(sim.compute_subsystem_entropy([cfg.n]))
+
         if record_timeseries:
             # Pre-allocate with (total_layers + 1) entries; index 0 is the
-            # post-warmup entropy (still 1, since warmup applies no
-            # measurements and cannot collapse the Bell-pair correlation).
+            # post-warmup entropy.
             ref_ts = []
-            ref_ts.append(int(sim.compute_subsystem_entropy([cfg.n])))
+            ref_ts.append(_compute_s_per_layer())
 
         t_all_0 = time.perf_counter()
         for layer in builder.layers():
@@ -243,13 +253,13 @@ class SimulationRunner:
             # Compute S(ref) at most once per layer; reuse for both timeseries
             # recording and until_purified termination.
             if need_s_per_layer:
-                s_ref_now = int(sim.compute_subsystem_entropy([cfg.n]))
+                s_ref_now = _compute_s_per_layer()
                 if ref_ts is not None:
                     ref_ts.append(s_ref_now)
                 if is_until_purified and s_ref_now == 0:
-                    # Reference is now purified; S(qubit n) stays 0 under
-                    # any further Clifford + Z-measurement activity on the
-                    # system since qubit n is untouched. We can stop.
+                    # Reference is purified; S stays 0 under further
+                    # unitary + Z-measurement activity (the reference is
+                    # either decoupled or pure). We can stop.
                     break
         t_total = time.perf_counter() - t_all_0
         # Pad the recorded trace to the MAX depth so that all samples in

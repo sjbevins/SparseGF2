@@ -28,9 +28,10 @@ def test_warmup_layers_must_be_nonneg_integer():
                       p=0.3, warmup_layers=-1)
 
 
-def test_warmup_layers_requires_single_ref():
-    with pytest.raises(ValueError, match="warmup_layers"):
-        CircuitConfig(graph_spec="complete", n=8, picture="purification",
+def test_warmup_layers_allowed_for_single_ref_and_purification():
+    # Both pictures with a pre-scrambling phase accept warmup_layers.
+    for pic in ("single_ref", "purification"):
+        CircuitConfig(graph_spec="complete", n=8, picture=pic,
                       p=0.3, warmup_layers=4)
 
 

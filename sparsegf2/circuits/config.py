@@ -141,10 +141,14 @@ class CircuitConfig:
             raise ValueError(
                 f"record_time_series must be bool; got {self.record_time_series!r}"
             )
-        if self.record_time_series and self.picture != "single_ref":
+        # record_time_series is meaningful for both single_ref (records
+        # S(qubit n) in {0,1}) and purification (records k = S(R) in
+        # [0, n]). Forbid for any other future picture.
+        if (self.record_time_series
+                and self.picture not in ("single_ref", "purification")):
             raise ValueError(
                 "record_time_series=True is only meaningful for "
-                "picture='single_ref'; got picture="
+                "picture in {'single_ref', 'purification'}; got picture="
                 f"{self.picture!r}"
             )
         if self.depth_mode == "until_purified" and self.picture != "single_ref":
@@ -160,10 +164,15 @@ class CircuitConfig:
                 f"got {self.warmup_layers!r}"
             )
         self.warmup_layers = int(self.warmup_layers)
-        if self.warmup_layers > 0 and self.picture != "single_ref":
+        # Warmup is meaningful for any picture that has a pre-scrambling
+        # phase (single_ref, purification). For other pictures in the
+        # future we refuse until specifically generalized.
+        if (self.warmup_layers > 0
+                and self.picture not in ("single_ref", "purification")):
             raise ValueError(
-                "warmup_layers > 0 is only meaningful for "
-                f"picture='single_ref'; got picture={self.picture!r}"
+                "warmup_layers > 0 is only meaningful for picture in "
+                "{'single_ref', 'purification'}; got picture="
+                f"{self.picture!r}"
             )
 
     # --------------------------------------------------------------
