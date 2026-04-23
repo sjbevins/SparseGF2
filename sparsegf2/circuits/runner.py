@@ -190,6 +190,11 @@ class SimulationRunner:
         record_timeseries = bool(
             cfg.picture == "single_ref" and cfg.record_time_series
         )
+        is_until_purified = bool(
+            cfg.picture == "single_ref" and cfg.depth_mode == "until_purified"
+        )
+        # until_purified needs per-layer S(ref) to decide when to stop.
+        need_s_per_layer = record_timeseries or is_until_purified
         ref_ts: Optional[list] = None
         if record_timeseries:
             # Pre-allocate with (total_layers + 1) entries; index 0 is the
@@ -219,9 +224,26 @@ class SimulationRunner:
                     "cliff_indices": np.asarray(layer.cliff_indices, dtype=np.int64),
                     "meas_qubits": list(layer.meas_qubits),
                 })
-            if ref_ts is not None:
-                ref_ts.append(int(sim.compute_subsystem_entropy([cfg.n])))
+            # Compute S(ref) at most once per layer; reuse for both timeseries
+            # recording and until_purified termination.
+            if need_s_per_layer:
+                s_ref_now = int(sim.compute_subsystem_entropy([cfg.n]))
+                if ref_ts is not None:
+                    ref_ts.append(s_ref_now)
+                if is_until_purified and s_ref_now == 0:
+                    # Reference is now purified; S(qubit n) stays 0 under
+                    # any further Clifford + Z-measurement activity on the
+                    # system since qubit n is untouched. We can stop.
+                    break
         t_total = time.perf_counter() - t_all_0
+        # Pad the recorded trace to the MAX depth so that all samples in
+        # a cell share the same (total_layers_max + 1,) shape on disk.
+        # After purification S(qubit n) remains 0, so padding with 0 is
+        # physically correct.
+        if ref_ts is not None:
+            target_len = cfg.total_layers() + 1
+            while len(ref_ts) < target_len:
+                ref_ts.append(0)
 
         # Observables. The set depends on the picture:
         #   purification : k = S(reference block) is the emergent-code rate;

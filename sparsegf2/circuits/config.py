@@ -22,7 +22,7 @@ import numpy as np
 GATING_MODES = ("matching",)                          # MVP: only "matching"
 MATCHING_MODE_NAMES = ("round_robin", "palette", "fresh")
 MEASUREMENT_MODE_NAMES = ("uniform",)                 # MVP: only "uniform"
-DEPTH_MODES = ("O(n)", "O(log_n)")                    # MVP
+DEPTH_MODES = ("O(n)", "O(log_n)", "until_purified")
 PICTURE_NAMES = ("purification", "single_ref")
 GRAPH_SPECS_MVP = ("cycle", "complete")
 
@@ -137,6 +137,13 @@ class CircuitConfig:
                 "picture='single_ref'; got picture="
                 f"{self.picture!r}"
             )
+        if self.depth_mode == "until_purified" and self.picture != "single_ref":
+            raise ValueError(
+                "depth_mode='until_purified' is only defined for "
+                "picture='single_ref' (the termination condition is "
+                "S(reference qubit) = 0); got picture="
+                f"{self.picture!r}"
+            )
 
     # --------------------------------------------------------------
     # Derived quantities
@@ -145,13 +152,15 @@ class CircuitConfig:
     def total_layers(self) -> int:
         """Total number of circuit layers implied by depth_mode + depth_factor.
 
-        Depth scales with the system-qubit count n (the reference qubit(s)
-        are idle throughout), so this is identical for both pictures.
+        For ``O(n)`` and ``O(log_n)``, this is the fixed circuit depth.
+        For ``until_purified`` (single_ref only), this is the MAXIMUM depth
+        cap; the runner terminates each sample as soon as S(qubit n) = 0.
 
-        - ``O(n)``     -> ``depth_factor * n``
-        - ``O(log_n)`` -> ``depth_factor * max(1, ceil(log2(n)))``
+        - ``O(n)``           -> ``depth_factor * n``
+        - ``O(log_n)``       -> ``depth_factor * max(1, ceil(log2(n)))``
+        - ``until_purified`` -> ``depth_factor * n`` (cap)
         """
-        if self.depth_mode == "O(n)":
+        if self.depth_mode in ("O(n)", "until_purified"):
             return max(1, self.depth_factor * self.n)
         if self.depth_mode == "O(log_n)":
             return max(1, self.depth_factor * max(1, int(math.ceil(math.log2(self.n)))))

@@ -334,6 +334,185 @@ def plot_tau_scaling(
     return fig, ax
 
 
+def plot_psurv_vs_tn_grid(
+    ts: Dict[Tuple[int, float], CellTimeseries],
+    *,
+    ncols: int = 5,
+    out_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    title: Optional[str] = None,
+):
+    """Grid of subplots, one per ``p``: ``P(t) = <S(t)>`` vs rescaled
+    time ``t / n`` with one curve per system size ``n``.
+
+    The standard Gullans-Huse purification-time diagnostic. Below the
+    critical rate ``p_c`` the purification time scales as ``tau ~ n``,
+    so curves for different ``n`` collapse under ``t / n``. Above
+    ``p_c`` the scaling is logarithmic / finite-n-dependent and the
+    curves separate.
+    """
+    import matplotlib.pyplot as plt
+
+    p_values = sorted({p for (_, p) in ts})
+    sizes = sorted({n for (n, _) in ts})
+    if not p_values or not sizes:
+        raise ValueError("no cells found in timeseries dict")
+
+    n_plots = len(p_values)
+    nrows = int(np.ceil(n_plots / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(2.9 * ncols, 2.4 * nrows),
+        sharex=False, sharey=True,
+    )
+    axes = np.atleast_2d(axes)
+    cmap = plt.get_cmap("viridis")
+    n_to_color = {
+        n: cmap(i / max(1, len(sizes) - 1)) for i, n in enumerate(sizes)
+    }
+
+    for idx, p_val in enumerate(p_values):
+        r, c = divmod(idx, ncols)
+        ax = axes[r, c]
+        for n_val in sizes:
+            cell = ts.get((n_val, p_val))
+            if cell is None:
+                continue
+            t_over_n = cell.t_axis.astype(np.float64) / float(n_val)
+            ax.plot(
+                t_over_n,
+                cell.P_of_t,
+                linewidth=1.2,
+                color=n_to_color[n_val],
+                label=f"n={n_val}",
+            )
+        ax.set_title(f"p = {p_val:.3f}", fontsize=9)
+        ax.axhline(0.5, color="0.6", linestyle=":", linewidth=0.7)
+        ax.set_ylim(-0.02, 1.05)
+        ax.grid(True, alpha=0.25)
+        if c == 0:
+            ax.set_ylabel(r"$P(t)$", fontsize=9)
+        if r == nrows - 1:
+            ax.set_xlabel(r"$t / n$", fontsize=9)
+
+    for idx in range(n_plots, nrows * ncols):
+        r, c = divmod(idx, ncols)
+        axes[r, c].set_visible(False)
+
+    handles = [
+        plt.Line2D([0], [0], color=n_to_color[n], linewidth=2, label=f"n={n}")
+        for n in sizes
+    ]
+    fig.legend(handles=handles, loc="upper center",
+               ncol=len(sizes), bbox_to_anchor=(0.5, 1.0),
+               frameon=False, fontsize=9)
+    if title is not None:
+        fig.suptitle(title, y=1.02, fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    if out_path is not None:
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def compute_tau_over_n_vs_p(
+    ts: Dict[Tuple[int, float], CellTimeseries],
+    *,
+    threshold: float = 0.5,
+) -> pl.DataFrame:
+    """Tabulate ``tau / n`` vs ``p`` with one row per ``(n, p)``.
+
+    ``tau`` is the smallest ``t`` at which ``P(t) = <S(t)>`` reaches or
+    drops through ``threshold`` (linear interpolation between adjacent
+    time points). If ``P(t)`` never crosses the threshold within the
+    sampled window, ``tau`` is null and the row's ``capped`` flag is
+    ``True``.
+    """
+    rows = []
+    for (n_val, p_val), cell in ts.items():
+        tau = compute_tau(cell, threshold=threshold)
+        rows.append({
+            "n": int(n_val),
+            "p": float(p_val),
+            "tau": float(tau) if tau is not None else None,
+            "tau_over_n": float(tau) / float(n_val) if tau is not None else None,
+            "cap": int(cell.t_axis.size - 1),
+            "capped": tau is None,
+        })
+    return pl.DataFrame(rows).sort(["p", "n"])
+
+
+def plot_tau_over_n_vs_p(
+    tau_table: pl.DataFrame,
+    *,
+    out_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    title: Optional[str] = None,
+    ax=None,
+):
+    """Plot ``tau / n`` vs ``p`` with one line per system size ``n``.
+
+    In the area-law (large-p) phase ``tau / n -> 0`` as ``n -> infinity``;
+    in the volume-law phase ``tau / n`` approaches a positive value (or
+    the cap is hit first, shown as open triangular markers).
+    """
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    else:
+        fig = ax.figure
+
+    sizes = sorted({int(v) for v in tau_table["n"].unique().to_list()})
+    cmap = plt.get_cmap("viridis")
+    max_plotted = 0.0
+    for i, n_val in enumerate(sizes):
+        col = cmap(i / max(1, len(sizes) - 1))
+        sub = tau_table.filter(pl.col("n") == n_val).sort("p")
+        p = sub["p"].to_numpy()
+        tn = np.array(
+            [x if x is not None else np.nan
+             for x in sub["tau_over_n"].to_list()],
+            dtype=np.float64,
+        )
+        finite = tn[np.isfinite(tn)]
+        if finite.size:
+            max_plotted = max(max_plotted, float(finite.max()))
+        ax.plot(p, tn, marker="o", markersize=5, linewidth=1.5,
+                color=col, label=f"n={n_val}")
+
+    # Overlay a marker at the cap value for any (n, p) that was censored.
+    # We plot this in a second pass so the y-range is already established.
+    y_lo, y_hi = ax.get_ylim()
+    cap_y = max(max_plotted, 0.0) if max_plotted else 1.0
+    for i, n_val in enumerate(sizes):
+        col = cmap(i / max(1, len(sizes) - 1))
+        sub = tau_table.filter(pl.col("n") == n_val).sort("p")
+        capped = sub["capped"].to_numpy().astype(bool)
+        if capped.any():
+            ax.scatter(
+                sub["p"].to_numpy()[capped],
+                np.full(int(capped.sum()), cap_y),
+                marker="v", s=30,
+                facecolors="none", edgecolors=col, zorder=5,
+            )
+
+    ax.set_xlabel(r"$p$  (measurement rate)")
+    ax.set_ylabel(r"$\tau / n$  (purification time, scaled)")
+    ax.set_title(title if title is not None
+                 else r"Scaling of purification time: $\tau / n$ vs $p$")
+    ax.axhline(0.0, color="0.6", linestyle=":", linewidth=0.7)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    if out_path is not None:
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax
+
+
 # Auto-detecting top-level entry point
 
 def analyze_single_ref(
