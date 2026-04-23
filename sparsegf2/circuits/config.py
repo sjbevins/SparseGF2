@@ -19,9 +19,9 @@ import numpy as np
 
 # Enumerations (validated in __post_init__ of the dataclasses)
 
-GATING_MODES = ("matching",)                          # MVP: only "matching"
+GATING_MODES = ("matching", "random_edge")
 MATCHING_MODE_NAMES = ("round_robin", "palette", "fresh")
-MEASUREMENT_MODE_NAMES = ("uniform",)                 # MVP: only "uniform"
+MEASUREMENT_MODE_NAMES = ("uniform", "gated", "random_pair")
 DEPTH_MODES = ("O(n)", "O(log_n)", "until_purified")
 PICTURE_NAMES = ("purification", "single_ref")
 GRAPH_SPECS_MVP = ("cycle", "complete")

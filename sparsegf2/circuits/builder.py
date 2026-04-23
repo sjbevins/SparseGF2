@@ -7,12 +7,24 @@ Both the SparseGF2 runner and the Stim parity tests consume the same
 :class:`CircuitLayer` objects so that their executions are bit-for-bit
 equivalent modulo simulator internals.
 
+Gating modes:
+
+- ``matching``    — apply a perfect matching every layer (n/2 gates).
+- ``random_edge`` — apply exactly one gate per layer on a uniformly-random
+  edge of the underlying graph.
+
 RNG usage order per layer (this order MUST NOT change without bumping the
 schema version, because it is load-bearing for reproducibility):
 
-    1. matching selection (``palette`` / ``fresh`` only; ``round_robin`` draws nothing)
-    2. Clifford indices for each gate pair
-    3. per-qubit measurement Bernoullis (``uniform``: one draw per qubit)
+    1. gate-placement selection:
+         - matching mode: matching selection (``palette`` / ``fresh`` only;
+           ``round_robin`` draws nothing).
+         - random_edge mode: one edge index sampled uniformly from the
+           graph edge list.
+    2. Clifford indices for each gate pair.
+    3. measurement qubit Bernoullis (mode-specific: ``uniform`` draws n,
+       ``gated`` draws len(candidates), ``random_pair`` draws a pair +
+       2 Bernoullis).
 """
 from __future__ import annotations
 
@@ -75,10 +87,26 @@ class CircuitBuilder:
         """Yield ``CircuitLayer`` objects, one per layer, in simulation order."""
         T = self.config.total_layers()
         cfg = self.config
+        edges = (
+            self.graph.edges if cfg.gating_mode == "random_edge" else None
+        )
+        n_edges = len(edges) if edges is not None else 0
 
         for t in range(T):
-            # 1. matching selection
-            pairs = select_matching(self.graph, cfg.matching_mode, t, self.rng)
+            # 1. gate placement
+            if cfg.gating_mode == "matching":
+                pairs = select_matching(self.graph, cfg.matching_mode, t, self.rng)
+            elif cfg.gating_mode == "random_edge":
+                if n_edges == 0:
+                    pairs = []
+                else:
+                    j = int(self.rng.integers(0, n_edges))
+                    u, v = edges[j]
+                    pairs = [(int(u), int(v))]
+            else:
+                raise RuntimeError(
+                    f"Unhandled gating_mode {cfg.gating_mode!r}"
+                )
 
             # 2. Clifford indices
             n_pairs = len(pairs)

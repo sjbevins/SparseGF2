@@ -141,6 +141,7 @@ def validate_config(cfg: RunConfig) -> ValidationReport:
     """
     graph_spec = cfg.circuit.graph_spec
     mode = cfg.circuit.matching_mode
+    gating = cfg.circuit.gating_mode
     report = ValidationReport(
         graph_spec=graph_spec, matching_mode=mode, sizes=list(cfg.sizes)
     )
@@ -149,7 +150,14 @@ def validate_config(cfg: RunConfig) -> ValidationReport:
         graph = parse_graph_spec(graph_spec, n, seed=cfg.circuit.base_seed)
         modes_here = available_modes(graph)
         report.available_modes_by_n[n] = modes_here
-        if mode in modes_here:
+        if gating == "random_edge":
+            # random_edge only needs at least one edge in the graph;
+            # matching compatibility is irrelevant.
+            if len(graph.edges) == 0:
+                report.incompatible.append((n, f"{graph.name}: no edges"))
+            else:
+                report.ok.append(n)
+        elif mode in modes_here:
             report.ok.append(n)
         else:
             reason = _reason_for_incompatibility(graph, mode)
