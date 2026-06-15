@@ -2,7 +2,7 @@
 
 A natural optimization intuition: SparseGF2 stores the stabilizer tableau
 sparsely and a two-qubit gate only touches generators supported on its two
-qubits, so a nearest-neighbour ``cycle`` (short supports) should simulate
+qubits, so a nearest-neighbor ``cycle`` (short supports) should simulate
 faster than an all-to-all ``complete`` graph (supports fan out). This
 script tests that intuition, and finds it **does not hold at O(n)
 depth**.

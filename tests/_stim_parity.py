@@ -54,7 +54,7 @@ def stim_symplectic(sim: stim.TableauSimulator, n: int) -> np.ndarray:
 
 
 def fresh_stim(n: int) -> stim.TableauSimulator:
-    """Return a Stim simulator initialised to |0^n⟩."""
+    """Return a Stim simulator initialized to |0^n⟩."""
     sim = stim.TableauSimulator()
     sim.set_num_qubits(n)
     return sim

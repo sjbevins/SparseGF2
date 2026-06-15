@@ -29,7 +29,7 @@ def test_from_spec_matches_direct_constructor():
     assert from_spec("newman_watts", 16, seed=3).edges == newman_watts(16, seed=3).edges
 
 
-def test_realisation_is_reproducible_and_seed_dependent():
+def test_realization_is_reproducible_and_seed_dependent():
     assert newman_watts(20, seed=7).edges == newman_watts(20, seed=7).edges
     assert newman_watts(20, seed=7).edges != newman_watts(20, seed=8).edges
 
@@ -76,7 +76,7 @@ def test_one_factorization_modes_unavailable(matching_mode):
 
 def test_brickwork_fresh_available_when_perfect_matching_exists():
     g = newman_watts(16, k=2, p=0.5, seed=0)
-    assert g.has_perfect_matching  # this realisation has a PM
+    assert g.has_perfect_matching  # this realization has a PM
     assert _runs(gating_mode="brickwork", matching_mode="fresh", picture="purification", p=0.1)
 
 
@@ -95,8 +95,8 @@ def test_all_pictures(picture):
 # --------------------------------------------------------- base_seed threading
 
 
-def test_base_seed_selects_graph_realisation():
-    # via the string spec, base_seed is the realisation seed: different base_seed
+def test_base_seed_selects_graph_realization():
+    # via the string spec, base_seed is the realization seed: different base_seed
     # -> different geometry; same base_seed -> identical geometry. (random_pool
     # gating, since the default brickwork+round_robin needs a 1-factorization the
     # stochastic graph lacks.)

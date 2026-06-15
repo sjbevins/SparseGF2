@@ -16,7 +16,7 @@ measurement mode):
 * :func:`draw_circuit` is the notebook entry point: it compiles to PNG and
   returns an inline image (falling back to the LaTeX string off-notebook).
 
-Wire colour follows the physics: **system qubits are black, reference qubits
+Wire color follows the physics: **system qubits are black, reference qubits
 (purification / single_ref) are red**, so the Bell-paired reference register is
 unmistakable. Deterministic construction gates (Bell pairs) and random Sp(4)
 Cliffords are boxes; measurements are meters.
@@ -160,7 +160,7 @@ def circuit_to_quantikz(
         ``standalone`` document (compilable on its own); otherwise return just
         the ``\begin{quantikz}...\end{quantikz}`` body for embedding.
     timesteps
-        When true (default) draw a labelled dashed ``\slice`` at each stage
+        When true (default) draw a labeled dashed ``\slice`` at each stage
         boundary, so the individual timesteps read off the diagram: ``setup``,
         ``warmup``, then ``t_1, t_2, …`` for the measured layers.
     row_sep, column_sep
@@ -218,7 +218,7 @@ def circuit_to_quantikz(
                 else:  # long-range: a box on each endpoint joined by a vertical wire
                     grid[top][c] = rf"\gate{{{lbl}}}\vqw{{{bot - top}}}"
                     grid[bot][c] = rf"\gate{{{lbl}}}"
-        else:  # unknown kind -> a labelled box (extensibility fallback)
+        else:  # unknown kind -> a labeled box (extensibility fallback)
             grid[op.qubits[0]][c] = rf"\gate{{{_tex_gate_label(op.label)}}}"
 
     # --- emit rows. Reference rows have auto-wire off (type n) and draw a red
@@ -305,7 +305,7 @@ def _compile_pdf(latex: str, workdir: Path) -> Path:
 
 
 def _pdf_to_png(pdf: Path, png: Path, dpi: int) -> None:
-    """Convert ``pdf`` to ``png`` with the first available rasteriser."""
+    """Convert ``pdf`` to ``png`` with the first available rasterizer."""
     ppm = _which("pdftoppm")
     if ppm:  # best quality; -singlefile drops the page-number suffix
         subprocess.run(
@@ -330,7 +330,7 @@ def _pdf_to_png(pdf: Path, png: Path, dpi: int) -> None:
         )
         return
     raise InvalidArgumentError(
-        "no PDF->PNG rasteriser found (need pdftoppm, sips, or ImageMagick); "
+        "no PDF->PNG rasterizer found (need pdftoppm, sips, or ImageMagick); "
         "save the diagram as .pdf instead, or install one"
     )
 
@@ -347,7 +347,7 @@ def save_circuit(
 
     ``fmt`` (or ``path``'s extension) selects the output: ``"tex"`` writes the
     LaTeX source; ``"pdf"`` compiles with ``pdflatex``; ``"png"`` compiles then
-    rasterises at ``dpi``. ``trace_kwargs`` are forwarded to
+    rasterizes at ``dpi``. ``trace_kwargs`` are forwarded to
     :func:`circuit_to_quantikz` (``sample_seed``, ``max_layers``, …).
     """
     path = Path(path)

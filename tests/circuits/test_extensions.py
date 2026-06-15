@@ -243,7 +243,7 @@ def test_random_edge_gates_are_valid_distinct_pairs():
 
 
 # ----------------------------------------------------------------------
-# nearest-neighbour models run end-to-end in BOTH gating modes
+# nearest-neighbor models run end-to-end in BOTH gating modes
 # ----------------------------------------------------------------------
 
 
@@ -255,7 +255,7 @@ def test_random_edge_gates_are_valid_distinct_pairs():
         ("random_edge", {"gates_per_layer": 4}),  # O(n) edges, n=8
     ],
 )
-def test_nearest_neighbour_cycle_runs_in_both_gating_modes(gating, kw):
+def test_nearest_neighbor_cycle_runs_in_both_gating_modes(gating, kw):
     cfg = CircuitConfig(graph_spec="cycle", n=8, gating_mode=gating, p=0.15, depth_factor=2, **kw)
     rec = simulate(cfg, sample_seed=0)
     assert rec.total_gates > 0

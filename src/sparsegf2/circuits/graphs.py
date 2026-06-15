@@ -18,7 +18,7 @@ A :class:`GraphTopology` carries:
 Topology vs. *simulatability* (the "construct circuits to be efficiently
 simulatable" goal): the intuition is that locality should be cheaper.
 SparseGF2 stores the tableau sparsely and a two-qubit gate only touches
-generators supported on its two qubits, so a nearest-neighbour **cycle**
+generators supported on its two qubits, so a nearest-neighbor **cycle**
 keeps supports short while a **complete** graph fans them out. But
 ``benchmarks/circuits/benchmark_topology_sparsity.py`` measured this and
 found the effect is **negligible at the depths we run** (``O(n)``): by
@@ -135,11 +135,11 @@ class GraphTopology:
         Deterministic (``False``) for both built-in graphs.
     one_factorization : list of list of (int, int) or None
         The canonical set of brickwork layers: a partition of the edges into
-        matchings (a proper edge colouring) that ``round_robin`` / ``palette``
+        matchings (a proper edge coloring) that ``round_robin`` / ``palette``
         cycle through. These are **perfect** matchings (a true 1-factorization)
         when the graph is regular and Class-1 (cycle, complete, regular graphs);
         for general geometries (path, lattice, arbitrary networkx graphs) they
-        are colour classes that may leave some qubits idle on a layer. ``None``
+        are color classes that may leave some qubits idle on a layer. ``None``
         only for the empty edge set.
     graph6 : str
         graph6-encoded representation for metadata storage.
@@ -190,7 +190,7 @@ class GraphTopology:
 
 
 # ----------------------------------------------------------------------
-# Cycle graph (nearest-neighbour)
+# Cycle graph (nearest-neighbor)
 # ----------------------------------------------------------------------
 
 
@@ -231,7 +231,7 @@ def _cycle_fresh_sampler(n: int):
 
 
 def cycle_graph(n: int) -> GraphTopology:
-    """Construct the cycle (nearest-neighbour ring) graph on ``n`` qubits."""
+    """Construct the cycle (nearest-neighbor ring) graph on ``n`` qubits."""
     if n < 3:
         raise InvalidArgumentError(f"cycle graph requires n >= 3; got n={n}")
     edges = _cycle_edges(n)
@@ -360,9 +360,9 @@ def path_graph(n: int) -> GraphTopology:
 def lattice_2d(rows: int, cols: int) -> GraphTopology:
     """Construct the open ``rows × cols`` grid; qubit ``(r, c) -> r*cols + c``.
 
-    Edges are horizontal and vertical nearest neighbours. The grid is bipartite,
+    Edges are horizontal and vertical nearest neighbors. The grid is bipartite,
     so its edges split into four matchings by direction and coordinate parity
-    (``H``/``V`` × even/odd), a proper edge colouring that brickwork cycles
+    (``H``/``V`` × even/odd), a proper edge coloring that brickwork cycles
     through. ``fresh`` returns a perfect matching when one exists (some axis
     has even length).
     """
@@ -413,10 +413,10 @@ def lattice_2d(rows: int, cols: int) -> GraphTopology:
 
 
 def _edge_coloring(edges: list[Edge]) -> list[Matching]:
-    """Proper edge colouring (color classes = matchings) via networkx.
+    """Proper edge coloring (color classes = matchings) via networkx.
 
-    Greedy node-colouring of the line graph: adjacent edges (sharing a vertex)
-    get different colours, so each colour class is a matching and the classes
+    Greedy node-coloring of the line graph: adjacent edges (sharing a vertex)
+    get different colors, so each color class is a matching and the classes
     partition the edges. Perfect matchings when the graph is regular & Class-1.
     """
     if not edges:
@@ -467,9 +467,9 @@ def _make_pm_sampler(n: int, edges: list[Edge]):
 def from_networkx(g, *, name: str | None = None) -> GraphTopology:
     """Build a :class:`GraphTopology` from any simple, undirected networkx graph.
 
-    Nodes are relabelled to ``0 .. n-1`` in iteration order. ``random_edge`` /
+    Nodes are relabeled to ``0 .. n-1`` in iteration order. ``random_edge`` /
     ``random_pool`` gating works on any graph (edges only); brickwork uses a
-    proper edge colouring (always available) for ``round_robin`` / ``palette``,
+    proper edge coloring (always available) for ``round_robin`` / ``palette``,
     and a best-effort perfect-matching sampler for ``fresh`` when the graph has
     a perfect matching.
 
@@ -525,7 +525,7 @@ def newman_watts(
     r"""Newman-Watts-Strogatz small-world graph (a **stochastic** geometry).
 
     Start from a ring lattice on ``n`` nodes where each node is joined to its
-    ``k`` nearest neighbours, then *add* a shortcut across each lattice edge
+    ``k`` nearest neighbors, then *add* a shortcut across each lattice edge
     independently with probability ``p`` (no rewiring, no edge removal). The
     result is connected and small-world but, unlike the ring, **not regular**,
     so it admits **no 1-factorization** (no partition of the edges into perfect
@@ -535,7 +535,7 @@ def newman_watts(
 
     * ``random_edge`` and ``random_pool`` gating work (they need only the edge
       set), together with every measurement mode and picture.
-    * ``brickwork`` with ``matching_mode="fresh"`` works **when the realisation
+    * ``brickwork`` with ``matching_mode="fresh"`` works **when the realization
       has a perfect matching** (a fresh random perfect matching is drawn each
       layer).
     * ``brickwork`` with ``matching_mode="round_robin"`` or ``"palette"`` is
@@ -547,15 +547,15 @@ def newman_watts(
     n : int
         Number of nodes (``>= 3``).
     k : int
-        Ring connectivity: each node is joined to its ``k`` nearest neighbours
+        Ring connectivity: each node is joined to its ``k`` nearest neighbors
         (``k`` even, ``2 <= k < n``). ``k = 2`` is the bare ring.
     p : float
         Shortcut probability per lattice edge, in ``[0, 1]``.
     seed : int
-        Realisation seed. A given ``(n, k, p, seed)`` is one fixed graph; vary
-        the seed to draw another realisation from the ensemble. Used as a
+        Realization seed. A given ``(n, k, p, seed)`` is one fixed graph; vary
+        the seed to draw another realization from the ensemble. Used as a
         string spec (``graph_spec="newman_watts"``), the config's ``base_seed``
-        is the realisation seed, so sweeping ``base_seed`` averages over graphs.
+        is the realization seed, so sweeping ``base_seed`` averages over graphs.
     name : str, optional
         Override the auto-generated name.
 
@@ -635,7 +635,7 @@ def from_spec(spec: str, n: int, seed: int = 0) -> GraphTopology:
     n : int
         Number of qubits.
     seed : int
-        Realisation seed for stochastic specs (``"newman_watts"``); ignored for
+        Realization seed for stochastic specs (``"newman_watts"``); ignored for
         the deterministic graphs.
 
     Returns

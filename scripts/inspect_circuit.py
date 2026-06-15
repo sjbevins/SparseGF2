@@ -8,7 +8,7 @@ schedule, marking what is random vs deterministic.
 
 Examples
 --------
-    # the single-reference picture, nearest-neighbour brickwork
+    # the single-reference picture, nearest-neighbor brickwork
     python scripts/inspect_circuit.py --n 8 --picture single_ref --layers 12
 
     # purification with O(n) random edges per step

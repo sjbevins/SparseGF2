@@ -40,7 +40,7 @@ def test_purification_layout_and_full_entanglement():
 
 
 def test_rng_is_forwarded_for_reproducibility():
-    # same seed -> identical measurement behaviour
+    # same seed -> identical measurement behavior
     sim_a, _ = setup_picture(Picture.PURE_STATE, 6, rng=np.random.default_rng(123))
     sim_b, _ = setup_picture(Picture.PURE_STATE, 6, rng=np.random.default_rng(123))
     # put both into a random-outcome situation: H then measure

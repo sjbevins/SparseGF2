@@ -21,7 +21,7 @@ API but that alternative-backend authors or low-level callers may want:
 These are intentionally not in the top-level :data:`sparsegf2.__all__`
 to keep the canonical user-facing surface minimal. Treat them as
 semi-public: stable across minor versions, but not the place we'd
-prioritise documentation polish.
+prioritize documentation polish.
 """
 
 from sparsegf2.core._protocol import SimulatorProtocol

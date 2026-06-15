@@ -321,7 +321,7 @@ default).
 
 ### Runtime
 
-Nearest-neighbour brickwork random Cliffords with $Z$-measurements at $p=0.25$,
+Nearest-neighbor brickwork random Cliffords with $Z$-measurements at $p=0.25$,
 run to depth $8n$. The same circuit is replayed in Stim for a like-for-like
 wall-clock comparison. SparseGF2's advantage grows with $n$ because the per-step
 saving compounds over the circuit.

@@ -169,7 +169,7 @@ fire):"""),
     ),
     md(r"""## 6. Graphs - connectivity is visible
 
-A `cycle` keeps gates nearest-neighbour (short connectors, plus the one wrap
+A `cycle` keeps gates nearest-neighbor (short connectors, plus the one wrap
 edge); a `complete` graph lets any pair interact (many long-range gates joined by
 vertical wires). Same seed, same everything else - only the graph differs:"""),
     code(

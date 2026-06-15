@@ -150,7 +150,7 @@ the stabilizer-subspace level, with no runtime Stim dependency.
 
 - ~30x faster than the pure-Python reference via `@njit(inline="always")` on the
   position-map primitives; faster than Stim above `n ≈ 64` on the brick-wall
-  benchmark (≈4x at `n = 256`, growing with `n`). `to_symplectic()` is vectorised
+  benchmark (≈4x at `n = 256`, growing with `n`). `to_symplectic()` is vectorized
   and `canonical_form()` uses a JIT'd GF(2) RREF.
 - Two-qubit gate hot loop (the largest single cost, ~54% of a circuit): the
   per-generator LUT is indexed by the packed Pauli pair `(xz_i<<2)|xz_j` and

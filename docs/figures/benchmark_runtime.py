@@ -1,4 +1,4 @@
-"""Runtime: SparseGF2 vs Stim on a nearest-neighbour brickwork circuit at depth 8n.
+"""Runtime: SparseGF2 vs Stim on a nearest-neighbor brickwork circuit at depth 8n.
 
 Random two-qubit Cliffords in a 1D brick pattern, with Z-measurements at rate
 p=0.25 (the area-law / measurement-heavy regime), run to depth d = 8n across

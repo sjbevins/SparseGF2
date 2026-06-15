@@ -311,7 +311,7 @@ and run structural correctness checks on each:
         "    print('\\n✓ EVERY construction is structurally correct')\n"
         "assert not fails\n"
     ),
-    md("Here is the full pass matrix for the **cycle** graph (the nearest-neighbour model), for eyeballing:"),
+    md("Here is the full pass matrix for the **cycle** graph (the nearest-neighbor model), for eyeballing:"),
     code(
         "print(f\"{'picture':>13} {'gating':>22} {'matching':>11} {'measure':>11}  result\")\n"
         "print('-' * 72)\n"

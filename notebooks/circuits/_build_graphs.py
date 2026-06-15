@@ -173,7 +173,7 @@ there at the documented *extension point* (no stubs)."""),
     ),
     md(r"""## 7. Topology vs. *simulatability* - the benchmark surprise
 
-Intuition: a nearest-neighbour **cycle** keeps gate supports short, so the
+Intuition: a nearest-neighbor **cycle** keeps gate supports short, so the
 sparse tableau should stay cheap, while a **complete** graph fans supports
 out and densifies - slower. We *measured* this
 ([`benchmark_topology_sparsity.py`](../../benchmarks/circuits/benchmark_topology_sparsity.py))

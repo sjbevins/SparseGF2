@@ -287,7 +287,7 @@ class CircuitConfig:
         # InvalidArgumentError at construction, not a RuntimeError deep in
         # the scheduler. The resolved graph is cached on ``_graph`` and reused
         # by CircuitBuilder. For a stochastic string spec (``newman_watts``) the
-        # ``base_seed`` is the graph realisation seed, so the geometry is fixed
+        # ``base_seed`` is the graph realization seed, so the geometry is fixed
         # across a config's trajectories and varies when ``base_seed`` is swept;
         # deterministic specs ignore the seed.
         self._graph: GraphTopology = (
@@ -440,7 +440,7 @@ class CircuitConfig:
            (so the returned ratio is a lower bound on the realized one) when
            gates share or repeat vertices (``random_edge`` with dense ``m``,
            ``random_pool`` which draws edges *with replacement*) or when a
-           brickwork colour class is not a perfect matching (path / lattice /
+           brickwork color class is not a perfect matching (path / lattice /
            irregular networkx graphs). The realized ``gate_to_meas_ratio_actual``
            on each :class:`SampleRecord` is always exact.
         """

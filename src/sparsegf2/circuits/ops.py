@@ -5,7 +5,7 @@ one gate, one measurement, etc. It is deliberately a single flexible
 dataclass (a ``kind`` tag plus a ``detail`` dict) so that new operation kinds
 and new constructions extend it *without a schema change*: a renderer
 switches on ``kind`` and falls back gracefully for anything it doesn't
-recognise, and a construction can stash arbitrary metadata in ``detail``.
+recognize, and a construction can stash arbitrary metadata in ``detail``.
 
 This is the seam that makes the inspector extensible. The
 :func:`apply_named_gate` helper is the inverse direction: it *executes* a

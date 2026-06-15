@@ -87,7 +87,7 @@ def test_callable_gates_per_layer_wrong_arity_raises_at_construction():
 
 
 def test_brickwork_gate_count_irregular_graph():
-    # On an irregular graph the brickwork colour classes are not all n/2 edges;
+    # On an irregular graph the brickwork color classes are not all n/2 edges;
     # total_gates must equal the sum of the cycled class sizes (not T * n/2).
     L = lattice_2d(4, 4)
     cfg = CircuitConfig(

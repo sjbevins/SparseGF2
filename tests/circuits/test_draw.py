@@ -112,11 +112,11 @@ def test_all_modes_emit_quantikz(gating, measurement):
     assert r"\begin{quantikz}" in circuit_to_quantikz(cfg, max_layers=4)
 
 
-def test_timesteps_add_labelled_slices():
+def test_timesteps_add_labeled_slices():
     cfg = CircuitConfig(graph_spec="cycle", n=4, picture="purification", p=0.3, depth_factor=2)
     tex = circuit_to_quantikz(cfg, max_layers=3)
     assert r"\slice{setup}" in tex  # the setup boundary is marked
-    assert r"\slice{$t_{1}$}" in tex  # measured layers become labelled timesteps
+    assert r"\slice{$t_{1}$}" in tex  # measured layers become labeled timesteps
     # and the feature switches off
     assert r"\slice" not in circuit_to_quantikz(cfg, max_layers=3, timesteps=False)
 

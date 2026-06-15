@@ -16,7 +16,7 @@ Optimizations measured
    incremental kernel-basis sampler (``random_symplectic(sampler=...)``).
 
 For each we sweep system size and (where it matters) the circuit architecture:
-nearest-neighbour ``cycle`` brickwork, all-to-all ``complete`` brickwork, and the
+nearest-neighbor ``cycle`` brickwork, all-to-all ``complete`` brickwork, and the
 ``random_pool`` gating mode. The JIT is warmed up before timing so compile time
 never pollutes a measurement.
 

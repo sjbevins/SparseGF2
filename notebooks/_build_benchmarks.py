@@ -113,7 +113,7 @@ and how does the advantage grow?"""),
     code(
         "fig, ax = plt.subplots(figsize=(7, 4.5))\n"
         "ax.semilogx(ns, speedup_n, 'o-', color='#55A868', lw=2, ms=8)\n"
-        "ax.axhline(1.0, color='grey', ls='--', lw=1, label='break-even (Stim = SparseGF2)')\n"
+        "ax.axhline(1.0, color='gray', ls='--', lw=1, label='break-even (Stim = SparseGF2)')\n"
         "for x, y in zip(ns, speedup_n):\n"
         "    ax.annotate(f'{y:.1f}x', (x, y), textcoords='offset points', xytext=(0, 8), ha='center', fontsize=9)\n"
         "ax.set_xlabel('system size  n'); ax.set_ylabel('speedup  (Stim time / SparseGF2 time)')\n"
@@ -149,7 +149,7 @@ sparsity."""),
     code(
         "fig, ax = plt.subplots(figsize=(7, 4.5))\n"
         "ax.plot(ps, speedup_p, 'o-', color='#55A868', lw=2, ms=8)\n"
-        "ax.axhline(1.0, color='grey', ls='--', lw=1)\n"
+        "ax.axhline(1.0, color='gray', ls='--', lw=1)\n"
         "ax.fill_between(ps, 1.0, speedup_p, where=(speedup_p >= 1.0), color='#55A868', alpha=0.12)\n"
         "ax.fill_between(ps, speedup_p, 1.0, where=(speedup_p < 1.0), color='#4C72B0', alpha=0.12)\n"
         "for x, y in zip(ps, speedup_p):\n"
@@ -166,7 +166,7 @@ sparsity."""),
 Why does more measurement mean more speed? Because the cost of a sparse
 measurement scales with the **stabilizer weight** (non-identity Paulis per
 generator), and measurements keep that weight small. We measure it directly on
-a nearest-neighbour brickwork circuit as $p$ varies (reusing the circuits-side
+a nearest-neighbor brickwork circuit as $p$ varies (reusing the circuits-side
 benchmark), and overlay it on the speedup curve: as the average weight falls,
 the speedup rises."""),
     code(
@@ -193,7 +193,7 @@ the speedup rises."""),
     ),
     md(r"""## 5. Graph topology has ~no effect on cost (at $O(n)$ depth)
 
-A natural guess is that nearest-neighbour (`cycle`) circuits simulate faster
+A natural guess is that nearest-neighbor (`cycle`) circuits simulate faster
 than all-to-all (`complete`) ones, because local gates keep stabilizer
 supports short. We measured it - and at the $O(n)$ depths we run, the tableau
 *saturates* either way, so topology barely changes the runtime (it changes the
@@ -209,7 +209,7 @@ physics, not the cost)."""),
         "\n"
         "x = np.arange(len(sizes)); w = 0.36\n"
         "fig, ax = plt.subplots(figsize=(7, 4.2))\n"
-        "ax.bar(x - w/2, t_cycle, w, label='cycle (nearest-neighbour)', color='#DD8452')\n"
+        "ax.bar(x - w/2, t_cycle, w, label='cycle (nearest-neighbor)', color='#DD8452')\n"
         "ax.bar(x + w/2, t_complete, w, label='complete (all-to-all)', color='#4C72B0')\n"
         "ax.set_xticks(x); ax.set_xticklabels([f'n={n}' for n in sizes])\n"
         "ax.set_ylabel('time per circuit (s)'); ax.set_title('Topology barely affects simulation cost (p=0.1, depth=4n)')\n"

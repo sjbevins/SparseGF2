@@ -139,7 +139,7 @@ implementations. The stabilizer blocks (rows $n..2n{-}1$) must have the same
 differ - different pivots - but the physics is in the stabilizer subspace.)"""),
     code(
         "def prepare(n, p, depth, seed):\n"
-        "    '''Nearest-neighbour brickwork + Z-measurements at rate p.'''\n"
+        "    '''Nearest-neighbor brickwork + Z-measurements at rate p.'''\n"
         "    gate_rng = np.random.default_rng(seed)\n"
         "    sim = SparseGF2(n, rng=np.random.default_rng(seed + 1))\n"
         "    for t in range(depth):\n"
@@ -210,7 +210,7 @@ bounded under measurement. (SparseGF2 also avoids the $O(n)$ column scan via
     ),
     md(r"""## 7. Wall-clock - full monitored-circuit runtime vs $n$
 
-End to end: time a complete $4n$-deep nearest-neighbour monitored circuit at
+End to end: time a complete $4n$-deep nearest-neighbor monitored circuit at
 $p=0.2$. A dense CHP simulator costs $O(n)$ measurements $\times\,O(n^2)$ each
 $= O(n^3)$ over the circuit (plus gates). SparseGF2 stays far below that
 because both gates and measurements touch only sparse supports. (First call

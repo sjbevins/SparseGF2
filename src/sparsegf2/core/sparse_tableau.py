@@ -1717,7 +1717,7 @@ class SparseGF2:
         n_anti = int(self.inv_x_len[q])
         if n_anti == 0:
             return True
-        # Vectorised: ask numpy whether any of the first n_anti entries
+        # Vectorized: ask numpy whether any of the first n_anti entries
         # of inv_x[q] is a stabilizer row (index >= n). ~5-10× faster
         # than the Python generator + all().
         return not bool(np.any(self.inv_x[q, :n_anti] >= n))
@@ -2210,7 +2210,7 @@ class SparseGF2:
         For the initial |0^n⟩ state, this matrix is exactly the
         ``2n × 2n`` identity.
         """
-        # Vectorised: split the (x << 1 | z) byte into its two bit planes.
+        # Vectorized: split the (x << 1 | z) byte into its two bit planes.
         # ~100× faster than a Python double loop at n=512.
         n = self.n
         if self._dense_mode:
