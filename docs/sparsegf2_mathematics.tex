@@ -1,0 +1,898 @@
+\documentclass[11pt]{article}
+
+% =====================================================================
+%  SparseGF2: Mathematical Specification
+%  A complete account of the mathematics underlying the implemented
+%  simulator and its circuit and analysis layers.
+% =====================================================================
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{remark}[definition]{Remark}
+\newtheorem{example}[definition]{Example}
+\theoremstyle{plain}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{lemma}[definition]{Lemma}
+\newtheorem{corollary}[definition]{Corollary}
+
+% Notation
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\Sp}{\mathrm{Sp}}
+\newcommand{\Cl}{\mathcal{C}}
+\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\spn}{\operatorname{span}}
+\newcommand{\wt}{\operatorname{wt}}
+\newcommand{\sympprod}[2]{\langle #1,\, #2\rangle_{\Omega}}
+\newcommand{\half}{\tfrac12}
+\newcommand{\xz}{(x\,|\,z)}
+\newcommand{\code}{\textsf{\small SparseGF2}}
+\newcommand{\ket}[1]{\lvert #1\rangle}
+\newcommand{\bra}[1]{\langle #1\rvert}
+
+\title{\textbf{SparseGF2}\\[2pt]\large A Mathematical Specification}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document specifies, in complete mathematical detail, the algorithms
+implemented in the \code{} stabilizer simulator and its circuits layer. \code{}
+is a \emph{phase-free} sparse stabilizer simulator over $\F_2$: it tracks only
+the symplectic part of an Aaronson--Gottesman tableau, stored sparsely, and
+generates and samples the symplectic group $\Sp(2n,\F_2)$ natively. Part~I
+covers the simulator core (representation, gates, measurement, $\F_2$ linear
+algebra, the symplectic group, observables). Part~II covers the circuits layer
+(graph-defined monitored Clifford circuits). Part~III collects shorter notes on further topics: the Bravyi--Maslov
+sampler, batched simulation, and finite-size-scaling analysis.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\part{The Simulator Core}
+% =====================================================================
+
+\section{Stabilizer formalism}
+\label{sec:stab}
+
+\subsection{The Pauli group}
+For a single qubit, the Pauli matrices are $I,X,Y,Z$ with $Y=iXZ$. The
+$n$-qubit Pauli group $\mathcal{P}_n$ consists of tensor products of these with
+an overall phase in $\{\pm 1,\pm i\}$. Every $P\in\mathcal{P}_n$ can be written
+\begin{equation}
+\label{eq:pauli-xz}
+  P \;=\; i^{\delta}\bigotimes_{q=0}^{n-1} X_q^{x_q}\,Z_q^{z_q},
+  \qquad x_q,z_q\in\{0,1\},\ \delta\in\Z_4 ,
+\end{equation}
+so $I\leftrightarrow(0,0)$, $X\leftrightarrow(1,0)$, $Z\leftrightarrow(0,1)$,
+$Y\leftrightarrow(1,1)$. Two Paulis commute or anticommute; they anticommute
+iff the number of qubits on which their single-qubit factors anticommute is odd.
+
+\subsection{Stabilizer states}
+\begin{definition}
+A \emph{stabilizer group} on $n$ qubits is an abelian subgroup
+$\mathcal{S}\le\mathcal{P}_n$ with $-I\notin\mathcal{S}$ and $|\mathcal{S}|=2^n$.
+Its unique simultaneous $+1$ eigenstate $\ket{\psi}$ (a one-dimensional
+subspace) is the associated \emph{stabilizer state}.
+\end{definition}
+A stabilizer group is fixed by $n$ independent generators. A \emph{Clifford}
+unitary $C$ is one for which $C\mathcal{P}_nC^\dagger=\mathcal{P}_n$; Cliffords
+map stabilizer states to stabilizer states, acting on generators by conjugation.
+
+\subsection{The Aaronson--Gottesman tableau}
+\label{sec:ag}
+The Aaronson--Gottesman (A\&G) representation~\cite{AG} tracks $2n$ generators:
+$n$ \emph{stabilizers} $S_0,\dots,S_{n-1}$ generating $\mathcal{S}$, and $n$
+\emph{destabilizers} $D_0,\dots,D_{n-1}$ chosen so that the full set
+$\{D_i,S_i\}$ generates $\mathcal{P}_n$ (modulo phase) and satisfies the
+canonical (anti)commutation relations
+\begin{equation}
+\label{eq:canonical}
+  [D_i,D_j]=[S_i,S_j]=0,\qquad
+  D_i S_j = (-1)^{\delta_{ij}}\, S_j D_i .
+\end{equation}
+That is, $D_i$ anticommutes with $S_i$ and commutes with every other generator.
+The destabilizers carry no physical information about $\ket\psi$; they are
+bookkeeping that makes Clifford updates and measurements $O(n)$ per generator.
+
+\code{} orders the $2n$ generators as rows $0,\dots,n-1$ (destabilizers) and
+$n,\dots,2n-1$ (stabilizers). The initial state $\ket{0^n}$ has
+$S_i=Z_i,\ D_i=X_i$.
+
+% ---------------------------------------------------------------------
+\section{The symplectic representation over \texorpdfstring{$\F_2$}{F2}}
+\label{sec:symp}
+
+\subsection{The phase-free coordinate map}
+Dropping the phase $i^\delta$ in~\eqref{eq:pauli-xz} sends a Pauli to its
+\emph{symplectic coordinates}
+$\xz=(x_0,\dots,x_{n-1},z_0,\dots,z_{n-1})\in\F_2^{2n}$. \code{} works
+throughout in the ordered basis
+$(X_0,\dots,X_{n-1},Z_0,\dots,Z_{n-1})$, so a Pauli is a length-$2n$ bit row,
+the $X$-block first. Stacking the $2n$ generators gives the
+\emph{symplectic tableau} $T\in\F_2^{2n\times 2n}$, written $[\,X\mid Z\,]$;
+rows $0..n{-}1$ are destabilizers, rows $n..2n{-}1$ stabilizers.
+
+\begin{example}
+$\ket{0^n}$ has destabilizers $X_i$ and stabilizers $Z_i$, so its tableau is the
+$2n\times 2n$ identity: the top-left $n\times n$ block (X-bits of the $X_i$) and
+the bottom-right block (Z-bits of the $Z_i$) are $I_n$, the rest $0$.
+\end{example}
+
+\subsection{The symplectic form and commutation}
+\begin{definition}
+The \emph{symplectic form} on $\F_2^{2n}$ in the $X$--$Z$ block basis is
+\begin{equation}
+  \Omega \;=\; \begin{pmatrix} 0_n & I_n\\ I_n & 0_n \end{pmatrix}
+  \in \F_2^{2n\times 2n},
+\end{equation}
+and the \emph{symplectic inner product} of $u=(u_x|u_z)$, $v=(v_x|v_z)$ is
+\begin{equation}
+\label{eq:sympprod}
+  \sympprod{u}{v} \;=\; u\,\Omega\,v^{\!\top}
+  \;=\; u_x\!\cdot\! v_z + u_z\!\cdot\! v_x \pmod 2 .
+\end{equation}
+(Over $\F_2$, $-1=+1$, so the usual $\begin{psmallmatrix}0&I\\-I&0\end{psmallmatrix}$
+coincides with $\Omega$.)
+\end{definition}
+\begin{proposition}
+Two Paulis with coordinates $u,v$ commute iff $\sympprod{u}{v}=0$ and
+anticommute iff $\sympprod{u}{v}=1$.
+\end{proposition}
+\begin{proof}
+On qubit $q$ the factors $X^{u_{x,q}}Z^{u_{z,q}}$ and $X^{v_{x,q}}Z^{v_{z,q}}$
+anticommute iff $u_{x,q}v_{z,q}+u_{z,q}v_{x,q}=1$ (using $XZ=-ZX$). The global
+sign is the product over $q$, i.e.\ $(-1)$ to the sum
+$\sum_q(u_{x,q}v_{z,q}+u_{z,q}v_{x,q})=\sympprod{u}{v}$.
+\end{proof}
+The canonical relations~\eqref{eq:canonical} state that the tableau rows form a
+\emph{symplectic basis}: with $e_i$ the destabilizer rows and $f_i$ the
+stabilizer rows, $\sympprod{e_i}{f_j}=\delta_{ij}$ and
+$\sympprod{e_i}{e_j}=\sympprod{f_i}{f_j}=0$.
+
+\subsection{Cliffords as symplectic matrices}
+A phase-free Clifford acts on Pauli coordinates by a linear map. We use the
+\emph{row-vector convention}: a Pauli row $\xz$ evolves under a gate with
+matrix $S$ as
+\begin{equation}
+\label{eq:rowaction}
+  (x'\,|\,z') \;=\; (x\,|\,z)\,S \pmod 2 .
+\end{equation}
+The rows of $S$ are the images of the basis Paulis, in the order
+$(X_0,\dots,Z_{n-1})$.
+\begin{definition}
+$S\in\F_2^{2n\times 2n}$ is \emph{symplectic} if it preserves $\Omega$:
+\begin{equation}
+\label{eq:sympcond}
+  S\,\Omega\,S^{\!\top} \;\equiv\; \Omega \pmod 2 .
+\end{equation}
+The set of such $S$ is the group $\Sp(2n,\F_2)$.
+\end{definition}
+\begin{proposition}
+A linear map~\eqref{eq:rowaction} sends Paulis to Paulis preserving all
+commutation relations iff $S\in\Sp(2n,\F_2)$. Hence phase-free Cliffords are
+exactly $\Sp(2n,\F_2)$.
+\end{proposition}
+\begin{proof}
+$\sympprod{uS}{vS}=uS\,\Omega\,S^{\!\top}v^{\!\top}$ equals
+$\sympprod{u}{v}=u\,\Omega\,v^{\!\top}$ for all $u,v$ iff
+$S\Omega S^{\!\top}=\Omega$.
+\end{proof}
+\code{} validates~\eqref{eq:sympcond} on every user-supplied gate matrix.
+
+\subsection{The phase-free contract}
+\label{sec:phasefree}
+\code{} stores $[\,X\mid Z\,]$ only; it discards the phase bits. Two consequences:
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{What is exact.} Every quantity that depends only on the
+  $\F_2$ \emph{row span} of the stabilizer tableau is computed exactly:
+  $\F_2$-rank, entanglement entropy, mutual information, code dimension, and
+  the stabilizer weight spectrum (Section~\ref{sec:obs}). Gates differing only
+  by phase (e.g.\ $S$ vs $S^\dagger$, a Pauli vs $I$) collapse to the same
+  symplectic action.
+\item \textbf{What is lost.} Signed Pauli expectations
+  $\bra{\psi}P\ket{\psi}\in\{\pm1\}$ are unavailable, because the distinguishing
+  sign lives in the discarded phase. A deterministic $Z_q$ measurement of a
+  $-Z_q$-stabilized state physically yields $1$, but \code{} returns $0$
+  (Section~\ref{sec:measure}).
+\end{enumerate}
+\begin{definition}[Parity contract]
+The correctness guarantee is \emph{stabilizer-subspace RREF parity}: at every
+step of every circuit, the reduced row-echelon form over $\F_2$ of the
+stabilizer block (rows $n..2n{-}1$) of $[\,X\mid Z\,]$ equals Stim's. The test
+suite enforces this step by step.
+\end{definition}
+
+% ---------------------------------------------------------------------
+\section{The sparse representation}
+\label{sec:sparse}
+
+The tableau is stored in four redundant structures, all kept consistent so the
+hot paths (gates, measurement) touch only the generators they must.
+
+\begin{definition}[Data structures]\leavevmode
+\begin{description}[leftmargin=1.5em,style=nextline]
+\item[PLT (Pauli lookup table)] A dense $2n\times n$ array $\mathrm{plt}[r,q]$
+  holding the $2$-bit code $xz=(x\!\ll\!1)\,|\,z$ for generator $r$ on qubit
+  $q$: $I{=}0,Z{=}1,X{=}2,Y{=}3$. Gives $O(1)$ random reads of any Pauli letter.
+\item[Support lists] For each generator $r$, the list $\mathrm{supp\_q}[r,\cdot]$
+  of qubits on which $r$ is non-identity, with length $\mathrm{supp\_len}[r]$ and
+  an inverse position map $\mathrm{supp\_pos}$ enabling $O(1)$ removal
+  (swap-with-last). Lets one iterate a generator in $O(\wt(r))$.
+\item[Inverted index $\mathrm{inv}$] For each qubit $q$, the list of generators
+  with support on $q$, with length and position maps. Gate kernels iterate this
+  so a gate on qubits $\{q_i,q_j\}$ touches only the affected rows.
+\item[Inverted index $\mathrm{inv\_x}$] For each qubit $q$, the list of
+  generators whose \emph{$X$-bit} on $q$ is set. These are exactly the
+  generators anticommuting with $Z_q$; the measurement kernel uses this to find
+  anticommuters in $O(1)$ per element.
+\end{description}
+\end{definition}
+The \emph{weight} of a generator is $\wt(r)=\mathrm{supp\_len}[r]$, the number of
+non-identity Paulis. Sparsity of the tableau ($\wt$ small) is what makes both
+gates and measurements cheap; see Sections~\ref{sec:measure} and~\ref{sec:obs}.
+
+\subsection{The hybrid dense representation}
+\label{sec:hybrid}
+
+The sparse representation wins precisely when the tableau is sparse. In the
+volume-law regime the generators delocalize ($\wt(r)=O(n)$), and then the
+inverted-index bookkeeping (Definition above) costs more than it saves: each gate
+touches $O(n)$ rows and pays the index-maintenance overhead on every one. There a
+plain bit-packed tableau is faster, because a gate is a fixed handful of word
+operations per row with no bookkeeping.
+
+The \emph{hybrid} mode (\texttt{SparseGF2(n, hybrid=True)}) carries a second,
+bit-packed mirror of the tableau, two $2n\times\lceil n/64\rceil$ arrays of
+\texttt{uint64}, $\mathrm{x\_packed}$ and $\mathrm{z\_packed}$, with qubit $q$ at
+word $q\gg 6$, bit $q\,\&\,63$, and switches between the two representations
+based on a density estimate. Let
+\[
+  \bar a \;=\; \frac1n\sum_{r=0}^{2n-1}\wt(r)
+\]
+be the average column weight (the mean number of generators touching a qubit).
+The simulator runs the sparse kernels while $\bar a$ is small and switches to the
+dense bit-packed kernels (a phase-free Aaronson--Gottesman update applied to the
+packed rows, reusing the same symplectic lookup tables of
+Section~\ref{sec:gate}) once $\bar a$ exceeds a threshold $\tau=\max(n/4,16)$,
+switching back below $\tau/2$. The $2\times$ hysteresis band, together with
+evaluating the test only every $\max(n/2,32)$ operations, prevents thrashing near
+the crossover. The two representations describe the \emph{same stabilizer group}
+at all times, the dense measurement chooses a different (equally valid)
+generating set than the sparse minimum-weight pivot
+(Section~\ref{sec:minweight}), but every gauge-invariant observable
+(Section~\ref{sec:obs}) is identical. The dense path recovers Stim-like
+performance in the volume-law regime while keeping the sparse advantage in the
+area-law regime, from one object.
+
+% ---------------------------------------------------------------------
+\section{Gate application}
+\label{sec:gate}
+\label{sec:gates}
+
+\subsection{Symplectic action via a lookup table}
+By~\eqref{eq:rowaction}, a $k$-qubit gate $S$ ($k\in\{1,2\}$) acts on a
+generator only through that generator's $2k$ coordinate bits on the gated
+qubits; all other coordinates are unchanged. \code{} precomputes, once per
+distinct $S$, a \emph{lookup table} (LUT) mapping each of the $4^k$ possible
+local Pauli codes to its image:
+\begin{equation}
+  \mathrm{LUT}_S\colon \{0,1,2,3\}^{k}\;\longrightarrow\;\{0,1,2,3\}^{k},
+  \qquad
+  \text{(local }xz\text{ in)} \mapsto \text{(local }xz\text{ out)} ,
+\end{equation}
+i.e.\ $4$ entries for a single-qubit gate, $16$ for a two-qubit gate. Applying
+$S$ to the whole state then iterates the generators with support on the gated
+qubits (via $\mathrm{inv}$), reads their local code from the PLT, and rewrites
+it through the LUT, patching the support lists and inverted indices in $O(1)$
+per affected bit. Cost is $O(\,|{\bigcup_q \mathrm{inv}[q]}|\,)$, independent
+of $n$ when the gate is local and the tableau sparse.
+
+\subsection{Named gates}
+The standard generators are the symplectic matrices (row-vector convention)
+\[
+  H:\ \begin{psmallmatrix}0&1\\1&0\end{psmallmatrix},\quad
+  S:\ \begin{psmallmatrix}1&1\\0&1\end{psmallmatrix},\quad
+  \sqrt{X}:\ \begin{psmallmatrix}1&0\\1&1\end{psmallmatrix}
+\]
+on a single qubit (acting on $(x|z)$), and $\mathrm{CX},\mathrm{CZ},
+\mathrm{SWAP}\in\Sp(4,\F_2)$ on two. Arbitrary $S\in\Sp(2k,\F_2)$ are accepted
+via \texttt{apply\_gate\_1q}/\texttt{apply\_gate\_2q}, with~\eqref{eq:sympcond}
+checked on the first use of each matrix.
+
+% ---------------------------------------------------------------------
+\section{Measurement}
+\label{sec:measure}
+
+\subsection{The projection}
+A $Z_q$ measurement projects onto an eigenspace of $Z_q$. In the stabilizer
+formalism there are two cases, determined by whether $Z_q$ is already
+``known.''
+\begin{proposition}[Determinism condition]
+\label{prop:det}
+A $Z_q$ measurement is \emph{deterministic} (outcome fixed by the state) iff
+$Z_q\in\langle S_0,\dots,S_{n-1}\rangle$, equivalently iff
+\emph{no stabilizer row anticommutes with $Z_q$}: no row $r\ge n$ has its
+$X$-bit on $q$ set. Otherwise the outcome is a fair coin and the state is
+projected.
+\end{proposition}
+\begin{proof}
+The outcome is deterministic iff $\pm Z_q\in\mathcal{S}$. As an $n$-dimensional
+isotropic subspace of $\F_2^{2n}$, $\mathcal{S}$ is maximal isotropic and so
+equals its own symplectic complement; hence $\pm Z_q\in\mathcal{S}$ iff $Z_q$
+commutes with all of $\mathcal{S}$, i.e.\ (commutation Proposition) iff no
+stabilizer generator has its $X$-bit on $q$. A destabilizer's $X$-bit on $q$
+reflects only the auxiliary pairing~\eqref{eq:canonical}, not membership in
+$\mathcal{S}$, so it is irrelevant.
+\end{proof}
+\code{} reads the anticommuters directly from $\mathrm{inv\_x}[q]$ and checks
+whether any has row index $\ge n$.
+
+\subsection{The Aaronson--Gottesman update}
+\label{sec:measupdate}
+In the non-deterministic case, let $\mathcal{A}=\{r:\ x_{r,q}=1\}$ be the
+generators anticommuting with $Z_q$ (from $\mathrm{inv\_x}[q]$), and pick a
+\emph{pivot} stabilizer $p\in\mathcal{A}$, $p\ge n$. The phase-free update is:
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{Decouple.} For every other $r\in\mathcal{A}$, replace
+  $T_r \leftarrow T_r \oplus T_p$ (bitwise XOR of rows). Afterwards $p$ is the
+  unique generator anticommuting with $Z_q$.
+\item \textbf{Re-pair.} Copy the old pivot row into the destabilizer slot
+  $p-n$: $T_{p-n}\leftarrow T_p$. This preserves the canonical
+  pairing~\eqref{eq:canonical} (the new stabilizer $Z_q$ will anticommute with
+  exactly the old $S_p$, now sitting at $p-n$).
+\item \textbf{Install.} Overwrite $T_p\leftarrow Z_q$.
+\end{enumerate}
+(The XOR in Step~1 is skipped for $r=p-n$, since Step~2 overwrites that slot.)
+In the deterministic case the symplectic tableau is left \emph{unchanged}: Stim
+would only flip a sign bit, which \code{} does not store, so this matches Stim's
+symplectic exactly.
+\begin{proposition}
+The update of Section~\ref{sec:measupdate} produces the unique symplectic
+tableau of the post-measurement state, independent of the pivot choice and of
+the (phase-free) outcome.
+\end{proposition}
+\begin{proof}
+Let $\mathcal{S}$ be the pre-measurement stabilizer group and
+$\mathcal{S}^0=\{g\in\mathcal{S}:[g,Z_q]=0\}$ its subgroup commuting with $Z_q$;
+in the non-deterministic case some stabilizer anticommutes with $Z_q$, so
+$\mathcal{S}^0$ has index $2$ and dimension $n-1$. The projection onto the
+$Z_q$-eigenspace is the pure state stabilized by
+$\langle Z_q,\mathcal{S}^0\rangle$.
+
+In coordinates, $\mathcal{A}=\{r:x_{r,q}=1\}$ are the generators anticommuting
+with $Z_q$ and $p\in\mathcal{A}$ is the stabilizer pivot. \emph{Step~1:} for
+each stabilizer $r\in\mathcal{A}\setminus\{p\}$, the row $T_r\oplus T_p$ has
+$q$-th $X$-bit $1\oplus1=0$, hence commutes with $Z_q$; adding the fixed row
+$T_p$ to others is a change of generating set, so the stabilizer span is
+preserved. Afterwards $T_p$ is the \emph{unique} anticommuting stabilizer, and
+the remaining $n-1$ stabilizer rows are independent elements of the
+$(n-1)$-dimensional $\mathcal{S}^0$, hence a basis of it. \emph{Step~3:}
+replacing $T_p$ by $Z_q$ makes the stabilizer rows generate
+$\langle Z_q,\mathcal{S}^0\rangle$, exactly the projected state.
+
+\emph{Step~2} restores the canonical relations~\eqref{eq:canonical}. Before the
+update $D_{p-n}$ was the unique destabilizer anticommuting with $S_p=T_p$.
+Setting $D_{p-n}\leftarrow T_p$ (the old $S_p$) gives a destabilizer that
+anticommutes with the new stabilizer $Z_q$ at slot $p$ (the old $S_p\in\mathcal A$
+had $x$-bit on $q$) and commutes with every other stabilizer (those were made to
+commute with $Z_q$ in Step~1 and already commuted with $S_p$). Every other
+destabilizer is untouched and keeps its relations; hence \eqref{eq:canonical}
+holds. (The XOR of $T_p$ into slot $p-n$ is skipped in Step~1 precisely because
+Step~2 overwrites it.)
+
+Finally, different pivots yield different generating sets of the same group
+$\langle Z_q,\mathcal{S}^0\rangle$, i.e.\ different representatives of one row
+span; the RREF (\texttt{canonical\_form}), and thus the recorded symplectic
+state, is identical, independent of the pivot and of the discarded outcome
+sign.
+\end{proof}
+
+\subsection{Minimum-weight pivot}
+\label{sec:minweight}
+When several stabilizers anticommute, \code{} selects the \emph{minimum-weight}
+pivot, $p=\arg\min_{r\in\mathcal{A},\,r\ge n}\wt(r)$ (rather than the first).
+The decoupling XOR in Step~1 adds the pivot's support to every other
+anticommuter, so a light pivot keeps the tableau sparse, lowering the cost of
+\emph{future} gates and measurements. The choice is invisible to all observables
+(it changes only the representative, not the row span).
+
+\subsection{Outcome, other bases, and resets}
+For a non-deterministic measurement \code{} returns a fair phase-free coin from
+the instance RNG; for a deterministic one it returns $0$ (see
+Section~\ref{sec:phasefree}). Measurements in the $X$ and $Y$ bases are
+conjugations of $Z$: $\texttt{measure\_x}=H\,\texttt{measure\_z}\,H$ and
+$\texttt{measure\_y}=SH\,\texttt{measure\_z}\,HS$ (phase-free, $S=S^\dagger$).
+Resets \texttt{reset\_z/x/y} apply the same projection and discard the bit; they
+project onto \emph{some} eigenstate of the basis operator (the eigenvalue is a
+sign-bit fact not tracked).
+
+% ---------------------------------------------------------------------
+\section{Linear algebra over \texorpdfstring{$\F_2$}{F2}}
+\label{sec:linalg}
+
+Two primitives, shared across the simulator, with bit-identical JIT and
+pure-Python paths.
+
+\subsection{Reduced row-echelon form}
+$\texttt{gf2\_rref}(A)$ reduces $A\in\F_2^{m\times k}$ to RREF by Gaussian
+elimination: scanning columns left to right, it finds a pivot in the current
+column at or below the pivot row, swaps it up, and XORs that row into every
+other row with a $1$ in the pivot column. Rank is the number of nonzero rows of
+the RREF, $\rank_{\F_2}(A)\in[0,\min(m,k)]$.
+
+\subsection{Kernel basis}
+$\texttt{gf2\_kernel\_basis}(M)$ returns a basis of the right kernel
+$\ker M=\{v\in\F_2^k: Mv^{\!\top}=0\}$. After reducing $M$ to RREF with pivot
+columns $\{p_r\}$, each \emph{free column} $f$ (non-pivot) yields one basis
+vector $v$ with $v[f]=1$ and $v[p_r]=A[r,f]$ for every pivot row $r$ (all other
+entries $0$). This gives $\dim\ker M=k-\rank M$ vectors. The empty matrix
+($m=0$) returns the $k\times k$ identity. This primitive drives the symplectic
+sampler (Section~\ref{sec:sampling}).
+
+\subsection{Canonical form}
+$\texttt{canonical\_form}()$ is the RREF of the stabilizer block (rows
+$n..2n{-}1$) of $[\,X\mid Z\,]$, the canonical representative of the stabilizer
+\emph{subspace}, used for state-equality testing and the parity contract of
+Section~\ref{sec:phasefree}.
+
+% ---------------------------------------------------------------------
+\section{The symplectic group \texorpdfstring{$\Sp(2n,\F_2)$}{Sp(2n,F2)}}
+\label{sec:spgroup}
+
+The simulator generates and samples $\Sp(2n,\F_2)$ natively, with no runtime
+dependence on Stim.
+
+\subsection{Symplectic complements}
+\begin{definition}
+For a subspace $U\le\F_2^{2n}$, the \emph{symplectic complement} is
+$U^{\perp}=\{w\in\F_2^{2n}:\sympprod{u}{w}=0\ \text{for all }u\in U\}$. A
+subspace $W$ is \emph{non-degenerate} if the restriction of $\Omega$ to $W$ has
+trivial radical: no nonzero $w\in W$ has $\sympprod{w}{w'}=0$ for all $w'\in W$.
+\end{definition}
+\begin{lemma}
+\label{lem:complement}
+The form $\Omega$ is non-degenerate on $\F_2^{2n}$ (indeed $\Omega^2=I$). If
+$U$ is a non-degenerate subspace then $U^{\perp}$ is non-degenerate,
+$\dim U+\dim U^{\perp}=2n$, and $\F_2^{2n}=U\oplus U^{\perp}$. Consequently the
+span of $k$ symplectic pairs $(X_j',Z_j')$ (with $\sympprod{X_j'}{Z_j'}=1$ and
+all cross-products $0$) is non-degenerate of dimension $2k$, and its complement
+has dimension $2(n-k)$.
+\end{lemma}
+\begin{proof}
+The map $\phi_U:\F_2^{2n}\to U^{*}$, $w\mapsto\bigl(u\mapsto\sympprod{u}{w}\bigr)$
+is linear with kernel $U^{\perp}$, so $\dim U^{\perp}=2n-\dim\operatorname{im}\phi_U$.
+When $U$ is non-degenerate, $\Omega|_U$ is an isomorphism $U\to U^{*}$, so
+$\phi_U$ is surjective and $\dim U^{\perp}=2n-\dim U$; moreover
+$U\cap U^{\perp}=\operatorname{rad}(U)=\{0\}$, whence $\F_2^{2n}=U\oplus U^{\perp}$,
+and applying the same to $U^{\perp}$ shows it is non-degenerate. A single pair
+spans a non-degenerate $2$-plane (its Gram matrix is
+$\begin{psmallmatrix}0&1\\1&0\end{psmallmatrix}$, invertible); an orthogonal
+direct sum of such planes is non-degenerate of dimension $2k$.
+\end{proof}
+
+\subsection{Order}
+\begin{theorem}
+\label{thm:order}
+\[
+  |\Sp(2n,\F_2)|
+  \;=\; \prod_{i=1}^{n}\bigl(2^{2(n-i+1)}-1\bigr)\,2^{\,2(n-i+1)-1}
+  \;=\; 2^{\,n^2}\prod_{i=1}^{n}\bigl(2^{2i}-1\bigr).
+\]
+In particular $|\Sp(2,\F_2)|=6$, $|\Sp(4,\F_2)|=720$,
+$|\Sp(6,\F_2)|=1{,}451{,}520$.
+\end{theorem}
+\begin{proof}
+The rows of any $S\in\Sp(2n,\F_2)$ form an ordered \emph{symplectic basis}
+$(X_1',Z_1',\dots,X_n',Z_n')$: condition~\eqref{eq:sympcond} is exactly the
+statement that $\sympprod{X_i'}{Z_j'}=\delta_{ij}$ and
+$\sympprod{X_i'}{X_j'}=\sympprod{Z_i'}{Z_j'}=0$, since
+$S\Omega S^{\!\top}=\Omega$ records all pairwise symplectic products of the rows.
+Conversely every ordered symplectic basis is the row set of a unique such $S$.
+So $|\Sp(2n,\F_2)|$ is the number of ordered symplectic bases, which we count by
+building one greedily.
+
+Suppose $(X_j',Z_j')$ are chosen for $j<i$ and let $U_{i-1}$ be their span. By
+Lemma~\ref{lem:complement}, $U_{i-1}$ is non-degenerate of dimension $2(i-1)$ and
+its complement $W_i=U_{i-1}^{\perp}$ is non-degenerate of dimension
+$2(n-i+1)$; the next pair must lie in $W_i$.
+\begin{itemize}[leftmargin=1.5em]
+\item $X_i'$: any \emph{nonzero} vector of $W_i$, giving $|W_i|-1=2^{2(n-i+1)}-1$
+  choices.
+\item $Z_i'$: any $w\in W_i$ with $\sympprod{X_i'}{w}=1$. The functional
+  $\ell:W_i\to\F_2$, $\ell(w)=\sympprod{X_i'}{w}$, is nonzero: $X_i'\ne0$ and
+  $W_i$ is non-degenerate, so some $w\in W_i$ has $\sympprod{X_i'}{w}=1$. A
+  nonzero $\F_2$-linear functional has a kernel of codimension $1$, so
+  $\ell^{-1}(1)$ is a coset of that kernel of size
+  $\half|W_i|=2^{2(n-i+1)-1}$.
+\end{itemize}
+(Any such $(X_i',Z_i')$ spans a non-degenerate $2$-plane in $W_i$, so the
+induction hypothesis is maintained.) Multiplying the per-step counts over
+$i=1,\dots,n$ gives the first form; substituting $j=n-i+1$ and pulling out
+$\prod_i 2^{2j-1}=2^{\sum_{j=1}^n(2j-1)}=2^{n^2}$ gives the second.
+\end{proof}
+
+\subsection{Enumeration}
+For $n\le 3$, $\texttt{enumerate\_symplectic\_group}(n)$ realizes the
+construction of Theorem~\ref{thm:order} recursively: at depth $i$ it forms
+$W_i$ by filtering $\F_2^{2n}$ to vectors $v$ with $\sympprod{c}{v}=0$ for every
+previously chosen $c$ (a linear sieve), then recurses over all valid
+$(X_i',Z_i')$. The $n=2$ table of $720$ matrices is cached and is the gate set
+of the circuits layer. The count is checked against Theorem~\ref{thm:order}.
+$\;n\ge 4$ is infeasible by enumeration ($\sim 4.7\times 10^{10}$ elements).
+
+\subsection{Why uniform on \texorpdfstring{$\Sp$}{Sp} is ``random Clifford''}
+\label{sec:collapse}
+The full $n$-qubit Clifford group (with signs) has order
+$|\Cl_n| = 2^{\,n^2+2n}\prod_{i=1}^n(4^i-1) = 4^{n}\,|\Sp(2n,\F_2)|$. The
+quotient map $\Cl_n\to\Sp(2n,\F_2)$ (forget signs) is $4^{n}$-to-$1$: each
+symplectic $S$ lifts to $4^n$ signed Cliffords (a $\pm$ choice on each of the
+$2n$ generators). Hence pushing the uniform distribution on $\Cl_n$ forward to
+$\Sp(2n,\F_2)$ gives the \emph{uniform} distribution on the $|\Sp|$ symplectics.
+For two qubits, $|\Cl_2|=11{,}520=16\cdot 720$. So for a phase-free simulator,
+``uniform random Clifford'' \emph{is} ``uniform random element of
+$\Sp(2n,\F_2)$,'' and sampling the $720$-element $\Sp(4,\F_2)$ table uniformly
+is exactly correct.
+
+\subsection{Uniform sampling for arbitrary \texorpdfstring{$n$}{n}}
+\label{sec:sampling}
+$\texttt{random\_symplectic}(n,\mathrm{rng})$ samples uniformly from
+$\Sp(2n,\F_2)$ by realizing the \emph{same} greedy construction with uniform
+choices at each step (the incremental kernel-basis sampler). It maintains the
+symplectic complement $W_i$ of the previously chosen pairs as the right kernel
+of the constraint matrix
+\[
+  M_i \;=\; \Big[\, [\,X_{j,z}'\mid X_{j,x}'\,];\ [\,Z_{j,z}'\mid Z_{j,x}'\,]
+            \ :\ j<i \,\Big],
+\]
+where the half-swap $[\,w_z\mid w_x\,]$ encodes $\sympprod{u}{w}=0$ as the
+linear constraint $[\,w_z\mid w_x\,]\,u^{\!\top}=0$ (cf.~\eqref{eq:sympprod}).
+At step $i$, with $K=\texttt{gf2\_kernel\_basis}(M_i)$ a basis of $W_i$
+($\dim W_i = 2(n-i)$ rows after $i$ pairs; $2n$ initially):
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{$X_i'$:} draw a uniform \emph{nonzero} coefficient vector
+  $c\in\F_2^{\dim W_i}$ and set $X_i'=cK$. This is uniform over $W_i\setminus\{0\}$.
+\item \textbf{$Z_i'$:} let $\pi_k=\sympprod{X_i'}{K_k}$. Draw a uniform
+  $c'\in\F_2^{\dim W_i}$; if its parity $c'\!\cdot\!\pi$ is $0$, flip one bit of
+  $c'$ at an index where $\pi_k=1$ (which exists since $W_i$ is non-degenerate).
+  Set $Z_i'=c'K$. This is uniform over $\{w\in W_i:\sympprod{X_i'}{w}=1\}$.
+\end{enumerate}
+The matrix $S$ has rows $X_1',\dots,X_n',Z_1',\dots,Z_n'$.
+\begin{proposition}
+The procedure outputs each $S\in\Sp(2n,\F_2)$ with equal probability.
+\end{proposition}
+\begin{proof}
+By Theorem~\ref{thm:order} ordered symplectic bases biject with $\Sp(2n,\F_2)$,
+and the construction reaches each basis by exactly one sequence of choices
+$(X_i',Z_i')\in(W_i\setminus\{0\})\times\ell^{-1}(1)$, where
+$\ell(w)=\sympprod{X_i'}{w}$. It suffices that each step is uniform over its
+choice set; the joint distribution is then the product, hence uniform over all
+bases and over the group. Write $m=\dim W_i$ and let $K$ be the basis of $W_i$.
+
+\emph{Step~1 (uniform over $W_i\setminus\{0\}$).} Drawing $c\in\F_2^{m}$
+uniformly and rejecting $c=0$ gives a uniform nonzero $c$; since $c\mapsto cK$ is
+a linear isomorphism $\F_2^{m}\to W_i$, $X_i'=cK$ is uniform over
+$W_i\setminus\{0\}$.
+
+\emph{Step~2 (uniform over $\ell^{-1}(1)$).} Put $\pi_k=\sympprod{X_i'}{K_k}$, so
+$\sympprod{X_i'}{c'K}=c'\!\cdot\!\pi$; $\pi\ne0$ because $\ell\ne0$. The procedure
+draws $c'\in\F_2^{m}$ uniformly and, if $c'\!\cdot\!\pi=0$, picks $j$ uniformly
+from $J=\{k:\pi_k=1\}$ ($a:=|J|\ge1$) and flips $c'_j$ (which sets the parity to
+$1$). Fix a target $t$ with $t\!\cdot\!\pi=1$. It is produced (i)~directly, when
+the draw equals $t$, with probability $2^{-m}$; or (ii)~by correction, when the draw
+is $t\oplus e_j$ for some $j\in J$ (which has even parity) and index $j$ is then
+selected, with probability $\sum_{j\in J}2^{-m}\cdot a^{-1}=2^{-m}$. So
+$\Pr[\text{output}=t]=2\cdot2^{-m}=2^{-(m-1)}$, uniform over the
+$2^{\,m-1}$-element coset $\ell^{-1}(1)$. As $c'\mapsto c'K$ maps this coset
+bijectively onto $\ell^{-1}(1)$, $Z_i'$ is uniform there.
+\end{proof}
+The cost is $O(n^3)$ bit-operations (a kernel computation per step). For $n=2$
+the routine short-circuits to a uniform draw from the cached $\Sp(4,\F_2)$ table
+so the RNG state advances identically across entry points.
+\begin{remark}
+The asymptotically faster Bravyi--Maslov $O(n^2)$ canonical-form
+sampler~\cite{BM} is not used; the kernel-basis method is simpler to verify and
+adequate for the $n\lesssim 200$ regime targeted here
+(Section~\ref{sec:roadmap-bm}).
+\end{remark}
+
+% ---------------------------------------------------------------------
+\section{Observables}
+\label{sec:obs}
+
+All observables are exact functions of the $\F_2$ row span
+(Section~\ref{sec:phasefree}); none require phase information.
+
+\subsection{Entanglement entropy}
+\begin{theorem}[Fattal--Cubitt--Yamamoto--Bravyi--Chuang~\cite{FCYBC}]
+\label{thm:fcybc}
+For a stabilizer state with stabilizer generators forming the matrix
+$G\in\F_2^{n\times 2n}$ (rows $n..2n{-}1$ of $[\,X\mid Z\,]$), and a subsystem
+$A\subseteq\{0,\dots,n-1\}$, the entanglement entropy (in ebits, units of
+$\log_2$) is
+\begin{equation}
+\label{eq:fcybc}
+  S(A) \;=\; \rank_{\F_2}\!\bigl(G|_A\bigr) \;-\; |A| ,
+\end{equation}
+where $G|_A\in\F_2^{n\times 2|A|}$ is $G$ restricted to the columns
+$A$ (the $X$-bits) and $A+n$ (the $Z$-bits) of the qubits in $A$.
+\end{theorem}
+\begin{proof}
+For a region $B$, let $\mathcal{S}_B=\{g\in\mathcal{S}:\operatorname{supp}(g)
+\subseteq B\}$ be the subgroup of stabilizers acting as identity outside $B$,
+and $d_B=\dim_{\F_2}\mathcal{S}_B$ its number of independent generators. A
+standard computation gives the reduced density operator of a stabilizer state on
+$B$ as the uniform mixture
+$\rho_B=2^{-|B|}\sum_{g\in\mathcal{S}_B}\!\pm\,g|_B$, which is
+$2^{-(|B|-d_B)}$ times a projector of rank $2^{\,|B|-d_B}$; hence
+$S(B)=|B|-d_B$. (The signs select \emph{which} eigenstate, not the entropy, so
+the phase-free coordinates suffice.) Writing $g=\prod_i g_i^{c_i}$, we have
+$g\in\mathcal{S}_{\bar A}$ iff its $A$-columns vanish, i.e.\ iff $c$ lies in the
+kernel of the restriction $c\mapsto (cG)|_A$; therefore
+$d_{\bar A}=n-\rank_{\F_2}(G|_A)$. For a pure state $S(A)=S(\bar A)$, so
+\[
+  S(A)=S(\bar A)=|\bar A|-d_{\bar A}
+       =(n-|A|)-\bigl(n-\rank_{\F_2}(G|_A)\bigr)
+       =\rank_{\F_2}(G|_A)-|A|. \qedhere
+\]
+\end{proof}
+The bounds $0\le S(A)\le\min(|A|,\,n-|A|)$ follow: $\mathcal{S}_A$ is an abelian
+(isotropic) subgroup of the $2|A|$-dimensional symplectic space on $A$, so
+$d_A\le|A|$ and $S(A)=|A|-d_A\ge0$; and $S(A)=S(\bar A)=|\bar A|-d_{\bar A}\le n-|A|$.
+\code{} raises if this contract is violated (a corruption check), and implements
+\eqref{eq:fcybc} via \texttt{gf2\_rank} on the stabilizer-restricted block,
+avoiding the full $2n\times2n$ allocation.
+\begin{remark}
+The cost of~\eqref{eq:fcybc} is a rank of an $n\times 2|A|$ matrix whose nonzero
+density is the stabilizer weight; sparse (area-law) tableaux make all
+rank-based observables, and the measurement updates that produce them, cheap.
+\end{remark}
+
+\subsection{Mutual and tripartite mutual information}
+For disjoint $A,B$,
+\begin{equation}
+  I(A:B) \;=\; S(A)+S(B)-S(A\cup B),
+\end{equation}
+and for pairwise-disjoint $A,B,C$ the tripartite mutual information is
+\begin{equation}
+  I_3(A:B:C) \;=\; I(A:B) + I(A:C) - I\!\bigl(A:B\cup C\bigr)
+  \;\in\;\Z ,
+\end{equation}
+a canonical MIPT order parameter (negative in the volume-law phase, near zero in
+the area-law phase)~\cite{GH}.
+
+\subsection{Code dimension}
+For a state on $2m$ qubits prepared as a Bell purification of $m$ system qubits
+(Section~\ref{sec:pictures}), the \emph{code dimension} is the system-half
+entanglement entropy
+\begin{equation}
+  k \;\equiv\; S(\text{system}) \;=\; \rank_{\F_2}\!\bigl(G|_{\{0,\dots,m-1\}}\bigr) - m
+  \;\in\; [0,m] ,
+\end{equation}
+the number of system qubits still entangled with the reference. It is the
+Gullans--Huse purification order parameter: $k=m$ for a fresh purification,
+$k\to0$ as monitored dynamics purifies the system.
+
+\subsection{Weight spectrum}
+The \emph{weight} of a generator is its number of non-identity Paulis,
+$\wt(r)=\mathrm{supp\_len}[r]$. \texttt{generator\_weights} returns the per-row
+weights; \texttt{stabilizer\_weight\_spectrum} the histogram over stabilizer
+rows; \texttt{average\_stabilizer\_weight} the mean. These quantify tableau
+sparsity (and hence simulation cost) directly.
+
+% =====================================================================
+\part{The Circuits Layer}
+% =====================================================================
+
+\section{Graph-defined monitored circuits}
+\label{sec:circuits}
+
+The circuits layer builds random-Clifford$+$measurement circuits whose two-qubit
+gates are placed on the edges of a fixed graph. One configuration plus a sample
+seed determines a circuit realization reproducibly.
+
+\subsection{Graphs, matchings, and 1-factorizations}
+\begin{definition}
+A \emph{matching} of a graph $G=(V,E)$ is an edge set no two of which share a
+vertex; it is \emph{perfect} if it covers every vertex. A
+\emph{$1$-factorization} is a partition of $E$ into perfect matchings.
+\end{definition}
+By Vizing's theorem the chromatic index of a simple graph is $\Delta$ or
+$\Delta+1$; a $\Delta$-regular graph is $1$-factorable iff it is Class~1, and
+then its $\Delta$ color classes are perfect matchings. The two implemented
+families (for even $|V|=n$):
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Cycle $C_n$:} $2$-regular, $\chi'=2$, with two alternating perfect
+  matchings $\{(0,1),(2,3),\dots\}$ and $\{(1,2),(3,4),\dots,(n-1,0)\}$.
+\item \textbf{Complete $K_n$:} $(n-1)$-regular, $\chi'=n-1$, from the round-robin
+  tournament $1$-factorization (fix vertex $n-1$, rotate the rest).
+\end{itemize}
+For odd $n$ neither has a perfect matching, and brickwork gating is rejected at
+configuration time. Graphs are stored with their edge list, a canonical
+$1$-factorization (when one exists), a uniform perfect-matching sampler, and a
+graph6 string.
+
+\subsection{Gating}
+Each layer fires a set of gate edges, each carrying an independent uniform
+$\Sp(4,\F_2)$ Clifford (Section~\ref{sec:collapse}):
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Brickwork:} a whole perfect matching ($n/2$ gates). The matching
+  is chosen by the matching mode:
+  \emph{round\_robin} (cycle through the $1$-factorization, layer $t$ uses
+  matching $t\bmod\chi'$), \emph{palette} (uniform over the $\chi'$ matchings of
+  the fixed $1$-factorization), or \emph{fresh} (uniform over \emph{all} perfect
+  matchings of the graph).
+\item \textbf{random\_edge:} $m$ distinct uniformly-random edges per layer (which
+  may share vertices, so not a matching), where $m=\texttt{gates\_per\_layer}$ may
+  be a constant or a function of $n$ (e.g.\ $m=n/2$).
+\end{itemize}
+
+\subsection{Measurement process: candidates and firing}
+\label{sec:measmodes}
+Each measured layer selects a \emph{candidate} set $\mathcal{K}$ of qubits, then
+fires (measures in $Z$) each candidate independently with probability $p$; the
+fired subset $\mathcal{F}\subseteq\mathcal{K}$ is projected. The candidate set is
+mode-specific:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{bernoulli:} $\mathcal{K}=\{0,\dots,n-1\}$ (every qubit).
+\item \textbf{gated:} $\mathcal{K}=\{$qubits the layer's gates touched$\}$.
+\item \textbf{random\_pair:} $\mathcal{K}=\{2$ qubits chosen uniformly without
+  replacement$\}$.
+\end{itemize}
+Only $\mathcal{F}$ is measured; the unfired candidates are recorded (for
+inspection) but leave the state unchanged.
+
+\subsection{Depth normalization}
+\label{sec:depth}
+Depth is measured in \emph{gates per qubit}, so circuits are comparable across
+gating modes. The base budget is $T_{\mathrm{base}}=\texttt{depth\_factor}\cdot n$
+for $O(n)$ depth, or $\texttt{depth\_factor}\cdot\lceil\log_2 n\rceil$ for
+$O(\log n)$; the \texttt{until\_purified} mode currently uses the $O(n)$ value as
+a fixed depth cap (the early-termination behavior it anticipates is a roadmap
+item, Part~III). A brickwork layer fires $n/2$ gates and touches every qubit once,
+so $T_{\mathrm{base}}$ \emph{is} its gates-per-qubit budget. A random\_edge layer
+fires $m$ gates touching $2m$ qubit-slots, i.e.\ a fraction $2m/n$ of the qubits
+per layer, so it needs
+\begin{equation}
+\label{eq:depthnorm}
+  T_{\mathrm{random\_edge}} \;=\; \mathrm{round}\!\Big(T_{\mathrm{base}}\cdot\frac{n}{2m}\Big)
+\end{equation}
+layers for the same budget. Thus single-edge random\_edge ($m=1$) runs
+$O(n^2)$ layers; $m=n/2$ matches brickwork. This is the precise sense in which
+the three gating styles apply the \emph{same} total gate count at equal
+\texttt{depth\_factor}.
+
+\subsection{Expected gate-to-measurement ratio}
+With $e_g$ the expected gates per layer ($e_g=n/2$ for brickwork, $e_g=m$ for
+random\_edge) and $e_m$ the expected measurements per layer, the expected ratio
+recorded before simulation is $r=e_g/e_m$ (or $\infty$ when $e_m=0$), where by
+measurement mode
+\begin{equation}
+  e_m \;=\;
+  \begin{cases}
+    n\,p & \text{bernoulli},\\
+    2\,e_g\,p & \text{gated (each gate touches 2 qubits)},\\
+    2\,p & \text{random\_pair}.
+  \end{cases}
+\end{equation}
+For the brickwork$+$bernoulli baseline this collapses to $r=\tfrac{n/2}{np}=\tfrac1{2p}$.
+
+% ---------------------------------------------------------------------
+\section{Physics pictures and order parameters}
+\label{sec:pictures}
+
+A \emph{picture} fixes the initial state, the system/reference partition, and
+the order parameter. All order parameters are FCYBC ranks
+(Theorem~\ref{thm:fcybc}).
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{pure\_state:} $n$ qubits in $\ket{0^n}$; order parameter is the
+  half-cut entropy $S(\{0,\dots,n/2-1\})$ (volume-law vs.\ area-law).
+\item \textbf{purification:} $2n$ qubits with a Bell pair per system qubit
+  ($H_i;\mathrm{CX}_{i,i+n}$); order parameter is the code dimension
+  $k=S(\text{system})$. Fresh: $k=n$; under monitoring $k\to0$ (the Gullans--Huse
+  purification transition).
+\item \textbf{single\_ref:} $n+1$ qubits with one reference Bell-paired with
+  system qubit $n-1$ ($H_{n-1};\mathrm{CX}_{n-1,n}$); order parameter is
+  $S(\text{reference})\in\{0,1\}$.
+\end{itemize}
+\begin{remark}[Measurement-induced phase transition]
+Random Clifford gates spread entanglement ballistically (volume law) while
+projective measurements destroy it. As the rate $p$ crosses a critical $p_c$,
+the steady-state entanglement of the monitored-trajectory ensemble switches from
+volume law to area law: a measurement-induced phase transition. The pictures
+above expose its order parameters; locating $p_c$ by finite-size scaling is the
+task of the analysis layer (Section~\ref{sec:roadmap-analysis}).
+\end{remark}
+
+% ---------------------------------------------------------------------
+\section{Reproducibility}
+\label{sec:rng}
+
+A realization is determined by $(\texttt{base\_seed},\texttt{sample\_seed})$ via
+\emph{two independent} pseudorandom streams: a \emph{construction} stream
+(seeded $\texttt{base\_seed}+\texttt{sample\_seed}$) that fixes the gate
+placement, the Clifford indices, and the measured-qubit selection, consumed in a
+fixed per-layer order; and a \emph{measurement-outcome} stream (seeded
+independently on the simulator instance) that supplies the phase-free coins. The
+streams are decoupled so a fixed circuit can be replayed with different outcomes.
+
+% =====================================================================
+\part{Further topics}
+% =====================================================================
+\label{sec:roadmap}
+
+\emph{Shorter notes on additional topics.}
+
+\section{Bravyi--Maslov \texorpdfstring{$O(n^2)$}{O(n^2)} sampling}
+\label{sec:roadmap-bm}
+Canonical decomposition $C=F_1HSF_2$ with Mallows-distributed permutation, for
+faster uniform $\Sp(2n,\F_2)$ sampling at large $n$.
+
+\section{Koenig--Smolin integer indexing}
+Deterministic bijection between $[\,0,|\Sp(2n,\F_2)|)$ and group elements (forward
+and inverse), via symplectic transvections.
+
+\section{Batched simulation}
+A \texttt{BatchedSparseGF2} carrying many trajectories in shared storage, for
+vectorized sweeps.
+
+\section{Additional graph families}
+\texttt{path}, 2D \texttt{lattice}, \texttt{from\_networkx}, and Newman--Watts
+adapters; each supplies edges and (optionally) a $1$-factorization and a
+perfect-matching sampler.
+
+\section{Additional measurement modes}
+\texttt{uniform\_count}: a fixed number of measured qubits per layer.
+
+\section{Adaptive depth and time series}
+\texttt{until\_purified} early termination (stop when the order parameter
+vanishes) and per-layer order-parameter recording. The \texttt{until\_purified}
+depth mode and the \texttt{record\_time\_series} flag are already accepted and
+validated by the configuration, but the runner does not yet act on either (the
+former currently behaves as a fixed $O(n)$ cap; see Section~\ref{sec:depth}).
+
+\section{Analysis and finite-size scaling}
+\label{sec:roadmap-analysis}
+A sweep driver over $(n,p,\text{seed})$ with data collection and finite-size
+scaling to locate the critical point $p_c$ and extract critical exponents.
+
+\section{Publication-quality circuit rendering}
+A \texttt{quantikz}/\LaTeX{} renderer over the existing circuit-trace
+intermediate representation.
+
+\section{Additional pictures, observables, and noise models}
+Reserved for future order parameters, multipartite measures, and noisy
+(non-unitary, non-projective) channels.
+
+% =====================================================================
+\begin{thebibliography}{9}
+\bibitem{AG} S.~Aaronson and D.~Gottesman, \emph{Improved Simulation of
+  Stabilizer Circuits}, Phys.\ Rev.\ A \textbf{70}, 052328 (2004),
+  \href{https://arxiv.org/abs/quant-ph/0406196}{arXiv:quant-ph/0406196}.
+\bibitem{FCYBC} D.~Fattal, T.~S.~Cubitt, Y.~Yamamoto, S.~Bravyi, I.~L.~Chuang,
+  \emph{Entanglement in the Stabilizer Formalism} (2004),
+  \href{https://arxiv.org/abs/quant-ph/0406168}{arXiv:quant-ph/0406168}.
+\bibitem{BM} S.~Bravyi and D.~Maslov, \emph{Hadamard-free circuits expose the
+  structure of the Clifford group} (2020),
+  \href{https://arxiv.org/abs/2003.09412}{arXiv:2003.09412}.
+\bibitem{KS} R.~Koenig and J.~A.~Smolin, \emph{How to efficiently select an
+  arbitrary Clifford group element} (2014),
+  \href{https://arxiv.org/abs/1406.2170}{arXiv:1406.2170}.
+\bibitem{GH} M.~J.~Gullans and D.~A.~Huse, \emph{Dynamical Purification Phase
+  Transition Induced by Quantum Measurements}, Phys.\ Rev.\ X \textbf{10},
+  041020 (2020), \href{https://arxiv.org/abs/1905.05195}{arXiv:1905.05195}.
+\end{thebibliography}
+
+\end{document}

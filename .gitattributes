@@ -1,0 +1,13 @@
+# Normalize text line endings to LF in the working tree on every platform, so
+# `ruff format --check`, the source-scanning tests, and diffs behave identically
+# on Windows, macOS, and Linux (avoids CRLF churn from git's autocrlf on Windows).
+* text=auto eol=lf
+
+# Binary assets - git must never apply text/EOL conversion to these.
+*.png binary
+*.pdf binary
+*.h5 binary
+*.hdf5 binary
+*.parquet binary
+*.npz binary
+*.ipynb -text
