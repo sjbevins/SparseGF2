@@ -93,6 +93,7 @@ from sparsegf2.core._protocol import SimulatorProtocol, SubsystemFastExtractor
 # Bit-packed elimination: identical results to ``gf2_rank``, ~7-27x faster at
 # the (n, 2|A|) shapes the observables produce (and never slower, even tiny).
 # Load-bearing for ``until_purified`` runs, which take a rank per measured layer.
+from sparsegf2.core.linalg_gf2 import gf2_eliminate_on_columns as _eliminate_on_columns
 from sparsegf2.core.linalg_gf2 import gf2_rank_bits as _gf2_rank
 from sparsegf2.errors import InvalidArgumentError, TableauCorruption
 
@@ -452,38 +453,6 @@ def code_rate(sim: SimulatorProtocol, n_system: int) -> float:
     if n_system == 0:
         return 0.0
     return code_dimension(sim, n_system) / n_system
-
-
-def _eliminate_on_columns(
-    mat: NDArray[np.uint8], cols: NDArray[np.int64]
-) -> tuple[NDArray[np.uint8], int]:
-    """Forward GF(2) elimination of ``mat`` using ``cols`` as pivot columns
-    (left to right), applying every row operation across all of ``mat``.
-
-    Returns a reduced copy and the rank ``r`` obtained on ``cols``: rows
-    ``0 .. r-1`` carry the pivots (and span the column space of ``cols``), and
-    rows ``r ..`` are zero in every column of ``cols``. Used by
-    :func:`contiguous_distance` to factor a fixed reference subsystem out of the
-    stabilizer block once, so each window costs two small ranks.
-    """
-    m = mat.copy()
-    r = 0
-    n_rows = m.shape[0]
-    for c in cols:
-        nz = np.flatnonzero(m[r:, c])
-        if nz.size == 0:
-            continue
-        piv = r + int(nz[0])
-        if piv != r:
-            m[[r, piv]] = m[[piv, r]]
-        hits = m[:, c].astype(bool).copy()
-        hits[r] = False
-        if hits.any():
-            m[hits] ^= m[r]
-        r += 1
-        if r == n_rows:
-            break
-    return m, r
 
 
 def contiguous_distance(

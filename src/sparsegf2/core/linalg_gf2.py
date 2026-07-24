@@ -227,6 +227,60 @@ def _gf2_rref_python(A: NDArray[np.uint8]) -> NDArray[np.uint8]:
 
 
 # ----------------------------------------------------------------------
+# Forward elimination on a chosen pivot-column set
+# ----------------------------------------------------------------------
+
+
+def gf2_eliminate_on_columns(
+    mat: NDArray[np.uint8], cols: NDArray[np.int64]
+) -> tuple[NDArray[np.uint8], int]:
+    """Forward GF(2) elimination of ``mat`` using ``cols`` as pivot columns
+    (left to right), applying every row operation across all of ``mat``.
+
+    Returns a reduced copy and the rank ``r`` obtained on ``cols``: rows
+    ``0 .. r-1`` carry the pivots (and span the column space of ``cols``), and
+    rows ``r ..`` are zero in every column of ``cols``. Columns outside
+    ``cols`` are carried along by the row operations but never pivoted on,
+    which is what makes this the workhorse for block eliminations:
+    :func:`sparsegf2.contiguous_distance` factors a fixed reference subsystem
+    out of the stabilizer block once, and the expurgation package's witness
+    extraction reduces ``[M | I]`` on the syndrome block, then the logical
+    block, reading candidates off the identity block.
+
+    Parameters
+    ----------
+    mat : ndarray of shape ``(m, k)``, ``uint8``
+        Entries 0 or 1. Not mutated; a copy is reduced and returned.
+    cols : ndarray of int
+        Column indices to pivot on, processed left to right in the given
+        order.
+
+    Returns
+    -------
+    tuple of (ndarray, int)
+        The reduced copy and the rank achieved on ``cols``.
+    """
+    m = mat.copy()
+    r = 0
+    n_rows = m.shape[0]
+    for c in cols:
+        nz = np.flatnonzero(m[r:, c])
+        if nz.size == 0:
+            continue
+        piv = r + int(nz[0])
+        if piv != r:
+            m[[r, piv]] = m[[piv, r]]
+        hits = m[:, c].astype(bool).copy()
+        hits[r] = False
+        if hits.any():
+            m[hits] ^= m[r]
+        r += 1
+        if r == n_rows:
+            break
+    return m, r
+
+
+# ----------------------------------------------------------------------
 # Kernel basis (right kernel)
 # ----------------------------------------------------------------------
 

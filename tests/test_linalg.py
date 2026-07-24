@@ -389,3 +389,44 @@ def test_gf2_rank_bits_python_mirror_matches_jit():
             packed8 = np.concatenate([packed8, pad], axis=1)
         words = np.ascontiguousarray(packed8).view(np.uint64).copy()
         assert _gf2_rank_words_python(words, k) == gf2_rank_bits(A)
+
+
+# ----------------------------------------------------------------------
+# gf2_eliminate_on_columns
+# ----------------------------------------------------------------------
+
+
+def test_eliminate_on_columns_contract():
+    """Rank on the pivot set matches gf2_rank of those columns, rows past
+    the rank are zero on every pivot column, the input is not mutated, and
+    the row space is preserved."""
+    from sparsegf2.core.linalg_gf2 import gf2_eliminate_on_columns, gf2_rank
+
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        m, k = int(rng.integers(1, 20)), int(rng.integers(2, 20))
+        n_piv = int(rng.integers(1, k))
+        A = rng.integers(0, 2, size=(m, k)).astype(np.uint8)
+        before = A.copy()
+        cols = np.arange(n_piv)
+        reduced, r = gf2_eliminate_on_columns(A, cols)
+        assert np.array_equal(A, before)  # not mutated
+        assert r == gf2_rank(A[:, :n_piv])
+        assert not reduced[r:, :n_piv].any()
+        # Row operations preserve the row space.
+        assert gf2_rank(np.concatenate([A, reduced])) == gf2_rank(A)
+
+
+def test_eliminate_on_columns_identity_witness():
+    """Augmenting with an identity block records the row operations: each
+    reduced row equals its witness combination of the original rows."""
+    from sparsegf2.core.linalg_gf2 import gf2_eliminate_on_columns
+
+    rng = np.random.default_rng(6)
+    m, k = 10, 7
+    A = rng.integers(0, 2, size=(m, k)).astype(np.uint8)
+    aug = np.concatenate([A, np.eye(m, dtype=np.uint8)], axis=1)
+    reduced, _ = gf2_eliminate_on_columns(aug, np.arange(k))
+    for row in reduced:
+        witness = row[k:]
+        assert np.array_equal((witness @ A) % 2, row[:k])

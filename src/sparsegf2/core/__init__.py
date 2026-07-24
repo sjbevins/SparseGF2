@@ -25,7 +25,12 @@ prioritize documentation polish.
 """
 
 from sparsegf2.core._protocol import SimulatorProtocol
-from sparsegf2.core.linalg_gf2 import gf2_kernel_basis, gf2_rank, gf2_rref
+from sparsegf2.core.linalg_gf2 import (
+    gf2_eliminate_on_columns,
+    gf2_kernel_basis,
+    gf2_rank,
+    gf2_rref,
+)
 from sparsegf2.core.observables import (
     average_stabilizer_weight,
     code_dimension,
@@ -103,6 +108,7 @@ __all__ = [
     "subsystem_rank",
     "tripartite_mutual_info",
     # Linear algebra primitives (advanced)
+    "gf2_eliminate_on_columns",
     "gf2_kernel_basis",
     "gf2_rank",
     "gf2_rref",

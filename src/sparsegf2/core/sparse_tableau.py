@@ -55,6 +55,10 @@ Public kernels
 * **Measurement**: :meth:`measure_z`, :meth:`measure_x`, :meth:`measure_y`,
   :meth:`is_deterministic_z`. Phase-free contract: deterministic
   outcomes return ``0`` regardless of the physical eigenvalue.
+  :meth:`measure_pauli` projects onto an arbitrary multi-qubit Pauli
+  and returns the pivot pair index (used by
+  :mod:`sparsegf2.expurgation`); :meth:`pauli_anticommuting_rows` is
+  the underlying commutation query.
 * **Reset/projection**: :meth:`reset_z`, :meth:`reset_x`, :meth:`reset_y`.
 * **State extraction**: :meth:`to_symplectic` (raw ``[X | Z]``),
   :meth:`canonical_form` (GF(2) RREF of the stabilizer subspace),
@@ -1057,6 +1061,27 @@ def _row_weights_packed(x_packed, z_packed, n):
     return bits.sum(axis=1).astype(np.int32)
 
 
+def _pack_pauli_bits(qubits, letters, n_words):
+    """Bit-pack a sparse Pauli into per-word x/z masks for the dense kernels.
+
+    ``qubits``/``letters`` follow the validated sparse-Pauli convention
+    of :meth:`SparseGF2._validate_pauli`; the return is a pair of
+    length-``n_words`` ``uint64`` arrays in the same LSB-first layout as
+    ``x_packed`` / ``z_packed``.
+    """
+    gx = np.zeros(n_words, dtype=np.uint64)
+    gz = np.zeros(n_words, dtype=np.uint64)
+    for i in range(qubits.shape[0]):
+        q = int(qubits[i])
+        w, b = q >> 6, np.uint64(q & 63)
+        xz = int(letters[i])
+        if (xz >> 1) & 1:
+            gx[w] |= _U1 << b
+        if xz & 1:
+            gz[w] |= _U1 << b
+    return gx, gz
+
+
 class SparseGF2:
     """Phase-free sparse stabilizer simulator over GF(2).
 
@@ -1887,6 +1912,227 @@ class SparseGF2:
         self.apply_h(q)
         self.apply_s(q)
         return out
+
+    # ------------------------------------------------------------------
+    # General Pauli measurement
+    # ------------------------------------------------------------------
+
+    def _validate_pauli(
+        self, qubits: Iterable[int], letters: Iterable[int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Coerce and validate a sparse Pauli given as (support, letters).
+
+        ``qubits`` are distinct indices in ``[0, n)``; ``letters`` are the
+        matching 2-bit ``(x << 1) | z`` codes and must be non-identity
+        (:data:`PAULI_Z`, :data:`PAULI_X`, or :data:`PAULI_Y`). Returns
+        ``(int64, uint8)`` arrays. An empty support (the identity Pauli)
+        is allowed here; callers that cannot accept the identity raise
+        on their own.
+        """
+        q = np.asarray(list(qubits), dtype=np.int64)
+        ltr = np.asarray(list(letters), dtype=np.uint8)
+        if q.ndim != 1 or ltr.ndim != 1 or q.shape[0] != ltr.shape[0]:
+            raise InvalidArgumentError(
+                f"qubits and letters must be 1-D and the same length, got {q.shape} and {ltr.shape}"
+            )
+        if q.shape[0]:
+            if q.min() < 0 or q.max() >= self.n:
+                raise InvalidArgumentError(
+                    f"qubit indices must be in [0, n={self.n}); got min={q.min()}, max={q.max()}"
+                )
+            if np.unique(q).shape[0] != q.shape[0]:
+                raise InvalidArgumentError(f"qubits must not repeat: got {q.tolist()}")
+            if (ltr < 1).any() or (ltr > 3).any():
+                raise InvalidArgumentError(
+                    f"letters must be PAULI_Z (1), PAULI_X (2), or PAULI_Y (3); got {ltr.tolist()}"
+                )
+        return q, ltr
+
+    def pauli_anticommuting_rows(self, qubits: Iterable[int], letters: Iterable[int]) -> np.ndarray:
+        """Return the generator rows that anticommute with a Pauli ``g``.
+
+        ``g`` is given sparsely: ``qubits`` lists its support and
+        ``letters`` the ``(x << 1) | z`` code at each listed qubit. The
+        symplectic product against row ``r`` decomposes into per-qubit
+        anticommutation terms, and only rows indexed under ``g``'s
+        support in ``inv`` can contribute, so the cost is
+        ``O(sum_q |inv[q]|)`` over ``q`` in the support, independent of
+        ``n`` at fixed tableau density. In dense (hybrid) mode the
+        parities are read from the bit-packed arrays instead; no mode
+        switch happens on this query.
+
+        Returns
+        -------
+        ndarray of ``int32``
+            Sorted row indices ``r`` in ``[0, 2n)`` with
+            ``⟨T_r, g⟩_Ω = 1``. Rows ``>= n`` are stabilizers. Empty for
+            the identity Pauli.
+        """
+        q, ltr = self._validate_pauli(qubits, letters)
+        if q.shape[0] == 0:
+            return np.zeros(0, dtype=np.int32)
+        if self._dense_mode:
+            gx, gz = _pack_pauli_bits(q, ltr, self.x_packed.shape[1])
+            # ⟨T_r, g⟩ = popcount(x_r & g_z) + popcount(z_r & g_x) mod 2.
+            counts = np.bitwise_count(self.x_packed & gz[None, :]).sum(axis=1)
+            counts += np.bitwise_count(self.z_packed & gx[None, :]).sum(axis=1)
+            return np.flatnonzero(counts & 1).astype(np.int32)
+        parity = np.zeros(self.N, dtype=np.uint8)
+        for i in range(q.shape[0]):
+            qq = int(q[i])
+            g_x = (int(ltr[i]) >> 1) & 1
+            g_z = int(ltr[i]) & 1
+            m = int(self.inv_len[qq])
+            for k in range(m):
+                r = int(self.inv[qq, k])
+                xz = int(self.plt[r, qq])
+                parity[r] ^= ((xz >> 1) & g_z) ^ ((xz & 1) & g_x)
+        return np.flatnonzero(parity).astype(np.int32)
+
+    def measure_pauli(self, qubits: Iterable[int], letters: Iterable[int]) -> int | None:
+        """Project the state onto an eigenspace of a multi-qubit Pauli ``g``.
+
+        The generalization of :meth:`measure_z` to an arbitrary Pauli,
+        following the same Aaronson-Gottesman three-step update: find the
+        rows anticommuting with ``g`` (one parity accumulation per
+        support qubit), pick a stabilizer anticommuter as the pivot
+        (respecting ``pivot_mode``), XOR the pivot into every other
+        anticommuter, copy the old pivot into its destabilizer slot, and
+        install ``g`` at the pivot. ``measure_z(q)`` is the special case
+        ``g = Z_q``. Works natively in both the sparse and the hybrid
+        dense mode.
+
+        Phase-free contract: the outcome sign is not tracked. When the
+        measurement is non-deterministic the two outcomes share one
+        symplectic tableau, and this method returns the **pivot pair
+        index** ``p - n`` so callers that track code structure (for
+        example the expurgation package's role array) know which
+        destabilizer/stabilizer pair absorbed ``g``. When the
+        measurement is deterministic (no stabilizer row anticommutes,
+        i.e. ``g`` is up to sign in the stabilizer group) the tableau is
+        left unchanged, matching :meth:`measure_z`, and ``None`` is
+        returned. Callers that need an outcome bit draw their own fair
+        coin in the non-deterministic case.
+
+        Parameters
+        ----------
+        qubits
+            Distinct support indices of ``g`` in ``[0, n)``. Must be
+            non-empty (measuring the identity raises).
+        letters
+            The ``(x << 1) | z`` Pauli code at each support qubit
+            (:data:`PAULI_Z`, :data:`PAULI_X`, or :data:`PAULI_Y`).
+
+        Returns
+        -------
+        int or None
+            The pivot pair index in ``[0, n)`` when the measurement was
+            non-deterministic, ``None`` when it was deterministic.
+        """
+        q, ltr = self._validate_pauli(qubits, letters)
+        if q.shape[0] == 0:
+            raise InvalidArgumentError("measure_pauli: the identity Pauli cannot be measured")
+        n = self.n
+        anti = self.pauli_anticommuting_rows(q, ltr)
+        stab_anti = anti[anti >= n]
+        if stab_anti.size == 0:
+            # Deterministic: g is (up to sign) in the stabilizer group.
+            # Symplectic tableau unchanged, exactly as measure_z.
+            if self.hybrid:
+                self._maybe_check_mode_switch()
+            return None
+        if self.use_min_weight_pivot:
+            weights = np.asarray(self.supp_len)[stab_anti]
+            pivot = int(stab_anti[int(np.argmin(weights))])
+        else:
+            pivot = int(stab_anti[0])
+        destab = pivot - n
+        if self._dense_mode:
+            others = anti[(anti != pivot) & (anti != destab)]
+            self.x_packed[others] ^= self.x_packed[pivot]
+            self.z_packed[others] ^= self.z_packed[pivot]
+            self.x_packed[destab] = self.x_packed[pivot]
+            self.z_packed[destab] = self.z_packed[pivot]
+            gx, gz = _pack_pauli_bits(q, ltr, self.x_packed.shape[1])
+            self.x_packed[pivot] = gx
+            self.z_packed[pivot] = gz
+            if self.hybrid:
+                self._maybe_check_mode_switch()
+            return destab
+        # Step 1: XOR the pivot into every other anticommuter. The
+        # destabilizer slot is skipped: it is cleared and overwritten
+        # with the old pivot next, so XOR'ing it first is wasted work.
+        for r0 in anti:
+            r = int(r0)
+            if r != pivot and r != destab:
+                _sparse_xor_rows(
+                    self.plt,
+                    self.supp_q,
+                    self._supp_len,
+                    self.supp_pos,
+                    self.inv,
+                    self.inv_len,
+                    self.inv_pos,
+                    self.inv_x,
+                    self.inv_x_len,
+                    self.inv_x_pos,
+                    r,
+                    pivot,
+                )
+        # Step 2: copy the old pivot into the destabilizer slot
+        # (XOR into a freshly-cleared row is a copy).
+        _clear_generator(
+            self.plt,
+            self.supp_q,
+            self._supp_len,
+            self.supp_pos,
+            self.inv,
+            self.inv_len,
+            self.inv_pos,
+            self.inv_x,
+            self.inv_x_len,
+            self.inv_x_pos,
+            destab,
+        )
+        _sparse_xor_rows(
+            self.plt,
+            self.supp_q,
+            self._supp_len,
+            self.supp_pos,
+            self.inv,
+            self.inv_len,
+            self.inv_pos,
+            self.inv_x,
+            self.inv_x_len,
+            self.inv_x_pos,
+            destab,
+            pivot,
+        )
+        # Step 3: replace the pivot with g.
+        _clear_generator(
+            self.plt,
+            self.supp_q,
+            self._supp_len,
+            self.supp_pos,
+            self.inv,
+            self.inv_len,
+            self.inv_pos,
+            self.inv_x,
+            self.inv_x_len,
+            self.inv_x_pos,
+            pivot,
+        )
+        for i in range(q.shape[0]):
+            qq = int(q[i])
+            xz = int(ltr[i])
+            self.plt[pivot, qq] = np.uint8(xz)
+            _add_to_support(self.supp_q, self._supp_len, self.supp_pos, pivot, qq)
+            _add_to_inv(self.inv, self.inv_len, self.inv_pos, qq, pivot)
+            if (xz >> 1) & 1:
+                _add_to_inv_x(self.inv_x, self.inv_x_len, self.inv_x_pos, qq, pivot)
+        if self.hybrid:
+            self._maybe_check_mode_switch()
+        return destab
 
     # ------------------------------------------------------------------
     # Symplectic extraction
