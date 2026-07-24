@@ -41,6 +41,15 @@ phase-free tableau (no signed simulator anywhere in the pipeline).
   (`r_M = rank M - rank M_S`), exact `recovery_probability` (`2**-r_M`), and
   `expurgation_candidates` (augmented `[M | I]` elimination whose witness bits
   reconstruct the uncorrectable operators, lightest first).
+- **Purification bridge**: `from_purification(sim, system_qubits)` extracts the
+  system code of a monitored purification-picture tableau (system + reference
+  qubits) into the presentation the machinery uses: the system-supported
+  stabilizers become the checks (kernel of the reference-column map) and a
+  symplectic Gram-Schmidt completes the logical pairs, with `k = S(system)`
+  verified internally. Tests pin the extracted brute-force distance against an
+  independent purification-side computation and the targeted-purification
+  identity (measuring an extracted candidate on the original tableau lowers
+  `code_dimension` by exactly one).
 - **`expurgate` driver**: the published loop with mid-sequence re-validation,
   gauge and stabilizer strategies, frozen validation patterns (monotone
   before/after recovery comparison), and stopping criteria (`k_target`,

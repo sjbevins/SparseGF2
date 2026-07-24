@@ -84,24 +84,36 @@ The package does not care how the tableau was produced. `StabilizerCode`
 couples to a `SparseGF2` instance plus a role array over its
 destabilizer/stabilizer pairs (check, logical, or gauge), and everything else
 is computed through the simulator's public measurement and commutation API.
-Three common entry points:
+Four common entry points:
 
 ```python
 from sparsegf2 import SparseGF2
-from sparsegf2.expurgation import StabilizerCode
+from sparsegf2.expurgation import StabilizerCode, from_purification
 
 # 1. An encoding circuit built from core gates: pairs on the data qubits
 #    are logical, the rest are checks.
 code = StabilizerCode.from_encoding(sim, data_qubits=[2, 3])
 
-# 2. An externally produced tableau (any simulator, a file, a paper):
+# 2. A monitored circuit in the purification picture (system + reference
+#    qubits): extract the system code. Checks are the stabilizers
+#    supported entirely on the system; k = S(system).
+code = from_purification(sim)  # first half = system
+code = from_purification(sim, system_qubits=range(n_sys))  # explicit
+
+# 3. An externally produced tableau (any simulator, a file, a paper):
 code = StabilizerCode.from_encoding(SparseGF2.from_symplectic(mat), [2, 3])
 
-# 3. Full control, including gauge pairs:
+# 4. Full control, including gauge pairs:
 code = StabilizerCode(sim, roles)
 ```
 
-The circuits and analysis layers are never imported.
+For a purification input, the extracted code lives on the system qubits (code
+qubit `i` is `sorted(system_qubits)[i]`), and expurgation runs on the
+extracted code. Measuring the same candidates on the original purification
+tableau with `measure_pauli` (indices mapped through that list) is the
+identical operation and lowers `code_dimension` by one per candidate, so the
+two pictures stay in sync if you need both. The circuits and analysis layers
+are never imported.
 
 ## Module map
 
@@ -111,6 +123,7 @@ The circuits and analysis layers are never imported.
 | `erasure.py` | `sample_erasure`, `uncorrectable_matrix`, `uncorrectable_rank`, `recovery_probability`, `expurgation_candidates` |
 | `driver.py` | `ExpurgationConfig`, `expurgate`, `mean_recovery`, `ExpurgationResult` |
 | `encoding.py` | `random_encoding` (brickwork or all-to-all) |
+| `purification.py` | `from_purification` (system + reference tableau to code view) |
 
 The two core primitives the package rides on live with the simulator:
 `SparseGF2.measure_pauli` / `SparseGF2.pauli_anticommuting_rows` in

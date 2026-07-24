@@ -27,6 +27,9 @@ Layout:
   mid-sequence re-validation and stopping criteria.
 * :mod:`~sparsegf2.expurgation.encoding`: a random-encoding builder so
   the package runs standalone.
+* :mod:`~sparsegf2.expurgation.purification`: extract the system code
+  of a monitored purification run (system + reference qubits) into the
+  presentation the machinery uses.
 
 See ``src/sparsegf2/expurgation/README.md`` for a walkthrough.
 """
@@ -46,6 +49,7 @@ from sparsegf2.expurgation.erasure import (
     uncorrectable_matrix,
     uncorrectable_rank,
 )
+from sparsegf2.expurgation.purification import from_purification
 from sparsegf2.expurgation.roles import (
     ROLE_CHECK,
     ROLE_GAUGE,
@@ -76,4 +80,6 @@ __all__ = [
     # Encodings
     "GEOMETRIES",
     "random_encoding",
+    # Purification bridge
+    "from_purification",
 ]
