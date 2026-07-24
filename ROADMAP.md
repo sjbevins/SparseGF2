@@ -30,6 +30,12 @@ The simulator is feature-complete for single-trajectory MIPT studies:
   analyze later); a parameter-sweep driver with on-disk output; and the
   augmentable `Study` database that lets you add new observables to saved
   tableaux and re-plot without re-simulating.
+- **Expurgation** (`sparsegf2.expurgation`): the Gullans et al. (PRX 11,
+  031066) code-surgery loop run natively on the tableau, built on the core's
+  general `measure_pauli` kernel: role bookkeeping over pairs, exact erasure
+  recovery `2**-r_M`, witness-based candidate extraction, and the driver with
+  gauge/stabilizer strategies. Works with any tableau regardless of origin.
+  See `src/sparsegf2/expurgation/README.md`.
 
 ## Planned
 
@@ -39,6 +45,10 @@ The simulator is feature-complete for single-trajectory MIPT studies:
   overflow, to cut per-instance memory for area-law trajectories at large `n`.
 - **Finite-size-scaling helpers**: data-collapse fitting on top of the sweep
   output (critical-point and exponent estimation).
+- **Expurgation sweeps as studies**: record `k`, mean recovery, and candidate
+  weights as `Study` columns so expurgation parameter scans (over `n`, depth,
+  geometry, erasure model, strategy) run on the existing analysis rails; numba
+  mirrors for `measure_pauli` if expurgation ever becomes a hot path.
 
 These are enhancements; none blocks running studies today. The runtime floor
 stays numpy + numba; every heavier dependency (networkx, pyarrow, h5py, joblib,

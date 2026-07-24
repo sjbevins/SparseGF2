@@ -4,6 +4,55 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-07-24
+
+Expurgation: the code-surgery algorithm of Gullans, Krastanov, Huse, Jiang, and
+Flammia, PRX **11**, 031066 (2021), Sec. VI, implemented natively on the
+phase-free tableau (no signed simulator anywhere in the pipeline).
+
+### Core simulator
+
+- **`SparseGF2.measure_pauli(qubits, letters)`**: projective measurement of an
+  arbitrary multi-qubit Pauli via the same Aaronson-Gottesman three-step update
+  as `measure_z` (anticommuters by parity accumulation, `pivot_mode`-respecting
+  stabilizer pivot, decouple / re-pair / install). Returns the pivot pair index,
+  or `None` for a deterministic measurement (tableau unchanged, matching
+  `measure_z`). Native sparse and hybrid-dense paths; cross-checked against
+  Stim's `MPP` at the stabilizer-subspace level.
+- **`SparseGF2.pauli_anticommuting_rows(qubits, letters)`**: the underlying
+  commutation query (all generator rows anticommuting with a sparse Pauli),
+  `O(sum |inv[q]|)` over the support in sparse mode, bit-packed popcounts in
+  dense mode.
+- **`gf2_eliminate_on_columns`** promoted from an observables-internal helper
+  to `sparsegf2.core.linalg_gf2` (single source of truth): forward GF(2)
+  elimination on a chosen pivot-column set, shared by `contiguous_distance`
+  and the expurgation witness extraction.
+
+### Expurgation (`sparsegf2.expurgation`)
+
+- **`StabilizerCode`**: the (check / logical / gauge) role array over
+  destabilizer/stabilizer pairs plus the elementary measure-and-relabel move.
+  Tableau-agnostic: couples only to the public `SparseGF2` measurement and
+  commutation API, so encoding circuits, `from_symplectic` imports, and
+  hand-built tableaux all work; `from_encoding(sim, data_qubits)` covers the
+  standard convention.
+- **Erasure decoding**: `uncorrectable_matrix` (`M(S, L, e)` assembled from
+  per-site commutation queries), `uncorrectable_rank`
+  (`r_M = rank M - rank M_S`), exact `recovery_probability` (`2**-r_M`), and
+  `expurgation_candidates` (augmented `[M | I]` elimination whose witness bits
+  reconstruct the uncorrectable operators, lightest first).
+- **`expurgate` driver**: the published loop with mid-sequence re-validation,
+  gauge and stabilizer strategies, frozen validation patterns (monotone
+  before/after recovery comparison), and stopping criteria (`k_target`,
+  `recovery_target`, barren rounds, `max_rounds`, `k = 0`), returning a full
+  `ExpurgationResult` record; `random_encoding` builds brickwork or all-to-all
+  random codes so the package runs standalone.
+- **Tests**: the companion notes' worked examples traced verbatim (matrix
+  entries, extracted candidates, a brute-force-verified distance increase from
+  1 to 2), random-code cross-checks of `M` against dense symplectic products,
+  loop accounting and monotonicity, and Stim `MPP` parity for the new kernel.
+  See `src/sparsegf2/expurgation/README.md`.
+
 ## [2.0.0] - 2026-06-15
 
 A self-contained, phase-free sparse stabilizer simulator over GF(2) with a

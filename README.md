@@ -407,6 +407,13 @@ cross-checker (every circuit is checked against it by GF(2) RREF).
   database, and plotting are covered in
   [`notebooks/analysis.ipynb`](notebooks/analysis.ipynb). Built-in observables
   are listed in [`src/sparsegf2/analysis/__init__.py`](src/sparsegf2/analysis/__init__.py).
+- **Expurgation.** `sparsegf2.expurgation` implements the code-surgery
+  algorithm of [Gullans et al., PRX 11, 031066 (2021)](https://arxiv.org/abs/2010.09775),
+  Sec. VI, natively on the tableau: find the error operators an encoded code
+  cannot correct and measure them away, trading rate for distance and erasure
+  recovery. Built on the core's general `SparseGF2.measure_pauli` kernel and
+  agnostic to how the tableau was generated. See
+  [`src/sparsegf2/expurgation/README.md`](src/sparsegf2/expurgation/README.md).
 - **Notebooks** (executable, with the math worked out):
   [`master.ipynb`](notebooks/master.ipynb) (the core walkthrough),
   [`analysis.ipynb`](notebooks/analysis.ipynb) (run a study end to end),
@@ -415,9 +422,10 @@ cross-checker (every circuit is checked against it by GF(2) RREF).
 - **Project map:**
   ```
   src/sparsegf2/
-  ├── core/        the simulator: sparse_tableau, numba_kernels, symplectic, observables, linalg_gf2
-  ├── circuits/    graph-defined MIPT circuits: picture, graphs, matching, measurements, scheduler, runner, draw
-  └── analysis/    online/offline analysis, parameter sweeps, studies, plotting
+  ├── core/         the simulator: sparse_tableau, numba_kernels, symplectic, observables, linalg_gf2
+  ├── circuits/     graph-defined MIPT circuits: picture, graphs, matching, measurements, scheduler, runner, draw
+  ├── analysis/     online/offline analysis, parameter sweeps, studies, plotting
+  └── expurgation/  Gullans et al. code surgery on the tableau: roles, erasure decoding, the loop
   scripts/         inspect_circuit.py, plot_study.py
   benchmarks/      SparseGF2-vs-Stim and per-optimization performance scripts
   docs/figures/    the figures in this README and the scripts that produce them

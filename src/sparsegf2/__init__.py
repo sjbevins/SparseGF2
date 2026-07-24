@@ -54,6 +54,10 @@ Subpackages built on the core
 * :mod:`sparsegf2.analysis`: named observables, online/offline analysis of
   final tableaux, and the parameter-:func:`~sparsegf2.analysis.sweep` driver
   with on-disk (parquet / HDF5) output.
+* :mod:`sparsegf2.expurgation`: the Gullans et al. expurgation algorithm
+  (targeted measurement of uncorrectable error operators) run natively on
+  the tableau, with role bookkeeping, exact erasure recovery, and the loop
+  driver.
 
 Contracts
 =========

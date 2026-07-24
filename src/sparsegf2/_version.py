@@ -6,4 +6,4 @@ declares ``dynamic = ["version"]`` and reads this same attribute via
 string lives; do not duplicate it into ``pyproject.toml``.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
