@@ -8,6 +8,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytest.importorskip("matplotlib")
+pytest.importorskip("scipy")
+
 from studies.prl_production.analysis import fit_beta
 from studies.prl_production.analysis.scaling import ProfileLossLandscape
 

@@ -99,9 +99,11 @@ progress = [
     "tqdm>=4",
     "ipywidgets>=8",
 ]
-# The full analysis layer (sweep + on-disk output + arbitrary geometry + bars).
+# The full analysis layer (sweep + on-disk output + arbitrary geometry + bars
+# + SciPy-backed finite-size-scaling fits).
 analysis = [
     "sparsegf2[data,parallel,graph,progress]",
+    "scipy>=1.13",
 ]
 # Convenience union that pulls everything needed to develop on the workspace.
 dev = [
@@ -141,8 +143,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# E402: tests do `pytest.importorskip("stim")` before importing test helpers
-# that themselves import stim; the late import is intentional.
+# E402: optional-dependency tests call `pytest.importorskip(...)` before importing
+# helpers that require those extras; the late imports are intentional.
 "tests/**/*.py" = ["B011", "E402"]
 
 [tool.ruff.lint.isort]

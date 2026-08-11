@@ -35,18 +35,59 @@ def cfg(**kw) -> CircuitConfig:
 # (filename, caption-ish label, config)
 MODES = [
     # --- gating modes ---
-    ("gating_brickwork", cfg(graph_spec="cycle", gating_mode="brickwork", measurement_mode="bernoulli")),
-    ("gating_random_edge", cfg(graph_spec="complete", gating_mode="random_edge", measurement_mode="gated", p=0.5)),
-    ("gating_random_pool", cfg(graph_spec="complete", gating_mode="random_pool", measurement_mode="bernoulli")),
+    (
+        "gating_brickwork",
+        cfg(graph_spec="cycle", gating_mode="brickwork", measurement_mode="bernoulli"),
+    ),
+    (
+        "gating_random_edge",
+        cfg(graph_spec="complete", gating_mode="random_edge", measurement_mode="gated", p=0.5),
+    ),
+    (
+        "gating_random_pool",
+        cfg(graph_spec="complete", gating_mode="random_pool", measurement_mode="bernoulli"),
+    ),
+    (
+        "gating_all_edges",
+        cfg(graph_spec="cycle", gating_mode="all_edges", measurement_mode="bernoulli"),
+    ),
     # --- matching / 1-factorization modes (brickwork + uniform measure) ---
-    ("matching_round_robin", cfg(graph_spec="cycle", matching_mode="round_robin", measurement_mode="bernoulli")),
-    ("matching_palette", cfg(graph_spec="cycle", matching_mode="palette", measurement_mode="bernoulli")),
-    ("matching_fresh", cfg(graph_spec="cycle", matching_mode="fresh", measurement_mode="bernoulli")),
+    (
+        "matching_round_robin",
+        cfg(graph_spec="cycle", matching_mode="round_robin", measurement_mode="bernoulli"),
+    ),
+    (
+        "matching_palette",
+        cfg(graph_spec="cycle", matching_mode="palette", measurement_mode="bernoulli"),
+    ),
+    (
+        "matching_fresh",
+        cfg(graph_spec="cycle", matching_mode="fresh", measurement_mode="bernoulli"),
+    ),
     # --- measurement modes ---
-    ("measure_bernoulli", cfg(graph_spec="cycle", gating_mode="brickwork", measurement_mode="bernoulli")),
-    ("measure_uniform_count", cfg(graph_spec="cycle", gating_mode="brickwork", measurement_mode="uniform_count", meas_count=2)),
-    ("measure_gated", cfg(graph_spec="complete", gating_mode="random_edge", measurement_mode="gated", p=0.5)),
-    ("measure_random_pair", cfg(graph_spec="complete", gating_mode="random_edge", measurement_mode="random_pair", p=0.5)),
+    (
+        "measure_bernoulli",
+        cfg(graph_spec="cycle", gating_mode="brickwork", measurement_mode="bernoulli"),
+    ),
+    (
+        "measure_uniform_count",
+        cfg(
+            graph_spec="cycle",
+            gating_mode="brickwork",
+            measurement_mode="uniform_count",
+            meas_count=2,
+        ),
+    ),
+    (
+        "measure_gated",
+        cfg(graph_spec="complete", gating_mode="random_edge", measurement_mode="gated", p=0.5),
+    ),
+    (
+        "measure_random_pair",
+        cfg(
+            graph_spec="complete", gating_mode="random_edge", measurement_mode="random_pair", p=0.5
+        ),
+    ),
 ]
 
 
@@ -54,9 +95,14 @@ def main() -> None:
     GALLERY.mkdir(parents=True, exist_ok=True)
     # Main README figure: a small purification brickwork circuit (red reference register).
     main_cfg = CircuitConfig(graph_spec="cycle", n=4, picture="purification", p=0.3, depth_factor=2)
-    print("wrote", save_circuit(main_cfg, HERE / "circuit_diagram.png", max_layers=4, dpi=170, sample_seed=0))
+    print(
+        "wrote",
+        save_circuit(main_cfg, HERE / "circuit_diagram.png", max_layers=4, dpi=170, sample_seed=0),
+    )
     for name, c in MODES:
-        print("wrote", save_circuit(c, GALLERY / f"{name}.png", max_layers=5, dpi=200, sample_seed=1))
+        print(
+            "wrote", save_circuit(c, GALLERY / f"{name}.png", max_layers=5, dpi=200, sample_seed=1)
+        )
 
 
 if __name__ == "__main__":

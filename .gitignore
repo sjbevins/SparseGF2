@@ -12,6 +12,7 @@ build/
 # Virtual environments
 .venv/
 .venv-bora/
+.venv-stim/
 venv/
 env/
 .conda/
@@ -24,6 +25,8 @@ env/
 # Testing and tooling caches
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp*/
+.pytest-tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -31,6 +34,7 @@ htmlcov/
 .tox/
 /.test-tmp/
 /tmp/
+.codex_latex_check/
 
 # Jupyter
 .ipynb_checkpoints/

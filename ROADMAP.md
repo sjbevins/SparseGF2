@@ -18,18 +18,21 @@ The simulator is feature-complete for single-trajectory MIPT studies:
   edge under heavy measurement, with identical physical results either way.
 - **Circuits**: graph-defined random-Clifford + measurement circuits with three
   pictures (pure state, purification, single reference), arbitrary geometry via
-  `from_networkx` plus built-in `cycle` / `complete` / `path` / `lattice_2d`,
-  three gating modes (`brickwork`, `random_edge`, `random_pool`), three matching
-  modes, four measurement modes, early-stop and per-layer time series, and text
-  + visual circuit inspection.
+  `from_networkx` plus built-in `cycle` / `complete` / `path` / `lattice_2d` /
+  `newman_watts` / `watts_strogatz`, four gating modes (`brickwork`,
+  `random_edge`, `random_pool`, `all_edges`), three matching modes, four
+  measurement modes, exact purification stopping, literal depth overrides,
+  selected depth checkpoints, per-layer time series, and text + visual circuit
+  inspection.
 - **Observables**: entanglement entropy, mutual information, tripartite mutual
   information, code dimension, code rate, contiguous distance, and generator-weight
   diagnostics.
 - **Analysis**: a registry of named, picture-aware analyses usable both online
   (compute at end-of-circuit, discard the tableau) and offline (save tableaux,
-  analyze later); a parameter-sweep driver with on-disk output; and the
-  augmentable `Study` database that lets you add new observables to saved
-  tableaux and re-plot without re-simulating.
+  analyze later); a parameter-sweep driver with on-disk output; the augmentable
+  `Study` database that lets you add new observables to saved tableaux and
+  re-plot without re-simulating; and finite-size-scaling collapse helpers for
+  critical-point and exponent estimation, including graph bootstrap support.
 - **Expurgation** (`sparsegf2.expurgation`): the Gullans et al. (PRX 11,
   031066) code-surgery loop run natively on the tableau, built on the core's
   general `measure_pauli` kernel: role bookkeeping over pairs, exact erasure
@@ -43,8 +46,6 @@ The simulator is feature-complete for single-trajectory MIPT studies:
   RNG seeding and observable extraction, for cheaper trajectory averaging.
 - **Growable per-generator storage**: start `supp_q` / `inv` small and realloc on
   overflow, to cut per-instance memory for area-law trajectories at large `n`.
-- **Finite-size-scaling helpers**: data-collapse fitting on top of the sweep
-  output (critical-point and exponent estimation).
 - **Expurgation sweeps as studies**: record `k`, mean recovery, and candidate
   weights as `Study` columns so expurgation parameter scans (over `n`, depth,
   geometry, erasure model, strategy) run on the existing analysis rails; numba

@@ -1,7 +1,7 @@
 """Measurement-candidate selection for graph-defined circuits.
 
 After a gate layer fires, choose which of the ``n`` system qubits to
-measure in the Z basis this layer. Three modes:
+measure in the Z basis this layer. Four modes:
 
 - ``bernoulli``: every one of the ``n`` qubits is an independent
   candidate; each is measured with probability ``p``. (Named ``bernoulli``
@@ -10,6 +10,9 @@ measure in the Z basis this layer. Three modes:
   candidates; each measured with probability ``p``.
 - ``random_pair``: exactly 2 distinct qubits are sampled uniformly
   (without replacement) as the candidate set; each measured with prob ``p``.
+- ``uniform_count``: exactly ``count`` distinct qubits are sampled uniformly
+  (without replacement) as the candidate set; each measured with probability
+  ``p``. The default count is ``max(1, n // 2)``.
 
 The RNG draws are issued in a deterministic, mode-specific order (see
 :mod:`sparsegf2.circuits.scheduler`) so a sweep is bit-for-bit

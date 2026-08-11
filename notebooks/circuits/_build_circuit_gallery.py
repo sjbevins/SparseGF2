@@ -1,9 +1,9 @@
 """Build + execute ``notebooks/circuits/circuit_gallery.ipynb``.
 
-The VISUAL circuit gallery: actual rendered circuit diagrams (quantikz2), inline,
-for every picture / graph / gating / matching / measurement mode, so the reader
-can *look* at each circuit and confirm it is built correctly. It also shows the
-column-packing layout code inline and the matching text/CLI inspectors.
+The visual circuit gallery: representative rendered quantikz2 diagrams spanning
+all pictures, gate-placement modes, and measurement modes, plus selected graph
+and matching examples. It also shows the column-packing layout code inline and
+the matching text/CLI inspectors.
 """
 
 from __future__ import annotations
@@ -44,8 +44,13 @@ draw_circuit(CircuitConfig(graph_spec="cycle", n=4, picture="single_ref", p=0.16
     code(
         "from IPython.display import display\n"
         "from sparsegf2.circuits import (\n"
-        "    draw_circuit, inspect_circuit, trace_circuit, CircuitConfig,\n"
+        "    draw_circuit as _draw_circuit, inspect_circuit, trace_circuit, CircuitConfig,\n"
         ")\n"
+        "def draw_circuit(*args, **kwargs):\n"
+        "    rendered = _draw_circuit(*args, **kwargs)\n"
+        "    if isinstance(rendered, str):\n"
+        "        raise RuntimeError('visual gallery build requires working LaTeX and PDF-to-PNG tools')\n"
+        "    return rendered\n"
         "print('ready - drawing with quantikz2')\n"
     ),
     md(r"""## 1. The golden path - anatomy of a diagram
@@ -71,13 +76,13 @@ run on a real layer that contains the long-range cycle-wrap gate `(0, 7)`:"""),
         "    '''Greedy interval coloring - the heart of draw.py::_pack_stage.'''\n"
         "    columns = []                      # each column: list of occupied (lo,hi) intervals\n"
         "    assign = {}\n"
-        "    for op in ops:\n"
+        "    for op_index, op in enumerate(ops):\n"
         "        lo, hi = min(op.qubits), max(op.qubits)\n"
         "        for c, intervals in enumerate(columns):\n"
         "            if all(hi < a or lo > b for a, b in intervals):  # disjoint with all in col c\n"
-        "                intervals.append((lo, hi)); assign[op.label] = c; break\n"
+        "                intervals.append((lo, hi)); assign[op_index] = c; break\n"
         "        else:\n"
-        "            columns.append([(lo, hi)]); assign[op.label] = len(columns) - 1\n"
+        "            columns.append([(lo, hi)]); assign[op_index] = len(columns) - 1\n"
         "    return assign, len(columns)\n"
         "\n"
         "# grab a layer that includes the wrap edge (0,7)\n"
@@ -87,14 +92,14 @@ run on a real layer that contains the long-range cycle-wrap gate `(0, 7)`:"""),
         "                  and any(abs(o.qubits[0]-o.qubits[1]) > 1 for o in s.ops if o.kind=='gate'))\n"
         "gates = [o for o in wrap_layer.ops if o.kind == 'gate']\n"
         "assign, ncols = pack(gates)\n"
-        "for o in gates:\n"
-        "    print(f'{o.label:>8} on {o.qubits} -> column {assign[o.label]}')\n"
+        "for op_index, o in enumerate(gates):\n"
+        "    print(f'{o.label:>8} on {o.qubits} -> column {assign[op_index]}')\n"
         "print(f'\\n{len(gates)} gates packed into {ncols} columns with no interval overlap')\n"
     ),
-    md("The wrap gate `(0,7)` spans the whole register, so it lands in its own column. Here is that exact circuit drawn (`p=0` so we see only the gates):"),
-    code(
-        "draw_circuit(cfg, sample_seed=0, max_layers=3)\n"
+    md(
+        "The wrap gate `(0,7)` spans the whole register, so it lands in its own column. Here is that exact circuit drawn (`p=0` so we see only the gates):"
     ),
+    code("draw_circuit(cfg, sample_seed=0, max_layers=3)\n"),
     md(r"""## 3. The three pictures - verify the construction by eye
 
 This is the payoff: you can **see** that each picture is wired correctly.
@@ -144,20 +149,31 @@ may share vertices (not a matching), which you can see directly:"""),
         "draw_circuit(CircuitConfig(graph_spec='cycle', n=8, gating_mode='random_edge', gates_per_layer=4, p=0.1, depth_factor=2),\n"
         "             sample_seed=0, max_layers=4)\n"
     ),
+    md(r"""**`random_pool`** samples edges with replacement (default `n//2`
+per layer), so repeated edges are allowed. **`all_edges`** instead fires the
+entire stored edge list once in deterministic order; only the Clifford indices
+and measurements consume randomness:"""),
+    code(
+        "for gm in ('random_pool', 'all_edges'):\n"
+        "    print('gating_mode =', gm)\n"
+        "    display(draw_circuit(CircuitConfig(graph_spec='cycle', n=8, gating_mode=gm, p=0.1, depth_factor=2),\n"
+        "                         sample_seed=0, max_layers=3))\n"
+    ),
     md(r"""## 5. Measurement modes
 
 Measurement is two steps: a mode-specific **candidate** set of eligible qubits is
 chosen, then each candidate is *measured with probability p*. The candidate set
-differs by mode: `bernoulli` → every qubit is a candidate; `gated` → only the
-qubits this timestep's gates touched; `random_pair` → exactly 2 random qubits.
+differs by mode: `bernoulli` uses every qubit; `gated` uses only the qubits this
+timestep's gates touched; `random_pair` samples exactly 2 qubits; and
+`uniform_count` samples exactly `meas_count` qubits without replacement.
 
 The diagram shows the meters that **fired**. To see the full candidate set (which
 qubits were eligible, not just which fired), use the **text inspector** - it lists
-candidates and fired separately. Below, the same seed across the three modes:"""),
+candidates and fired separately. Below, the same seed across all four modes:"""),
     code(
-        "for mm in ('bernoulli', 'gated', 'random_pair'):\n"
+        "for mm in ('bernoulli', 'gated', 'random_pair', 'uniform_count'):\n"
         "    print('measurement_mode =', mm)\n"
-        "    display(draw_circuit(CircuitConfig(graph_spec='cycle', n=8, measurement_mode=mm, p=0.5, depth_factor=2),\n"
+        "    display(draw_circuit(CircuitConfig(graph_spec='cycle', n=8, measurement_mode=mm, meas_count=3 if mm == 'uniform_count' else None, p=0.5, depth_factor=2),\n"
         "                         sample_seed=1, max_layers=4))\n"
     ),
     md(r"""The text view makes the candidate-vs-fired split explicit (here `bernoulli`

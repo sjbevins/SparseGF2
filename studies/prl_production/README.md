@@ -8,7 +8,7 @@ recipes are version controlled.
 The first campaign is the single-reference purification-time phase diagram in
 `single_ref/`.  It uses Watts-Strogatz rewiring of `C(n, 2)`: every graph has
 `2n` edges and mean degree four.  See [PROTOCOL.md](PROTOCOL.md) before
-launching a production job.  [PROVENANCE.md](PROVENANCE.md) maps the active
+launching a production job.  [PROVENANCE.md](PROVENANCE.md) maps the recorded
 run to its published source commit, and [analysis/METHOD.md](analysis/METHOD.md)
 fixes the statistical protocol before the data are complete.
 
@@ -18,14 +18,16 @@ Directory map:
 - `single_ref/`: simulator, campaign runner, validation, and monitor.
 - `analysis/`: survival estimates, live aggregation, scaling fits, and the
   predeclared analysis protocol.
+- `graph_registry/`: the persistent 350,000-draw Watts-Strogatz graph catalog,
+  extensible invariant/result schema, and its validation protocol.
 - `manifests/`: exact run metadata and reproducibility records.
 - `data/`: generated graph banks and per-point trajectory arrays (ignored).
 - `logs/`: detached-run logs (ignored).
 - `figures/raw/`: direct diagnostic plots from unprocessed results.
 - `figures/diagnostics/`: loss landscapes, collapses, and audit plots.
 - `figures/publication/`: final paper-ready figures.
-- `STATUS.md`: human-readable progress report written atomically by the
-  monitor.
+- `STATUS.md`: version-controlled static campaign snapshot. The local monitor
+  may replace the research checkout's copy with live counters.
 
 From the repository root, use only the repository interpreter:
 

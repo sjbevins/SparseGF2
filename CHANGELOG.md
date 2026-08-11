@@ -33,6 +33,13 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 - Bounded three-parameter purification-time collapse tools with a profiled
   smooth master curve, deterministic multistart fitting, and all three
   pairwise profiled loss landscapes.
+- A versioned SQLite graph registry for 350,000 independently indexed
+  mean-degree-four Watts--Strogatz draws, with deterministic tuple-keyed seed
+  derivation, strict provenance, integrity checks, and resume-safe insertion.
+- Complete per-graph realized-rewiring and combinatorial-Laplacian algebraic-
+  connectivity analyses for the paper graph registry, including compact cell
+  summaries, conditional histograms, cumulative normalized-gain estimates,
+  deterministic bootstrap intervals, and reproducible figure recipes.
 
 ### Changed
 
@@ -50,6 +57,10 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 
 ### Fixed
 
+- The `analysis` extra now installs SciPy, which its finite-size-scaling and
+  production-collapse routines require; minimal-runtime CI skips only tests for
+  optional plotting/scaling dependencies. GitHub Actions now use the Node
+  24-based checkout and Python setup releases.
 - Expurgation now always consumes exactly one logical pair for every validated
   logically nontrivial measurement. Previously an encoded logical-Z operator
   could be mistaken for a deterministic pure-state measurement, or a
@@ -259,9 +270,10 @@ the stabilizer-subspace level, with no runtime Stim dependency.
 - The runtime floor stays numpy + numba; heavier dependencies (networkx, pyarrow,
   h5py, pandas, joblib, matplotlib) are optional extras (`graph`, `data`,
   `parallel`, `viz`, `analysis`), imported lazily only when used.
-- Every text file read/write specifies `encoding="utf-8"` and a `.gitattributes`
-  pins LF line endings, so the package builds and the suite runs identically on
-  Windows, macOS, and Linux.
+- Package-owned text metadata I/O specifies `encoding="utf-8"`, while a
+  `.gitattributes` pins LF line endings, so the installed package and its test
+  suite behave consistently on Windows, macOS, and Linux. Standalone benchmark
+  and research scripts are outside this portability claim.
 - Stim is its own `stim` extra, separate from `test`; the suite runs without it
   (the Stim-parity tests skip), so the simulator and tests install on any
   supported Python (3.12+) even when Stim has no wheel for it yet.

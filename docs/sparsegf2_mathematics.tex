@@ -54,9 +54,8 @@ the symplectic part of an Aaronson--Gottesman tableau, stored sparsely, and
 generates and samples the symplectic group $\Sp(2n,\F_2)$ natively. Part~I
 covers the simulator core (representation, gates, measurement, $\F_2$ linear
 algebra, the symplectic group, observables). Part~II covers the circuits layer
-(graph-defined monitored Clifford circuits). Part~III records implementation
-status and the remaining roadmap, including the Bravyi--Maslov sampler,
-batched execution, and finite-size-scaling analysis.
+(graph-defined monitored Clifford circuits). Part~III records implemented
+extensions and the smaller set of capabilities that remain future work.
 \end{abstract}
 
 \tableofcontents
@@ -549,9 +548,9 @@ is exactly correct.
 
 \subsection{Uniform sampling for arbitrary \texorpdfstring{$n$}{n}}
 \label{sec:sampling}
-$\texttt{random\_symplectic}(n,\mathrm{rng})$ samples uniformly from
-$\Sp(2n,\F_2)$ by realizing the \emph{same} greedy construction with uniform
-choices at each step (the incremental kernel-basis sampler). It maintains the
+\texttt{random\_symplectic}, through its \texttt{sampler} argument, exposes two
+uniform constructions. The explicit \texttt{kernel\_basis} option realizes the
+\emph{same} greedy construction with uniform choices at each step. It maintains the
 symplectic complement $W_i$ of the previously chosen pairs as the right kernel
 of the constraint matrix
 \[
@@ -599,13 +598,17 @@ $\Pr[\text{output}=t]=2\cdot2^{-m}=2^{-(m-1)}$, uniform over the
 $2^{\,m-1}$-element coset $\ell^{-1}(1)$. As $c'\mapsto c'K$ maps this coset
 bijectively onto $\ell^{-1}(1)$, $Z_i'$ is uniform there.
 \end{proof}
-The cost is $O(n^3)$ bit-operations (a kernel computation per step). For $n=2$
-the routine short-circuits to a uniform draw from the cached $\Sp(4,\F_2)$ table
-so the RNG state advances identically across entry points.
+The kernel-basis construction costs $O(n^3)$ bit-operations (a kernel
+computation per step). For $n=2$ the routine short-circuits to a uniform draw
+from the cached $\Sp(4,\F_2)$ table so the RNG state advances identically across
+entry points.
 \begin{remark}
-The asymptotically faster Bravyi--Maslov $O(n^2)$ canonical-form
-sampler~\cite{BM} is not used; the kernel-basis method is simpler to verify and
-adequate for the $n\lesssim 200$ regime targeted here
+The \texttt{bravyi\_maslov} option implements the canonical decomposition
+$C=F_1HSF_2$ with a Mallows-distributed permutation~\cite{BM}. It requires
+$O(n^2)$ logical bit operations (dense matrix products add implementation
+overhead) and is the default selected by \texttt{sampler=auto} for $n\ne2$.
+The kernel-basis method remains available as the simpler independently verified
+construction; both distributions are uniform but consume different RNG draws
 (Section~\ref{sec:roadmap-bm}).
 \end{remark}
 
@@ -712,32 +715,46 @@ vertex; it is \emph{perfect} if it covers every vertex. A
 \end{definition}
 By Vizing's theorem the chromatic index of a simple graph is $\Delta$ or
 $\Delta+1$; a $\Delta$-regular graph is $1$-factorable iff it is Class~1, and
-then its $\Delta$ color classes are perfect matchings. The two implemented
-families (for even $|V|=n$):
+then its $\Delta$ color classes are perfect matchings. Six string-specified
+families are implemented: cycle, complete, path, a square two-dimensional open
+lattice, Newman--Watts shortcut graphs, and Watts--Strogatz rewired circulants.
+The last two accept parameters in the specification string and are realized
+from the configuration's base seed. Arbitrary simple undirected NetworkX graphs
+are accepted through \texttt{from\_networkx}. Two useful exact constructions
+(for even $|V|=n$) are:
 \begin{itemize}[leftmargin=1.5em]
 \item \textbf{Cycle $C_n$:} $2$-regular, $\chi'=2$, with two alternating perfect
   matchings $\{(0,1),(2,3),\dots\}$ and $\{(1,2),(3,4),\dots,(n-1,0)\}$.
 \item \textbf{Complete $K_n$:} $(n-1)$-regular, $\chi'=n-1$, from the round-robin
   tournament $1$-factorization (fix vertex $n-1$, rotate the rest).
 \end{itemize}
-For odd $n$ neither has a perfect matching, and brickwork gating is rejected at
-configuration time. Graphs are stored with their edge list, a canonical
-$1$-factorization (when one exists), a uniform perfect-matching sampler, and a
-graph6 string.
+For odd $n$ neither cycle nor complete has a perfect matching. Paths and open
+lattices carry proper edge-color classes, while stochastic and arbitrary graphs
+may carry only their edge list and, when available, a fresh perfect-matching
+sampler. A configuration rejects a matching mode that its realized graph cannot
+supply. Every topology stores a canonical edge list and graph6 string, together
+with any available factorization and matching sampler.
 
 \subsection{Gating}
 Each layer fires a set of gate edges, each carrying an independent uniform
 $\Sp(4,\F_2)$ Clifford (Section~\ref{sec:collapse}):
 \begin{itemize}[leftmargin=1.5em]
-\item \textbf{Brickwork:} a whole perfect matching ($n/2$ gates). The matching
-  is chosen by the matching mode:
+\item \textbf{Brickwork:} one disjoint stored matching or edge-color class. On
+  even cycles and complete graphs these are perfect matchings ($n/2$ gates);
+  path, lattice, and arbitrary-graph color classes may leave vertices idle. The
+  matching is chosen by the matching mode:
   \emph{round\_robin} (cycle through the $1$-factorization, layer $t$ uses
-  matching $t\bmod\chi'$), \emph{palette} (uniform over the $\chi'$ matchings of
-  the fixed $1$-factorization), or \emph{fresh} (uniform over \emph{all} perfect
-  matchings of the graph).
+  matching $t\bmod\chi'$), \emph{palette} (uniform over the $\chi'$ stored
+  classes), or \emph{fresh} (uniform over \emph{all} perfect matchings of the
+  graph, when a sampler is available).
 \item \textbf{random\_edge:} $m$ distinct uniformly-random edges per layer (which
   may share vertices, so not a matching), where $m=\texttt{gates\_per\_layer}$ may
   be a constant or a function of $n$ (e.g.\ $m=n/2$).
+\item \textbf{random\_pool:} $m$ uniformly-random edges sampled with replacement.
+  Its default is $m=n/2$; repeated edges and shared vertices are allowed.
+\item \textbf{all\_edges:} every stored graph edge fires once in deterministic
+  edge-list order. Randomness is spent only on the Clifford choice and the
+  measurement process.
 \end{itemize}
 
 \subsection{Measurement process: candidates and firing}
@@ -751,6 +768,8 @@ mode-specific:
 \item \textbf{gated:} $\mathcal{K}=\{$qubits the layer's gates touched$\}$.
 \item \textbf{random\_pair:} $\mathcal{K}=\{2$ qubits chosen uniformly without
   replacement$\}$.
+\item \textbf{uniform\_count:} $\mathcal{K}$ is a uniformly sampled set of
+  exactly \texttt{meas\_count} distinct qubits (default $\max(1,\lfloor n/2\rfloor)$).
 \end{itemize}
 Only $\mathcal{F}$ is measured; the unfired candidates are recorded (for
 inspection) but leave the state unchanged.
@@ -759,36 +778,57 @@ inspection) but leave the state unchanged.
 \label{sec:depth}
 Depth is measured in \emph{gates per qubit}, so circuits are comparable across
 gating modes. The base budget is $T_{\mathrm{base}}=\texttt{depth\_factor}\cdot n$
-for $O(n)$ depth, or $\texttt{depth\_factor}\cdot\lceil\log_2 n\rceil$ for
-$O(\log n)$; the \texttt{until\_purified} mode currently uses the $O(n)$ value as
-a fixed depth cap (the early-termination behavior it anticipates is a roadmap
-item, Part~III). A brickwork layer fires $n/2$ gates and touches every qubit once,
-so $T_{\mathrm{base}}$ \emph{is} its gates-per-qubit budget. A random\_edge layer
+for $O(n)$ and \texttt{until\_purified} depth, or
+$\texttt{depth\_factor}\cdot\lceil\log_2 n\rceil$ for $O(\log n)$. In
+\texttt{until\_purified} mode this value is a cap: the runner checks the
+picture's order parameter adaptively and stops at its exact first zero. The
+normalization is calibrated to a full brickwork matching of $n/2$ gates that
+touches every qubit once, so $T_{\mathrm{base}}$ is its gates-per-qubit budget.
+A non-perfect stored color class still counts as one brickwork layer and can
+apply fewer gates; the record reports the realized total. A random\_edge layer
 fires $m$ gates touching $2m$ qubit-slots, i.e.\ a fraction $2m/n$ of the qubits
 per layer, so it needs
 \begin{equation}
 \label{eq:depthnorm}
   T_{\mathrm{random\_edge}} \;=\; \mathrm{round}\!\Big(T_{\mathrm{base}}\cdot\frac{n}{2m}\Big)
 \end{equation}
-layers for the same budget. Thus single-edge random\_edge ($m=1$) runs
-$O(n^2)$ layers; $m=n/2$ matches brickwork. This is the precise sense in which
-the three gating styles apply the \emph{same} total gate count at equal
-\texttt{depth\_factor}.
+layers for the same budget; the same normalization applies to random\_pool.
+Thus single-edge random\_edge ($m=1$) runs $O(n^2)$ layers, while $m=n/2$
+matches brickwork. The all\_edges architecture instead defines one layer as one
+pass over the complete stored edge list and therefore uses the base count.
+Finally, a positive \texttt{total\_layers\_override} bypasses every depth formula
+and specifies a literal measured-layer cap.
 
 \subsection{Expected gate-to-measurement ratio}
-With $e_g$ the expected gates per layer ($e_g=n/2$ for brickwork, $e_g=m$ for
-random\_edge) and $e_m$ the expected measurements per layer, the expected ratio
-recorded before simulation is $r=e_g/e_m$ (or $\infty$ when $e_m=0$), where by
-measurement mode
+With $e_g$ the configured pre-run gate estimate ($e_g=n/2$ for brickwork,
+$e_g=m$ for the two random-edge modes, and $e_g=|E|$ for all\_edges) and $e_m$
+the corresponding measurement estimate, the ratio recorded before simulation
+is $r=e_g/e_m$ (or $\infty$ when $e_m=0$), where by measurement mode
 \begin{equation}
   e_m \;=\;
   \begin{cases}
     n\,p & \text{bernoulli},\\
-    2\,e_g\,p & \text{gated (each gate touches 2 qubits)},\\
-    2\,p & \text{random\_pair}.
+    2e_g\,p & \text{gated (non-all\_edges)},\\
+    |\bigcup_{e\in E}e|\,p & \text{gated (all\_edges)},\\
+    2\,p & \text{random\_pair},\\
+    \texttt{meas\_count}\,p & \text{uniform\_count}.
   \end{cases}
 \end{equation}
-For the brickwork$+$bernoulli baseline this collapses to $r=\tfrac{n/2}{np}=\tfrac1{2p}$.
+For the full-brickwork$+$bernoulli baseline this collapses to
+$r=\tfrac{n/2}{np}=\tfrac1{2p}$. For a non-perfect brickwork color class the
+configured $e_g=n/2$ is likewise a convention rather than the realized count.
+The non-all\_edges gated estimate uses $2e_g$ even when gate endpoints overlap
+and is then a lower bound on the realized ratio. The record's realized gate and
+measurement totals, and hence its realized ratio, are exact.
+
+\subsection{Time series and checkpoints}
+The runner may record the order parameter after every measured layer. It also
+accepts selected one-based checkpoint layers. With no callback, each checkpoint
+stores an independent symplectic-tableau snapshot; with a callback, its
+read-only return value is stored instead. A callback may return the distinguished
+\texttt{CHECKPOINT\_STOP} sentinel, which stops after that checkpoint without
+storing the sentinel. Post-loop observables are evaluated on the actual final
+state in all cases.
 
 % ---------------------------------------------------------------------
 \section{Physics pictures and order parameters}

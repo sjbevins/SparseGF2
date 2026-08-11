@@ -4,6 +4,9 @@ import csv
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("matplotlib")
+
 from studies.prl_production.analysis import plot_live as plot_module
 from studies.prl_production.analysis.plot_live import plot_live_summaries
 

@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytest.importorskip("scipy")
+
 from studies.prl_production.analysis import scaling
 from studies.prl_production.analysis.scaling import (
     CollapseBounds,

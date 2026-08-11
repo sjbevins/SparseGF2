@@ -1,160 +1,139 @@
-"""Build + execute ``notebooks/circuits/scheduler.ipynb`` - CircuitBuilder,
-the single-RNG model, the load-bearing draw order, and the layer stream."""
+"""Build and execute ``notebooks/circuits/scheduler.ipynb``."""
 
 from __future__ import annotations
 
 from _nbtools import build_and_execute, code, md
 
 CELLS = [
-    md(r"""# `sparsegf2.circuits.scheduler` - config + seed → layer stream
+    md(
+        r"""# `sparsegf2.circuits.scheduler` - config plus seed to layers
 
-[`scheduler.py`](../../src/sparsegf2/circuits/scheduler.py) is the **single
-source of truth for a circuit realization**. Given a `CircuitConfig` and a
-`sample_seed`, `CircuitBuilder` emits a deterministic stream of
-`CircuitLayer` records - gate pairs, their Clifford indices, and the qubits
-to measure - *without touching the simulator*. That separation means the
-same realization can be replayed on any backend (including a Stim parity
-check).
+`CircuitBuilder` is simulator-free. It converts a validated `CircuitConfig`
+and one `sample_seed` into a deterministic stream of `CircuitLayer` records.
+Each layer contains gate pairs, one symplectic Clifford-table index per gate,
+the measurement candidates, and the subset that actually fires.
 
-## Contents
-1. `CircuitLayer` - the per-layer record
-2. The single-RNG model and the seed
-3. The **load-bearing draw order**
-4. `_place_gates` - brickwork vs random_edge
-5. `layers`, `warmup_layers_iter`, `schedule`
-6. Determinism & why the draw order can't move"""),
-    md(r"""## 1. `CircuitLayer`
-
-```python
-@dataclass
-class CircuitLayer:
-    gate_pairs: list[tuple[int, int]]   # the 2q-gate qubit pairs this layer
-    cliff_indices: np.ndarray           # int64 (n_gates,) - index into the Sp(4) table
-    meas_qubits: list[int]              # sorted qubits measured this layer
-```
-
-`n_gates` and `n_measurements` are convenience properties. A layer is pure
-data: *what* to do, not *how*. The runner reads it and calls
-`apply_gate_2q` / `measure_z`."""),
-    code(
-        "import numpy as np\n"
-        "from sparsegf2.circuits import CircuitConfig\n"
-        "from sparsegf2.circuits.scheduler import CircuitBuilder, CircuitLayer\n"
-        "cfg = CircuitConfig(graph_spec='cycle', n=8, depth_factor=2)\n"
-        "layer = CircuitBuilder(cfg, sample_seed=0).schedule()[0]\n"
-        "print('gate_pairs   :', layer.gate_pairs)\n"
-        "print('cliff_indices:', layer.cliff_indices, '(', layer.cliff_indices.dtype, ')')\n"
-        "print('meas_qubits  :', layer.meas_qubits)\n"
-        "print('n_gates / n_measurements:', layer.n_gates, '/', layer.n_measurements)\n"
+Schema v2 seeds the construction generator with the pair
+`[base_seed, sample_seed]`. The old scalar sum aliased distinct cells such as
+`(10, 2)` and `(11, 1)`; pair seeding keeps those streams independent.
+"""
     ),
-    md(r"""## 2. The single-RNG model and the seed
-
-`CircuitBuilder` seeds **one** `np.random.default_rng(base_seed +
-sample_seed)` and consumes it for all construction randomness. The
-measurement *outcomes* are a **separate** stream living on the `SparseGF2`
-instance (seeded independently by the runner), so the circuit realization
-and the measurement coins are decoupled - you can replay the exact same
-circuit with different outcomes by changing only the outcome stream. (A
-3-way RNG split is a documented option; one stream keeps the mental model
-simple. See the [`runner`](runner.ipynb) notebook for the outcome stream.)"""),
     code(
-        "b = CircuitBuilder(CircuitConfig(graph_spec='cycle', n=8, depth_factor=1), sample_seed=5)\n"
-        "print('builder seed = base_seed + sample_seed =', b.seed, '= 42 + 5')\n"
-        "print('graph reused from config:', b.graph.name)\n"
+        "from sparsegf2.circuits import CircuitBuilder, CircuitConfig, from_spec\n\n"
+        "cfg = CircuitConfig(\n"
+        "    graph_spec='cycle', n=8, p=0.25, total_layers_override=2,\n"
+        "    base_seed=10,\n"
+        ")\n"
+        "layer = CircuitBuilder(cfg, sample_seed=2).schedule()[0]\n"
+        "print('gate pairs       :', layer.gate_pairs)\n"
+        "print('Clifford indices :', layer.cliff_indices)\n"
+        "print('meas candidates  :', layer.meas_candidates)\n"
+        "print('meas qubits      :', layer.meas_qubits)\n"
     ),
-    md(r"""## 3. The load-bearing draw order
+    md(
+        r"""## Four gate-placement modes
 
-Reproducibility from `(base_seed, sample_seed, layer_index)` requires the
-RNG be consumed in a **fixed order each layer**. The contract:
+The fixed per-layer draw order is load-bearing for reproducibility:
 
-1. **gate placement** - `brickwork`: matching selection (`palette`/`fresh`
-   draw; `round_robin` draws nothing); `random_edge`: one edge index.
-2. **Clifford indices** - one `rng.integers(0, n_cliffords)` per gate pair.
-3. **measurement candidates** - mode-specific draws.
+1. place gates (`all_edges` and round-robin brickwork consume no placement
+   randomness);
+2. draw one Clifford index per gate;
+3. select measurement candidates where needed, then draw their Bernoulli
+   firing coins.
 
-This order is identical in `warmup_layers_iter` and `layers` for steps 1-2.
-Changing it (or the matching mode, which changes how many draws step 1
-makes) reshuffles every later draw - which is why both are part of the
-schema's reproducibility guarantee."""),
-    md(r"""## 4. `_place_gates` - brickwork vs random_edge
-
-```python
-def _place_gates(self, t, edges, n_edges):
-    if gating_mode == "brickwork":
-        pairs = select_matching(self.graph, matching_mode, t, self.rng)   # whole matching
-    elif gating_mode == "random_edge":
-        m = min(cfg.resolved_gates_per_layer(), n_edges)        # m random edges
-        idx = self.rng.choice(n_edges, size=m, replace=False)
-        pairs = [edges[int(j)] for j in idx]
-    cliff_idx = self.rng.integers(0, n_cliffords, size=len(pairs))         # step 2
-    return pairs, cliff_idx
-```
-
-`brickwork` fires a whole perfect matching ($n/2$ gates); `random_edge`
-fires $m = $ `gates_per_layer` distinct random edges (which may share
-vertices - *not* a matching). $m=1$ is the single-edge model; $m=n/2$ is the
-"O(n) random edges per step" model. Both then draw one Clifford index per
-pair, in the fixed order. (Recall from [`config`](config.ipynb) that
-`total_layers` scales with $m$, so a single-edge circuit runs $O(n^2)$
-layers.)"""),
+`random_edge` draws distinct edge indices. `random_pool` draws with replacement,
+so repeated edges are allowed and the requested count may exceed `|E|`.
+`all_edges` returns the complete stored edge list in its canonical order.
+"""
+    ),
     code(
-        "# brickwork: n/2 gates/layer; random_edge: m gates/layer\n"
-        "bw = CircuitBuilder(CircuitConfig(graph_spec='cycle', n=8, gating_mode='brickwork', depth_factor=2), 0).schedule()\n"
-        "re1 = CircuitBuilder(CircuitConfig(graph_spec='cycle', n=8, gating_mode='random_edge', gates_per_layer=1, depth_factor=2), 0).schedule()\n"
-        "ren = CircuitBuilder(CircuitConfig(graph_spec='cycle', n=8, gating_mode='random_edge', gates_per_layer=4, depth_factor=2), 0).schedule()\n"
-        "print('brickwork    gates/layer:', sorted({L.n_gates for L in bw}))   # {4}\n"
-        "print('random m=1   gates/layer:', sorted({L.n_gates for L in re1}), '| layers:', len(re1), '(O(n^2))')\n"
-        "print('random m=n/2 gates/layer:', sorted({L.n_gates for L in ren}), '| layers:', len(ren), '(matches brickwork)')\n"
-        "from sparsegf2.circuits import cycle_graph\n"
-        "edges = set(cycle_graph(8).edges)\n"
-        "print('random_edge picks graph edges:', all((min(u,v),max(u,v)) in edges for L in ren for u,v in L.gate_pairs))\n"
+        "modes = {\n"
+        "    'brickwork': {},\n"
+        "    'random_edge': {'gates_per_layer': 2},\n"
+        "    'random_pool': {'gates_per_layer': 6},\n"
+        "    'all_edges': {},\n"
+        "}\n"
+        "for mode, extra in modes.items():\n"
+        "    local = CircuitConfig(\n"
+        "        graph_spec='cycle', n=8, gating_mode=mode, p=0.0,\n"
+        "        total_layers_override=1, **extra,\n"
+        "    )\n"
+        "    first = CircuitBuilder(local, 4).schedule()[0]\n"
+        "    print(f'{mode:>11}: {first.n_gates} gates  {first.gate_pairs}')\n"
+        "    if mode == 'all_edges':\n"
+        "        assert first.gate_pairs == from_spec('cycle', 8).edges\n"
     ),
-    md(r"""## 5. `layers`, `warmup_layers_iter`, `schedule`
+    md(
+        r"""## Four measurement modes
 
-- `layers()` yields the $T=$ `total_layers()` measured layers (gates +
-  measurements).
-- `warmup_layers_iter()` yields `warmup_layers` **gate-only** layers
-  (`meas_qubits` always empty) - pre-scrambling. It consumes the RNG
-  *before* `layers()`, so the measured phase still begins at the scheduler's
-  canonical $t=0$ for the gating pattern.
-- `schedule()` is the eager list form of `layers()`.
-
-Warmup matters for the purification picture (scramble the Bell pairs across
-the system before measuring); for `pure_state` it just deepens the circuit."""),
+`bernoulli` makes every system qubit eligible. `gated` uses the distinct gate
+endpoints. `random_pair` selects two distinct candidates, and `uniform_count`
+selects `meas_count` distinct candidates. Candidate selection and firing are
+recorded separately so circuit visualizations can show both.
+"""
+    ),
     code(
-        "cfg = CircuitConfig(graph_spec='cycle', n=8, picture='purification', depth_factor=2, warmup_layers=3)\n"
-        "b = CircuitBuilder(cfg, 0)\n"
-        "warm = list(b.warmup_layers_iter())\n"
-        "print('warmup layers:', len(warm), '| all gate-only:', all(L.n_measurements == 0 for L in warm))\n"
-        "print('measured layers:', len(b.schedule()), '= depth_factor*n = 2*8')\n"
+        "measurement_modes = {\n"
+        "    'bernoulli': {},\n"
+        "    'gated': {},\n"
+        "    'random_pair': {},\n"
+        "    'uniform_count': {'meas_count': 3},\n"
+        "}\n"
+        "for mode, extra in measurement_modes.items():\n"
+        "    local = CircuitConfig(\n"
+        "        graph_spec='cycle', n=8, measurement_mode=mode, p=1.0,\n"
+        "        total_layers_override=1, **extra,\n"
+        "    )\n"
+        "    first = CircuitBuilder(local, 5).schedule()[0]\n"
+        "    assert first.meas_qubits == first.meas_candidates\n"
+        "    print(f'{mode:>13}: candidates={first.meas_candidates}')\n"
     ),
-    md(r"""## 6. Determinism
+    md(
+        r"""## Pair-seeded construction and independent runner streams
 
-Same `(config, sample_seed)` → byte-identical schedule (gate pairs, Clifford
-indices, measured qubits). Different seeds diverge. This is the property the
-runner and the Stim-parity tests stand on:"""),
+Equal scalar sums no longer imply equal construction streams. The runner adds
+two independent tagged streams without perturbing this schedule:
+`[base_seed, sample_seed, 0x6D656173]` for measurement outcomes and
+`[base_seed, sample_seed, 0x73637262]` for the optional global scramble.
+Thus toggling `scramble` cannot move gate placement, Clifford, or measurement
+candidate draws.
+"""
+    ),
     code(
-        "cfg = CircuitConfig(graph_spec='cycle', n=8, depth_factor=2, matching_mode='palette', p=0.3)\n"
-        "a = CircuitBuilder(cfg, 7).schedule()\n"
-        "b = CircuitBuilder(cfg, 7).schedule()\n"
-        "same = all(la.gate_pairs == lb.gate_pairs and np.array_equal(la.cliff_indices, lb.cliff_indices)\n"
-        "           and la.meas_qubits == lb.meas_qubits for la, lb in zip(a, b, strict=True))\n"
-        "print('seed 7 == seed 7 :', same)\n"
-        "c = CircuitBuilder(cfg, 8).schedule()\n"
-        "print('seed 7 != seed 8 :', any(not np.array_equal(la.cliff_indices, lc.cliff_indices)\n"
-        "                                 for la, lc in zip(a, c, strict=True)))\n"
+        "a_cfg = CircuitConfig(graph_spec='cycle', n=8, base_seed=10, total_layers_override=1)\n"
+        "b_cfg = CircuitConfig(graph_spec='cycle', n=8, base_seed=11, total_layers_override=1)\n"
+        "a_draws = CircuitBuilder(a_cfg, 2).rng.integers(2**32, size=6)\n"
+        "b_draws = CircuitBuilder(b_cfg, 1).rng.integers(2**32, size=6)\n"
+        "print('equal scalar sums:', 10 + 2 == 11 + 1)\n"
+        "print('pair-seeded streams differ:', not (a_draws == b_draws).all())\n"
     ),
-    md(r"""## Summary
+    md(
+        r"""## Warmup and measured iterators
 
-- `CircuitBuilder` is the deterministic, simulator-free source of a
-  realization: a stream of `CircuitLayer` records.
-- One construction RNG, consumed in a **fixed draw order** (placement →
-  clifford → measurement) that is load-bearing for reproducibility.
-- `brickwork` (a matching) vs `random_edge` (one edge); warmup prepends
-  gate-only layers; `schedule()` is the eager form.
+`warmup_layers_iter()` yields gate-only prescrambling layers. `layers()` yields
+the measured phase lazily, while `schedule()` materializes that phase as a list.
+A literal `total_layers_override` controls the measured iterator only.
+"""
+    ),
+    code(
+        "local = CircuitConfig(\n"
+        "    graph_spec='cycle', n=8, picture='purification',\n"
+        "    warmup_layers=2, total_layers_override=3,\n"
+        ")\n"
+        "builder = CircuitBuilder(local, 9)\n"
+        "warm = list(builder.warmup_layers_iter())\n"
+        "measured = builder.schedule()\n"
+        "print('warmup / measured:', len(warm), '/', len(measured))\n"
+        "print('warmup is gate-only:', all(layer.n_measurements == 0 for layer in warm))\n"
+    ),
+    md(
+        r"""## Summary
 
-Next: [`runner`](runner.ipynb) - executing the layer stream on `SparseGF2`
-and reading off the order parameter."""),
+The scheduler implements all four gate modes and all four measurement modes
+with a fixed schema-v2 construction stream. Measurement outcomes and global
+scrambling remain separately tagged runner streams.
+"""
+    ),
 ]
 
 if __name__ == "__main__":

@@ -19,6 +19,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+pytest.importorskip("scipy")
+
 import sparsegf2.analysis.fss_collapse as fss_module
 from sparsegf2.analysis import (
     fit_fixed_pc,
@@ -261,8 +263,6 @@ def test_smooth_pc_collapse_tracks_trend_and_tightens_scatter():
 # ----------------------------------------------------------------------
 # (b) observable-agnostic on REAL simulator output (small + fast)
 # ----------------------------------------------------------------------
-
-pytest.importorskip("networkx")  # WS graph spec needs the 'graph' extra
 
 _WS_SIZES = (8, 12, 16)
 _WS_PS = (0.05, 0.12, 0.20, 0.30, 0.45)

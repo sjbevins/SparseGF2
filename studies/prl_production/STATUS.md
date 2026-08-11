@@ -1,22 +1,34 @@
 # PRL production status
 
-- **Production state:** active locally; live counters are intentionally not versioned
+Static snapshot: **2026-08-11 (America/New_York)**.
+
+- **Production state:** paused after the runner reported a failure
 - **Run ID:** `f76def10804a67a6`
 - **Simulator review:** complete and published
 - **Smoke validation:** complete
+- **Points complete:** 8,537 / 37,400
+- **Trajectories complete:** 4,270,300 / 18,700,000
+- **Observed purification events:** 3,604,672
 
-- Production grid: 37,400 points and 18,700,000 trajectories.
-- Production geometry: Watts-Strogatz `C(n,2)`, exactly `2n` edges and
-  mean degree 4.
-- Production depth: `T_max=8n`, with `S(R)` evaluated after every measured
-  layer.
-- Smoke run: 18 / 18 points and 72 / 72 trajectories complete.
-- Smoke events: 48 observed purification times and 24 correctly censored
-  `p=0` trajectories.
-- Resume replay: byte-identical across all 24 NPZ files; aggregate SHA-256
-  `6fec0dae233cfb51ed73d1bf98f16a445a220fe46a1296ab3fd21c3f917dfa20`.
+| n | trajectories complete | points complete |
+|---:|---:|---:|
+| 32 | 534,500 / 2,337,500 | 1,069 / 4,675 |
+| 48 | 534,500 / 2,337,500 | 1,069 / 4,675 |
+| 64 | 534,425 / 2,337,500 | 1,068 / 4,675 |
+| 96 | 534,125 / 2,337,500 | 1,068 / 4,675 |
+| 128 | 533,500 / 2,337,500 | 1,067 / 4,675 |
+| 160 | 533,375 / 2,337,500 | 1,066 / 4,675 |
+| 192 | 533,200 / 2,337,500 | 1,066 / 4,675 |
+| 256 | 532,675 / 2,337,500 | 1,064 / 4,675 |
 
-The local monitor replaces the research checkout's copy of this document
-atomically with live progress and ETA.  See [`PROVENANCE.md`](PROVENANCE.md)
-for the immutable source fingerprint and published commit used by the active
-run; generated data, live manifests, and logs remain local.
+The campaign uses Watts--Strogatz rewiring of `C(n,2)`, exactly `2n` edges
+and mean degree four, with `T_max=8n` and `S(R)` evaluated after every measured
+layer. Completed point files were written atomically and remain valid. An
+identical launch resumes incomplete graph indices rather than repeating
+completed trajectories; inspect the ignored local runner log before resuming
+to determine the failure cause.
+
+This file is a version-controlled snapshot, not a live monitor. Generated
+data, runtime manifests, and logs remain local. See
+[`PROVENANCE.md`](PROVENANCE.md) for the immutable source fingerprint and
+published commit required to resume this run.

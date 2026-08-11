@@ -1,0 +1,6 @@
+# Canonicalize author identities so tooling (git shortlog, GitHub) shows a
+# single contributor. The GitHub web-edit "noreply" identity and the W&M
+# institutional address are the same person as the primary git identity.
+sjbevins <sjbevins64@gmail.com> Samuel Bevins <103068729+sjbevins@users.noreply.github.com>
+sjbevins <sjbevins64@gmail.com> <103068729+sjbevins@users.noreply.github.com>
+sjbevins <sjbevins64@gmail.com> <sjbevins@wm.edu>
