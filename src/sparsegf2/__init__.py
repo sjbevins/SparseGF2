@@ -35,6 +35,7 @@ What you get
 
 * **Observables**, in :mod:`sparsegf2.core.observables`:
   :func:`subsystem_rank`, :func:`entanglement_entropy`,
+  :func:`single_qubit_entropy`,
   :func:`mutual_information`, :func:`tripartite_mutual_info`,
   :func:`code_dimension`, :func:`generator_weights`,
   :func:`stabilizer_weight_spectrum`,
@@ -84,6 +85,7 @@ from sparsegf2.core.observables import (
     entanglement_entropy,
     generator_weights,
     mutual_information,
+    single_qubit_entropy,
     stabilizer_weight_spectrum,
     subsystem_rank,
     tripartite_mutual_info,
@@ -161,6 +163,7 @@ __all__ = [
     "entanglement_entropy",
     "generator_weights",
     "mutual_information",
+    "single_qubit_entropy",
     "stabilizer_weight_spectrum",
     "subsystem_rank",
     "tripartite_mutual_info",

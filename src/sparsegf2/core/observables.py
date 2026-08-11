@@ -12,6 +12,9 @@ Available observables
                               local stabilizer subgroup on subsystem ``A``.
 ``entanglement_entropy``      ``S(A) = rank - |A|``, the Fattal–Cubitt–Yamamoto–
                               Bravyi–Chuang formula (`quant-ph/0406168`_).
+``single_qubit_entropy``      ``S({q}) in {0, 1}``, evaluated from the two
+                              singleton tableau columns without GF(2)
+                              elimination.
 ``mutual_information``        ``I(A:B) = S(A) + S(B) - S(A ∪ B)``.
 ``tripartite_mutual_info``    ``I_3(A:B:C) = I(A:B) + I(A:C) - I(A:B ∪ C)``.
 ``code_dimension``            Number of *purified* logical qubits in an
@@ -298,6 +301,73 @@ def entanglement_entropy(sim: SimulatorProtocol, subsystem: Iterable[int]) -> in
             f"expected in [0, {upper}]; likely tableau corruption"
         )
     return s
+
+
+def single_qubit_entropy(sim: SimulatorProtocol, qubit: int) -> int:
+    r"""Return the entropy of one qubit without a general rank calculation.
+
+    For a one-qubit subsystem the restricted stabilizer block has exactly two
+    columns, the X and Z columns on ``qubit``.  Its rank is two exactly when
+    both columns are nonzero and linearly independent.  Over :math:`F_2`, two
+    nonzero column vectors are dependent iff they are equal, so the entropy is
+    obtained with three boolean reductions instead of packing and eliminating
+    a general GF(2) matrix.
+
+    This is the hot-path observable for single-reference purification-time
+    simulations, where it is evaluated after every monitored circuit layer.
+    It is mathematically identical to
+    ``entanglement_entropy(sim, [qubit])`` for a valid pure stabilizer state.
+
+    Parameters
+    ----------
+    sim
+        A simulator satisfying :class:`SimulatorProtocol`.
+    qubit
+        Qubit index in ``[0, sim.n)``. Booleans are rejected.
+
+    Returns
+    -------
+    int
+        Zero for a pure one-qubit reduced state and one for a maximally mixed
+        one-qubit reduced state.
+
+    Raises
+    ------
+    InvalidArgumentError
+        If ``qubit`` is not an integer in range.
+    TableauCorruption
+        If the singleton stabilizer block has rank zero, which is impossible
+        for a pure stabilizer state.
+    """
+    if isinstance(qubit, (bool, np.bool_)) or not isinstance(qubit, (int, np.integer)):
+        raise InvalidArgumentError(f"qubit must be an integer; got {qubit!r}")
+    qubit = int(qubit)
+    n = sim.n
+    if not 0 <= qubit < n:
+        raise InvalidArgumentError(f"qubit must lie in [0, n={n}); got {qubit}")
+
+    A = np.asarray([qubit], dtype=np.int64)
+    if isinstance(sim, SubsystemFastExtractor):
+        block = np.asarray(sim._subsystem_xz_block(A), dtype=np.uint8) & 1
+    else:
+        full = np.asarray(sim.to_symplectic(), dtype=np.uint8) & 1
+        block = full[n:, [qubit, qubit + n]]
+    if block.shape != (n, 2):
+        raise TableauCorruption(
+            "single_qubit_entropy: simulator returned singleton block with "
+            f"shape {block.shape}, expected {(n, 2)}"
+        )
+
+    x = block[:, 0]
+    z = block[:, 1]
+    x_nonzero = bool(np.any(x))
+    z_nonzero = bool(np.any(z))
+    if not x_nonzero and not z_nonzero:
+        raise TableauCorruption(
+            "single_qubit_entropy: singleton stabilizer block has rank zero; "
+            "likely tableau corruption"
+        )
+    return int(x_nonzero and z_nonzero and not np.array_equal(x, z))
 
 
 def mutual_information(sim: SimulatorProtocol, A: Iterable[int], B: Iterable[int]) -> int:

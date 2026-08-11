@@ -10,6 +10,8 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 
 - `CircuitConfig(total_layers_override=T)` for a literal measured-layer cap,
   independent of the depth-mode formula.
+- `single_qubit_entropy`, an exact singleton stabilizer-entropy fast path for
+  per-layer single-reference first-passage checks.
 - Layer checkpoints on `simulate` and `SimulationRunner.run`, including
   read-only live callbacks and the `CHECKPOINT_STOP` sentinel for
   checkpoint-granular early stopping.
@@ -40,6 +42,15 @@ All notable changes to `sparsegf2` are documented here. The format is based on
   connectivity analyses for the paper graph registry, including compact cell
   summaries, conditional histograms, cumulative normalized-gain estimates,
   deterministic bootstrap intervals, and reproducible figure recipes.
+- A graph-family-agnostic raw purification-time workflow over Cartesian graph
+  parameter grids, with exact decimal measurement grids, stable named RNG
+  streams, per-graph/per-circuit censoring data, plan-first launch guards,
+  runtime-attempt auditing, generator- and environment-bound edge banks,
+  resume-safe checkpoint journals, and a coordinator-owned SQLite artifact
+  catalog with container and logical-result digests.
+- A real-kernel single-reference benchmark harness with stage timings,
+  one-thread-per-process safeguards, work/storage estimates, and bounded
+  Windows process-scaling measurements.
 
 ### Changed
 

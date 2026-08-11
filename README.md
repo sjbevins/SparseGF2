@@ -164,7 +164,7 @@ print(entanglement_entropy(sim, [0, 1]))   # bipartite entropy in ebits
 out = sim.measure_z(0)                      # project; returns a phase-free bit
 ```
 
-Key observables: `entanglement_entropy`, `mutual_information`,
+Key observables: `entanglement_entropy`, `single_qubit_entropy`, `mutual_information`,
 `tripartite_mutual_info`, `code_dimension`, `code_rate`, `contiguous_distance`,
 `stabilizer_weight_spectrum`; `sim.active_count()` gives the tableau-density
 diagnostic `a_bar` (also recorded per circuit run as `mean_active_generators`).
@@ -429,7 +429,11 @@ cross-checker (every circuit is checked against it by GF(2) RREF).
   [`src/sparsegf2/expurgation/README.md`](src/sparsegf2/expurgation/README.md).
 - **Reproducible paper campaigns.** The versioned protocols, production
   drivers, graph registry, and analysis recipes used for current paper runs
-  live in [`studies/prl_production/`](studies/prl_production/README.md).
+  live in [`studies/prl_production/`](studies/prl_production/README.md). This
+  includes a generalized, plan-first single-reference purification-time runner
+  over Cartesian graph-parameter grids, with exact measurement-rate grids,
+  raw per-graph/per-circuit results, resumable storage, a searchable artifact
+  catalog, a standalone flowchart, and a production benchmark protocol.
   Generated trajectories and large numerical artifacts remain local.
 - **Notebooks** (executable, with the math worked out):
   [`master.ipynb`](notebooks/master.ipynb) (the core walkthrough),
@@ -446,6 +450,7 @@ cross-checker (every circuit is checked against it by GF(2) RREF).
   scripts/         inspect_circuit.py, plot_study.py
   benchmarks/      SparseGF2-vs-Stim and per-optimization performance scripts
   docs/figures/    the figures in this README and the scripts that produce them
+  studies/prl_production/  fingerprinted production protocols, runners, and analysis
   ```
 
 ## References
