@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 from studies.prl_production.single_ref.engine import PointSpec, point_path
+from studies.prl_production.single_ref.shared_io import load_npz_snapshot
 
 PRL_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = PRL_ROOT / "manifests" / "runtime"
@@ -51,7 +52,7 @@ def _read_point(
     cached = cache.get(path)
     if cached is not None and cached[0] == stamp:
         return cached[1:]
-    with np.load(path, allow_pickle=False) as data:
+    with load_npz_snapshot(path) as data:
         complete = np.asarray(data["complete"], dtype=np.uint8)
         events = np.asarray(data["event_observed"], dtype=np.uint8)
     completed = int(complete.sum())

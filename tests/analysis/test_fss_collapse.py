@@ -14,9 +14,12 @@ Three groups:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+import sparsegf2.analysis.fss_collapse as fss_module
 from sparsegf2.analysis import (
     fit_fixed_pc,
     fit_three_param,
@@ -93,6 +96,80 @@ def test_fit_fixed_pc_recovers_exponents_at_true_pc():
     nu, z = fit_fixed_pc(curves, PC_TRUE)
     assert nu == pytest.approx(NU_TRUE, abs=0.20)
     assert z == pytest.approx(Z_TRUE, abs=0.08)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SimpleNamespace(success=False, fun=0.0, x=(NU_TRUE, Z_TRUE)),
+        SimpleNamespace(success=True, fun=np.nan, x=(NU_TRUE, Z_TRUE)),
+        SimpleNamespace(success=True, fun=0.0, x=(NU_TRUE, 2.0)),
+    ],
+)
+def test_fit_fixed_pc_rejects_invalid_warm_result(monkeypatch, result):
+    monkeypatch.setattr(fss_module, "_minimize", lambda *args, **kwargs: result)
+    assert all(np.isnan(fit_fixed_pc(_synthetic_curves(), PC_TRUE, warm=(1.4, 0.7))))
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SimpleNamespace(success=False, fun=0.0, x=(PC_TRUE, NU_TRUE, Z_TRUE)),
+        SimpleNamespace(success=True, fun=np.inf, x=(PC_TRUE, NU_TRUE, Z_TRUE)),
+        SimpleNamespace(success=True, fun=0.0, x=(0.9, NU_TRUE, Z_TRUE)),
+    ],
+)
+def test_fit_three_param_rejects_invalid_warm_result(monkeypatch, result):
+    monkeypatch.setattr(fss_module, "_minimize", lambda *args, **kwargs: result)
+    assert all(np.isnan(fit_three_param(_synthetic_curves(), warm=(0.3, 1.4, 0.7))))
+
+
+def test_fit_fixed_pc_point_estimate_screens_optimizer_results(monkeypatch):
+    calls = 0
+    wanted = (1.6, 0.82)
+
+    def fake_minimize(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(success=False, fun=-3.0, x=(NU_TRUE, Z_TRUE))
+        if calls == 2:
+            return SimpleNamespace(success=True, fun=-2.0, x=(9.0, Z_TRUE))
+        if calls == 3:
+            return SimpleNamespace(success=True, fun=np.nan, x=(NU_TRUE, Z_TRUE))
+        if calls == 4:
+            return SimpleNamespace(success=True, fun=0.2, x=wanted)
+        return SimpleNamespace(success=True, fun=0.5, x=(1.7, 0.85))
+
+    monkeypatch.setattr(fss_module, "_minimize", fake_minimize)
+    assert fit_fixed_pc(_synthetic_curves(), PC_TRUE) == wanted
+
+
+def test_fit_three_param_point_estimate_screens_optimizer_results(monkeypatch):
+    calls = 0
+    wanted = (0.31, 1.6, 0.82)
+
+    def fake_minimize(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(success=False, fun=-3.0, x=(PC_TRUE, NU_TRUE, Z_TRUE))
+        if calls == 2:
+            return SimpleNamespace(success=True, fun=-2.0, x=(0.9, NU_TRUE, Z_TRUE))
+        if calls == 3:
+            return SimpleNamespace(success=True, fun=np.nan, x=(PC_TRUE, NU_TRUE, Z_TRUE))
+        if calls == 4:
+            return SimpleNamespace(success=True, fun=0.2, x=wanted)
+        return SimpleNamespace(success=True, fun=0.5, x=(0.32, 1.7, 0.85))
+
+    monkeypatch.setattr(fss_module, "_minimize", fake_minimize)
+    assert fit_three_param(_synthetic_curves()) == wanted
+
+
+def test_fit_three_param_returns_nan_when_every_start_fails(monkeypatch):
+    failed = SimpleNamespace(success=False, fun=0.0, x=(PC_TRUE, NU_TRUE, Z_TRUE))
+    monkeypatch.setattr(fss_module, "_minimize", lambda *args, **kwargs: failed)
+    assert all(np.isnan(fit_three_param(_synthetic_curves())))
 
 
 def test_robust_pc_recovers_pc():

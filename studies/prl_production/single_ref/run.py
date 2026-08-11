@@ -15,11 +15,13 @@ from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager, suppress
 from dataclasses import asdict
+from functools import wraps
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 from studies.prl_production.campaign import CampaignProfile, exact_beta, get_profile
+from studies.prl_production.single_ref import engine as single_ref_engine
 from studies.prl_production.single_ref.engine import (
     PointProgress,
     PointSpec,
@@ -33,6 +35,28 @@ DEFAULT_DATA_ROOT = PRL_ROOT / "data"
 RUNTIME_ROOT = PRL_ROOT / "manifests" / "runtime"
 STATUS_PATH = PRL_ROOT / "STATUS.md"
 RUNNER_LOCK = RUNTIME_ROOT / "single_ref_runner.lock"
+_STORAGE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6)
+_STORAGE_RETRY_MARKER = "__sparsegf2_storage_retry__"
+
+
+def _install_storage_retry() -> None:
+    """Retry transient Windows failures while atomically publishing NPZ files."""
+    writer = single_ref_engine._write_deterministic_npz
+    if getattr(writer, _STORAGE_RETRY_MARKER, False):
+        return
+
+    @wraps(writer)
+    def retrying_write(path: Path, arrays: dict[str, object]) -> None:
+        for attempt in range(len(_STORAGE_RETRY_DELAYS) + 1):
+            try:
+                return writer(path, arrays)
+            except PermissionError:
+                if attempt == len(_STORAGE_RETRY_DELAYS):
+                    raise
+                time.sleep(_STORAGE_RETRY_DELAYS[attempt])
+
+    setattr(retrying_write, _STORAGE_RETRY_MARKER, True)
+    single_ref_engine._write_deterministic_npz = retrying_write
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -345,7 +369,7 @@ def _prepare_banks(data_root: Path, points: list[PointSpec], workers: int) -> No
     unique: dict[tuple[int, int, int], PointSpec] = {}
     for point in points:
         unique[(point.n, point.beta_key, point.n_graphs)] = point
-    executor = ProcessPoolExecutor(max_workers=workers)
+    executor = ProcessPoolExecutor(max_workers=workers, initializer=_install_storage_retry)
     try:
         for _ in _bounded_parallel(
             executor,
@@ -375,7 +399,10 @@ def _run_points(
     events = 0
     last_result: PointProgress | None = None
     last_report = 0.0
-    executor = ProcessPoolExecutor(max_workers=args.workers)
+    executor = ProcessPoolExecutor(
+        max_workers=args.workers,
+        initializer=_install_storage_retry,
+    )
     try:
         results = _bounded_parallel(
             executor,

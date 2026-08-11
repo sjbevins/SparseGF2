@@ -450,12 +450,21 @@ def _load_point_arrays(path: Path, point: PointSpec, *, record_traces: bool) -> 
     done = complete.astype(bool)
     observed = done & event.astype(bool)
     censored = done & ~event.astype(bool)
-    if np.any(tau[observed] != stop[observed]) or np.any(tau[observed] < 1):
+    incomplete = ~done
+    if (
+        np.any(tau[incomplete] != -1)
+        or np.any(stop[incomplete] != 0)
+        or np.any(event[incomplete] != 0)
+    ):
+        raise ValueError(f"{path}: incomplete rows are inconsistent")
+    if (
+        np.any(tau[observed] != stop[observed])
+        or np.any(tau[observed] < 1)
+        or np.any(tau[observed] > point.cap)
+    ):
         raise ValueError(f"{path}: observed tau_p and stop_layer are inconsistent")
     if np.any(tau[censored] != -1) or np.any(stop[censored] != point.cap):
         raise ValueError(f"{path}: censored rows are inconsistent")
-    if np.any(stop[~done] != 0):
-        raise ValueError(f"{path}: incomplete rows must have stop_layer=0")
     return arrays
 
 

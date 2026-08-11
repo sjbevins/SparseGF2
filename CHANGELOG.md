@@ -28,6 +28,8 @@ All notable changes to `sparsegf2` are documented here. The format is based on
   purification times on mean-degree-four Watts--Strogatz graphs, including
   deterministic data files, censoring flags, live status, and scalar/batch
   parity validation.
+- Manifest-validated live Kaplan--Meier summaries, graph-bootstrap median error
+  bars, and preliminary raw-curve plots for the production campaign.
 
 ### Changed
 
@@ -53,6 +55,13 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 - The optional PDF drawing test now checks for the required LaTeX classes and
   packages, rather than failing merely because `pdflatex` exists without
   `standalone` or `quantikz`.
+- Production readers take short, share-safe NPZ snapshots, and production
+  workers retry transient Windows destination locks without changing completed
+  trajectory data.
+- Finite-size-scaling fits reject unsuccessful, nonfinite, and out-of-bounds
+  optimizer results instead of reporting fallback parameters as valid fits.
+- Production resume validation now rejects inconsistent incomplete rows and
+  observed purification times beyond the configured depth cap.
 
 ## [2.1.0] - 2026-07-24
 

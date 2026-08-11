@@ -36,6 +36,7 @@
         "**/prl_production/data": true,
         "**/prl_production/logs": true,
         "**/prl_production/manifests/runtime": true,
+        "**/prl_production/analysis/runs": true,
         "**/imi": true,
         "**/tab": true
     },
@@ -58,6 +59,7 @@
         "**/prl_production/data/**": true,
         "**/prl_production/logs/**": true,
         "**/prl_production/manifests/runtime/**": true,
+        "**/prl_production/analysis/runs/**": true,
         "**/figs*/**": true,
         "**/runs/**": true,
         "**/imi/**": true,
@@ -81,6 +83,7 @@
         "**/prl_production/data/**": true,
         "**/prl_production/logs/**": true,
         "**/prl_production/manifests/runtime/**": true,
+        "**/prl_production/analysis/runs/**": true,
         "**/figs*/**": true,
         "**/figures_export/**": true
     }

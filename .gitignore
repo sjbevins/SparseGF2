@@ -23,6 +23,7 @@ env/
 
 # Testing and tooling caches
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -124,3 +125,21 @@ studies/prl_production/data/*
 studies/prl_production/logs/*
 !studies/prl_production/logs/README.md
 studies/prl_production/manifests/runtime/
+studies/prl_production/analysis/runs/
+studies/prl_production/figures/raw/*/
+
+# Exact-distance and MILP research remains local until the solver workflow is
+# validated and explicitly approved for publication.
+studies/distance_ilp/
+studies/**/_exact_dist*.py
+studies/**/exact_dist*.py
+studies/**/_prl_dist_campaign.py
+studies/**/true_dist*.py
+studies/**/truedist*.py
+studies/**/truedist*/
+studies/**/*exact_dist*
+studies/**/*true_dist*
+studies/**/*truedist*
+studies/**/*_prl_dist*
+studies/**/code_distance.py
+studies/**/verify_distance.py

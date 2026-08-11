@@ -5,10 +5,12 @@ import json
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from studies.prl_production.campaign import GRAPH_K, production_profile
+from studies.prl_production.single_ref import engine as production_engine
 from studies.prl_production.single_ref import run as production_run
 from studies.prl_production.single_ref.engine import (
     PointSpec,
@@ -133,9 +135,7 @@ def test_graph_bank_and_resumed_point_are_byte_reproducible(tmp_path) -> None:
     assert hashlib.sha256(output.read_bytes()).digest() == final_hash
 
 
-def test_runner_lock_blocks_concurrent_writer_and_recovers_stale_pid(
-    tmp_path, monkeypatch
-) -> None:
+def test_runner_lock_blocks_concurrent_writer_and_recovers_stale_pid(tmp_path, monkeypatch) -> None:
     lock = tmp_path / "runner.lock"
     monkeypatch.setattr(production_run, "RUNNER_LOCK", lock)
     with production_run._single_runner_lock():
@@ -156,6 +156,105 @@ def test_runner_lock_blocks_concurrent_writer_and_recovers_stale_pid(
         owner = json.loads(lock.read_text(encoding="utf-8"))
         assert owner["pid"] == os.getpid()
     assert not lock.exists()
+
+
+def test_storage_retry_is_bounded_and_idempotent(tmp_path, monkeypatch) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def flaky_writer(path: Path, arrays: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError("destination is briefly locked")
+
+    monkeypatch.setattr(production_engine, "_write_deterministic_npz", flaky_writer)
+    monkeypatch.setattr(production_run.time, "sleep", sleeps.append)
+    production_run._install_storage_retry()
+    installed = production_engine._write_deterministic_npz
+    production_run._install_storage_retry()
+
+    assert production_engine._write_deterministic_npz is installed
+    installed(tmp_path / "point.npz", {"value": np.asarray([1])})
+    assert calls == 3
+    assert sleeps == list(production_run._STORAGE_RETRY_DELAYS[:2])
+
+
+def test_storage_retry_does_not_delay_success(tmp_path, monkeypatch) -> None:
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    def successful_writer(path: Path, arrays: dict[str, object]) -> None:
+        calls.append((path, arrays))
+
+    monkeypatch.setattr(production_engine, "_write_deterministic_npz", successful_writer)
+    monkeypatch.setattr(
+        production_run.time,
+        "sleep",
+        lambda _delay: pytest.fail("successful writes must not sleep"),
+    )
+    production_run._install_storage_retry()
+    path = tmp_path / "point.npz"
+    arrays = {"value": np.asarray([1])}
+
+    production_engine._write_deterministic_npz(path, arrays)
+
+    assert calls == [(path, arrays)]
+
+
+def test_storage_retry_reraises_after_final_attempt(tmp_path, monkeypatch) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def locked_writer(path: Path, arrays: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+        raise PermissionError("destination remains locked")
+
+    monkeypatch.setattr(production_engine, "_write_deterministic_npz", locked_writer)
+    monkeypatch.setattr(production_run, "_STORAGE_RETRY_DELAYS", (0.01, 0.02))
+    monkeypatch.setattr(production_run.time, "sleep", sleeps.append)
+    production_run._install_storage_retry()
+
+    with pytest.raises(PermissionError, match="remains locked"):
+        production_engine._write_deterministic_npz(
+            tmp_path / "point.npz",
+            {"value": np.asarray([1])},
+        )
+    assert calls == 3
+    assert sleeps == [0.01, 0.02]
+
+
+def test_both_process_pools_install_storage_retry(tmp_path, monkeypatch) -> None:
+    initializers: list[object] = []
+
+    class FakeExecutor:
+        def __init__(self, *, max_workers: int, initializer=None) -> None:
+            assert max_workers == 2
+            initializers.append(initializer)
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait
+            assert not cancel_futures
+
+    monkeypatch.setattr(production_run, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(production_run, "_bounded_parallel", lambda *args, **kwargs: iter(()))
+    point = PointSpec(n=8, beta=0.1, p=0.2, n_graphs=1)
+    production_run._prepare_banks(tmp_path, [point], workers=2)
+    args = SimpleNamespace(workers=2, checkpoint_every=1, record_traces=False)
+    production_run._run_points(
+        tmp_path,
+        [point],
+        production_profile(),
+        args,
+        "run-id",
+        tmp_path / "state.json",
+        0.0,
+    )
+
+    assert initializers == [
+        production_run._install_storage_retry,
+        production_run._install_storage_retry,
+    ]
 
 
 def test_print_run_id_is_write_free(tmp_path, monkeypatch, capsys) -> None:
@@ -181,3 +280,34 @@ def test_detached_scripts_target_the_resolved_run() -> None:
     assert "run_id = $runId" in launcher
     assert '"single_ref_$($runId)_state.json"' in pause
     assert "monitor --run-id $runId" in pause
+
+
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("incomplete_event", "incomplete rows"),
+        ("incomplete_tau", "incomplete rows"),
+        ("observed_after_cap", "observed tau_p"),
+    ],
+)
+def test_point_loader_rejects_corrupt_incomplete_and_out_of_cap_rows(
+    tmp_path: Path,
+    corruption: str,
+    match: str,
+) -> None:
+    point = PointSpec(n=8, beta=0.1, p=0.2, n_graphs=2)
+    arrays = production_engine._new_point_arrays(point, record_traces=False)
+    if corruption == "incomplete_event":
+        np.asarray(arrays["event_observed"])[0] = 1
+    elif corruption == "incomplete_tau":
+        np.asarray(arrays["tau_p"])[0] = 3
+    else:
+        np.asarray(arrays["tau_p"])[0] = point.cap + 1
+        np.asarray(arrays["stop_layer"])[0] = point.cap + 1
+        np.asarray(arrays["event_observed"])[0] = 1
+        np.asarray(arrays["complete"])[0] = 1
+    path = tmp_path / "point.npz"
+    production_engine._write_deterministic_npz(path, arrays)
+
+    with pytest.raises(ValueError, match=match):
+        production_engine._load_point_arrays(path, point, record_traces=False)

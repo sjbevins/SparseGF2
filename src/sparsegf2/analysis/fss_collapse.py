@@ -89,6 +89,30 @@ RawCell = Mapping[int, Mapping[float, Any]]
 _LOSS_SENTINEL = 1e12
 
 
+def _fit_candidate(result, bounds, *, closed) -> tuple[float, np.ndarray] | None:
+    """Return a converged, finite, in-bounds optimizer candidate, if any."""
+    if not bool(getattr(result, "success", False)):
+        return None
+    try:
+        objective = float(result.fun)
+        values = np.asarray(result.x, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if values.shape != (len(bounds),):
+        return None
+    if not np.isfinite(objective) or objective >= _LOSS_SENTINEL:
+        return None
+    if not np.all(np.isfinite(values)):
+        return None
+    for value, (lower, upper), is_closed in zip(values, bounds, closed, strict=True):
+        if is_closed:
+            if not lower <= value <= upper:
+                return None
+        elif not lower < value < upper:
+            return None
+    return objective, values
+
+
 # ----------------------------------------------------------------------
 # Houdayer-Hartmann leave-one-size-out master-curve loss
 # ----------------------------------------------------------------------
@@ -276,20 +300,28 @@ def fit_fixed_pc(
     opts = dict(xatol=1e-3, fatol=1e-8, maxiter=600)
     if warm is not None:
         res = _minimize(loss, warm, method="Nelder-Mead", options=opts)
-        return float(res.x[0]), float(res.x[1])
+        candidate = _fit_candidate(
+            res,
+            (nu_bounds, z_bounds),
+            closed=(False, True),
+        )
+        if candidate is None:
+            return float("nan"), float("nan")
+        return float(candidate[1][0]), float(candidate[1][1])
     best_loss, best_x = np.inf, None
     for nu0 in (1.0, 1.5, 2.5, 4.0):
         for z0 in (0.3, 0.5, 0.7):
             res = _minimize(loss, (nu0, z0), method="Nelder-Mead", options=opts)
-            if (
-                res.fun < best_loss
-                and nu_bounds[0] < res.x[0] < nu_bounds[1]
-                and z_bounds[0] <= res.x[1] <= z_bounds[1]
-            ):
-                best_loss, best_x = res.fun, res.x
+            candidate = _fit_candidate(
+                res,
+                (nu_bounds, z_bounds),
+                closed=(False, True),
+            )
+            if candidate is not None and candidate[0] < best_loss:
+                best_loss, best_x = candidate
     if best_x is None:
-        # Every start converged outside the bounds: the data's exponents are
-        # not in the window. Returning a made-up in-band pair here would flow
+        # No start produced a converged, finite, in-bounds fit. Returning a
+        # made-up in-band pair here would flow
         # into graph_bootstrap as a fabricated point with std = 0 — say NaN.
         return float("nan"), float("nan")
     return float(best_x[0]), float(best_x[1])
@@ -316,7 +348,9 @@ def fit_three_param(
     single ``z0 = 0.5`` start can land in a worse basin and miss the clean global
     minimum. A ``warm=(p_c, nu, z)`` start does a single local refine (used by the
     bootstraps). Bounds are enforced as a soft penalty inside the objective.
-    Returns ``(p_c, nu, z)``.
+    Returns ``(p_c, nu, z)``, or ``(nan, nan, nan)`` when no start converges
+    to a finite objective strictly inside all three bounds. An unsuccessful,
+    non-finite, or out-of-bounds optimizer result is never reported as a fit.
     """
     sizes, ps, ys = _arrays(curves)
 
@@ -333,8 +367,15 @@ def fit_three_param(
     opts = dict(xatol=1e-3, fatol=1e-9, maxiter=600)
     if warm is not None:
         res = _minimize(loss, warm, method="Nelder-Mead", options=opts)
-        return float(res.x[0]), float(res.x[1]), float(res.x[2])
-    best_loss, best_x = np.inf, (0.2, 2.0, 0.5)
+        candidate = _fit_candidate(
+            res,
+            (pc_bounds, nu_bounds, z_bounds),
+            closed=(False, False, False),
+        )
+        if candidate is None:
+            return float("nan"), float("nan"), float("nan")
+        return tuple(float(value) for value in candidate[1])
+    best_loss, best_x = np.inf, None
     pc_lo = np.percentile(ps, 1)
     pc_hi = np.percentile(ps, 55)
     for pc0 in np.linspace(pc_lo, pc_hi, 12):
@@ -343,10 +384,16 @@ def fit_three_param(
             # high z; a single z0=0.5 start can miss the high-z (z~1) global min.
             for z0 in (0.4, 0.7, 1.0, 1.15):
                 res = _minimize(loss, (pc0, nu0, z0), method="Nelder-Mead", options=opts)
-                if res.fun < best_loss:
-                    best_loss = res.fun
-                    best_x = (float(res.x[0]), float(res.x[1]), float(res.x[2]))
-    return best_x
+                candidate = _fit_candidate(
+                    res,
+                    (pc_bounds, nu_bounds, z_bounds),
+                    closed=(False, False, False),
+                )
+                if candidate is not None and candidate[0] < best_loss:
+                    best_loss, best_x = candidate
+    if best_x is None:
+        return float("nan"), float("nan"), float("nan")
+    return tuple(float(value) for value in best_x)
 
 
 # ----------------------------------------------------------------------

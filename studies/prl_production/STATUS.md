@@ -1,7 +1,8 @@
 # PRL production status
 
-- **Production state:** not launched
-- **Simulator review:** complete; publication approved and being finalized
+- **Production state:** active locally; live counters are intentionally not versioned
+- **Run ID:** `f76def10804a67a6`
+- **Simulator review:** complete and published
 - **Smoke validation:** complete
 
 - Production grid: 37,400 points and 18,700,000 trajectories.
@@ -15,6 +16,7 @@
 - Resume replay: byte-identical across all 24 NPZ files; aggregate SHA-256
   `6fec0dae233cfb51ed73d1bf98f16a445a220fe46a1296ab3fd21c3f917dfa20`.
 
-The production launcher requires an explicit confirmation flag.  After the
-reviewed commits are published, the monitor will replace this document
-atomically with live progress and ETA.
+The local monitor replaces the research checkout's copy of this document
+atomically with live progress and ETA.  See [`PROVENANCE.md`](PROVENANCE.md)
+for the immutable source fingerprint and published commit used by the active
+run; generated data, live manifests, and logs remain local.

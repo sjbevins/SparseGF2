@@ -8,12 +8,16 @@ recipes are version controlled.
 The first campaign is the single-reference purification-time phase diagram in
 `single_ref/`.  It uses Watts-Strogatz rewiring of `C(n, 2)`: every graph has
 `2n` edges and mean degree four.  See [PROTOCOL.md](PROTOCOL.md) before
-launching a production job.
+launching a production job.  [PROVENANCE.md](PROVENANCE.md) maps the active
+run to its published source commit, and [analysis/METHOD.md](analysis/METHOD.md)
+fixes the statistical protocol before the data are complete.
 
 Directory map:
 
 - `inputs/`: immutable steering inputs, not fit constraints.
 - `single_ref/`: simulator, campaign runner, validation, and monitor.
+- `analysis/`: survival estimates, live aggregation, scaling fits, and the
+  predeclared analysis protocol.
 - `manifests/`: exact run metadata and reproducibility records.
 - `data/`: generated graph banks and per-point trajectory arrays (ignored).
 - `logs/`: detached-run logs (ignored).
@@ -38,7 +42,8 @@ commit are complete:
 studies\prl_production\run_single_ref.ps1 -Profile production -Workers 8 -ConfirmProduction
 ```
 
-The detached launcher records only its own process IDs.  To pause it after the
-latest atomic point checkpoint, use
+The detached launcher records the resolved run ID, its own process IDs, and
+separate runner and monitor logs.  To pause it after the latest atomic point
+checkpoint, use
 `pause_single_ref.ps1 -Force`; the next identical launch resumes incomplete
 graph indices.  A single-writer lock rejects an accidental second runner.
