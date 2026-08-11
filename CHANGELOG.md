@@ -30,6 +30,9 @@ All notable changes to `sparsegf2` are documented here. The format is based on
   parity validation.
 - Manifest-validated live Kaplan--Meier summaries, graph-bootstrap median error
   bars, and preliminary raw-curve plots for the production campaign.
+- Bounded three-parameter purification-time collapse tools with a profiled
+  smooth master curve, deterministic multistart fitting, and all three
+  pairwise profiled loss landscapes.
 
 ### Changed
 

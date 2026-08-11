@@ -127,6 +127,7 @@ studies/prl_production/logs/*
 studies/prl_production/manifests/runtime/
 studies/prl_production/analysis/runs/
 studies/prl_production/figures/raw/*/
+studies/prl_production/figures/diagnostics/*/
 
 # Exact-distance and MILP research remains local until the solver workflow is
 # validated and explicitly approved for publication.
