@@ -51,7 +51,7 @@ jobs:
         run: ruff format --check src/ tests/
 
       - name: pytest
-        run: pytest -q tests/
+        run: python -m pytest -q tests/
 
       - name: pytest -O (stripped-assert smoke)
         # Catches paths where a production-critical check was written
