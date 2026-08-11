@@ -243,6 +243,8 @@ def test_from_spec_unknown_param_raises(spec):
 
 
 def test_from_spec_newman_watts_inline_params():
+    pytest.importorskip("networkx")
+
     from sparsegf2.circuits.graphs import newman_watts
 
     n, seed = 32, 4
