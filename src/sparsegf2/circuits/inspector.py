@@ -155,12 +155,14 @@ def _summary(config: CircuitConfig, sample_seed: int) -> dict[str, Any]:
     if cfg.picture is Picture.PURE_STATE:
         layout = f"{cfg.total_qubits()} qubits (all system)"
     elif cfg.picture is Picture.PURIFICATION:
-        layout = f"{cfg.total_qubits()} qubits: system 0-{n - 1}, reference {n}-{2 * n - 1}"
+        layout = f"{cfg.total_qubits()} qubits: system 0–{n - 1}, reference {n}–{2 * n - 1}"
     else:  # SINGLE_REF
-        layout = f"{cfg.total_qubits()} qubits: system 0-{n - 1}, reference [{n}]"
+        layout = f"{cfg.total_qubits()} qubits: system 0–{n - 1}, reference [{n}]"
 
     if cfg.gating_mode == "brickwork":
         gating = f"brickwork / {cfg.matching_mode}"
+    elif cfg.gating_mode == "all_edges":
+        gating = f"all_edges ({len(cfg._graph.edges)} edges/layer)"
     else:  # random_edge | random_pool
         gating = f"{cfg.gating_mode} (gates_per_layer={cfg.resolved_gates_per_layer()})"
 
@@ -172,7 +174,11 @@ def _summary(config: CircuitConfig, sample_seed: int) -> dict[str, Any]:
         "graph": cfg._graph.name,
         "gating": gating,
         "measurement": f"{cfg.measurement_mode}  p={cfg.p}",
-        "depth": f"{cfg.depth_mode} ×{cfg.depth_factor} = {cfg.total_layers()} measured layers",
+        "depth": (
+            f"exact override = {cfg.total_layers()} measured layers"
+            if cfg.total_layers_override is not None
+            else f"{cfg.depth_mode} ×{cfg.depth_factor} = {cfg.total_layers()} measured layers"
+        ),
         "exp. gate:meas": ratio_str,
         "sample_seed": str(sample_seed),
     }

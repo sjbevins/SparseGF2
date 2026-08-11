@@ -68,11 +68,45 @@ def test_random_pool_gated_expected_is_lower_bound():
 
 @pytest.mark.parametrize("mode", GATING_MODES)
 def test_to_dict_round_trips_all_gating_modes(mode):
-    kw = {} if mode == "brickwork" else {"gates_per_layer": 3}
+    kw = {"gates_per_layer": 3} if mode in ("random_edge", "random_pool") else {}
     cfg = CircuitConfig(graph_spec="cycle", n=8, p=0.2, gating_mode=mode, **kw)
     cfg2 = CircuitConfig(**cfg.to_dict())  # must not raise for any mode
     assert cfg2.gating_mode == mode
     assert cfg2.total_layers() == cfg.total_layers()
+
+
+def test_all_edges_bernoulli_ratio_uses_full_edge_count():
+    cfg = CircuitConfig(
+        graph_spec="cycle",
+        n=8,
+        p=1.0,
+        gating_mode="all_edges",
+        total_layers_override=3,
+    )
+    rec = simulate(cfg, sample_seed=0)
+    assert rec.total_gates == 3 * len(cfg._graph.edges)
+    assert cfg.expected_gate_to_meas_ratio() == pytest.approx(1.0)
+    assert rec.gate_to_meas_ratio_actual == pytest.approx(1.0)
+
+
+def test_all_edges_gated_ratio_uses_distinct_touched_qubits():
+    cfg = CircuitConfig(
+        graph_spec="path",
+        n=6,
+        p=1.0,
+        gating_mode="all_edges",
+        measurement_mode="gated",
+        total_layers_override=2,
+    )
+    rec = simulate(cfg, sample_seed=0)
+    assert cfg.expected_gate_to_meas_ratio() == pytest.approx(5 / 6)
+    assert rec.gate_to_meas_ratio_actual == pytest.approx(5 / 6)
+
+
+@pytest.mark.parametrize("gpl", [1, lambda cfg: 1])
+def test_all_edges_rejects_gates_per_layer(gpl):
+    with pytest.raises(InvalidArgumentError, match="fixed gate schedule"):
+        CircuitConfig(graph_spec="cycle", n=8, gating_mode="all_edges", gates_per_layer=gpl)
 
 
 def test_callable_gates_per_layer_wrong_arity_raises_at_construction():

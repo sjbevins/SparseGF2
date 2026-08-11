@@ -1,0 +1,366 @@
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,graphicx,xcolor,caption,enumitem}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{listings}
+\definecolor{codekw}{rgb}{0.15,0.15,0.6}
+\definecolor{codecm}{rgb}{0.30,0.55,0.30}
+\definecolor{codestr}{rgb}{0.6,0.2,0.2}
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{darkgreen}{rgb}{0.0,0.5,0.0}
+\lstset{
+  basicstyle=\ttfamily\small, keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape, stringstyle=\color{codestr},
+  backgroundcolor=\color{codebg}, frame=single, framerule=0.2pt, rulecolor=\color{gray},
+  breaklines=true, showstringspaces=false, columns=fullflexible, language=Python,
+  numbers=left, numberstyle=\tiny\color{gray}, xleftmargin=2.2em,
+}
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Sp}{\operatorname{Sp}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+\captionsetup{font=small}
+
+\title{\textbf{SparseGF2: Circuit Construction}\\[2pt]
+\large An Implementation Reference}
+\author{MIPT--QEC project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent This document specifies, in complete implementation detail, how the SparseGF2 stabilizer simulator
+\emph{constructs and executes} the monitored random-Clifford circuits used in the measurement-induced phase
+transition (MIPT) study. It is the software companion to the mathematical specification
+(\file{docs/sparsegf2\_mathematics.tex}): where that document derives the stabilizer/symplectic formalism, this
+one traces the actual code path --- configuration, graph and edge selection, the sparse tableau data structure,
+the purification picture and initial scramble, the layer-by-layer execution loop, gate application through the
+Clifford lookup table and Numba kernels, single-qubit measurement, observables/order parameters, and the record
+and reproducibility conventions. Every component is tied to the concrete module, class, and function that
+implements it. File references are relative to \file{src/sparsegf2/}.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+% ======================================================================
+\section{Overview: from specification to executed circuit}
+\label{sec:overview}
+A run is a pipeline of stages, each owned by one module. A circuit is \emph{never} materialized as a static list
+of gates; it is generated on the fly, layer by layer, directly against the evolving stabilizer state.
+\begin{enumerate}[itemsep=2pt]
+\item \textbf{Configuration} (\file{circuits/config.py}, \code{CircuitConfig}) --- an immutable, validated
+specification: the number of system qubits $n$, the depth mode and factor, the measurement rate $p$, the
+interaction-graph family, the gating mode, the measurement-eligibility mode, the ``picture'' (plain vs.\
+purification), the scramble/warmup options, and the seed.
+\item \textbf{Interaction graph} (\file{circuits/graphs.py}, \code{GraphTopology}) --- the set of qubit pairs on
+which two-qubit gates may act, plus (for matching-based gating) an edge coloring / $1$-factorization.
+\item \textbf{Scheduler} (\file{circuits/scheduler.py}, \file{circuits/matching.py}) --- turns the graph into a
+per-layer sequence of gated edges (with a Clifford index each) and a per-layer list of measurement candidates,
+fixing the RNG consumption order.
+\item \textbf{Stabilizer state} (\file{core/sparse\_tableau.py}, \code{SparseGF2}) --- the Aaronson--Gottesman
+tableau stored sparsely over $\F_2$, with an optional dense/hybrid bit-packed mirror.
+\item \textbf{Picture / initial state} (\file{circuits/picture.py}, \code{setup\_picture}) --- builds the initial
+state (e.g.\ $n$ Bell pairs across a system/reference split for the purification picture) and reports the layout
+and order parameter.
+\item \textbf{Runner} (\file{circuits/runner.py}, \code{SimulationRunner}) --- the execution loop: optional
+scramble, warmup, then for each measured layer apply the gate step and the measurement step, evaluate the
+order parameter, take requested checkpoints, and support early stopping.
+\item \textbf{Records} (\file{circuits/records.py}, \code{SampleRecord}) --- the per-run outputs.
+\end{enumerate}
+Section~\ref{sec:changes} separates the stable simulator semantics from the additive circuit and checkpoint
+extensions used by the deep purification-time campaign.
+
+% ======================================================================
+\section{Run configuration}
+\label{sec:config}
+Everything about a run is fixed by one immutable dataclass, \code{CircuitConfig} (\file{config.py}), validated in
+\code{\_\_post\_init\_\_}. Table~\ref{tab:config} lists the fields.
+
+\begin{table}[h]\centering\small
+\begin{tabular}{lll}
+\toprule
+Field & Default & Role\\
+\midrule
+\code{graph\_spec} & --- & Graph of allowed 2-qubit edges (\code{str} / \code{GraphTopology} / \code{nx.Graph})\\
+\code{n} & --- & Number of system qubits\\
+\code{picture} & \code{pure\_state} & \code{pure\_state} / \code{purification} / \code{single\_ref} (Sec.~\ref{sec:picture})\\
+\code{gating\_mode} & \code{brickwork} & \code{brickwork} / \code{random\_edge} / \code{random\_pool} / \code{all\_edges}\\
+\code{matching\_mode} & \code{round\_robin} & brickwork only: \code{round\_robin} / \code{palette} / \code{fresh}\\
+\code{gates\_per\_layer} & \code{None} & random-edge modes: default $1$ (\code{random\_edge}) or $n/2$ (\code{random\_pool})\\
+\code{measurement\_mode} & \code{bernoulli} & candidates: \code{bernoulli} (all) / \code{gated} / \code{random\_pair} / \code{uniform\_count}\\
+\code{meas\_count} & \code{None} & for \code{uniform\_count}; default $n/2$\\
+\code{p} & \code{0.15} & per-candidate measurement probability $\in[0,1]$\\
+\code{depth\_mode} & \code{O(n)} & \code{O(n)} / \code{O(log\_n)} / \code{until\_purified} (adaptive; needs a reference)\\
+\code{depth\_factor} & \code{8} & multiplier in the depth formula ($\ge1$)\\
+\code{total\_layers\_override} & \code{None} & optional literal positive measured-layer count; bypasses the depth formula\\
+\code{n\_cliffords} & \code{720} & size of the sampled 2-qubit Clifford set, $\in[1,720]$\\
+\code{base\_seed} & \code{42} & nonnegative base component of every pair-keyed per-sample RNG stream\\
+\code{warmup\_layers} & \code{0} & gate-only pre-scrambling layers before the measured phase\\
+\code{scramble} & \code{False} & apply one global random Clifford to the system qubits pre-circuit\\
+\code{scramble\_entangled\_qubit} & \code{True} & \code{single\_ref}: include the reference's partner in the scramble\\
+\code{record\_time\_series} & \code{False} & record the order parameter after every layer\\
+\code{pivot\_mode} & \code{None} & measurement pivot: \code{min\_weight} (sparser) / \code{first} (cheaper)\\
+\code{use\_numba} & \code{None} & JIT toggle; \code{None} auto-detects\\
+\code{hybrid} & \code{False} & enable the sparse/dense bit-packed hybrid path\\
+\bottomrule
+\end{tabular}
+\caption{\code{CircuitConfig} fields.}
+\label{tab:config}
+\end{table}
+
+\paragraph{Derived quantities.} If \code{total\_layers\_override} is set, \code{total\_layers()} returns that
+literal scheduled measured-layer count before considering any depth mode or random-edge rescaling. Otherwise, for
+\code{O(n)} it starts from $\mathrm{depth\_factor}\cdot n$, for \code{O(log\_n)} from
+$\mathrm{depth\_factor}\cdot\lceil\log_2 n\rceil$, and \code{until\_purified} uses the $O(n)$ value as its cap.
+The random-edge modes rescale those formula-based counts to preserve a brickwork-equivalent gate budget;
+\code{all\_edges} does not. Adaptive purification or a \code{CHECKPOINT\_STOP} callback may execute fewer layers
+than the scheduled cap.
+\code{total\_qubits()} is $n$, $2n$, or $n{+}1$ by picture. \code{scramble\_qubits()} returns which qubits the
+global scramble covers (\code{range(n)} for every case except \code{single\_ref} with
+\code{scramble\_entangled\_qubit=False}, which holds out the reference's partner). The resolved graph is built
+once and cached on \code{\_graph} so all samples of a config share it. A stochastic string graph specification
+uses \code{base\_seed} alone as its quenched graph-realization seed.
+
+% ======================================================================
+\section{The stabilizer state: the sparse tableau}
+\label{sec:tableau}
+The state is an Aaronson--Gottesman tableau of $2n$ generators ($n$ destabilizers, $n$ stabilizers), phase-free
+over $\F_2$ (SparseGF2 tracks only the symplectic $[X|Z]$ part; signs are dropped, which is sufficient for the
+entanglement/purification observables). The representation (\code{SparseGF2}, \file{core/sparse\_tableau.py}) is
+\emph{sparse}: rather than a dense $2n\times2n$ matrix, it keeps, for each generator, only the qubits on which it
+acts, together with inverted indices for $O(1)$ lookups. Table~\ref{tab:tableau} lists the arrays.
+
+\begin{table}[h]\centering\small
+\begin{tabular}{lll}
+\toprule
+Array & Shape & Purpose\\
+\midrule
+\code{plt} & $(2n,n)$ \code{uint8} & Pauli lookup table: 2-bit code $(x{\ll}1)\,|\,z$, i.e. $I{=}0,Z{=}1,X{=}2,Y{=}3$\\
+\code{supp\_q} / \code{supp\_len} & $(2n,n)$/$(2n,)$ & per-generator support (nonzero qubits) and its length\\
+\code{supp\_pos} & $(2n,n)$ & back-pointer into \code{supp\_q} for $O(1)$ removal\\
+\code{inv} / \code{inv\_len} & $(n,2n)$/$(n,)$ & per-qubit inverted index: which generators touch qubit $q$\\
+\code{inv\_pos} & $(2n,n)$ & back-pointer for \code{inv}\\
+\code{inv\_x} / \code{inv\_x\_len} & $(n,2n)$/$(n,)$ & per-qubit index of generators with the $x$-bit set on $q$\\
+\code{inv\_x\_pos} & $(2n,n)$ & back-pointer for \code{inv\_x}\\
+\bottomrule
+\end{tabular}
+\caption{The seven-array sparse tableau, kept in sync by $O(1)$ inverted-index primitives.}
+\label{tab:tableau}
+\end{table}
+
+\paragraph{Row layout \& initialization.} Rows $0\ldots n{-}1$ are destabilizers ($X_i$ on qubit $i$); rows
+$n\ldots 2n{-}1$ are stabilizers ($Z_i$ on qubit $i$). \code{\_init\_zero\_state} sets \code{plt[i,i]=X} and
+\code{plt[n+i,i]=Z} with unit support, which is the $|0^n\rangle$ tableau. The \code{inv\_x} index (generators
+that anticommute with a $Z$-measurement on $q$) is what makes measurement cheap (Sec.~\ref{sec:measure}).
+
+\paragraph{Hybrid dense mirror.} With \code{hybrid=True} the tableau additionally maintains a bit-packed
+\code{uint64} dense mirror; volume-law (dense) circuits then use packed row operations while measurement-heavy
+(sparse) circuits use the sparse path. Correctness is identical; only the constant factors differ.
+
+\paragraph{Constructor.} \code{SparseGF2(n, rng=None, pivot\_mode=None, use\_numba=None, hybrid=False)}. The
+\code{rng} is the \emph{measurement-outcome} generator (Sec.~\ref{sec:records}), independent of circuit
+construction. Key methods: \code{copy()}, \code{apply\_clifford(S, qubits)} and \code{\_dispatch\_2q(qi,qj,lut)}
+(Sec.~\ref{sec:gates}), \code{measure\_z(q)} (Sec.~\ref{sec:measure}), \code{active\_count()} (mean generators
+per qubit diagnostic), and \code{to\_symplectic()} $\to (2n,2n)$ \code{uint8} $[X|Z]$.
+
+% ======================================================================
+\section{Interaction graph and per-layer edge selection}
+\label{sec:graph}
+\code{GraphTopology} (\file{graphs.py}) carries \code{name}, \code{n}, a canonical \code{edges} list ($u<v$),
+\code{is\_stochastic} (whether a realization depends on the seed, e.g.\ Newman--Watts), an optional
+\code{one\_factorization} (partition into perfect matchings, for brickwork), the \code{graph6} string, and an
+optional \code{fresh\_matching\_sampler}; \code{chi\_prime} is the number of color classes. Graphs are built
+from a spec by \code{from\_spec} (families: \code{cycle}, \code{path}, \code{complete}, \code{lattice\_2d},
+\code{newman\_watts}, \dots) or adapted from a \code{networkx} graph by \code{from\_networkx}.
+
+\paragraph{Per-layer selection.} \code{select\_matching(graph, mode, layer\_index, rng)}
+(\file{matching.py}) returns a matching: \code{round\_robin} cycles deterministically through the
+$1$-factorization (layer $t$ uses class $t\bmod\chi'$, no RNG draw); \code{palette} draws a random class per
+layer; \code{fresh} samples a uniformly random perfect matching. The random-edge modes instead draw edge
+indices directly. The \code{all\_edges} mode fires every edge in the graph's stored order on every layer; its
+placement is deterministic and consumes no RNG.
+
+\paragraph{The scheduler.} \code{CircuitBuilder(config, sample\_seed)} (\file{scheduler.py}) owns one
+\code{np.random.default\_rng([base\_seed, sample\_seed])} consumed in a \emph{fixed} per-layer order ---
+(1)~gate placement, (2)~one Clifford index per gate, (3)~measurement-candidate draws --- so a run is
+bit-reproducible. It yields \code{CircuitLayer} objects (fields: \code{gate\_pairs}, \code{cliff\_indices},
+\code{meas\_qubits}, \code{meas\_candidates}) via \code{warmup\_layers\_iter()} (gate-only) and \code{layers()}
+(measured).
+
+% ======================================================================
+\section{The purification picture and the initial scramble}
+\label{sec:picture}
+\code{setup\_picture(picture, n\_system, *, rng, pivot\_mode, use\_numba, hybrid)} (\file{picture.py}) returns a
+freshly initialized \code{SparseGF2} with the picture's setup operations already applied, and a \code{PictureSpec}
+describing the layout (\code{system\_qubits}, \code{reference\_qubits}, \code{total\_qubits}) and the
+\code{order\_parameter} name. The three pictures:
+\begin{itemize}[itemsep=2pt]
+\item \code{pure\_state}: $n$ qubits in $|0^n\rangle$; no setup ops; order parameter is the half-cut entropy.
+\item \code{purification}: $2n$ qubits; for each $i$, $H(i)$ then $\mathrm{CX}(i,i{+}n)$, i.e.\ $n$ Bell pairs
+(system $i$ $\leftrightarrow$ reference $i{+}n$); order parameter is the code dimension $k=S(\text{system})$.
+\item \code{single\_ref}: $n{+}1$ qubits; $H(n{-}1)$ then $\mathrm{CX}(n{-}1,n)$, i.e.\ one reference Bell-paired
+with system qubit $n{-}1$; order parameter is the reference entropy $S(\{n\})\in\{0,1\}$.
+\end{itemize}
+The setup ops are deterministic and applied immediately (the inspector renders exactly this list). The optional
+\textbf{global scramble} (Sec.~\ref{sec:runner}) then applies one maximally-scrambling random Clifford
+$\code{random\_symplectic}(k)$ to the \code{scramble\_qubits()}, putting the state deep in the volume-law phase
+before the monitored evolution.
+
+% ======================================================================
+\section{The execution loop}
+\label{sec:runner}
+\code{SimulationRunner.run(sample\_seed, *, analyses, save\_tableau, checkpoint\_layers,
+checkpoint\_callback)} (\file{runner.py}) is the heart. At
+construction the runner fetches the Clifford table \code{sp4\_table()} and prebuilds one gate LUT per index
+(\code{\_gate\_luts\_for}, process-cached by table content). One realization proceeds:
+\begin{enumerate}[itemsep=2pt]
+\item \textbf{Streams \& picture.} The measurement-outcome generator
+\code{sim\_rng = default\_rng([base\_seed, sample\_seed, \_MEAS\_STREAM\_KEY])} is created and handed to
+\code{setup\_picture}; the \code{CircuitBuilder} gets its own independent construction stream
+(Sec.~\ref{sec:records}).
+\item \textbf{Global scramble} (if \code{scramble\_qubits()} is non-empty): an independent stream
+\code{default\_rng([base\_seed, sample\_seed, \_SCRAMBLE\_STREAM\_KEY])} draws
+\code{random\_symplectic(k)}, applied via \code{sim.apply\_clifford(\dots, qubits=scr\_qubits)}.
+\item \textbf{Warmup} (gate-only layers from \code{warmup\_layers\_iter()}): each ordered layer is applied by
+\code{sim.\_dispatch\_2q\_batch(gate\_pairs, cliff\_indices, lut\_array)}.
+\item \textbf{Measured phase} (up to \code{total\_layers()}): for each \code{CircuitLayer}, first the
+\emph{gate step} (\code{\_dispatch\_2q\_batch}), then the \emph{measurement step}
+(\code{sim.\_measure\_z\_batch(meas\_qubits)}, outcomes drawn from \code{sim\_rng}). The batch kernels execute
+the same scalar operations in the same order and preserve hybrid mode-switch boundaries and RNG consumption.
+\end{enumerate}
+
+\begin{lstlisting}[caption={The measured-phase inner loop (\file{runner.py}).},captionpos=b]
+for layer in builder.layers():
+    sim._dispatch_2q_batch(layer.gate_pairs, layer.cliff_indices,
+                           lut_array)       # ordered gate step
+    sim._measure_z_batch(layer.meas_qubits) # ordered measurement step
+    abar_sum += sim.active_count()
+    if track_op and layer.n_measurements > 0:
+        ...  # recompute the order parameter (with LOCC check-skipping)
+\end{lstlisting}
+
+\paragraph{Order parameter \& early stop.} When \code{depth\_mode == until\_purified} or
+\code{record\_time\_series}, the order parameter is read after any measured layer. Because it is an entanglement
+entropy with a reference that is never gated, gates cannot change it and a single measurement changes it by at
+most $1$ (LOCC monotonicity); the runner therefore \emph{skips} re-checks until the measurement budget since the
+last check is spent, and the recorded first-zero layer $\tau_p$ stays exact. On reaching $0$ the loop breaks and
+records \code{purified\_at\_layer}. It also accumulates $\bar a$ (mean active generators per qubit) as a density
+diagnostic.
+
+\paragraph{Depth checkpoints.} Requested checkpoint indices are one-based measured-layer counts and are evaluated
+after that layer's gates and measurements. Without a callback, the runner stores an independent symplectic-tableau
+snapshot. With \code{checkpoint\_callback}, it instead calls the read-only function as
+\code{callback(sim, spec, layer)} and stores the returned value. Layers outside the executed range are ignored.
+Returning the public \code{CHECKPOINT\_STOP} sentinel stops after the current layer's bookkeeping; the sentinel
+itself is not stored. The final observable pass still describes the live stopped state, and
+\code{purified\_at\_layer} is set by this generic stop only when the final reference order parameter is actually
+zero. Sparse checkpoints therefore record the first \emph{observed} zero checkpoint, not necessarily the exact
+unobserved transition layer.
+
+% ======================================================================
+\section{Gate application: the Clifford table and Numba kernels}
+\label{sec:gates}
+\paragraph{The Clifford set.} \code{sp4\_table()} (\file{\_clifford\_table.py}, built from
+\file{core/symplectic.py}) returns a cached $(720,4,4)$ \code{uint8} array: the $|\!\Sp(4,\F_2)|=720$ two-qubit
+symplectic matrices, in the basis $(X_{q_i},X_{q_j},Z_{q_i},Z_{q_j})$ with the row-vector convention
+(transformed basis $=$ old $\cdot\,S$). This is the two-qubit Clifford group modulo Paulis, which is all the
+phase-free tableau needs; the enumeration is verified against Stim.
+
+\paragraph{Lookup tables.} A symplectic matrix is turned into a fast \emph{lookup table} once
+(\code{\_build\_2q\_lut}, cached): a $16$-entry \code{uint8} array indexed by the packed old two-qubit Pauli bits
+$(\mathit{xz}_i{\ll}2)\,|\,\mathit{xz}_j$, returning the packed new bits. The runner prebuilds one such LUT per
+Clifford index up front.
+
+\paragraph{Applying a gate.} \code{sim.\_dispatch\_2q(qi, qj, lut)} runs the two-qubit kernel
+(\code{\_apply\_2q\_kernel}): it forms the deduplicated \emph{active set} of generators touching $q_i$ or $q_j$
+(\code{inv[qi]} $\cup$ \code{inv[qj]}), and for each such generator packs its bits on $(q_i,q_j)$, looks up the
+new bits, and updates \code{plt} plus the \code{supp}/\code{inv}/\code{inv\_x} indices where a Pauli appears or
+disappears. The cost is $O(|\code{inv[qi]}|+|\code{inv[qj]}|)$ --- only the affected generators are touched, which
+is the whole point of the sparse representation. \code{apply\_clifford(S, qubits)} generalizes this to an
+arbitrary-arity symplectic (used for the scramble). With \code{use\_numba}, byte-identical \code{@njit} kernels
+(\file{core/numba\_kernels.py}) replace the Python ones.
+
+% ======================================================================
+\section{Measurement}
+\label{sec:measure}
+\paragraph{Which qubits fire.} \code{sample\_measurements\_detailed(mode, n, p, gate\_pairs, rng, count)}
+(\file{measurements.py}) first selects \emph{candidates} by mode --- \code{bernoulli} (all $n$ qubits),
+\code{gated} (qubits in this layer's gate pairs), \code{random\_pair} (two random qubits), \code{uniform\_count}
+(\code{count} random qubits) --- then flips a Bernoulli$(p)$ coin per candidate (\code{rng.random(len)}), and
+returns the sorted candidates and the fired subset.
+
+\paragraph{The tableau update.} \code{sim.measure\_z(q)} implements the Aaronson--Gottesman $Z$-measurement via
+\code{\_measure\_z\_kernel}. It first checks \code{inv\_x[q]} for a \emph{stabilizer} that anticommutes with
+$Z_q$: if none, the outcome is deterministic and the tableau is unchanged. Otherwise the outcome is random: a
+pivot anticommuter is chosen (\code{pivot\_mode}: \code{min\_weight} keeps generators sparse, \code{first} is
+cheaper), the pivot is XORed (\code{\_sparse\_xor\_rows}) into every other anticommuter, the pivot's old row is
+copied into its destabilizer slot, and the pivot is replaced by the pure $Z_q$ generator. The random bit is
+drawn from the simulator's independent \code{sim\_rng}.
+
+% ======================================================================
+\section{Observables and order parameters}
+\label{sec:observables}
+All entanglement observables reduce to a GF(2) rank (\file{core/observables.py}). \code{subsystem\_rank(sim, A)}
+extracts the stabilizer block restricted to the columns of $A$ (its $x$- and $z$-bits) and computes
+$\mathrm{rank}_{\F_2}$ by bit-packed Gaussian elimination (\code{gf2\_rank\_bits}, $7$--$27\times$ faster than
+dense). The entanglement entropy is $S(A)=\mathrm{rank}([X|Z]|_A)-|A|$ (Fattal et al.); the
+\emph{code dimension} is $k=S(\text{system})$; the \emph{reference entropy} is $S(\text{reference})$. The runner's
+\code{\_order\_parameter(sim, spec)} dispatches on \code{spec.order\_parameter} to \code{code\_dimension} (purif\-
+ication), \code{entanglement\_entropy(reference)} (single\_ref), or the half-cut entropy (pure\_state). The
+single-reference purification time $\tau_p$ is the first layer at which this order parameter hits $0$.
+
+% ======================================================================
+\section{Records and reproducibility}
+\label{sec:records}
+A run returns a \code{SampleRecord} (\file{records.py}): identity (\code{sample\_seed}, \code{picture}),
+diagnostics (\code{total\_layers}, \code{total\_gates}, \code{total\_measurements}, expected/actual
+gate-to-measurement ratio), observables (\code{code\_dimension} / \code{ref\_entropy} / \code{entropy\_half\_cut},
+whichever apply), \code{purified\_at\_layer}, \code{mean\_active\_generators} ($\bar a$), an optional
+\code{time\_series}, an optional \code{final\_tableau}, any custom \code{analyses}, and either optional
+\code{checkpoint\_tableaux} or callback-produced \code{checkpoint\_values} keyed by measured layer.
+
+\paragraph{Three decoupled RNG streams.} Reproducibility schema v2 keys every per-sample generator by the ordered
+pair \code{(base\_seed, sample\_seed)}, never by their collision-prone scalar sum. Additional stream components
+keep measurement outcomes and scrambling independent of construction, so toggling one feature does not perturb
+another:
+\begin{enumerate}[itemsep=1pt]
+\item \textbf{Circuit construction} --- \code{default\_rng([base\_seed, sample\_seed])} in the
+\code{CircuitBuilder}, consumed in the fixed order gate-placement $\to$ Clifford-indices $\to$
+measurement-candidates.
+\item \textbf{Measurement outcomes} --- \code{default\_rng([base\_seed, sample\_seed, 0x6D656173])} (``meas'') on
+the \code{SparseGF2} instance.
+\item \textbf{Global scramble} --- \code{default\_rng([base\_seed, sample\_seed, 0x73637262])} (``scrb'').
+\end{enumerate}
+A stochastic graph string is realized separately from \code{base\_seed} alone and is therefore fixed across all
+sample seeds in the same configuration.
+A ``cell'' of a sweep is a \code{(config, sample\_seed)} pair, so results are independent of the number of
+parallel workers.
+
+% ======================================================================
+\section{Compatibility and additive extensions}
+\label{sec:changes}
+The scientific core remains the same phase-free stabilizer simulation described above: the tableau representation,
+Clifford action, measurement update, and GF(2)-rank observables do not depend on the optional scheduling and
+checkpoint interfaces. The current extensions are deliberately localized:
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Scheduling.} \code{all\_edges} adds a deterministic full-edge layer, and
+\code{total\_layers\_override} supplies an exact scheduled depth. Existing gating and depth formulas retain their
+documented meanings when those options are unused.
+\item \textbf{Observation.} Checkpoint tableaux and read-only callbacks expose intermediate states without changing
+the gate or measurement streams. \code{CHECKPOINT\_STOP} adds checkpoint-granular early stopping while preserving
+final-state observables.
+\item \textbf{Validation and persistence.} Configuration validation rejects ambiguous booleans, lossy integer
+coercions, and nonfinite probabilities. Analysis writers use unique same-directory temporary files so overlapping
+atomic writes cannot overwrite one another's payload.
+\item \textbf{Reproducibility.} RNG schema v2 is an intentional stream-definition change from the former
+\code{base\_seed + sample\_seed} convention. Pair-keyed streams remove seed-sum collisions; old and new payloads
+must therefore carry their schema/provenance rather than being assumed bit-identical.
+\end{itemize}
+These interfaces are covered by parity tests across pictures and gating modes, including nonperturbation of the
+executed circuit, exact-depth prefixes, checkpoint-stop bookkeeping, and equality of a final checkpoint tableau
+with \code{final\_tableau}. The project changelog is the authoritative record of version-specific behavior.
+
+\end{document}

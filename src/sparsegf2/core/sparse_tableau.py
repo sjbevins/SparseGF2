@@ -58,7 +58,9 @@ Public kernels
   :meth:`measure_pauli` projects onto an arbitrary multi-qubit Pauli
   and returns the pivot pair index (used by
   :mod:`sparsegf2.expurgation`); :meth:`pauli_anticommuting_rows` is
-  the underlying commutation query.
+  the underlying commutation query. :meth:`project_pauli_into_pair` is
+  the distinct code-space primitive that consumes a caller-selected canonical
+  pair even when the pure-state measurement would be deterministic.
 * **Reset/projection**: :meth:`reset_z`, :meth:`reset_x`, :meth:`reset_y`.
 * **State extraction**: :meth:`to_symplectic` (raw ``[X | Z]``),
   :meth:`canonical_form` (GF(2) RREF of the stabilizer subspace),
@@ -1610,6 +1612,107 @@ class SparseGF2:
         if self.hybrid:  # skip the bound-method call entirely on the default path
             self._maybe_check_mode_switch()
 
+    def _dispatch_2q_batch(
+        self,
+        pairs: Iterable[tuple[int, int]] | np.ndarray,
+        cliff_indices: Iterable[int] | np.ndarray,
+        luts: np.ndarray,
+    ) -> None:
+        """Apply an ordered batch of pre-indexed two-qubit Clifford LUTs.
+
+        Internal fast path for the circuit runner.  The scalar kernels remain
+        authoritative: the Numba batch kernels merely loop over them without a
+        Python round trip per gate.  In hybrid mode, batches are split exactly at
+        ``_check_interval`` boundaries so density checks and sparse/dense mode
+        switches occur after the same primitive operation as :meth:`_dispatch_2q`.
+        """
+        pairs_arr = np.asarray(pairs, dtype=np.int64)
+        indices_arr = np.asarray(cliff_indices, dtype=np.int64)
+        luts_arr = np.asarray(luts, dtype=np.uint8)
+        if pairs_arr.size == 0:
+            if indices_arr.size != 0:
+                raise InvalidArgumentError("empty gate-pair batch requires empty cliff_indices")
+            return
+        if pairs_arr.ndim != 2 or pairs_arr.shape[1] != 2:
+            raise InvalidArgumentError(f"pairs must have shape (m, 2); got {pairs_arr.shape}")
+        n_ops = pairs_arr.shape[0]
+        if indices_arr.ndim != 1 or indices_arr.shape[0] != n_ops:
+            raise InvalidArgumentError(
+                f"cliff_indices must have shape ({n_ops},); got {indices_arr.shape}"
+            )
+        if luts_arr.ndim != 2 or luts_arr.shape[1] != 16:
+            raise InvalidArgumentError(f"luts must have shape (n_luts, 16); got {luts_arr.shape}")
+        if (
+            pairs_arr.min() < 0
+            or pairs_arr.max() >= self.n
+            or np.any(pairs_arr[:, 0] == pairs_arr[:, 1])
+        ):
+            raise InvalidArgumentError(
+                f"gate pairs must contain distinct qubits in [0, n={self.n})"
+            )
+        if indices_arr.min() < 0 or indices_arr.max() >= luts_arr.shape[0]:
+            raise InvalidArgumentError(
+                f"cliff_indices must lie in [0, {luts_arr.shape[0]}); "
+                f"got min={indices_arr.min()}, max={indices_arr.max()}"
+            )
+
+        # Preserve the pure-Python backend exactly; the batching optimization is
+        # specifically about removing Python-to-Numba transitions.
+        if not self.use_numba:
+            for g in range(n_ops):
+                self._dispatch_2q(
+                    int(pairs_arr[g, 0]),
+                    int(pairs_arr[g, 1]),
+                    luts_arr[indices_arr[g]],
+                )
+            return
+
+        start = 0
+        while start < n_ops:
+            stop = n_ops
+            if self.hybrid:
+                stop = min(stop, start + self._check_interval - self._ops_since_check)
+            if self._dense_mode:
+                _nk.apply_2q_batch_packed_jit(
+                    self.x_packed,
+                    self.z_packed,
+                    pairs_arr,
+                    indices_arr,
+                    luts_arr,
+                    start,
+                    stop,
+                )
+            else:
+                _nk.apply_2q_batch_kernel_jit(
+                    self.plt,
+                    self.supp_q,
+                    self._supp_len,
+                    self.supp_pos,
+                    self.inv,
+                    self.inv_len,
+                    self.inv_pos,
+                    self.inv_x,
+                    self.inv_x_len,
+                    self.inv_x_pos,
+                    pairs_arr,
+                    indices_arr,
+                    luts_arr,
+                    start,
+                    stop,
+                    self._active_buf,
+                )
+            if self.hybrid:
+                self._ops_since_check += stop - start
+                if self._ops_since_check == self._check_interval:
+                    self._ops_since_check = 0
+                    abar = self._active_count()
+                    if self._dense_mode:
+                        if abar < self._dense_threshold / 2:
+                            self._switch_to_sparse()
+                    elif abar > self._dense_threshold:
+                        self._switch_to_dense()
+            start = stop
+
     def apply_cx(
         self,
         control: int | None = None,
@@ -1847,6 +1950,84 @@ class SparseGF2:
             return int(rng.integers(0, 2))
         return 0
 
+    def _measure_z_batch(
+        self,
+        qubits: Iterable[int] | np.ndarray,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        """Measure an ordered qubit batch while preserving scalar semantics.
+
+        Used internally by the circuit runner.  Tableau updates use the same
+        scalar kernels in the same order, hybrid mode checks occur at the same
+        primitive-operation boundaries, and one scalar RNG draw is consumed for
+        every non-deterministic measurement exactly as in :meth:`measure_z`.
+        """
+        qubits_arr = np.asarray(qubits, dtype=np.int64)
+        if qubits_arr.size == 0:
+            return np.zeros(0, dtype=np.uint8)
+        if qubits_arr.ndim != 1:
+            raise InvalidArgumentError(f"qubits must be one-dimensional; got {qubits_arr.shape}")
+        if qubits_arr.min() < 0 or qubits_arr.max() >= self.n:
+            raise InvalidArgumentError(f"qubits must lie in [0, n={self.n})")
+        n_ops = qubits_arr.shape[0]
+
+        if not self.use_numba:
+            return np.asarray([self.measure_z(int(q), rng=rng) for q in qubits_arr], dtype=np.uint8)
+
+        was_random = np.zeros(n_ops, dtype=np.uint8)
+        start = 0
+        while start < n_ops:
+            stop = n_ops
+            if self.hybrid:
+                stop = min(stop, start + self._check_interval - self._ops_since_check)
+            if self._dense_mode:
+                _nk.measure_z_batch_packed_jit(
+                    self.x_packed,
+                    self.z_packed,
+                    qubits_arr,
+                    start,
+                    stop,
+                    was_random,
+                )
+            else:
+                _nk.measure_z_batch_kernel_jit(
+                    self.plt,
+                    self.supp_q,
+                    self._supp_len,
+                    self.supp_pos,
+                    self.inv,
+                    self.inv_len,
+                    self.inv_pos,
+                    self.inv_x,
+                    self.inv_x_len,
+                    self.inv_x_pos,
+                    qubits_arr,
+                    start,
+                    stop,
+                    self.use_min_weight_pivot,
+                    self._others_buf,
+                    was_random,
+                )
+            if self.hybrid:
+                self._ops_since_check += stop - start
+                if self._ops_since_check == self._check_interval:
+                    self._ops_since_check = 0
+                    abar = self._active_count()
+                    if self._dense_mode:
+                        if abar < self._dense_threshold / 2:
+                            self._switch_to_sparse()
+                    elif abar > self._dense_threshold:
+                        self._switch_to_dense()
+            start = stop
+
+        outcomes = np.zeros(n_ops, dtype=np.uint8)
+        if np.any(was_random):
+            draw_rng = self._rng if rng is None else rng
+            for m in range(n_ops):
+                if was_random[m]:
+                    outcomes[m] = draw_rng.integers(0, 2)
+        return outcomes
+
     def reset_z(self, q: int, rng: np.random.Generator | None = None) -> None:
         """Project ``q`` onto the ``Z_q``-eigenspace.
 
@@ -1929,12 +2110,31 @@ class SparseGF2:
         is allowed here; callers that cannot accept the identity raise
         on their own.
         """
-        q = np.asarray(list(qubits), dtype=np.int64)
-        ltr = np.asarray(list(letters), dtype=np.uint8)
-        if q.ndim != 1 or ltr.ndim != 1 or q.shape[0] != ltr.shape[0]:
+        raw_q = np.asarray(list(qubits), dtype=object)
+        raw_ltr = np.asarray(list(letters), dtype=object)
+        if raw_q.ndim != 1 or raw_ltr.ndim != 1 or raw_q.shape[0] != raw_ltr.shape[0]:
             raise InvalidArgumentError(
-                f"qubits and letters must be 1-D and the same length, got {q.shape} and {ltr.shape}"
+                "qubits and letters must be 1-D and the same length, got "
+                f"{raw_q.shape} and {raw_ltr.shape}"
             )
+        no_bad_value = object()
+        for name, values in (("qubits", raw_q), ("letters", raw_ltr)):
+            bad = next(
+                (
+                    value
+                    for value in values
+                    if isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, np.integer))
+                ),
+                no_bad_value,
+            )
+            if bad is not no_bad_value:
+                raise InvalidArgumentError(
+                    f"{name} must contain exact integers (not Booleans or lossy numeric "
+                    f"values); got {bad!r}"
+                )
+        q = np.asarray([int(value) for value in raw_q], dtype=np.int64)
+        ltr = np.asarray([int(value) for value in raw_ltr], dtype=np.uint8)
         if q.shape[0]:
             if q.min() < 0 or q.max() >= self.n:
                 raise InvalidArgumentError(
@@ -2133,6 +2333,152 @@ class SparseGF2:
         if self.hybrid:
             self._maybe_check_mode_switch()
         return destab
+
+    def project_pauli_into_pair(
+        self, qubits: Iterable[int], letters: Iterable[int], pair: int
+    ) -> int:
+        """Install a Pauli as the stabilizer row of a selected canonical pair.
+
+        This is the code-space projection primitive used by expurgation.  It
+        differs intentionally from :meth:`measure_pauli`, which measures the
+        *pure state* represented by all ``n`` stabilizer rows and therefore
+        treats an encoded logical-Z row as deterministic.  A code-space
+        projection must instead spend one selected logical pair even when the
+        Pauli already belongs to that pure-state stabilizer group.
+
+        The selected pair must anticommute with ``g`` on at least one of its
+        two rows.  One such row is retained as the new destabilizer partner;
+        every row outside the pair that anticommutes with ``g`` is multiplied
+        by that partner, and ``g`` replaces the pair's stabilizer row.  This is
+        a symplectic change of canonical basis followed by the projection, so
+        the full tableau remains canonical in both sparse and dense modes.
+
+        Parameters
+        ----------
+        qubits, letters
+            Non-empty sparse Pauli ``g`` in the same convention as
+            :meth:`measure_pauli`.
+        pair
+            Canonical pair index in ``[0, n)`` that the caller has chosen to
+            consume.  ``g`` must act nontrivially on this pair.
+
+        Returns
+        -------
+        int
+            ``pair``, for convenient role bookkeeping by the caller.
+        """
+        q, ltr = self._validate_pauli(qubits, letters)
+        if q.shape[0] == 0:
+            raise InvalidArgumentError(
+                "project_pauli_into_pair: the identity Pauli cannot be projected"
+            )
+        if isinstance(pair, (bool, np.bool_)) or not isinstance(pair, (int, np.integer)):
+            raise InvalidArgumentError(
+                f"project_pauli_into_pair: pair must be an integer in [0, n={self.n}), got {pair!r}"
+            )
+        pair = int(pair)
+        if pair < 0 or pair >= self.n:
+            raise InvalidArgumentError(
+                f"project_pauli_into_pair: pair must be in [0, n={self.n}), got {pair}"
+            )
+
+        n = self.n
+        destab = pair
+        stab = n + pair
+        anti = self.pauli_anticommuting_rows(q, ltr)
+        anti_set = set(int(r) for r in anti)
+        if destab in anti_set:
+            partner = destab
+        elif stab in anti_set:
+            partner = stab
+        else:
+            raise InvalidArgumentError(
+                "project_pauli_into_pair: the Pauli commutes with both rows of "
+                f"pair {pair}; that pair cannot absorb the projection"
+            )
+
+        others = anti[(anti != destab) & (anti != stab)]
+        if self._dense_mode:
+            if others.size:
+                self.x_packed[others] ^= self.x_packed[partner]
+                self.z_packed[others] ^= self.z_packed[partner]
+            if partner == stab:
+                self.x_packed[destab] = self.x_packed[stab]
+                self.z_packed[destab] = self.z_packed[stab]
+            gx, gz = _pack_pauli_bits(q, ltr, self.x_packed.shape[1])
+            self.x_packed[stab] = gx
+            self.z_packed[stab] = gz
+            if self.hybrid:
+                self._maybe_check_mode_switch()
+            return pair
+
+        for r0 in others:
+            _sparse_xor_rows(
+                self.plt,
+                self.supp_q,
+                self._supp_len,
+                self.supp_pos,
+                self.inv,
+                self.inv_len,
+                self.inv_pos,
+                self.inv_x,
+                self.inv_x_len,
+                self.inv_x_pos,
+                int(r0),
+                partner,
+            )
+        if partner == stab:
+            _clear_generator(
+                self.plt,
+                self.supp_q,
+                self._supp_len,
+                self.supp_pos,
+                self.inv,
+                self.inv_len,
+                self.inv_pos,
+                self.inv_x,
+                self.inv_x_len,
+                self.inv_x_pos,
+                destab,
+            )
+            _sparse_xor_rows(
+                self.plt,
+                self.supp_q,
+                self._supp_len,
+                self.supp_pos,
+                self.inv,
+                self.inv_len,
+                self.inv_pos,
+                self.inv_x,
+                self.inv_x_len,
+                self.inv_x_pos,
+                destab,
+                stab,
+            )
+        _clear_generator(
+            self.plt,
+            self.supp_q,
+            self._supp_len,
+            self.supp_pos,
+            self.inv,
+            self.inv_len,
+            self.inv_pos,
+            self.inv_x,
+            self.inv_x_len,
+            self.inv_x_pos,
+            stab,
+        )
+        for i in range(q.shape[0]):
+            qq = int(q[i])
+            xz = int(ltr[i])
+            self.plt[stab, qq] = np.uint8(xz)
+            _add_to_support(self.supp_q, self._supp_len, self.supp_pos, stab, qq)
+            _add_to_inv(self.inv, self.inv_len, self.inv_pos, qq, stab)
+            if (xz >> 1) & 1:
+                _add_to_inv_x(self.inv_x, self.inv_x_len, self.inv_x_pos, qq, stab)
+        if self.hybrid:
+            self._maybe_check_mode_switch()
+        return pair
 
     # ------------------------------------------------------------------
     # Symplectic extraction

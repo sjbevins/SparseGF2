@@ -202,3 +202,5 @@ def test_purification_validation():
         from_purification(sim, system_qubits=[0, 0])
     with pytest.raises(InvalidArgumentError):
         from_purification(sim, system_qubits=[4])
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        from_purification(sim, system_qubits=[1.9])

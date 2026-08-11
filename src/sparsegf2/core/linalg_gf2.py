@@ -40,6 +40,8 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from sparsegf2.errors import InvalidArgumentError
+
 try:  # pragma: no cover (JIT path is the default; fallback is for debug)
     from sparsegf2.core.numba_kernels import (
         gf2_kernel_basis_jit as _gf2_kernel_basis_jit,
@@ -260,10 +262,25 @@ def gf2_eliminate_on_columns(
     tuple of (ndarray, int)
         The reduced copy and the rank achieved on ``cols``.
     """
-    m = mat.copy()
+    m = np.asarray(mat)
+    if m.ndim != 2:
+        raise InvalidArgumentError(f"mat must be two-dimensional; got shape {m.shape}")
+    m = np.array(m, dtype=np.uint8, copy=True)
+    m &= 1
+    raw_cols = np.asarray(list(cols), dtype=object)
+    if raw_cols.ndim != 1:
+        raise InvalidArgumentError(f"cols must be one-dimensional; got shape {raw_cols.shape}")
+    for value in raw_cols:
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+            raise InvalidArgumentError(f"cols must contain exact integers; got {value!r}")
+    col_indices = np.asarray([int(value) for value in raw_cols], dtype=np.int64)
+    if col_indices.size and (col_indices.min() < 0 or col_indices.max() >= m.shape[1]):
+        raise InvalidArgumentError(
+            f"cols must lie in [0, {m.shape[1]}); got {col_indices.tolist()}"
+        )
     r = 0
     n_rows = m.shape[0]
-    for c in cols:
+    for c in col_indices:
         nz = np.flatnonzero(m[r:, c])
         if nz.size == 0:
             continue

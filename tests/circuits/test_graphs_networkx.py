@@ -183,7 +183,7 @@ def test_from_networkx_edgeless():
     assert not t.has_perfect_matching
 
 
-@pytest.mark.parametrize("mode", ["brickwork", "random_edge", "random_pool"])
+@pytest.mark.parametrize("mode", ["brickwork", "random_edge", "random_pool", "all_edges"])
 def test_edgeless_graph_rejected(mode):
     with pytest.raises(InvalidArgumentError):
         CircuitConfig(graph_spec=nx.empty_graph(4), n=4, gating_mode=mode, p=0.2)

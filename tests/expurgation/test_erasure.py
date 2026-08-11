@@ -112,6 +112,8 @@ def test_erasure_validation(example_a_code):
         uncorrectable_matrix(example_a_code, np.array([0, 0]))
     with pytest.raises(InvalidArgumentError):
         uncorrectable_matrix(example_a_code, np.array([4]))
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        uncorrectable_matrix(example_a_code, np.array([1.9]))
 
 
 # ----------------------------------------------------------------------
@@ -155,3 +157,9 @@ def test_sample_erasure_validation():
         sample_erasure(8, rng, count=9)
     with pytest.raises(InvalidArgumentError):
         sample_erasure(8, rng, count=1, sites=np.array([8]))
+    with pytest.raises(InvalidArgumentError, match="exact integer"):
+        sample_erasure(8, rng, count=1.9)
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        sample_erasure(8, rng, count=1, sites=np.array([1.9]))
+    with pytest.raises(InvalidArgumentError):
+        sample_erasure(8, rng, rate=True)

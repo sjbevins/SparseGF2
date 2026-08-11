@@ -60,6 +60,56 @@ def test_npz_tableaux_round_trip(tmp_path):
         assert np.array_equal(back[k], tabs[k])
 
 
+def test_arrays_npz_round_trip_preserves_dtype(tmp_path):
+    from sparsegf2.analysis import io
+
+    # write_arrays_npz is the dtype-preserving sibling of write_tableaux_npz
+    # (which casts to uint8 -- right for binary tableaux, corrupting for these).
+    arrays = {
+        "profile/n300": np.arange(300, dtype=np.int64),  # values > 255: uint8 would wrap
+        "floats": np.array([0.5, -1.25, 3.0], dtype=np.float64),
+    }
+    path = tmp_path / "arr.npz"
+    io.write_arrays_npz(arrays, path)
+    back = io.read_arrays_npz(path)
+    assert set(back) == set(arrays)
+    for k, v in arrays.items():
+        assert back[k].dtype == v.dtype  # dtype preserved (unlike the tableau writer)
+        assert np.array_equal(back[k], v)
+
+
+def test_atomic_write_preserves_prior_file_on_failure(tmp_path):
+    from sparsegf2.analysis import io
+
+    # a crash mid-write must not destroy the previous copy: _atomic_path writes a
+    # temp then os.replace()s, so a failing write leaves the old file intact and
+    # drops the partial temp.
+    path = tmp_path / "keep.npz"
+    io.write_arrays_npz({"x": np.arange(5)}, path)
+    with pytest.raises(ValueError), io._atomic_path(path) as tmp:
+        tmp.write_bytes(b"partial")
+        raise ValueError("boom mid-write")
+    # the original survives and the temp is gone
+    assert io.read_arrays_npz(path)["x"].tolist() == [0, 1, 2, 3, 4]
+    assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
+
+
+def test_atomic_paths_are_unique_for_overlapping_writers(tmp_path):
+    from sparsegf2.analysis import io
+
+    path = tmp_path / "shared.bin"
+    with io._atomic_path(path) as outer:
+        outer.write_bytes(b"outer")
+        with io._atomic_path(path) as inner:
+            assert inner != outer
+            inner.write_bytes(b"inner")
+        assert path.read_bytes() == b"inner"
+        # The outer writer still owns its distinct temporary payload.
+        assert outer.read_bytes() == b"outer"
+    assert path.read_bytes() == b"outer"
+    assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
+
+
 def test_parquet_manifest_and_empty_rows(tmp_path):
     from sparsegf2.analysis import io
 

@@ -33,6 +33,7 @@ EXPECTED_ALL = {
     "lattice_2d",
     "newman_watts",
     "path_graph",
+    "watts_strogatz",
     # matching
     "MATCHING_MODES",
     "select_matching",
@@ -48,6 +49,7 @@ EXPECTED_ALL = {
     "CircuitConfig",
     "SampleRecord",
     # runner
+    "CHECKPOINT_STOP",
     "SimulationRunner",
     "simulate",
 }

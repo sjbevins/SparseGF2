@@ -11,9 +11,10 @@ Golden path::
     rec = simulate(CircuitConfig(graph_spec="cycle", n=8, p=0.16))
 
 Implemented today: ``pure_state`` / ``purification`` / ``single_ref`` pictures;
-``cycle`` / ``complete`` / ``path`` / ``lattice_2d`` / ``newman_watts`` graphs
-plus ``from_networkx`` for arbitrary simple undirected geometry; ``brickwork`` /
-``random_edge`` / ``random_pool`` gating; ``round_robin`` / ``palette`` /
+``cycle`` / ``complete`` / ``path`` / ``lattice_2d`` / ``newman_watts`` /
+``watts_strogatz`` graphs plus ``from_networkx`` for arbitrary simple undirected
+geometry; ``brickwork`` /
+``random_edge`` / ``random_pool`` / ``all_edges`` gating; ``round_robin`` / ``palette`` /
 ``fresh`` matchings; ``bernoulli`` / ``gated`` / ``random_pair`` /
 ``uniform_count`` measurements; ``O(n)`` / ``O(log_n)`` / ``until_purified``
 depth. Everything is live code: new pictures / graphs / modes are small local
@@ -35,6 +36,7 @@ from sparsegf2.circuits.graphs import (
     lattice_2d,
     newman_watts,
     path_graph,
+    watts_strogatz,
 )
 from sparsegf2.circuits.inspector import (
     CircuitTrace,
@@ -56,7 +58,7 @@ from sparsegf2.circuits.measurements import (
 from sparsegf2.circuits.ops import DIRECTED_GATES, NAMED_GATES, Op, apply_named_gate
 from sparsegf2.circuits.picture import Picture, PictureSpec, setup_ops, setup_picture
 from sparsegf2.circuits.records import SampleRecord
-from sparsegf2.circuits.runner import SimulationRunner, simulate
+from sparsegf2.circuits.runner import CHECKPOINT_STOP, SimulationRunner, simulate
 from sparsegf2.circuits.scheduler import CircuitBuilder, CircuitLayer
 
 __all__ = [
@@ -88,6 +90,7 @@ __all__ = [
     "lattice_2d",
     "newman_watts",
     "path_graph",
+    "watts_strogatz",
     # matching
     "MATCHING_MODES",
     "select_matching",
@@ -103,6 +106,7 @@ __all__ = [
     "CircuitConfig",
     "SampleRecord",
     # runner
+    "CHECKPOINT_STOP",
     "SimulationRunner",
     "simulate",
 ]

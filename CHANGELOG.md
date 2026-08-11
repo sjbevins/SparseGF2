@@ -4,6 +4,56 @@ All notable changes to `sparsegf2` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `CircuitConfig(total_layers_override=T)` for a literal measured-layer cap,
+  independent of the depth-mode formula.
+- Layer checkpoints on `simulate` and `SimulationRunner.run`, including
+  read-only live callbacks and the `CHECKPOINT_STOP` sentinel for
+  checkpoint-granular early stopping.
+- Deterministic `gating_mode="all_edges"`, which fires the graph's full stored
+  edge list each layer.
+- Degree-preserving Watts--Strogatz graphs through `watts_strogatz(...)` and
+  parameterized string specifications such as
+  `"watts_strogatz(k=2,beta=0.1)"`, with graph provenance recorded on every
+  sample.
+- Dtype-preserving analysis-array NPZ I/O and general finite-size-scaling
+  collapse tools.
+- `SparseGF2.project_pauli_into_pair`, the code-space projection primitive
+  needed to expurgate a selected logical pair even when the Pauli is a
+  stabilizer of the pure-state tableau used to present the code.
+- A resume-safe PRL production workflow for exact-layer single-reference
+  purification times on mean-degree-four Watts--Strogatz graphs, including
+  deterministic data files, censoring flags, live status, and scalar/batch
+  parity validation.
+
+### Changed
+
+- Circuit gates and Z measurements use ordered batched Numba kernels while
+  preserving scalar operation order, RNG draws, hybrid mode-switch points, and
+  final tableaux.
+- Per-sample RNG streams use the pair `(base_seed, sample_seed)` rather than
+  their sum. This removes collisions between distinct seed pairs but changes
+  seeded trajectories relative to 2.1.0.
+- Integer-valued circuit, Pauli, erasure, and expurgation inputs reject Boolean
+  aliases and lossy numeric coercions. Measurement rates and probability
+  targets must be finite real numbers in their documented ranges.
+- Atomic analysis writes use unique same-directory staging paths, so concurrent
+  writers cannot clobber one another's temporary payload.
+
+### Fixed
+
+- Expurgation now always consumes exactly one logical pair for every validated
+  logically nontrivial measurement. Previously an encoded logical-Z operator
+  could be mistaken for a deterministic pure-state measurement, or a
+  pre-existing gauge pair could absorb the pivot; either path left `k`
+  unchanged and violated the algorithm's accounting and monotonicity contract.
+- The optional PDF drawing test now checks for the required LaTeX classes and
+  packages, rather than failing merely because `pdflatex` exists without
+  `standalone` or `quantikz`.
+
 ## [2.1.0] - 2026-07-24
 
 Expurgation: the code-surgery algorithm of Gullans, Krastanov, Huse, Jiang, and

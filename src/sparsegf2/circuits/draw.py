@@ -305,7 +305,7 @@ def _compile_pdf(latex: str, workdir: Path) -> Path:
 
 
 def _pdf_to_png(pdf: Path, png: Path, dpi: int) -> None:
-    """Convert ``pdf`` to ``png`` with the first available rasterizer."""
+    """Convert ``pdf`` to ``png`` with the first available rasteriser."""
     ppm = _which("pdftoppm")
     if ppm:  # best quality; -singlefile drops the page-number suffix
         subprocess.run(
@@ -330,7 +330,7 @@ def _pdf_to_png(pdf: Path, png: Path, dpi: int) -> None:
         )
         return
     raise InvalidArgumentError(
-        "no PDF->PNG rasterizer found (need pdftoppm, sips, or ImageMagick); "
+        "no PDF->PNG rasteriser found (need pdftoppm, sips, or ImageMagick); "
         "save the diagram as .pdf instead, or install one"
     )
 

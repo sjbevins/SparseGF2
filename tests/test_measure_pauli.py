@@ -256,3 +256,18 @@ def test_measure_pauli_rejects_bad_inputs():
         sim.measure_pauli([-1], [PAULI_X])
     with pytest.raises(InvalidArgumentError):
         sim.measure_pauli([0, 1], [PAULI_X])  # length mismatch
+
+
+@pytest.mark.parametrize(
+    ("qubits", "letters"),
+    [
+        ([1.9], [PAULI_X]),
+        ([True], [PAULI_X]),
+        ([0], [2.9]),
+        ([0], [True]),
+    ],
+)
+def test_pauli_validation_rejects_lossy_or_boolean_integer_aliases(qubits, letters):
+    sim = SparseGF2(2)
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        sim.pauli_anticommuting_rows(qubits, letters)

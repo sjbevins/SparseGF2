@@ -99,6 +99,18 @@ def test_trace_has_setup_then_layers():
     assert tr.truncated is True
 
 
+def test_trace_summary_describes_all_edges_and_exact_depth():
+    cfg = CircuitConfig(
+        graph_spec="cycle",
+        n=8,
+        gating_mode="all_edges",
+        total_layers_override=3,
+    )
+    tr = trace_circuit(cfg, sample_seed=0, max_layers=1)
+    assert tr.summary["gating"] == "all_edges (8 edges/layer)"
+    assert tr.summary["depth"] == "exact override = 3 measured layers"
+
+
 def test_trace_setup_shows_bell_pair_for_single_ref():
     cfg = CircuitConfig(graph_spec="cycle", n=8, picture="single_ref", p=0.1, depth_factor=2)
     tr = trace_circuit(cfg, max_layers=2)
@@ -233,7 +245,12 @@ def test_render_text_pure_state_setup_is_trivial():
 def test_render_all_pictures_and_modes_render():
     # smoke: every picture x gating x measurement renders without error
     for picture in ("pure_state", "purification", "single_ref"):
-        for gating, extra in (("brickwork", {}), ("random_edge", {"gates_per_layer": 2})):
+        for gating, extra in (
+            ("brickwork", {}),
+            ("random_edge", {"gates_per_layer": 2}),
+            ("random_pool", {"gates_per_layer": 2}),
+            ("all_edges", {}),
+        ):
             for meas in ("bernoulli", "gated", "random_pair"):
                 cfg = CircuitConfig(
                     graph_spec="cycle",

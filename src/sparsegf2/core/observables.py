@@ -10,8 +10,8 @@ Available observables
 ============================= ================================================
 ``subsystem_rank``            ``rank_{F_2}([X|Z]|_A)``, the dimension of the
                               local stabilizer subgroup on subsystem ``A``.
-``entanglement_entropy``      ``S(A) = rank - |A|``, the Fattal-Cubitt-Yamamoto-
-                              Bravyi-Chuang formula (`quant-ph/0406168`_).
+``entanglement_entropy``      ``S(A) = rank - |A|``, the Fattal–Cubitt–Yamamoto–
+                              Bravyi–Chuang formula (`quant-ph/0406168`_).
 ``mutual_information``        ``I(A:B) = S(A) + S(B) - S(A ∪ B)``.
 ``tripartite_mutual_info``    ``I_3(A:B:C) = I(A:B) + I(A:C) - I(A:B ∪ C)``.
 ``code_dimension``            Number of *purified* logical qubits in an
@@ -93,7 +93,6 @@ from sparsegf2.core._protocol import SimulatorProtocol, SubsystemFastExtractor
 # Bit-packed elimination: identical results to ``gf2_rank``, ~7-27x faster at
 # the (n, 2|A|) shapes the observables produce (and never slower, even tiny).
 # Load-bearing for ``until_purified`` runs, which take a rank per measured layer.
-from sparsegf2.core.linalg_gf2 import gf2_eliminate_on_columns as _eliminate_on_columns
 from sparsegf2.core.linalg_gf2 import gf2_rank_bits as _gf2_rank
 from sparsegf2.errors import InvalidArgumentError, TableauCorruption
 
@@ -236,6 +235,17 @@ def _subsystem_rank_arr(sim: SimulatorProtocol, A: NDArray[np.int64], n: int) ->
     return _gf2_rank(sub)
 
 
+def _entropy_from_validated(sim: SimulatorProtocol, A: NDArray[np.int64], n: int) -> int:
+    """Entropy for a validated subsystem, using the smaller pure-state side."""
+    if A.shape[0] == 0 or A.shape[0] == n:
+        return 0
+    if A.shape[0] > n // 2:
+        mask = np.ones(n, dtype=np.bool_)
+        mask[A] = False
+        A = np.flatnonzero(mask).astype(np.int64, copy=False)
+    return int(_subsystem_rank_arr(sim, A, n) - A.shape[0])
+
+
 # ----------------------------------------------------------------------
 # Entropy + mutual information
 # ----------------------------------------------------------------------
@@ -244,7 +254,7 @@ def _subsystem_rank_arr(sim: SimulatorProtocol, A: NDArray[np.int64], n: int) ->
 def entanglement_entropy(sim: SimulatorProtocol, subsystem: Iterable[int]) -> int:
     r"""Entanglement entropy of subsystem ``A`` in units of $\log_2$.
 
-    Fattal-Cubitt-Yamamoto-Bravyi-Chuang 2004 (`quant-ph/0406168`_):
+    Fattal–Cubitt–Yamamoto–Bravyi–Chuang 2004 (`quant-ph/0406168`_):
 
     .. math::
 
@@ -365,19 +375,48 @@ def tripartite_mutual_info(
         if any of ``A``, ``B``, ``C`` has duplicate / out-of-range
         indices.
     """
-    Aarr = _validate_subsystem(A, sim.n)
-    Barr = _validate_subsystem(B, sim.n)
-    Carr = _validate_subsystem(C, sim.n)
+    return _tripartite_mutual_info_and_entropy_ab(sim, A, B, C)[0]
+
+
+def _tripartite_mutual_info_and_entropy_ab(
+    sim: SimulatorProtocol,
+    A: Iterable[int],
+    B: Iterable[int],
+    C: Iterable[int],
+) -> tuple[int, int]:
+    """Return ``(I3(A:B:C), S(A union B))`` with shared rank work.
+
+    This internal helper underpins :func:`tripartite_mutual_info` and the
+    dynamics studies that also record the half-cut entropy ``S(A union B)``.
+    The former implementation evaluated three mutual informations separately,
+    repeating the rank of ``A`` three times.  Here each of the seven distinct
+    entropies is evaluated once.  Pure-state complementarity is used whenever a
+    union is larger than half the system, reducing matrix width without changing
+    the integer observable.
+    """
+    n = sim.n
+    Aarr = _validate_subsystem(A, n)
+    Barr = _validate_subsystem(B, n)
+    Carr = _validate_subsystem(C, n)
     if np.intersect1d(Aarr, Barr).size:
         raise InvalidArgumentError("A and B must be disjoint")
     if np.intersect1d(Aarr, Carr).size:
         raise InvalidArgumentError("A and C must be disjoint")
     if np.intersect1d(Barr, Carr).size:
         raise InvalidArgumentError("B and C must be disjoint")
-    iAB = mutual_information(sim, Aarr, Barr)
-    iAC = mutual_information(sim, Aarr, Carr)
-    iAbc = mutual_information(sim, Aarr, np.concatenate([Barr, Carr]))
-    return iAB + iAC - iAbc
+
+    AB = np.concatenate([Aarr, Barr])
+    AC = np.concatenate([Aarr, Carr])
+    BC = np.concatenate([Barr, Carr])
+    ABC = np.concatenate([Aarr, Barr, Carr])
+    sA = _entropy_from_validated(sim, Aarr, n)
+    sB = _entropy_from_validated(sim, Barr, n)
+    sC = _entropy_from_validated(sim, Carr, n)
+    sAB = _entropy_from_validated(sim, AB, n)
+    sAC = _entropy_from_validated(sim, AC, n)
+    sBC = _entropy_from_validated(sim, BC, n)
+    sABC = _entropy_from_validated(sim, ABC, n)
+    return sA + sB + sC - sAB - sAC - sBC + sABC, sAB
 
 
 # ----------------------------------------------------------------------
@@ -453,6 +492,38 @@ def code_rate(sim: SimulatorProtocol, n_system: int) -> float:
     if n_system == 0:
         return 0.0
     return code_dimension(sim, n_system) / n_system
+
+
+def _eliminate_on_columns(
+    mat: NDArray[np.uint8], cols: NDArray[np.int64]
+) -> tuple[NDArray[np.uint8], int]:
+    """Forward GF(2) elimination of ``mat`` using ``cols`` as pivot columns
+    (left to right), applying every row operation across all of ``mat``.
+
+    Returns a reduced copy and the rank ``r`` obtained on ``cols``: rows
+    ``0 .. r-1`` carry the pivots (and span the column space of ``cols``), and
+    rows ``r ..`` are zero in every column of ``cols``. Used by
+    :func:`contiguous_distance` to factor a fixed reference subsystem out of the
+    stabilizer block once, so each window costs two small ranks.
+    """
+    m = mat.copy()
+    r = 0
+    n_rows = m.shape[0]
+    for c in cols:
+        nz = np.flatnonzero(m[r:, c])
+        if nz.size == 0:
+            continue
+        piv = r + int(nz[0])
+        if piv != r:
+            m[[r, piv]] = m[[piv, r]]
+        hits = m[:, c].astype(bool).copy()
+        hits[r] = False
+        if hits.any():
+            m[hits] ^= m[r]
+        r += 1
+        if r == n_rows:
+            break
+    return m, r
 
 
 def contiguous_distance(

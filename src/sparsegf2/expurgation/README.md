@@ -64,11 +64,13 @@ One round of the loop:
    directions, `r_M` of them, and their identity-block witness bits reconstruct
    the offending Pauli operators, returned lightest first.
 4. Re-validate each candidate against the current tableau (earlier measurements
-   in the round may have made it detectable or trivial) and measure the
-   survivors with `SparseGF2.measure_pauli`. The destabilizer/stabilizer pair
-   that absorbs the operator leaves the logical set. Under the default `gauge`
-   strategy it becomes a gauge pair and the original checks stay untouched;
-   under the `stabilizer` strategy it becomes a new check.
+   in the round may have made it detectable or trivial) and project each
+   survivor into a logical pair on which it acts nontrivially. This code-space
+   update deliberately differs from measuring the pure-state tableau: an
+   encoded logical-Z row must still consume its logical qubit. Under the default
+   `gauge` strategy the selected pair becomes gauge and the original checks stay
+   untouched; under the `stabilizer` strategy the measured Pauli becomes a new
+   check.
 5. Stop when `k` reaches `k_target`, the validation metric reaches
    `recovery_target`, `max_barren_rounds` consecutive rounds produce no valid
    candidate, `max_rounds` is hit, or `k` reaches zero (expurgation failed).

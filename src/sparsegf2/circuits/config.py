@@ -8,9 +8,9 @@ bad cell fails at construction with a clear
 runner.
 
 Sweep-level orchestration (iterating over ``n``, ``p``, many seeds,
-writing parquet) deliberately lives *outside* this package. It belongs
-to the future ``sparsegf2.analysis`` layer. A ``CircuitConfig`` is one
-cell; the analysis package will hold the many-cell driver.
+and writing persistent results) deliberately lives in
+``sparsegf2.analysis``. A ``CircuitConfig`` describes one cell; the
+analysis package owns the many-cell driver.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from numbers import Real
 from typing import Literal
 
 import numpy as np
@@ -28,8 +29,13 @@ from sparsegf2.circuits.measurements import MEASUREMENT_MODES
 from sparsegf2.circuits.picture import Picture
 from sparsegf2.errors import InvalidArgumentError
 
-GATING_MODES = ("brickwork", "random_edge", "random_pool")
+GATING_MODES = ("brickwork", "random_edge", "random_pool", "all_edges")
 DEPTH_MODES = ("O(n)", "O(log_n)", "until_purified")
+
+
+def _is_integer(value: object) -> bool:
+    """Whether ``value`` is an integer knob rather than a Boolean alias."""
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
 
 
 @dataclass
@@ -53,10 +59,13 @@ class CircuitConfig:
         not here.
     picture : Picture or str
         Physics picture (``"pure_state"`` / ``"purification"`` / ``"single_ref"``).
-    gating_mode : {"brickwork", "random_edge", "random_pool"}
+    gating_mode : {"brickwork", "random_edge", "random_pool", "all_edges"}
         ``brickwork`` fires a whole perfect matching each layer (``n/2``
         gates); ``random_edge`` fires ``gates_per_layer`` *distinct* random
-        graph edges each layer (default 1); ``random_pool`` fires
+        graph edges each layer (default 1); ``all_edges`` fires **every** graph
+        edge each layer, in the graph's fixed edge order (a fully deterministic
+        gate schedule; RNG is consumed only by the Clifford choices and the
+        measurements); ``random_pool`` fires
         ``gates_per_layer`` random edges **with replacement** (default ``n/2``,
         which holds the gate:measurement ratio at brickwork's ``1:2p``; raise
         the coefficient, e.g. ``n``, to change the ratio deliberately).
@@ -82,15 +91,25 @@ class CircuitConfig:
         How total circuit depth scales with ``n``.
     depth_factor : int
         Multiplier in the depth formula (``>= 1``).
+    total_layers_override : int or None, optional
+        If set (a positive int), :meth:`total_layers` returns this literal
+        measured-layer count, bypassing the ``depth_mode``/``depth_factor``
+        formula *and* the random-edge gating rescale. Use it to run a circuit
+        to an exact depth that no depth mode expresses (e.g. a constant number
+        of layers, or ``round(n**z)``). ``None`` (default) uses the formula.
     n_cliffords : int
         Size of the Clifford table to sample gate indices from. Defaults to
         ``720 = |Sp(4, F_2)|``, **not** 11,520 (the sign-decorated Clifford
         count, which is invisible to the phase-free simulator).
     base_seed : int
-        Base RNG seed; the per-sample seed is ``base_seed + sample_seed``.
+        Base RNG seed (``>= 0``). Every per-sample stream is keyed by the
+        **pair** ``(base_seed, sample_seed)`` — never their sum — so distinct
+        ``(base_seed, sample_seed)`` cells never share a stream. For a
+        stochastic string spec the ``base_seed`` alone is also the graph
+        realization seed (quenched across a config's samples).
     record_time_series : bool
-        Record the order parameter after every layer (a future runner
-        feature). Forbidden for ``pure_state`` (no reference to track).
+        Record the order parameter after every measured layer. Forbidden for
+        ``pure_state`` (no reference to track).
     warmup_layers : int
         Number of gate-only pre-scrambling layers before the measured loop
         (``>= 0``).
@@ -128,7 +147,7 @@ class CircuitConfig:
     graph_spec: str | GraphTopology
     n: int
     picture: Picture | str = Picture.PURE_STATE
-    gating_mode: Literal["brickwork", "random_edge", "random_pool"] = "brickwork"
+    gating_mode: Literal["brickwork", "random_edge", "random_pool", "all_edges"] = "brickwork"
     matching_mode: Literal["round_robin", "palette", "fresh"] = "round_robin"
     gates_per_layer: int | Callable[[CircuitConfig], int] | None = None
     measurement_mode: Literal["bernoulli", "gated", "random_pair", "uniform_count"] = "bernoulli"
@@ -145,6 +164,9 @@ class CircuitConfig:
     pivot_mode: str | None = None
     use_numba: bool | None = None
     hybrid: bool = False
+    # Additive fields stay after the original constructor fields so existing
+    # positional calls keep their meaning.
+    total_layers_override: int | None = None
 
     def __post_init__(self) -> None:
         # ---- graph_spec ----
@@ -154,7 +176,7 @@ class CircuitConfig:
         if not isinstance(self.graph_spec, (str, GraphTopology)):
             self.graph_spec = from_networkx(self.graph_spec)
         # ---- n ----
-        if not isinstance(self.n, (int, np.integer)) or self.n < 2:
+        if not _is_integer(self.n) or self.n < 2:
             raise InvalidArgumentError(f"n must be an integer >= 2; got {self.n!r}")
         self.n = int(self.n)
         if isinstance(self.graph_spec, GraphTopology) and self.graph_spec.n != self.n:
@@ -183,7 +205,7 @@ class CircuitConfig:
             pass  # per-mode default, resolved lazily (1 for random_edge, n/2 for random_pool)
         elif callable(self.gates_per_layer):
             pass  # resolved lazily against this config (e.g. lambda cfg: cfg.n)
-        elif isinstance(self.gates_per_layer, (int, np.integer)):
+        elif _is_integer(self.gates_per_layer):
             if self.gates_per_layer < 1:
                 raise InvalidArgumentError(
                     f"gates_per_layer must be >= 1; got {self.gates_per_layer!r}"
@@ -194,13 +216,16 @@ class CircuitConfig:
                 "gates_per_layer must be None, a positive int, or a callable "
                 f"(CircuitConfig -> int); got {type(self.gates_per_layer).__name__}"
             )
-        # gates_per_layer only applies to the random-edge modes; brickwork always
-        # fires a full matching. Reject any value with brickwork rather than
-        # silently ignore it.
-        if self.gating_mode == "brickwork" and self.gates_per_layer is not None:
+        # gates_per_layer only applies to the random-edge modes. Brickwork fires
+        # a full matching and all_edges fires the graph's complete edge set;
+        # reject a value in either deterministic mode rather than ignore it.
+        if (
+            self.gating_mode not in ("random_edge", "random_pool")
+            and self.gates_per_layer is not None
+        ):
             raise InvalidArgumentError(
                 "gates_per_layer only applies to gating_mode='random_edge'/'random_pool'; "
-                "brickwork always fires a full matching (n/2 gates)"
+                f"gating_mode={self.gating_mode!r} has a fixed gate schedule"
             )
         # ---- measurement_mode ----
         if self.measurement_mode not in MEASUREMENT_MODES:
@@ -215,7 +240,7 @@ class CircuitConfig:
                 raise InvalidArgumentError(
                     "meas_count only applies to measurement_mode='uniform_count'"
                 )
-            if not isinstance(self.meas_count, (int, np.integer)) or self.meas_count < 1:
+            if not _is_integer(self.meas_count) or self.meas_count < 1:
                 raise InvalidArgumentError(
                     f"meas_count must be a positive int; got {self.meas_count!r}"
                 )
@@ -223,30 +248,49 @@ class CircuitConfig:
             if self.meas_count > self.n:
                 raise InvalidArgumentError(f"meas_count={self.meas_count} exceeds n={self.n}")
         # ---- p ----
-        if not 0.0 <= self.p <= 1.0:
-            raise InvalidArgumentError(f"p must be in [0, 1]; got {self.p}")
-        self.p = float(self.p)
+        if not isinstance(self.p, Real) or isinstance(self.p, (bool, np.bool_)):
+            raise InvalidArgumentError(f"p must be a finite real number in [0, 1]; got {self.p!r}")
+        try:
+            normalized_p = float(self.p)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise InvalidArgumentError(
+                f"p must be a finite real number in [0, 1]; got {self.p!r}"
+            ) from exc
+        if not math.isfinite(normalized_p) or not 0.0 <= normalized_p <= 1.0:
+            raise InvalidArgumentError(f"p must be a finite real number in [0, 1]; got {self.p!r}")
+        self.p = normalized_p
         # ---- depth ----
         if self.depth_mode not in DEPTH_MODES:
             raise InvalidArgumentError(
                 f"depth_mode must be one of {DEPTH_MODES}; got {self.depth_mode!r}"
             )
-        if not isinstance(self.depth_factor, (int, np.integer)) or self.depth_factor < 1:
+        if not _is_integer(self.depth_factor) or self.depth_factor < 1:
             raise InvalidArgumentError(
                 f"depth_factor must be a positive integer; got {self.depth_factor!r}"
             )
         self.depth_factor = int(self.depth_factor)
+        # ---- total_layers_override (exact measured-layer count) ----
+        if self.total_layers_override is not None:
+            if not _is_integer(self.total_layers_override) or self.total_layers_override < 1:
+                raise InvalidArgumentError(
+                    "total_layers_override must be None or a positive int; "
+                    f"got {self.total_layers_override!r}"
+                )
+            self.total_layers_override = int(self.total_layers_override)
         # ---- n_cliffords ----
-        if not isinstance(self.n_cliffords, (int, np.integer)) or not (
-            1 <= self.n_cliffords <= 720
-        ):
+        if not _is_integer(self.n_cliffords) or not (1 <= self.n_cliffords <= 720):
             raise InvalidArgumentError(
                 f"n_cliffords must be an integer in [1, 720]; got {self.n_cliffords!r}"
             )
         self.n_cliffords = int(self.n_cliffords)
         # ---- base_seed ----
-        if not isinstance(self.base_seed, (int, np.integer)):
-            raise InvalidArgumentError(f"base_seed must be an integer; got {self.base_seed!r}")
+        # Non-negative because every stream is seeded from the entropy pair
+        # [base_seed, sample_seed] (SeedSequence rejects negative entries), and
+        # so is the stochastic-graph realization seed.
+        if not _is_integer(self.base_seed) or self.base_seed < 0:
+            raise InvalidArgumentError(
+                f"base_seed must be a non-negative integer; got {self.base_seed!r}"
+            )
         self.base_seed = int(self.base_seed)
         # ---- record_time_series ----
         if not isinstance(self.record_time_series, bool):
@@ -265,7 +309,7 @@ class CircuitConfig:
                 "it is not defined for picture='pure_state'"
             )
         # ---- warmup_layers ----
-        if not isinstance(self.warmup_layers, (int, np.integer)) or self.warmup_layers < 0:
+        if not _is_integer(self.warmup_layers) or self.warmup_layers < 0:
             raise InvalidArgumentError(
                 f"warmup_layers must be a non-negative integer; got {self.warmup_layers!r}"
             )
@@ -281,6 +325,8 @@ class CircuitConfig:
 
         if not isinstance(self.hybrid, bool):
             raise InvalidArgumentError(f"hybrid must be bool; got {self.hybrid!r}")
+        if self.use_numba is not None and not isinstance(self.use_numba, bool):
+            raise InvalidArgumentError(f"use_numba must be bool or None; got {self.use_numba!r}")
 
         # ---- graph + gating/matching compatibility (eager, fail-fast) ----
         # Resolve the graph now so an incompatible (graph, mode) pair raises
@@ -309,15 +355,19 @@ class CircuitConfig:
                     f"{self._graph.name!r} has none. "
                     f"Available matching modes: {available_modes(self._graph)}"
                 )
-        elif self.gating_mode in ("random_edge", "random_pool") and not self._graph.edges:
+        elif (
+            self.gating_mode in ("random_edge", "random_pool", "all_edges")
+            and not self._graph.edges
+        ):
             raise InvalidArgumentError(
                 f"gating_mode={self.gating_mode!r} needs at least one edge, but graph "
                 f"{self._graph.name!r} has none"
             )
 
-        # Eagerly validate a callable gates_per_layer for the random-edge modes,
-        # so a bad callable fails fast at construction (not deep in the scheduler).
-        if self.gating_mode in ("random_edge", "random_pool") and callable(self.gates_per_layer):
+        # Eagerly resolve gates_per_layer for the random-edge modes, so a bad
+        # callable AND an undeliverable distinct-edge count both fail fast at
+        # construction (not deep in the scheduler, and never silently).
+        if self.gating_mode in ("random_edge", "random_pool"):
             try:
                 self.resolved_gates_per_layer()
             except InvalidArgumentError:
@@ -342,9 +392,29 @@ class CircuitConfig:
         if g is None:
             m = max(1, self.n // 2) if self.gating_mode == "random_pool" else 1
         else:
-            m = int(g(self)) if callable(g) else int(g)
+            resolved = g(self) if callable(g) else g
+            if not _is_integer(resolved):
+                raise InvalidArgumentError(
+                    "gates_per_layer must resolve to a positive int; "
+                    f"got {resolved!r} ({type(resolved).__name__})"
+                )
+            m = int(resolved)
         if m < 1:
             raise InvalidArgumentError(f"gates_per_layer resolved to {m}; must be >= 1")
+        # random_edge draws m *distinct* edges: m > |E| cannot be delivered. The
+        # scheduler used to clamp silently while total_layers() and the expected
+        # ratio still used the unclamped m — a 4x gate-budget shortfall on a
+        # cycle asked for m=4|E|, with no warning. Refuse instead: the caller
+        # can write min(m, len(graph.edges)) explicitly if that is what they
+        # mean. (random_pool draws with replacement; any m is deliverable.)
+        if self.gating_mode == "random_edge":
+            n_edges = len(self._graph.edges) if hasattr(self, "_graph") else None
+            if n_edges is not None and m > n_edges:
+                raise InvalidArgumentError(
+                    f"gates_per_layer={m} exceeds the graph's edge count {n_edges}; "
+                    f"random_edge fires *distinct* edges, so at most {n_edges} per layer "
+                    f"are deliverable (use random_pool for draws with replacement)"
+                )
         return m
 
     def resolved_meas_count(self) -> int:
@@ -355,25 +425,34 @@ class CircuitConfig:
     def total_layers(self) -> int:
         """Number of measured layers (time steps) for this cell.
 
-        Depth is measured in **gates per qubit**, so circuits are comparable
-        across gating modes. The brickwork-equivalent base budget is:
+        The depth modes first define a brickwork-equivalent base layer count:
 
         - ``O(n)`` / ``until_purified`` → ``depth_factor * n``
         - ``O(log_n)``                 → ``depth_factor * ceil(log2 n)``
 
-        A brickwork layer fires ``n/2`` gates and touches every qubit once,
-        so the base value *is* the gates-per-qubit budget and is returned
-        directly. ``random_edge`` fires ``m = resolved_gates_per_layer()``
-        gates/layer, touching only ``2m/n`` of the qubits per layer, so it
-        needs ``n/(2m)`` times as many layers to reach the same budget:
+        A brickwork layer fires ``n/2`` gates and touches every qubit once, so
+        the base value is returned directly. The random-edge modes fire
+        ``m = resolved_gates_per_layer()`` gates/layer and therefore use
+        ``n/(2m)`` times as many layers to preserve the brickwork gate budget:
 
-        - ``random_edge`` → ``round(base * n / (2m))``.
+        - ``random_edge`` / ``random_pool`` → ``round(base * n / (2m))``.
 
-        Consequence (the reason this is mode-aware): a **single-edge**
+        Consequence (the reason the random modes are rescaled): a **single-edge**
         ``random_edge`` circuit (``m=1``) runs ``O(n^2)`` layers; an
         ``O(n)`` layer count is *not* enough at one gate per step. An
-        ``m = n/2`` random_edge circuit matches brickwork's layer count.
+        ``m = n/2`` random-edge circuit matches brickwork's layer count.
+
+        ``all_edges`` returns the base count without gate-budget normalization:
+        firing the graph's complete edge list is the definition of one layer in
+        that architecture, even when ``|E| != n/2``. Use
+        ``total_layers_override`` when an experiment specifies a literal layer
+        count independent of every depth formula.
+
+        An explicit ``total_layers_override`` short-circuits all of this and is
+        returned as the literal measured-layer count.
         """
+        if self.total_layers_override is not None:
+            return self.total_layers_override
         if self.depth_mode in ("O(n)", "until_purified"):
             base = max(1, self.depth_factor * self.n)
         elif self.depth_mode == "O(log_n)":
@@ -422,7 +501,8 @@ class CircuitConfig:
 
         Expected gates per layer ``eg``: ``n/2`` for brickwork (a full
         matching), ``m = resolved_gates_per_layer()`` for ``random_edge`` /
-        ``random_pool``. Expected measurements per layer ``em`` by mode:
+        ``random_pool``, and ``|E|`` for ``all_edges``. Expected measurements
+        per layer ``em`` by mode:
 
         - ``bernoulli``     : ``n * p``       (every qubit, prob p)
         - ``gated``         : ``2 * eg * p``  (see caveat below)
@@ -441,18 +521,25 @@ class CircuitConfig:
            gates share or repeat vertices (``random_edge`` with dense ``m``,
            ``random_pool`` which draws edges *with replacement*) or when a
            brickwork color class is not a perfect matching (path / lattice /
-           irregular networkx graphs). The realized ``gate_to_meas_ratio_actual``
-           on each :class:`SampleRecord` is always exact.
+           irregular networkx graphs). For ``all_edges`` the candidate count is
+           known exactly from the union of the graph-edge endpoints. The realized
+           ``gate_to_meas_ratio_actual`` on each :class:`SampleRecord` is always
+           exact.
         """
-        eg = (
-            self.n / 2.0
-            if self.gating_mode == "brickwork"
-            else float(self.resolved_gates_per_layer())
-        )
+        if self.gating_mode == "brickwork":
+            eg = self.n / 2.0
+        elif self.gating_mode == "all_edges":
+            eg = float(len(self._graph.edges))
+        else:
+            eg = float(self.resolved_gates_per_layer())
         if self.measurement_mode == "bernoulli":
             em = self.n * self.p
         elif self.measurement_mode == "gated":
-            em = 2.0 * eg * self.p
+            if self.gating_mode == "all_edges":
+                touched = {q for edge in self._graph.edges for q in edge}
+                em = len(touched) * self.p
+            else:
+                em = 2.0 * eg * self.p
         elif self.measurement_mode == "uniform_count":
             em = self.resolved_meas_count() * self.p
         else:  # random_pair
@@ -465,9 +552,12 @@ class CircuitConfig:
         The ``Picture`` enum becomes its string value, a prebuilt graph
         becomes its name, and a callable ``gates_per_layer`` is resolved to its
         concrete int for the random-edge modes (callables don't serialize).
-        The result round-trips through ``CircuitConfig(**d)`` for every gating
-        mode: ``gates_per_layer`` is emitted as ``None`` for ``brickwork`` (which
-        rejects any explicit value).
+        For a named graph spec, the result round-trips through
+        ``CircuitConfig(**d)`` for every gating mode: ``gates_per_layer`` is
+        emitted as ``None`` for the deterministic ``brickwork`` / ``all_edges``
+        modes (which reject any explicit value). A prebuilt graph serializes only
+        its descriptive name; preserve its ``graph6`` data separately when that
+        name is not itself a registered graph spec.
         """
         d = asdict(self)
         d["picture"] = str(self.picture)

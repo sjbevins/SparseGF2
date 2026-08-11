@@ -29,7 +29,9 @@ which makes the target check stable.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from numbers import Real
 
 import numpy as np
 from numpy.typing import NDArray
@@ -40,7 +42,7 @@ from sparsegf2.expurgation.erasure import (
     recovery_probability,
     sample_erasure,
 )
-from sparsegf2.expurgation.roles import STRATEGIES, StabilizerCode
+from sparsegf2.expurgation.roles import STRATEGIES, StabilizerCode, _exact_integer_array
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,68 @@ class ExpurgationConfig:
     max_barren_rounds: int = 3
     validation_patterns: int = 32
     seed: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous and lossy settings before a run mutates a code."""
+        if self.strategy not in STRATEGIES:
+            raise InvalidArgumentError(f"strategy={self.strategy!r} not in {STRATEGIES}")
+        if self.erasure_rate is not None and (
+            not isinstance(self.erasure_rate, Real)
+            or isinstance(self.erasure_rate, (bool, np.bool_))
+            or not math.isfinite(float(self.erasure_rate))
+            or not 0.0 <= float(self.erasure_rate) <= 1.0
+        ):
+            raise InvalidArgumentError(
+                f"erasure_rate must be a finite real number in [0, 1], got {self.erasure_rate!r}"
+            )
+        integer_fields = (
+            ("erasure_count", self.erasure_count, 0),
+            ("k_target", self.k_target, 0),
+            ("max_rounds", self.max_rounds, 0),
+            ("max_barren_rounds", self.max_barren_rounds, 1),
+            ("validation_patterns", self.validation_patterns, 0),
+        )
+        for name, value, minimum in integer_fields:
+            if value is None and name == "erasure_count":
+                continue
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or value < minimum
+            ):
+                raise InvalidArgumentError(
+                    f"{name} must be an exact integer >= {minimum}, got {value!r}"
+                )
+            object.__setattr__(self, name, int(value))
+        if self.recovery_target is not None:
+            if (
+                not isinstance(self.recovery_target, Real)
+                or isinstance(self.recovery_target, (bool, np.bool_))
+                or not math.isfinite(float(self.recovery_target))
+                or not 0.0 <= float(self.recovery_target) <= 1.0
+            ):
+                raise InvalidArgumentError(
+                    "recovery_target must be a finite real number in [0, 1], "
+                    f"got {self.recovery_target!r}"
+                )
+            object.__setattr__(self, "recovery_target", float(self.recovery_target))
+        if self.seed is not None:
+            if (
+                isinstance(self.seed, (bool, np.bool_))
+                or not isinstance(self.seed, (int, np.integer))
+                or self.seed < 0
+            ):
+                raise InvalidArgumentError(
+                    f"seed must be None or a non-negative exact integer, got {self.seed!r}"
+                )
+            object.__setattr__(self, "seed", int(self.seed))
+        if self.sites is not None:
+            sites = _exact_integer_array(self.sites, name="sites")
+            if sites.size and (sites < 0).any():
+                raise InvalidArgumentError("sites must contain non-negative indices")
+            if np.unique(sites).shape[0] != sites.shape[0]:
+                raise InvalidArgumentError("sites must not repeat")
+            object.__setattr__(self, "sites", tuple(int(site) for site in sites))
 
 
 @dataclass

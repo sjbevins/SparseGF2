@@ -24,6 +24,15 @@ optional extras, imported lazily only when their feature is used.
 from __future__ import annotations
 
 from sparsegf2.analysis._runtime import available_cores
+from sparsegf2.analysis.fss_collapse import (
+    fit_fixed_pc,
+    fit_three_param,
+    graph_bootstrap,
+    hh_loss,
+    master_curve_loss,
+    robust_pc,
+    smooth_pc_collapse,
+)
 from sparsegf2.analysis.offline import analyze, analyze_tableaux, reconstruct
 from sparsegf2.analysis.plotting import aggregate, observable_columns, plot_study, plot_vs
 from sparsegf2.analysis.registry import (
@@ -44,11 +53,18 @@ __all__ = [
     "analyze",
     "analyze_tableaux",
     "available_cores",
+    "fit_fixed_pc",
+    "fit_three_param",
+    "graph_bootstrap",
+    "hh_loss",
+    "master_curve_loss",
     "observable_columns",
     "plot_study",
     "plot_vs",
     "reconstruct",
     "register_analysis",
     "resolve_analyses",
+    "robust_pc",
+    "smooth_pc_collapse",
     "sweep",
 ]

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from sparsegf2 import PAULI_X, PAULI_Z, SparseGF2
+from sparsegf2.core.symplectic import is_symplectic
 from sparsegf2.errors import InvalidArgumentError
 from sparsegf2.expurgation import (
     ROLE_CHECK,
@@ -39,6 +40,10 @@ def test_constructor_validation():
         StabilizerCode.from_encoding(sim, [0, 0])  # repeated data qubit
     with pytest.raises(InvalidArgumentError):
         StabilizerCode.from_encoding(sim, [3])  # out of range
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        StabilizerCode(sim, [0, 1, 1.9])
+    with pytest.raises(InvalidArgumentError, match="exact integers"):
+        StabilizerCode.from_encoding(sim, [True])
 
 
 def test_roles_are_copied():
@@ -131,15 +136,44 @@ def test_measure_skips_logically_trivial(example_a_code):
     assert np.array_equal(code.roles, roles_before)
 
 
-def test_measure_skips_deterministic_candidate(example_a_code):
-    # Z-bar_a = IZZI has nontrivial logical action but is already in the
-    # stabilizer group (it is a stabilizer row), so its measurement is
-    # deterministic: the move is skipped and nothing changes.
+def test_measure_consumes_logical_z_already_in_pure_state_stabilizer(example_a_code):
+    # Z-bar_a = IZZI is a pure-state stabilizer row, but it is logically
+    # nontrivial for the code. Code-space projection must therefore spend
+    # its logical pair instead of treating the measurement as deterministic.
     code = example_a_code
     before = code.sim.to_symplectic().copy()
-    assert code.measure([1, 2], [PAULI_Z, PAULI_Z]) is None
-    assert code.k == 2
+    assert code.measure([1, 2], [PAULI_Z, PAULI_Z]) == 2
+    assert code.k == 1
+    assert code.gauge_pairs().tolist() == [2]
     assert np.array_equal(code.sim.to_symplectic(), before)
+
+
+def test_measure_never_spends_preexisting_gauge_pair():
+    # First expurgate pair 0.  The second operator anticommutes with that
+    # gauge pair and with logical pair 1, so an unconstrained pure-state
+    # measurement can pivot on pair 0 and fail to reduce k.  Code-space
+    # projection must target the remaining logical pair.
+    code = StabilizerCode(SparseGF2(2), [ROLE_LOGICAL, ROLE_LOGICAL])
+    assert code.measure([0], [PAULI_X], strategy="gauge") == 0
+    assert code.k == 1
+    assert code.measure([0, 1], [PAULI_X, PAULI_X], strategy="gauge") == 1
+    assert code.k == 0
+    assert code.gauge_pairs().tolist() == [0, 1]
+    assert is_symplectic(code.sim.to_symplectic())
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_code_projection_preserves_canonical_tableau_in_sparse_and_dense_modes(hybrid):
+    sim = SparseGF2(3, hybrid=hybrid)
+    sim.apply_h(0)
+    sim.apply_cx(0, 1)
+    sim.apply_cx(1, 2)
+    if hybrid:
+        sim._switch_to_dense()
+    code = StabilizerCode(sim, [ROLE_LOGICAL] * 3)
+    assert code.measure([0, 2], [PAULI_X, PAULI_Z], strategy="stabilizer") is not None
+    assert code.k == 2
+    assert is_symplectic(code.sim.to_symplectic())
 
 
 def test_measure_validates_strategy(example_a_code):

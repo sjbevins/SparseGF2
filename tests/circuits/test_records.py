@@ -41,3 +41,33 @@ def test_union_shape_minimal_construction():
     )
     assert rec.code_dimension is None
     assert rec.entropy_half_cut is None
+
+
+def test_checkpoint_fields_preserve_preexisting_positional_layout():
+    # Before checkpoint support, ``analyses`` immediately followed
+    # ``final_tableau``. Additive record fields must not silently reinterpret an
+    # older positional constructor call.
+    analyses = {"legacy": 7}
+    rec = SampleRecord(
+        0,
+        Picture.PURE_STATE,
+        1,
+        2,
+        3,
+        4.0,
+        5.0,
+        None,
+        None,
+        0,
+        None,
+        None,
+        0.1,
+        None,
+        None,
+        None,
+        None,
+        analyses,
+    )
+    assert rec.analyses is analyses
+    assert rec.checkpoint_tableaux is None
+    assert rec.checkpoint_values is None

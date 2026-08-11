@@ -11,18 +11,25 @@ parameter and packs a :class:`SampleRecord`.
 Two RNG streams, by design:
 
 - **Circuit construction** lives on the :class:`CircuitBuilder`, seeded
-  ``base_seed + sample_seed``.
+  from the pair ``[base_seed, sample_seed]``.
 - **Measurement outcomes** live on the :class:`~sparsegf2.SparseGF2`
-  instance, seeded *independently* here so that the random measurement
-  coins are decoupled from the circuit realization (re-run the same
-  circuit with different outcomes by changing only this stream).
+  instance, seeded *independently* here (``[base_seed, sample_seed,
+  _MEAS_STREAM_KEY]``) so that the random measurement coins are decoupled
+  from the circuit realization (re-run the same circuit with different
+  outcomes by changing only this stream).
+
+Every stream is keyed by the **pair** (schema v2), never the scalar sum:
+v1's ``base_seed + sample_seed`` made cells with equal sums — ``(b, s)``
+and ``(b + k, s - k)`` — bit-for-bit identical, which silently duplicated
+trajectories in sweeps that vary ``base_seed`` (stochastic-graph
+averaging) alongside ``sample_seed``.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -38,8 +45,9 @@ from sparsegf2.core.sparse_tableau import _build_2q_lut
 from sparsegf2.errors import InvalidArgumentError
 
 # Distinguishes the measurement-outcome SeedSequence from the builder's
-# single-int seed, so the two streams are independent for every sample
-# (a two-element seed never hashes to a plain ``base+sample`` int).
+# pair seed, so the two streams are independent for every sample (a
+# three-element ``[base, sample, key]`` seed never collides with the
+# builder's two-element ``[base, sample]``).
 _MEAS_STREAM_KEY = 0x6D656173  # "meas"
 _SCRAMBLE_STREAM_KEY = 0x73637262  # "scrb", independent stream for the global scramble Clifford
 
@@ -49,30 +57,74 @@ _SCRAMBLE_STREAM_KEY = 0x73637262  # "scrb", independent stream for the global s
 _log = logging.getLogger(__name__)
 
 
-# The per-index gate LUT list depends only on the gate table (+ how many of its
+# The per-index gate LUT bundle depends only on the gate table (+ how many of its
 # entries are in play), not on the cell, and every cell in a sweep shares the
-# same process-cached table. Memoize the list by table content so a 1600-cell
+# same process-cached table. Memoize both the scalar list and contiguous batch
+# array by table content so a 1600-cell
 # sweep builds it once instead of re-probing ~720 LUTs per cell.
-_GATE_LUTS_BY_TABLE: dict[bytes, list[np.ndarray]] = {}
+_GATE_LUTS_BY_TABLE: dict[bytes, tuple[list[np.ndarray], NDArray[np.uint8]]] = {}
+
+
+def _gate_lut_bundle_for(
+    table: NDArray[np.uint8], n_cliffords: int
+) -> tuple[list[np.ndarray], NDArray[np.uint8]]:
+    key = np.ascontiguousarray(table[:n_cliffords]).tobytes()
+    bundle = _GATE_LUTS_BY_TABLE.get(key)
+    if bundle is None:
+        luts = [_build_2q_lut(table[i]) for i in range(n_cliffords)]
+        lut_array = np.ascontiguousarray(luts, dtype=np.uint8)
+        lut_array.flags.writeable = False
+        bundle = (luts, lut_array)
+        _GATE_LUTS_BY_TABLE[key] = bundle
+    return bundle
 
 
 def _gate_luts_for(table: NDArray[np.uint8], n_cliffords: int) -> list[np.ndarray]:
-    key = np.ascontiguousarray(table[:n_cliffords]).tobytes()
-    luts = _GATE_LUTS_BY_TABLE.get(key)
-    if luts is None:
-        luts = [_build_2q_lut(table[i]) for i in range(n_cliffords)]
-        _GATE_LUTS_BY_TABLE[key] = luts
-    return luts
+    """Backward-compatible scalar-LUT view of the process-cached bundle."""
+    return _gate_lut_bundle_for(table, n_cliffords)[0]
 
 
 def _cfg_brief(cfg: CircuitConfig) -> str:
     """A one-line, log-friendly summary of the cell being simulated."""
     graph = getattr(cfg.graph_spec, "name", cfg.graph_spec)
+    depth = (
+        f"override={cfg.total_layers_override}"
+        if cfg.total_layers_override is not None
+        else f"{cfg.depth_mode}x{cfg.depth_factor}"
+    )
     return (
         f"picture={cfg.picture} n={cfg.n} p={cfg.p} graph={graph} "
         f"gating={cfg.gating_mode} matching={cfg.matching_mode} "
-        f"meas={cfg.measurement_mode} depth={cfg.depth_mode}x{cfg.depth_factor}"
+        f"meas={cfg.measurement_mode} depth={depth}"
     )
+
+
+#: Sentinel a ``checkpoint_callback`` may return to request an early stop at that
+#: checkpoint (checkpoint-granular purification stop). Far cheaper than
+#: ``depth_mode='until_purified'`` when the caller only records at sparse
+#: checkpoints: it avoids the every-few-measurements order-parameter recompute.
+CHECKPOINT_STOP = object()
+
+
+def _checkpoint_set(checkpoint_layers: Iterable[int] | None) -> set[int] | None:
+    """Normalize requested checkpoint layers without lossy coercion."""
+    if checkpoint_layers is None:
+        return None
+    try:
+        iterator = iter(checkpoint_layers)
+    except TypeError as exc:
+        raise InvalidArgumentError(
+            "checkpoint_layers must be an iterable of integers; "
+            f"got {checkpoint_layers!r} ({type(checkpoint_layers).__name__})"
+        ) from exc
+    out: set[int] = set()
+    for layer in iterator:
+        if not isinstance(layer, (int, np.integer)) or isinstance(layer, (bool, np.bool_)):
+            raise InvalidArgumentError(
+                f"checkpoint_layers must contain integers; got {layer!r} ({type(layer).__name__})"
+            )
+        out.add(int(layer))
+    return out
 
 
 def _order_parameter(sim, spec) -> int:
@@ -95,6 +147,8 @@ def simulate(
     | Mapping[str, Callable[[Any, Any], Any]]
     | None = None,
     save_tableau: bool = False,
+    checkpoint_layers: Iterable[int] | None = None,
+    checkpoint_callback: Callable[[Any, Any, int], Any] | None = None,
 ) -> SampleRecord:
     """Run one sample and return its :class:`SampleRecord`.
 
@@ -102,6 +156,9 @@ def simulate(
 
     Parameters
     ----------
+    sample_seed
+        Non-negative exact integer identifying the sample RNG streams. Boolean
+        aliases and values requiring a lossy integer coercion are rejected.
     analyses
         Optional named/custom analyses to compute on the final state
         (``record.analyses``). A list mixing registered names and callables
@@ -111,8 +168,23 @@ def simulate(
     save_tableau
         If true, also store the ``(2N, 2N)`` symplectic in
         ``record.final_tableau`` for later offline analysis.
+    checkpoint_layers
+        Measured-layer indices at which to snapshot the full ``(2N, 2N)``
+        tableau into ``record.checkpoint_tableaux`` (for dynamics studies that
+        analyze the state at several depths). See :meth:`SimulationRunner.run`.
+    checkpoint_callback
+        Optional read-only ``fn(sim, spec, layer)`` evaluated at requested
+        checkpoints instead of saving tableaux. Results populate
+        ``record.checkpoint_values``; returning :data:`CHECKPOINT_STOP` requests
+        an early stop after the current layer.
     """
-    return SimulationRunner(config).run(sample_seed, analyses=analyses, save_tableau=save_tableau)
+    return SimulationRunner(config).run(
+        sample_seed,
+        analyses=analyses,
+        save_tableau=save_tableau,
+        checkpoint_layers=checkpoint_layers,
+        checkpoint_callback=checkpoint_callback,
+    )
 
 
 class SimulationRunner:
@@ -151,7 +223,9 @@ class SimulationRunner:
         # table, so re-keying the symplectic on every gate (a tobytes + cache
         # lookup) is pure waste; with the LUTs prebuilt the inner loop calls
         # SparseGF2._dispatch_2q directly.
-        self._gate_luts = _gate_luts_for(self.clifford_table, config.n_cliffords)
+        self._gate_luts, self._gate_lut_array = _gate_lut_bundle_for(
+            self.clifford_table, config.n_cliffords
+        )
 
     def run(
         self,
@@ -161,18 +235,52 @@ class SimulationRunner:
         | Mapping[str, Callable[[Any, Any], Any]]
         | None = None,
         save_tableau: bool = False,
+        checkpoint_layers: Iterable[int] | None = None,
+        checkpoint_callback: Callable[[Any, Any, int], Any] | None = None,
     ) -> SampleRecord:
-        """Execute one realization and return its record."""
+        """Execute one realization and return its record.
+
+        ``checkpoint_layers`` is a set of measured-layer indices (1-based, i.e.
+        after that many measured layers of gates+measurements) at which to capture
+        the state. By default the full ``(2N, 2N)`` symplectic tableau is
+        snapshotted into ``record.checkpoint_tableaux`` via
+        :meth:`SparseGF2.to_symplectic` (a read-only copy that does not perturb the
+        run). If ``checkpoint_callback`` is given, it is instead called as
+        ``checkpoint_callback(sim, spec, layer)`` on the *live* state at each
+        checkpoint and its return value stored in ``record.checkpoint_values``
+        (``{layer: result}``) -- this computes an observable at each depth *without*
+        saving or later reconstructing the tableau (far cheaper for large sweeps).
+        The callback must be read-only (it runs mid-circuit). Indices outside
+        ``1..total_layers`` are never hit. Returning :data:`CHECKPOINT_STOP`
+        requests an early stop after the current layer; the sentinel is not stored
+        as a checkpoint value. If the final reference order parameter is zero,
+        ``purified_at_layer`` records this stopping checkpoint (the exact first-zero
+        layer can be earlier when checkpoints are sparse). Independent of
+        ``save_tableau`` / ``analyses``.
+
+        ``sample_seed`` must be a non-negative exact integer; Boolean aliases
+        and values requiring a lossy integer coercion are rejected before any
+        simulator state is constructed.
+        """
         cfg = self.config
+        builder = CircuitBuilder(cfg, sample_seed=sample_seed)
+        sample_seed = builder.sample_seed
+        checkpoint_set = _checkpoint_set(checkpoint_layers)
+        if checkpoint_callback is not None and checkpoint_set is None:
+            raise InvalidArgumentError("checkpoint_callback requires checkpoint_layers")
+        if checkpoint_callback is not None and not callable(checkpoint_callback):
+            raise InvalidArgumentError("checkpoint_callback must be callable")
+        checkpoints: dict[int, NDArray[np.uint8]] = {}
+        checkpoint_values: dict[int, Any] = {}
         # Clifford indices are drawn in [0, cfg.n_cliffords) and __init__ prebuilds
         # one LUT per index in that range, so every index is in range for `luts`.
-        luts = self._gate_luts
+        lut_array = self._gate_lut_array
 
         t0 = time.perf_counter()
         _log.info("simulate seed=%d: %s", sample_seed, _cfg_brief(cfg))
 
         # Independent measurement-outcome stream (see module docstring).
-        sim_rng = np.random.default_rng([cfg.base_seed + sample_seed, _MEAS_STREAM_KEY])
+        sim_rng = np.random.default_rng([cfg.base_seed, int(sample_seed), _MEAS_STREAM_KEY])
         sim, spec = setup_picture(
             cfg.picture,
             cfg.n,
@@ -181,8 +289,6 @@ class SimulationRunner:
             use_numba=cfg.use_numba,
             hybrid=cfg.hybrid,
         )
-
-        builder = CircuitBuilder(cfg, sample_seed=sample_seed)
 
         # --- Global scramble: one maximally-scrambling random Clifford on the
         # system qubits (a one-shot alternative/complement to the gate-only
@@ -194,7 +300,7 @@ class SimulationRunner:
         # gate-placement or measurement RNG sequences. ---
         scr_qubits = cfg.scramble_qubits()
         if scr_qubits is not None and len(scr_qubits) >= 1:
-            scr_rng = np.random.default_rng([cfg.base_seed + sample_seed, _SCRAMBLE_STREAM_KEY])
+            scr_rng = np.random.default_rng([cfg.base_seed, int(sample_seed), _SCRAMBLE_STREAM_KEY])
             k = len(scr_qubits)
             sim.apply_clifford(random_symplectic(k, scr_rng), qubits=scr_qubits)
             _log.info(
@@ -207,9 +313,7 @@ class SimulationRunner:
         # --- Warmup (gate-only) phase: scramble before measuring. ---
         n_warmup = 0
         for wlayer in builder.warmup_layers_iter():
-            for g, (qi, qj) in enumerate(wlayer.gate_pairs):
-                ci = int(wlayer.cliff_indices[g])
-                sim._dispatch_2q(qi, qj, luts[ci])
+            sim._dispatch_2q_batch(wlayer.gate_pairs, wlayer.cliff_indices, lut_array)
             n_warmup += 1
             if _log.isEnabledFor(logging.DEBUG):
                 _log.debug("warmup layer %d: %d gates", n_warmup, wlayer.n_gates)
@@ -246,20 +350,38 @@ class SimulationRunner:
         # the bit-packed rank keeps that affordable.)
         skip_checks = time_series is None
         meas_since_check = 0
+        checkpoint_stopped_at: int | None = None
         # Tableau-density diagnostic: a_bar (mean generators per qubit) averaged
         # over the measured layers. An O(2n) sum per layer (popcount in hybrid
         # dense mode), negligible next to the layer's gates.
         abar_sum = 0.0
         for layer in builder.layers():
+            stop_at_checkpoint = False
             total_layers += 1
-            for g, (qi, qj) in enumerate(layer.gate_pairs):
-                ci = int(layer.cliff_indices[g])
-                sim._dispatch_2q(qi, qj, luts[ci])
+            sim._dispatch_2q_batch(layer.gate_pairs, layer.cliff_indices, lut_array)
             total_gates += layer.n_gates
-            for q in layer.meas_qubits:
-                sim.measure_z(q)  # outcome drawn from sim_rng (sim._rng)
+            # Outcomes are not recorded, but the batched path consumes the same
+            # scalar sim_rng draws as repeated measure_z calls.
+            sim._measure_z_batch(layer.meas_qubits)
             total_measurements += layer.n_measurements
             abar_sum += sim.active_count()
+
+            # Depth checkpoint AFTER this measured layer's gates + measurements:
+            # run the read-only callback on the live state, else snapshot the full
+            # tableau (to_symplectic is a read-only copy).
+            if checkpoint_set is not None and total_layers in checkpoint_set:
+                if checkpoint_callback is not None:
+                    callback_value = checkpoint_callback(sim, spec, total_layers)
+                    if callback_value is CHECKPOINT_STOP:
+                        # Finish this layer's order-parameter/time-series bookkeeping
+                        # before breaking. The final observable pass below determines
+                        # whether this generic stop was also a purification event.
+                        stop_at_checkpoint = True
+                        checkpoint_stopped_at = total_layers
+                    else:
+                        checkpoint_values[total_layers] = callback_value
+                else:
+                    checkpoints[total_layers] = sim.to_symplectic()
 
             if track_op:
                 if layer.n_measurements > 0:  # gates can't move it; only a measurement can
@@ -284,6 +406,8 @@ class SimulationRunner:
                     layer.n_measurements,
                     f", order_param={last_op}" if track_op else "",
                 )
+            if stop_at_checkpoint:
+                break
 
         # --- Observables. The half-cut entropy is recorded for every picture;
         # the picture's order_parameter names the extra scalar. When the order
@@ -308,6 +432,15 @@ class SimulationRunner:
                 else int(entanglement_entropy(sim, spec.reference_qubits))
             )
 
+        # CHECKPOINT_STOP is generic: only label it as purification when the
+        # picture actually has an absorbing reference order parameter and the
+        # live final state reached zero. Pure-state or nonzero stops remain
+        # ordinary early stops with ``purified_at_layer=None``.
+        if checkpoint_stopped_at is not None and purified_at is None:
+            final_op = code_dim if code_dim is not None else ref_ent
+            if final_op == 0:
+                purified_at = checkpoint_stopped_at
+
         # --- Ratios. ---
         actual_ratio = total_gates / total_measurements if total_measurements > 0 else float("inf")
 
@@ -322,10 +455,33 @@ class SimulationRunner:
             code_dimension=code_dim,
             ref_entropy=ref_ent,
             entropy_half_cut=entropy_half,
+            graph_name=getattr(builder.graph, "name", None),
+            # graph6 is stored whenever the string spec + n alone cannot
+            # reconstruct the geometry: stochastic realizations, and any
+            # prebuilt GraphTopology / networkx-adapted graph (whose provenance
+            # in the record is otherwise just a name).
+            graph6=(
+                builder.graph.graph6
+                if (
+                    getattr(builder.graph, "is_stochastic", False)
+                    or not isinstance(cfg.graph_spec, str)
+                )
+                else None
+            ),
             runtime_total_s=time.perf_counter() - t0,
             purified_at_layer=purified_at,
             mean_active_generators=(abar_sum / total_layers) if total_layers > 0 else None,
             time_series=time_series,
+            checkpoint_tableaux=(
+                (checkpoints or None)
+                if (checkpoint_set is not None and checkpoint_callback is None)
+                else None
+            ),
+            checkpoint_values=(
+                (checkpoint_values or None)
+                if (checkpoint_set is not None and checkpoint_callback is not None)
+                else None
+            ),
         )
         _log.info(
             "simulate done seed=%d: %d layers, %d gates, %d measurements, "
@@ -353,8 +509,8 @@ class SimulationRunner:
 
         if save_tableau:
             record.final_tableau = sim.to_symplectic()
-            _log.debug("final tableau saved (%dx%d)", 2 * cfg.n, 2 * cfg.n)
+            _log.debug("final tableau saved (%dx%d)", *record.final_tableau.shape)
         return record
 
 
-__all__ = ["simulate", "SimulationRunner"]
+__all__ = ["CHECKPOINT_STOP", "SimulationRunner", "simulate"]

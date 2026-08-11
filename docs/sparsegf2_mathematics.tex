@@ -54,8 +54,9 @@ the symplectic part of an Aaronson--Gottesman tableau, stored sparsely, and
 generates and samples the symplectic group $\Sp(2n,\F_2)$ natively. Part~I
 covers the simulator core (representation, gates, measurement, $\F_2$ linear
 algebra, the symplectic group, observables). Part~II covers the circuits layer
-(graph-defined monitored Clifford circuits). Part~III collects shorter notes on further topics: the Bravyi--Maslov
-sampler, batched simulation, and finite-size-scaling analysis.
+(graph-defined monitored Clifford circuits). Part~III records implementation
+status and the remaining roadmap, including the Bravyi--Maslov sampler,
+batched execution, and finite-size-scaling analysis.
 \end{abstract}
 
 \tableofcontents
@@ -821,56 +822,73 @@ task of the analysis layer (Section~\ref{sec:roadmap-analysis}).
 \label{sec:rng}
 
 A realization is determined by $(\texttt{base\_seed},\texttt{sample\_seed})$ via
-\emph{two independent} pseudorandom streams: a \emph{construction} stream
-(seeded $\texttt{base\_seed}+\texttt{sample\_seed}$) that fixes the gate
-placement, the Clifford indices, and the measured-qubit selection, consumed in a
-fixed per-layer order; and a \emph{measurement-outcome} stream (seeded
-independently on the simulator instance) that supplies the phase-free coins. The
-streams are decoupled so a fixed circuit can be replayed with different outcomes.
+three independent pseudorandom streams in reproducibility schema v2. The
+construction stream is seeded by the ordered entropy array
+$[\texttt{base\_seed},\texttt{sample\_seed}]$ and fixes gate placement,
+Clifford indices, and measured-qubit selection in a fixed per-layer order. The
+measurement-outcome and global-scramble streams append the integer tags
+$\texttt{0x6D656173}$ (``meas'') and $\texttt{0x73637262}$ (``scrb''),
+respectively. Pair-keying prevents distinct cells with equal
+$\texttt{base\_seed}+\texttt{sample\_seed}$ from sharing a stream. A stochastic
+string graph specification is realized separately from \texttt{base\_seed} alone,
+so its geometry is quenched across the sample seeds of one configuration.
 
 % =====================================================================
-\part{Further topics}
+\part{Implementation status and remaining roadmap}
 % =====================================================================
 \label{sec:roadmap}
 
-\emph{Shorter notes on additional topics.}
+This section distinguishes capabilities already present in the package from
+remaining extensions.
 
 \section{Bravyi--Maslov \texorpdfstring{$O(n^2)$}{O(n^2)} sampling}
 \label{sec:roadmap-bm}
-Canonical decomposition $C=F_1HSF_2$ with Mallows-distributed permutation, for
-faster uniform $\Sp(2n,\F_2)$ sampling at large $n$.
+Implemented by \texttt{random\_symplectic(..., sampler="bravyi\_maslov")} and
+used by the default \texttt{auto} mode for $n\ne2$. It samples the canonical
+decomposition $C=F_1HSF_2$ with a Mallows-distributed permutation. Packed matrix
+assembly remains a possible optimization.
 
 \section{Koenig--Smolin integer indexing}
 Deterministic bijection between $[\,0,|\Sp(2n,\F_2)|)$ and group elements (forward
-and inverse), via symplectic transvections.
+and inverse), via symplectic transvections, remains unimplemented.
 
 \section{Batched simulation}
 A \texttt{BatchedSparseGF2} carrying many trajectories in shared storage, for
-vectorized sweeps.
+vectorized sweeps, remains a future extension. The circuit runner does batch the
+ordered primitive gates and measurements of each individual trajectory to reduce
+Python-to-Numba transition overhead.
 
 \section{Additional graph families}
 \texttt{path}, 2D \texttt{lattice}, \texttt{from\_networkx}, and Newman--Watts
 adapters; each supplies edges and (optionally) a $1$-factorization and a
-perfect-matching sampler.
+perfect-matching sampler. These families are implemented in
+\texttt{circuits/graphs.py}, alongside cycle, complete, Watts--Strogatz, and
+other stochastic families.
 
 \section{Additional measurement modes}
-\texttt{uniform\_count}: a fixed number of measured qubits per layer.
+\texttt{uniform\_count}, which selects a fixed number of candidate qubits per
+layer before Bernoulli$(p)$ firing, is implemented together with
+\texttt{bernoulli}, \texttt{gated}, and \texttt{random\_pair}.
 
 \section{Adaptive depth and time series}
 \texttt{until\_purified} early termination (stop when the order parameter
-vanishes) and per-layer order-parameter recording. The \texttt{until\_purified}
-depth mode and the \texttt{record\_time\_series} flag are already accepted and
-validated by the configuration, but the runner does not yet act on either (the
-former currently behaves as a fixed $O(n)$ cap; see Section~\ref{sec:depth}).
+vanishes) and per-layer order-parameter recording are implemented. The runner
+also supports selected one-based depth checkpoints, either as independent
+tableau snapshots or read-only callback values. A callback may return
+\texttt{CHECKPOINT\_STOP} for checkpoint-granular early stopping.
 
 \section{Analysis and finite-size scaling}
 \label{sec:roadmap-analysis}
 A sweep driver over $(n,p,\text{seed})$ with data collection and finite-size
-scaling to locate the critical point $p_c$ and extract critical exponents.
+scaling to locate the critical point $p_c$ and extract critical exponents is
+implemented in \texttt{sparsegf2.analysis}. The package provides sweep/study
+orchestration, atomic persistence, offline reduction, plotting, and scaling
+collapse; project-specific research estimators remain in \texttt{studies/}.
 
 \section{Publication-quality circuit rendering}
 A \texttt{quantikz}/\LaTeX{} renderer over the existing circuit-trace
-intermediate representation.
+intermediate representation is implemented in \texttt{circuits/draw.py}, with
+PDF/PNG compilation when the external TeX and rasterization tools are present.
 
 \section{Additional pictures, observables, and noise models}
 Reserved for future order parameters, multipartite measures, and noisy

@@ -29,7 +29,9 @@ is why no signed simulator is needed anywhere in the pipeline.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from numbers import Real
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,7 +39,7 @@ from numpy.typing import NDArray
 from sparsegf2.core.linalg_gf2 import gf2_eliminate_on_columns, gf2_rank_bits
 from sparsegf2.core.sparse_tableau import PAULI_X, PAULI_Z
 from sparsegf2.errors import InvalidArgumentError
-from sparsegf2.expurgation.roles import StabilizerCode
+from sparsegf2.expurgation.roles import StabilizerCode, _exact_integer_array
 
 
 @dataclass(frozen=True)
@@ -74,17 +76,30 @@ def sample_erasure(
     """
     if (rate is None) == (count is None):
         raise InvalidArgumentError("give exactly one of rate= or count=")
-    pool = np.arange(n, dtype=np.int64) if sites is None else np.asarray(sites, dtype=np.int64)
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 0:
+        raise InvalidArgumentError(f"n must be a non-negative exact integer, got {n!r}")
+    n = int(n)
+    pool = (
+        np.arange(n, dtype=np.int64) if sites is None else _exact_integer_array(sites, name="sites")
+    )
     if pool.size:
         if pool.min() < 0 or pool.max() >= n:
             raise InvalidArgumentError(f"sites must be in [0, n={n})")
         if np.unique(pool).shape[0] != pool.shape[0]:
             raise InvalidArgumentError("sites must not repeat")
     if rate is not None:
-        if not 0.0 <= rate <= 1.0:
+        if (
+            not isinstance(rate, Real)
+            or isinstance(rate, (bool, np.bool_))
+            or not math.isfinite(float(rate))
+            or not 0.0 <= float(rate) <= 1.0
+        ):
             raise InvalidArgumentError(f"rate must be in [0, 1], got {rate}")
-        picked = pool[rng.random(pool.shape[0]) < rate]
+        picked = pool[rng.random(pool.shape[0]) < float(rate)]
     else:
+        if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)):
+            raise InvalidArgumentError(f"count must be an exact integer, got {count!r}")
+        count = int(count)
         if not 0 <= count <= pool.shape[0]:
             raise InvalidArgumentError(f"count must be in [0, {pool.shape[0]}], got {count}")
         picked = rng.choice(pool, size=count, replace=False)
@@ -92,7 +107,7 @@ def sample_erasure(
 
 
 def _validate_erasure(code: StabilizerCode, erased: NDArray[np.int64]) -> NDArray[np.int64]:
-    e = np.asarray(list(erased), dtype=np.int64)
+    e = _exact_integer_array(erased, name="erased sites")
     if e.size:
         if e.min() < 0 or e.max() >= code.n:
             raise InvalidArgumentError(f"erased sites must be in [0, n={code.n})")

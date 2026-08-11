@@ -94,13 +94,20 @@ def test_gates_per_layer_callable_scales_with_n():
         assert layer.n_gates == 8
 
 
-def test_gates_per_layer_capped_at_available_edges():
-    # cycle(8) has 8 edges; asking for more than that caps at 8.
+def test_gates_per_layer_exceeding_edges_rejected():
+    # cycle(8) has 8 edges; random_edge fires *distinct* edges, so asking for
+    # more than |E| cannot be delivered. It is refused at construction (a silent
+    # clamp would make total_layers()/the expected ratio disagree with reality).
+    with pytest.raises(InvalidArgumentError):
+        CircuitConfig(
+            graph_spec="cycle", n=8, gating_mode="random_edge", gates_per_layer=100, depth_factor=1
+        )
+    # exactly |E| is fine (every distinct edge fires each layer).
     cfg = CircuitConfig(
-        graph_spec="cycle", n=8, gating_mode="random_edge", gates_per_layer=100, depth_factor=1
+        graph_spec="cycle", n=8, gating_mode="random_edge", gates_per_layer=8, depth_factor=1
     )
     for layer in CircuitBuilder(cfg, 0).schedule():
-        assert layer.n_gates == 8  # capped at n_edges
+        assert layer.n_gates == 8
 
 
 @pytest.mark.parametrize("gpl", [5, lambda c: c.n])

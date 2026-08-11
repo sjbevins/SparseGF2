@@ -178,10 +178,10 @@ measurement circuits.
 from sparsegf2.circuits import CircuitConfig, simulate
 
 cfg = CircuitConfig(
-    graph_spec="cycle",       # "cycle"|"complete"|"path"|"lattice_2d"|"newman_watts"|any nx.Graph
+    graph_spec="cycle",       # also "watts_strogatz(k=2,beta=0.1)" or any nx.Graph
     n=32,
     picture="purification",   # "pure_state" | "purification" | "single_ref"
-    gating_mode="brickwork",  # "brickwork" | "random_edge" | "random_pool"
+    gating_mode="brickwork",  # "brickwork" | "random_edge" | "random_pool" | "all_edges"
     measurement_mode="bernoulli",  # "bernoulli" | "gated" | "random_pair" | "uniform_count"
     p=0.16,
     depth_factor=8,
@@ -189,6 +189,14 @@ cfg = CircuitConfig(
 rec = simulate(cfg, sample_seed=0)
 print(rec.code_dimension, rec.entropy_half_cut)
 ```
+
+Use `gating_mode="all_edges"` to fire the graph's complete stored edge list on
+every layer. `total_layers_override=T` requests a literal measured-layer count.
+For depth-resolved observables, pass `checkpoint_layers=[...]` to `simulate`;
+add a read-only `checkpoint_callback` to compute values on the live tableau
+without saving each full checkpoint. A callback may return the public sentinel
+`from sparsegf2.circuits import CHECKPOINT_STOP` to end the run after that
+checkpoint without storing the sentinel as a value.
 
 **Studies.** The `sparsegf2.analysis` layer sweeps parameters and persists the
 results. You can compute observables online (and discard each tableau) or save

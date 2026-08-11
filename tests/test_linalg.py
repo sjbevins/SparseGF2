@@ -32,10 +32,12 @@ from sparsegf2.core._protocol import SimulatorProtocol
 from sparsegf2.core.linalg_gf2 import (
     _gf2_kernel_basis_python,
     _gf2_rref_python,
+    gf2_eliminate_on_columns,
     gf2_kernel_basis,
     gf2_rank,
     gf2_rref,
 )
+from sparsegf2.errors import InvalidArgumentError
 
 # ----------------------------------------------------------------------
 # JIT-vs-Python parity for gf2_rref
@@ -430,3 +432,14 @@ def test_eliminate_on_columns_identity_witness():
     for row in reduced:
         witness = row[k:]
         assert np.array_equal((witness @ A) % 2, row[:k])
+
+
+@pytest.mark.parametrize("cols", [[1.9], [True], [-1], [3]])
+def test_eliminate_on_columns_rejects_invalid_columns(cols):
+    with pytest.raises(InvalidArgumentError):
+        gf2_eliminate_on_columns(np.eye(3, dtype=np.uint8), cols)
+
+
+def test_eliminate_on_columns_rejects_nonmatrix_input():
+    with pytest.raises(InvalidArgumentError, match="two-dimensional"):
+        gf2_eliminate_on_columns(np.ones(3, dtype=np.uint8), [0])

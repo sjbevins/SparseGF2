@@ -4,8 +4,8 @@ A circuit is "graph-defined" when the two-qubit gates of each layer are
 placed on the **edges** of a fixed graph on the ``n`` qubits. The graph
 decides *who can interact with whom*; the scheduler
 (:mod:`sparsegf2.circuits.scheduler`) decides *which* edges fire each
-layer (a perfect matching for brickwork, a single random edge for
-``random_edge``).
+layer (a perfect matching for brickwork, sampled edges for ``random_edge`` /
+``random_pool``, or the stored complete edge list for ``all_edges``).
 
 A :class:`GraphTopology` carries:
 
@@ -92,6 +92,14 @@ def graph6_encode(n: int, edges) -> str:
     for u, v in edges:
         if u == v:
             raise InvalidArgumentError(f"graph6 does not permit self-loops; got ({u},{v})")
+        # Range-check both endpoints: the bit loop below only visits pairs
+        # inside 0..n-1, so an out-of-range edge would otherwise vanish
+        # silently and the encoding would look like a sparser graph.
+        if not (0 <= u < n and 0 <= v < n):
+            raise InvalidArgumentError(
+                f"edge ({u},{v}) has an endpoint outside 0..{n - 1}; "
+                f"graph6_encode(n={n}, ...) encodes vertices 0..n-1 only"
+            )
         a, b = (u, v) if u < v else (v, u)
         edge_set.add((a, b))
 
@@ -522,7 +530,7 @@ def newman_watts(
     seed: int = 0,
     name: str | None = None,
 ) -> GraphTopology:
-    r"""Newman-Watts-Strogatz small-world graph (a **stochastic** geometry).
+    r"""Newman–Watts–Strogatz small-world graph (a **stochastic** geometry).
 
     Start from a ring lattice on ``n`` nodes where each node is joined to its
     ``k`` nearest neighbors, then *add* a shortcut across each lattice edge
@@ -577,6 +585,11 @@ def newman_watts(
         raise InvalidArgumentError(f"newman_watts needs even k with 2 <= k < n; got k={k}, n={n}")
     if not 0.0 <= p <= 1.0:
         raise InvalidArgumentError(f"newman_watts needs p in [0, 1]; got {p}")
+    if int(seed) < 0:
+        raise InvalidArgumentError(
+            f"newman_watts needs a non-negative realization seed; got seed={seed} "
+            "(via a string spec this is the config's base_seed)"
+        )
     # nx labels nodes 0..n-1 already; the ring base guarantees connectivity.
     g = nx.newman_watts_strogatz_graph(n, k, p, seed=int(seed))
     edges = sorted({(min(u, v), max(u, v)) for u, v in g.edges()})
@@ -587,6 +600,146 @@ def newman_watts(
         edges=edges,
         is_stochastic=True,
         one_factorization=None,  # stochastic / non-regular: no 1-factorization
+        graph6=graph6_encode(n, edges),
+        fresh_matching_sampler=sampler,
+    )
+
+
+# ----------------------------------------------------------------------
+# Watts-Strogatz rewired circulant (stochastic, degree-preserving)
+# ----------------------------------------------------------------------
+
+_WS_STREAM = 0x77735F72  # "ws_r": graph-realization RNG stream tag (kept fixed for reproducibility)
+
+
+def _ws_beta_key(beta: float) -> int:
+    """Quantize ``beta`` for the RNG seed so distinct betas give distinct realizations."""
+    return int(round(float(beta) * 1_000_000_000))
+
+
+def _ws_rewire_edges(n: int, k: int, beta: float, seed: int) -> list[Edge]:
+    """Edge list of one Watts-Strogatz rewiring of the circulant ``C(n, k)``.
+
+    Base graph ``C(n, k)``: each vertex ``i`` joins ``(i +/- c) mod n`` for
+    ``c = 1..k`` (degree ``2k``). Walking the lattice edges once in the classic
+    Watts-Strogatz order (``c = 1..k`` outer, ``i = 0..n-1`` inner), each edge
+    ``{i, (i+c) mod n}`` is rewired with probability ``beta``: the near endpoint
+    ``i`` is kept and the far endpoint is replaced by a uniformly-random current
+    **non-neighbor** of ``i`` (excluding ``i`` itself), against the *current*
+    adjacency. Each rewire removes one edge and adds one, so the edge count
+    ``|E| = nk`` (hence the **mean** degree ``2k``) is preserved, with no self-
+    or multi-edges. The degree *sequence* is not preserved: as in classic
+    Watts-Strogatz, moving an edge's far endpoint lowers one vertex's degree and
+    raises another's. The RNG is seeded reproducibly from ``(seed, n, k, beta)``.
+    """
+    rng = np.random.default_rng([int(seed), int(n), int(k), _ws_beta_key(beta), _WS_STREAM])
+    adj: list[set[int]] = [set() for _ in range(n)]
+    order: list[Edge] = []
+    for c in range(1, k + 1):
+        for i in range(n):
+            j = (i + c) % n
+            adj[i].add(j)
+            adj[j].add(i)
+            order.append((i, j))
+    for i, j in order:
+        if rng.random() < beta:
+            forbidden = adj[i] | {i}
+            if len(forbidden) >= n:  # i already joined to everything: no valid target
+                continue
+            cand = [v for v in range(n) if v not in forbidden]
+            jp = cand[int(rng.integers(len(cand)))]
+            adj[i].discard(j)
+            adj[j].discard(i)
+            adj[i].add(jp)
+            adj[jp].add(i)
+    return sorted({(min(u, v), max(u, v)) for u in range(n) for v in adj[u]})
+
+
+def watts_strogatz(
+    n: int,
+    k: int = 2,
+    beta: float = 0.5,
+    *,
+    seed: int = 0,
+    name: str | None = None,
+) -> GraphTopology:
+    r"""Watts-Strogatz **rewired** circulant ``C(n, k)`` (a stochastic geometry).
+
+    Start from the circulant ring lattice ``C(n, k)`` in which each vertex is
+    joined to its ``k`` nearest neighbors on **each side** (degree ``2k``), then
+    rewire each lattice edge to a random long-range chord with probability
+    ``beta`` in the classic Watts-Strogatz way: remove ``{i, j}`` and add
+    ``{i, j'}`` for a uniformly-random current non-neighbor ``j'`` of the kept
+    endpoint ``i``. Because an edge is *moved* rather than added, the edge count
+    ``nk`` (hence the mean degree ``2k``) is preserved for every ``beta`` (the
+    degree sequence is not: classic Watts-Strogatz rewiring). As
+    ``beta`` runs ``0 -> 1`` the graph interpolates lattice -> small-world ->
+    random, and the algebraic connectivity (spectral gap) opens by orders of
+    magnitude (Olfati-Saber, "Ultrafast Consensus in Small-World Networks").
+
+    This is **distinct** from :func:`newman_watts`, which *adds* a shortcut
+    across each lattice edge (never removing one) and is therefore non-regular.
+    Here ``k`` counts neighbors per side (degree ``2k``); there ``k`` is the
+    total ring connectivity.
+
+    Being stochastic and (in general) non-Class-1, it carries no fixed
+    1-factorization, so ``round_robin`` / ``palette`` matching are unavailable;
+    ``random_edge`` and ``random_pool`` gating (which need only the edge set),
+    every measurement mode and every picture work, and ``brickwork`` with
+    ``matching_mode="fresh"`` works when the realization has a perfect matching.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes (``>= 3``).
+    k : int
+        Neighbors per side of the base circulant (``1 <= k < n/2``, degree
+        ``2k``). ``k = 1`` is the bare ring; ``k = 2`` was used in the WS study.
+    beta : float
+        Rewiring probability per lattice edge, in ``[0, 1]``. ``beta = 0`` is the
+        exact circulant ``C(n, k)``.
+    seed : int
+        Realization seed. A given ``(n, k, beta, seed)`` is one fixed graph
+        (reproducible bit-for-bit); vary the seed to draw another realization
+        from the ensemble. Used as the string spec ``"watts_strogatz"``, the
+        config's ``base_seed`` is the realization seed, so sweeping ``base_seed``
+        averages over graphs.
+    name : str, optional
+        Override the auto-generated name.
+
+    References
+    ----------
+    D. J. Watts and S. H. Strogatz, *Collective dynamics of 'small-world'
+    networks*, Nature **393**, 440 (1998).
+    R. Olfati-Saber, *Ultrafast consensus in small-world networks*, Proc. ACC,
+    2371 (2005).
+    """
+    if n < 3:
+        raise InvalidArgumentError(f"watts_strogatz needs n >= 3; got n={n}")
+    if k < 1 or 2 * k >= n:
+        raise InvalidArgumentError(
+            f"watts_strogatz needs 1 <= k < n/2 (so degree 2k < n); got k={k}, n={n}"
+        )
+    if not 0.0 <= beta <= 1.0:
+        raise InvalidArgumentError(f"watts_strogatz needs beta in [0, 1]; got {beta}")
+    if int(seed) < 0:
+        raise InvalidArgumentError(
+            f"watts_strogatz needs a non-negative realization seed; got seed={seed} "
+            "(via a string spec this is the config's base_seed)"
+        )
+    edges = _ws_rewire_edges(n, k, float(beta), int(seed))
+    try:
+        sampler = _make_pm_sampler(
+            n, edges
+        )  # brickwork+fresh iff a PM exists (needs the 'graph' extra)
+    except ImportError:
+        sampler = None  # networkx absent: random_edge/random_pool gating still work (edge set only)
+    return GraphTopology(
+        name=name or f"watts_strogatz(n={n},k={k},beta={beta:g},seed={seed})",
+        n=n,
+        edges=edges,
+        is_stochastic=True,
+        one_factorization=None,  # stochastic / non-Class-1: no fixed 1-factorization
         graph6=graph6_encode(n, edges),
         fresh_matching_sampler=sampler,
     )
@@ -620,6 +773,45 @@ _GRAPH_CONSTRUCTORS = {
 }
 
 
+def _parse_spec_params(spec: str, family: str, allowed: set[str]) -> dict[str, float]:
+    """Parse ``"family(k=2,beta=0.1)"`` into ``{"k": 2, "beta": 0.1}``.
+
+    A bare ``"family"`` (no parentheses) yields ``{}`` (use the family defaults).
+    ``k`` is read as an ``int``; all other values as ``float``. An unknown
+    parameter key (not in ``allowed``) raises :class:`InvalidArgumentError` rather
+    than leaking a ``TypeError`` from the downstream constructor.
+    """
+    body = spec[len(family) :].strip()
+    if not body:
+        return {}
+    if not (body.startswith("(") and body.endswith(")")):
+        raise InvalidArgumentError(
+            f"malformed graph spec {spec!r}; expected {family}(key=value,...)"
+        )
+    out: dict[str, float] = {}
+    for part in body[1:-1].split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise InvalidArgumentError(
+                f"malformed graph spec {spec!r}; expected key=value in {family}(...)"
+            )
+        key, val = (s.strip() for s in part.split("=", 1))
+        if key not in allowed:
+            raise InvalidArgumentError(
+                f"unknown parameter {key!r} for {family} in graph spec {spec!r}; "
+                f"allowed: {', '.join(sorted(allowed))}"
+            )
+        try:
+            out[key] = int(val) if key == "k" else float(val)
+        except ValueError as e:
+            raise InvalidArgumentError(
+                f"bad value {val!r} for {key!r} in graph spec {spec!r}"
+            ) from e
+    return out
+
+
 def from_spec(spec: str, n: int, seed: int = 0) -> GraphTopology:
     """Build a graph topology from a string specification.
 
@@ -627,26 +819,36 @@ def from_spec(spec: str, n: int, seed: int = 0) -> GraphTopology:
     ----------
     spec : str
         One of ``"cycle"``, ``"complete"``, ``"path"``, ``"lattice_2d"``,
-        ``"newman_watts"`` (case-insensitive). ``"lattice_2d"`` builds the square
-        ``s x s`` grid when ``n = s^2``; ``"newman_watts"`` builds a stochastic
-        small-world graph seeded by ``seed`` (default ``k=2``, ``p=0.5``; pass
-        :func:`newman_watts` directly to tune them). Use :func:`from_networkx`
+        ``"newman_watts"``, ``"watts_strogatz"`` (case-insensitive).
+        ``"lattice_2d"`` builds the square ``s x s`` grid when ``n = s^2``;
+        ``"newman_watts"`` builds a stochastic add-shortcut small-world graph
+        seeded by ``seed`` and accepts inline parameters, e.g.
+        ``"newman_watts(k=4,p=0.2)"`` (default ``k=2``, ``p=0.5``).
+        ``"watts_strogatz"`` builds the stochastic **rewired** circulant seeded by
+        ``seed`` and accepts inline parameters, e.g.
+        ``"watts_strogatz(k=2,beta=0.1)"`` (default ``k=2``, ``beta=0.5``). Inline
+        parameters let a sweep vary ``beta`` / ``p`` by sweeping the ``graph_spec``
+        string while ``base_seed`` draws realizations. Use :func:`from_networkx`
         for an arbitrary geometry.
     n : int
         Number of qubits.
     seed : int
-        Realization seed for stochastic specs (``"newman_watts"``); ignored for
-        the deterministic graphs.
+        Realization seed for stochastic specs (``"newman_watts"``,
+        ``"watts_strogatz"``); ignored for the deterministic graphs.
 
     Returns
     -------
     GraphTopology
     """
     spec = spec.strip().lower()
-    if spec == "newman_watts":
-        return newman_watts(n, seed=seed)
+    if spec == "newman_watts" or spec.startswith("newman_watts("):
+        return newman_watts(n, seed=seed, **_parse_spec_params(spec, "newman_watts", {"k", "p"}))
+    if spec == "watts_strogatz" or spec.startswith("watts_strogatz("):
+        return watts_strogatz(
+            n, seed=seed, **_parse_spec_params(spec, "watts_strogatz", {"k", "beta"})
+        )
     if spec not in _GRAPH_CONSTRUCTORS:
-        supported = ", ".join(sorted([*_GRAPH_CONSTRUCTORS, "newman_watts"]))
+        supported = ", ".join(sorted([*_GRAPH_CONSTRUCTORS, "newman_watts", "watts_strogatz"]))
         raise InvalidArgumentError(f"Unknown graph spec {spec!r}. Supported: {supported}.")
     return _GRAPH_CONSTRUCTORS[spec](n)
 
@@ -663,4 +865,5 @@ __all__ = [
     "lattice_2d",
     "newman_watts",
     "path_graph",
+    "watts_strogatz",
 ]

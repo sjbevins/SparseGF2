@@ -160,3 +160,13 @@ def test_config_validation(example_a_code):
             example_a_code,
             ExpurgationConfig(erasure_count=1, recovery_target=0.9, validation_patterns=0),
         )
+    with pytest.raises(InvalidArgumentError, match="max_rounds"):
+        ExpurgationConfig(erasure_count=1, max_rounds=1.9)
+    with pytest.raises(InvalidArgumentError, match="max_barren_rounds"):
+        ExpurgationConfig(erasure_count=1, max_barren_rounds=0)
+    with pytest.raises(InvalidArgumentError, match="recovery_target"):
+        ExpurgationConfig(erasure_count=1, recovery_target=1.1)
+    with pytest.raises(InvalidArgumentError, match="seed"):
+        ExpurgationConfig(erasure_count=1, seed=-1)
+    with pytest.raises(InvalidArgumentError, match="sites"):
+        ExpurgationConfig(erasure_count=1, sites=(0, 0))

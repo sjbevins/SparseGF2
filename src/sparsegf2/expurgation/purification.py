@@ -34,7 +34,12 @@ from sparsegf2.core.linalg_gf2 import gf2_kernel_basis
 from sparsegf2.core.observables import entanglement_entropy
 from sparsegf2.core.sparse_tableau import SparseGF2
 from sparsegf2.errors import InvalidArgumentError, SimulatorBackendError
-from sparsegf2.expurgation.roles import ROLE_CHECK, ROLE_LOGICAL, StabilizerCode
+from sparsegf2.expurgation.roles import (
+    ROLE_CHECK,
+    ROLE_LOGICAL,
+    StabilizerCode,
+    _exact_integer_array,
+)
 
 
 def _sp(u: np.ndarray, v: np.ndarray, n: int) -> int:
@@ -134,7 +139,7 @@ def from_purification(
             )
         system = np.arange(n_tot // 2, dtype=np.int64)
     else:
-        system = np.asarray(list(system_qubits), dtype=np.int64)
+        system = _exact_integer_array(system_qubits, name="system_qubits")
         if system.size == 0:
             raise InvalidArgumentError("system_qubits must be non-empty")
         if system.min() < 0 or system.max() >= n_tot:

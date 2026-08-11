@@ -52,6 +52,28 @@ ROLE_GAUGE = np.uint8(2)
 STRATEGIES = ("stabilizer", "gauge")
 
 
+def _exact_integer_array(values: Iterable[int], *, name: str) -> NDArray[np.int64]:
+    """Return a 1-D int64 array without accepting lossy numeric coercions."""
+    raw = np.asarray(list(values), dtype=object)
+    if raw.ndim != 1:
+        raise InvalidArgumentError(f"{name} must be one-dimensional; got shape {raw.shape}")
+    no_bad_value = object()
+    bad = next(
+        (
+            value
+            for value in raw
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
+        ),
+        no_bad_value,
+    )
+    if bad is not no_bad_value:
+        raise InvalidArgumentError(
+            f"{name} must contain exact integers (not Booleans or lossy numeric values); "
+            f"got {bad!r}"
+        )
+    return np.asarray([int(value) for value in raw], dtype=np.int64)
+
+
 class StabilizerCode:
     """A stabilizer (subsystem) code presented as a tableau plus roles.
 
@@ -76,15 +98,16 @@ class StabilizerCode:
     """
 
     def __init__(self, sim: SparseGF2, roles: Iterable[int]):
-        role_arr = np.asarray(list(roles), dtype=np.uint8).copy()
+        role_values = _exact_integer_array(roles, name="roles")
+        role_arr = role_values.astype(np.uint8, copy=True)
         if role_arr.shape != (sim.n,):
             raise InvalidArgumentError(
                 f"roles must have shape ({sim.n},) = (sim.n,), got {role_arr.shape}"
             )
-        if role_arr.size and role_arr.max() > 2:
+        if role_values.size and ((role_values < 0).any() or (role_values > 2).any()):
             raise InvalidArgumentError(
                 "roles entries must be ROLE_CHECK (0), ROLE_LOGICAL (1), or ROLE_GAUGE (2); "
-                f"got values {sorted(set(role_arr.tolist()))}"
+                f"got values {sorted(set(role_values.tolist()))}"
             )
         self.sim = sim
         self.roles: NDArray[np.uint8] = role_arr
@@ -108,7 +131,7 @@ class StabilizerCode:
             The set ``K`` of logical input positions, distinct indices
             in ``[0, sim.n)``.
         """
-        data = np.asarray(list(data_qubits), dtype=np.int64)
+        data = _exact_integer_array(data_qubits, name="data_qubits")
         if data.size:
             if data.min() < 0 or data.max() >= sim.n:
                 raise InvalidArgumentError(
@@ -206,9 +229,9 @@ class StabilizerCode:
         """Measure a zero-syndrome Pauli and spend the pair that absorbs it.
 
         The elementary move of the expurgation algorithm: project the
-        state onto an eigenspace of ``g`` via
-        :meth:`SparseGF2.measure_pauli`, then record what became of the
-        pivot pair. Under the ``"stabilizer"`` strategy the pair becomes
+        code space onto an eigenspace of ``g`` by consuming a logical
+        pair on which ``g`` acts nontrivially. Under the ``"stabilizer"``
+        strategy the pair becomes
         a new check (the code shrinks to a plain stabilizer code with
         one more check); under ``"gauge"`` it becomes a gauge pair (the
         original checks are untouched, the paper's preferred variant).
@@ -226,10 +249,8 @@ class StabilizerCode:
         Returns
         -------
         int or None
-            The pair index whose role was flipped, or ``None`` when the
-            move was skipped: ``g`` acts trivially on the current
-            logical algebra, or its measurement is deterministic
-            (``g`` is already in the stabilizer group up to sign). A
+            The logical pair index whose role was flipped, or ``None``
+            when ``g`` acts trivially on the current logical algebra. A
             skipped move leaves the tableau and the roles unchanged.
         """
         if strategy not in STRATEGIES:
@@ -242,18 +263,9 @@ class StabilizerCode:
             )
         if not logical.any():
             return None
-        pair = self.sim.measure_pauli(qubits, letters)
-        if pair is None:
-            # Deterministic: g is in the stabilizer group up to sign; the
-            # candidate is stale and the tableau was left unchanged.
-            return None
-        if self.roles[pair] == ROLE_CHECK:
-            # Zero syndrome means no check row can anticommute with g, so
-            # the pivot pair can never be a check pair when the labels
-            # match the tableau. Reaching this line means they do not.
-            raise InvalidArgumentError(
-                f"measure: pivot landed on check pair {pair}; the role array is "
-                "inconsistent with the tableau it labels"
-            )
+        logical_pairs = self.logical_pairs()
+        logical_slot = int(np.flatnonzero(logical)[0]) // 2
+        pair = int(logical_pairs[logical_slot])
+        self.sim.project_pauli_into_pair(qubits, letters, pair)
         self.roles[pair] = ROLE_CHECK if strategy == "stabilizer" else ROLE_GAUGE
         return pair

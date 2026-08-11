@@ -230,6 +230,51 @@ def apply_2q_kernel_jit(
         plt[r, qj] = new_xz_j
 
 
+@njit(cache=True)
+def apply_2q_batch_kernel_jit(
+    plt,
+    supp_q,
+    supp_len,
+    supp_pos,
+    inv,
+    inv_len,
+    inv_pos,
+    inv_x,
+    inv_x_len,
+    inv_x_pos,
+    pairs,
+    cliff_indices,
+    luts,
+    start,
+    stop,
+    active_buf,
+):
+    """Apply ``pairs[start:stop]`` through the sparse 2q kernel in order.
+
+    This is an internal runner fast path.  It is deliberately a thin loop
+    around :func:`apply_2q_kernel_jit`: batching removes one Python-to-Numba
+    transition per gate without changing the kernel, gate order, or tableau
+    update.
+    """
+    for g in range(start, stop):
+        apply_2q_kernel_jit(
+            plt,
+            supp_q,
+            supp_len,
+            supp_pos,
+            inv,
+            inv_len,
+            inv_pos,
+            inv_x,
+            inv_x_len,
+            inv_x_pos,
+            pairs[g, 0],
+            pairs[g, 1],
+            luts[cliff_indices[g]],
+            active_buf,
+        )
+
+
 # ----------------------------------------------------------------------
 # Sparse XOR and clear (njit)
 # ----------------------------------------------------------------------
@@ -342,7 +387,7 @@ def measure_z_kernel_jit(
     Returns 1 if non-deterministic (a stabilizer anticommuter existed),
     0 otherwise.
 
-    Aaronson-Gottesman CHP, phase-free:
+    Aaronson–Gottesman CHP, phase-free:
 
     * **Deterministic** (no stabilizer row ``r >= n`` has ``x_{r,q} = 1``):
       Stim leaves the symplectic tableau unchanged, so we do the same.
@@ -449,6 +494,44 @@ def measure_z_kernel_jit(
     return 1
 
 
+@njit(cache=True)
+def measure_z_batch_kernel_jit(
+    plt,
+    supp_q,
+    supp_len,
+    supp_pos,
+    inv,
+    inv_len,
+    inv_pos,
+    inv_x,
+    inv_x_len,
+    inv_x_pos,
+    qubits,
+    start,
+    stop,
+    use_min_weight_pivot,
+    others_buf,
+    was_random,
+):
+    """Measure ``qubits[start:stop]`` with the sparse kernel, in order."""
+    for m in range(start, stop):
+        was_random[m] = measure_z_kernel_jit(
+            plt,
+            supp_q,
+            supp_len,
+            supp_pos,
+            inv,
+            inv_len,
+            inv_pos,
+            inv_x,
+            inv_x_len,
+            inv_x_pos,
+            qubits[m],
+            use_min_weight_pivot,
+            others_buf,
+        )
+
+
 # ----------------------------------------------------------------------
 # Warmup
 # ----------------------------------------------------------------------
@@ -458,7 +541,7 @@ def warmup() -> None:
     """Trigger JIT compilation of every kernel.
 
     Call this once at the start of a long-running session to amortize
-    Numba's compilation latency (1-3 s) before any timing measurement.
+    Numba's compilation latency (1–3 s) before any timing measurement.
     Subsequent runs hit the on-disk cache and pay only the import cost.
 
     The warmup constructs a proper |0^4⟩ tableau, applies real Cliffords
@@ -619,7 +702,7 @@ def gf2_rref_jit(A):
     """Reduce ``A`` to GF(2) row-reduced echelon form in-place, return ``A``.
 
     Standard pivot-and-eliminate scan over uint8 entries. The JIT'd
-    version is ~10-50× faster than the pure-Python reference for
+    version is ~10–50× faster than the pure-Python reference for
     moderate ``A`` (which is what :meth:`SparseGF2.canonical_form`
     feeds in: an ``(n, 2n)`` uint8 matrix). The body is in-place to
     avoid a re-allocation per call.
@@ -797,6 +880,19 @@ def apply_2q_packed_jit(x_packed, z_packed, qi, qj, lut):
 
 
 @njit(cache=True)
+def apply_2q_batch_packed_jit(x_packed, z_packed, pairs, cliff_indices, luts, start, stop):
+    """Apply ``pairs[start:stop]`` through the packed 2q kernel in order."""
+    for g in range(start, stop):
+        apply_2q_packed_jit(
+            x_packed,
+            z_packed,
+            pairs[g, 0],
+            pairs[g, 1],
+            luts[cliff_indices[g]],
+        )
+
+
+@njit(cache=True)
 def apply_1q_packed_jit(x_packed, z_packed, q, lut):
     """Dense 1q Clifford via the packed (4,) LUT (index ``(x<<1)|z``)."""
     n_rows = x_packed.shape[0]
@@ -853,6 +949,13 @@ def measure_z_packed_jit(x_packed, z_packed, q):
         z_packed[pivot, jj] = np.uint64(0)
     z_packed[pivot, w] = one << b
     return 1
+
+
+@njit(cache=True)
+def measure_z_batch_packed_jit(x_packed, z_packed, qubits, start, stop, was_random):
+    """Measure ``qubits[start:stop]`` with the packed kernel, in order."""
+    for m in range(start, stop):
+        was_random[m] = measure_z_packed_jit(x_packed, z_packed, qubits[m])
 
 
 @njit(cache=True)

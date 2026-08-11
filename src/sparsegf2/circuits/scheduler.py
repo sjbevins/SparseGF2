@@ -18,18 +18,25 @@ Gating modes
 - ``random_pool``: fire ``config.gates_per_layer`` uniformly-random edges *with
   replacement* each layer (default ``m=n/2``, holding the gate:measurement ratio
   at brickwork's ``1:2p``; raise the coefficient to change the ratio).
+- ``all_edges``: fire every stored graph edge, in order, on every layer. Gate
+  placement is deterministic and consumes no RNG.
 
 RNG model (single stream)
 -------------------------
-This builder uses **one** ``np.random.Generator`` seeded at
-``base_seed + sample_seed``, consumed in a fixed per-layer order that is
-**load-bearing for reproducibility** and must not change without a schema
-bump:
+This builder uses **one** ``np.random.Generator`` seeded from the **pair**
+``[base_seed, sample_seed]`` (schema v2; the v1 scalar ``base_seed +
+sample_seed`` collided across cells: ``(b, s)`` and ``(b + k, s - k)`` shared
+every stream, so sweeping ``base_seed`` for stochastic-graph averaging while
+also sweeping samples silently duplicated trajectories). The stream is
+consumed in a fixed per-layer order that is **load-bearing for
+reproducibility** and must not change without a schema bump:
 
     1. gate placement
        - ``brickwork``: matching selection (``palette``/``fresh`` draw;
          ``round_robin`` draws nothing)
-       - ``random_edge``: one edge index
+       - ``random_edge``: ``m`` distinct edge indices
+       - ``random_pool``: ``m`` edge indices with replacement
+       - ``all_edges``: no draw
     2. Clifford indices, one per gate pair
     3. measurement-candidate draws (mode-specific count)
 
@@ -51,6 +58,22 @@ from sparsegf2.circuits.config import CircuitConfig
 from sparsegf2.circuits.graphs import GraphTopology, from_spec
 from sparsegf2.circuits.matching import select_matching
 from sparsegf2.circuits.measurements import sample_measurements_detailed
+from sparsegf2.errors import InvalidArgumentError
+
+
+def _normalize_sample_seed(sample_seed: object) -> int:
+    """Validate a SeedSequence entropy component without lossy coercion."""
+    if not isinstance(sample_seed, (int, np.integer)) or isinstance(sample_seed, (bool, np.bool_)):
+        raise InvalidArgumentError(
+            "sample_seed must be a non-negative integer; "
+            f"got {sample_seed!r} ({type(sample_seed).__name__})"
+        )
+    sample_seed = int(sample_seed)
+    if sample_seed < 0:
+        raise InvalidArgumentError(
+            f"sample_seed must be a non-negative integer; got {sample_seed!r}"
+        )
+    return sample_seed
 
 
 @dataclass
@@ -96,15 +119,18 @@ class CircuitBuilder:
     config : CircuitConfig
         All non-sample-seed knobs (validated already in its ``__post_init__``).
     sample_seed : int
-        Per-sample offset added to ``config.base_seed`` to seed this
-        realization's RNG.
+        Non-negative exact integer paired with ``config.base_seed`` as
+        ``[base_seed, sample_seed]`` to seed this realization's RNG. Boolean
+        aliases and values requiring a lossy integer coercion are rejected.
     """
 
     def __init__(self, config: CircuitConfig, sample_seed: int = 0) -> None:
         self.config = config
-        self.sample_seed = int(sample_seed)
-        self.seed = int(config.base_seed) + self.sample_seed
-        self.rng = np.random.default_rng(self.seed)
+        self.sample_seed = _normalize_sample_seed(sample_seed)
+        # Pair-seeded (schema v2): [base_seed, sample_seed] gives every
+        # (base_seed, sample_seed) cell its own stream. The v1 scalar sum made
+        # (b, s) and (b + k, s - k) bit-identical.
+        self.rng = np.random.default_rng([int(config.base_seed), self.sample_seed])
         # Reuse the graph the config already resolved + validated in
         # __post_init__ (``_graph``): avoids a per-sample rebuild and
         # guarantees the executed graph is the one validation checked. The
@@ -116,19 +142,29 @@ class CircuitBuilder:
         elif isinstance(config.graph_spec, GraphTopology):
             self.graph = config.graph_spec
         else:
-            self.graph = from_spec(config.graph_spec, config.n, seed=self.seed)
+            # base_seed (not base+sample): the stochastic-graph realization is
+            # quenched per config, exactly as the normal __post_init__ path
+            # resolves it; a per-sample seed here would silently anneal the
+            # geometry and diverge from what validation checked.
+            self.graph = from_spec(config.graph_spec, config.n, seed=int(config.base_seed))
 
     # ---- internal: one layer's gate placement + Clifford indices ----
 
     def _place_gates(self, t: int, edges, n_edges: int):
         """Return ``(gate_pairs, cliff_indices)`` for layer ``t``.
 
-        Consumes RNG step 1 (placement) then step 2 (Clifford indices), in
-        that order, for both gating modes.
+        Random placement modes consume RNG for step 1; deterministic modes do
+        not. Step 2 then draws one Clifford index per selected edge.
         """
         cfg = self.config
         if cfg.gating_mode == "brickwork":
             pairs = select_matching(self.graph, cfg.matching_mode, t, self.rng)
+        elif cfg.gating_mode == "all_edges":
+            # Fire EVERY graph edge each layer, in the graph's fixed edge order.
+            # Fully deterministic placement (no RNG consumed in step 1); the RNG
+            # is spent only on the per-gate Clifford indices (step 2) and the
+            # measurements (step 3).
+            pairs = list(self.graph.edges)
         elif cfg.gating_mode in ("random_edge", "random_pool"):
             if n_edges == 0:
                 pairs = []

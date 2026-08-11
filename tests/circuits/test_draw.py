@@ -9,6 +9,7 @@ exercised when a LaTeX install is present. Visual quality is checked separately.
 from __future__ import annotations
 
 import inspect
+import subprocess
 
 import pytest
 
@@ -22,7 +23,31 @@ from sparsegf2.circuits import (
 from sparsegf2.circuits.draw import _pack_stage, _which
 from sparsegf2.errors import InvalidArgumentError
 
-_HAS_LATEX = _which("pdflatex") is not None
+
+def _latex_dependencies_available():
+    """Whether the external compiler and document packages used below exist."""
+    if _which("pdflatex") is None:
+        return False
+    kpsewhich = _which("kpsewhich")
+    if kpsewhich is None:
+        return False
+    try:
+        return all(
+            subprocess.run(
+                [kpsewhich, package],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).returncode
+            == 0
+            for package in ("standalone.cls", "tikzlibraryquantikz2.code.tex")
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+_HAS_LATEX = _latex_dependencies_available()
 
 
 # ----------------------------------------------------------------------
@@ -92,7 +117,7 @@ def test_reference_wires_are_red_system_wires_are_not():
     assert "red" not in pure
 
 
-@pytest.mark.parametrize("gating", ["brickwork", "random_edge", "random_pool"])
+@pytest.mark.parametrize("gating", ["brickwork", "random_edge", "random_pool", "all_edges"])
 @pytest.mark.parametrize("measurement", ["bernoulli", "gated", "random_pair", "uniform_count"])
 def test_all_modes_emit_quantikz(gating, measurement):
     kw = dict(
