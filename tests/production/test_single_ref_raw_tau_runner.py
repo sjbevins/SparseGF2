@@ -9,6 +9,7 @@ from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
 
+import numba
 import numpy as np
 import pytest
 from studies.prl_production.single_ref.benchmark import THREAD_LIMIT_VARIABLES
@@ -29,6 +30,22 @@ from studies.prl_production.single_ref.raw_tau.storage import (
     raw_tau_path,
 )
 from studies.prl_production.sweep_spec import ScientificEnvironmentContract
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_process_thread_state():
+    """Keep runner tests from leaking process-wide thread limits."""
+    original_environment = {name: os.environ.get(name) for name in THREAD_LIMIT_VARIABLES}
+    original_numba_threads = numba.get_num_threads()
+    try:
+        yield
+    finally:
+        numba.set_num_threads(original_numba_threads)
+        for name, value in original_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _payload(data_root: Path) -> dict[str, object]:
