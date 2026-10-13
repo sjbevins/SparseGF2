@@ -21,9 +21,29 @@ tested against Stim.
   <img alt="A monitored random Clifford circuit: random two-qubit Cliffords in a brickwork, Z measurements at rate p, and a reference qubit Bell-paired with the system" src="v3/docs/figures/circuit-light.png">
 </picture>
 
-Speed comparisons against Stim, Qiskit Aer, Cirq and SparseGF2 v2 are in the
-[v3 README](v3/README.md#performance) (method:
-[`v3/benchmarks/`](v3/benchmarks/README.md)).
+## Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="v3/docs/figures/runtime-dark.png">
+  <img alt="Seconds per monitored circuit versus n for SparseGF2 v3 (with and without phases), Stim, SparseGF2 v2, Qiskit Aer and Cirq; SparseGF2 v3 is fastest at every size" src="v3/docs/figures/runtime-light.png">
+</picture>
+
+On monitored random Clifford circuits (n qubits, depth 2n, one core each,
+identical circuits, final states cross-checked):
+
+* In phase-free mode SparseGF2 v3 is **3–15× faster than Stim** for n ≥ 64,
+  and the margin grows with n. With signs tracked it is **about 3× faster**.
+* It is hundreds to thousands of times faster than Qiskit Aer and Cirq.
+* Its ensemble engine generates and simulates fresh random circuits in
+  parallel: about **128,000 circuits per second at n = 16** and 1,700 at
+  n = 128 on four cores.
+* On the PRL purification-time protocol it runs **27–60× more trajectories per
+  second per thread than the v2 production engine**, with statistically
+  identical results.
+
+Method, caveats and every number:
+[v3 README, Performance](v3/README.md#performance) and
+[`v3/benchmarks/`](v3/benchmarks/README.md).
 
 ## Physics in a few lines
 

@@ -227,13 +227,144 @@ the probability for a random E of each size).
 
 ## Performance
 
-How fast SparseGF2 v3 is, and how that was measured, comes from the scripts in
-[`benchmarks/`](benchmarks/README.md): the same monitored circuits are run by
-SparseGF2 v3 (both modes), Stim, Qiskit Aer, Cirq and SparseGF2 v2, one thread
-each, with the final states cross-checked; the ensemble engine's throughput
-and the production-protocol comparison with v2 are measured separately. The
-results and figures are being regenerated on an idle machine and will appear
-here.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/runtime-dark.png">
+  <img alt="Seconds per monitored circuit versus n for SparseGF2 v3 (with and without phases), Stim, SparseGF2 v2, Qiskit Aer and Cirq; SparseGF2 v3 is fastest at every size" src="docs/figures/runtime-light.png">
+</picture>
+
+The workload is the one this simulator exists for: `n` qubits on a ring, depth
+`2n`, uniformly random two-qubit Cliffords in a brickwork, every qubit measured
+in Z with probability `p` after each layer. Every simulator runs the same
+circuits on one core, and the final states are cross-checked. On this
+machine (4-core Xeon, 2.1 GHz):
+
+* **Phase-free mode** (entanglement, codes, purification): **3–15× faster than
+  Stim for n ≥ 64**, and the margin grows with `n`: about 9× at n = 256 and
+  11–15× at n = 512–1024 (2–7× at n = 16–32).
+* **With signs tracked** (the default; outcomes, detectors): about **3× faster
+  than Stim** (1.5–6× across all points).
+* In either mode, **300–1800× faster than Qiskit Aer** (stabilizer method)
+  and **1300–9000× faster than Cirq**. Phase-free, **4–45× faster than
+  SparseGF2 v2**.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/speedup-dark.png">
+  <img alt="Speed-up of SparseGF2 v3 over Stim versus n for three measurement rates, with and without phase tracking" src="docs/figures/speedup-light.png">
+</picture>
+
+For small systems a single `Simulator.run` call is dominated by Python
+overhead (the 1.5–2× points at n = 16–32). Many small circuits are what the
+ensemble engine is for: it generates and simulates a fresh random circuit per
+trajectory inside one compiled, parallel kernel.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/throughput-dark.png">
+  <img alt="Circuits per second versus n: the SparseGF2 v3 ensemble engine on 4 threads, SparseGF2 v3 Simulator.run on one thread, Stim on one thread and Stim with ideal 4-process scaling" src="docs/figures/throughput-light.png">
+</picture>
+
+At p = 0.16 that is about **128,000 circuits per second at n = 16, 7,000 at
+n = 64 and 1,700 at n = 128** on 4 cores. At n = 128, Stim manages 53 per
+second on one core, or about 210 if run as four perfectly parallel processes.
+
+**Your production workload.** On the PRL single-reference protocol
+([`examples/purification_time.py`](examples/purification_time.py)), with the
+same Watts–Strogatz graph banks fed to both engines, v3 runs **27–60× more
+trajectories per second than the v2 production engine on one thread**
+(90–210× on all 4 cores). The purification-time distributions are
+statistically indistinguishable (Kolmogorov–Smirnov p = 0.15–0.92), at the
+grid centre and at p_center − 0.04.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/production-dark.png">
+  <img alt="Trajectories per second on the PRL purification-time protocol versus n: SparseGF2 v3 on 4 threads and on 1 thread, and the SparseGF2 v2 production engine on 1 thread" src="docs/figures/production-light.png">
+</picture>
+
+<details>
+<summary>All the numbers</summary>
+
+**Milliseconds per circuit, p = 0.05** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 v3 | SparseGF2 v3, phase-free | Stim | SparseGF2 v2 | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 0.045 (3.8×) | 0.043 (3.9×) | 0.169 | 0.810 | 40.2 | 180 |
+| 32 | 0.134 (4.4×) | 0.121 (4.9×) | 0.590 | 2.20 | 175 | 702 |
+| 64 | 0.828 (2.2×) | 0.569 (3.2×) | 1.83 | 7.83 | 807 | 4,683 |
+| 128 | 2.80 (4.4×) | 1.59 (7.7×) | 12.3 | 46.9 | 2,919 | – |
+| 256 | 14.9 (4.6×) | 7.89 (8.6×) | 67.8 | 299 | 12,632 | – |
+| 512 | 142 (3.2×) | 51.4 (8.7×) | 449 | 2,297 | – | – |
+| 1024 | 1,286 (3.4×) | 430 (10.2×) | 4,379 | 18,334 | – | – |
+
+**Milliseconds per circuit, p = 0.16** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 v3 | SparseGF2 v3, phase-free | Stim | SparseGF2 v2 | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 0.140 (1.8×) | 0.136 (1.9×) | 0.257 | 1.39 | 65.7 | 182 |
+| 32 | 0.258 (4.3×) | 0.166 (6.7×) | 1.11 | 2.96 | 196 | 816 |
+| 64 | 0.951 (3.1×) | 0.660 (4.4×) | 2.90 | 10.4 | 789 | 5,960 |
+| 128 | 7.69 (2.5×) | 2.90 (6.5×) | 18.9 | 84.3 | 3,243 | – |
+| 256 | 39.3 (3.1×) | 14.3 (8.5×) | 122 | 573 | 12,667 | – |
+| 512 | 316 (3.3×) | 89.9 (11.4×) | 1,026 | 2,590 | – | – |
+| 1024 | 3,025 (3.4×) | 796 (12.9×) | 10,276 | 12,063 | – | – |
+
+**Milliseconds per circuit, p = 0.3** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 v3 | SparseGF2 v3, phase-free | Stim | SparseGF2 v2 | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 0.087 (3.6×) | 0.085 (3.7×) | 0.312 | 2.54 | 43.6 | 178 |
+| 32 | 0.590 (1.5×) | 0.333 (2.6×) | 0.873 | 5.40 | 187 | 1,141 |
+| 64 | 1.28 (4.4×) | 1.16 (4.9×) | 5.68 | 18.3 | 665 | 7,349 |
+| 128 | 6.59 (6.0×) | 4.50 (8.8×) | 39.5 | 76.4 | 4,109 | – |
+| 256 | 39.0 (4.9×) | 20.9 (9.1×) | 192 | 282 | 13,027 | – |
+| 512 | 521 (3.2×) | 140 (12.0×) | 1,672 | 1,243 | – | – |
+| 1024 | 4,598 (3.5×) | 1,103 (14.5×) | 16,010 | 4,755 | – | – |
+
+**Ensemble engine throughput** (fresh random circuits, depth 2n, 4 threads), circuits per second
+
+| p | n = 16 | n = 32 | n = 64 | n = 128 | n = 256 | n = 512 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.05 | 180,855 | 48,985 | 12,860 | 2,803 | 538 | 78 |
+| 0.16 | 127,998 | 35,072 | 7,035 | 1,658 | 294 | 37 |
+| 0.3 | 96,749 | 27,296 | 6,390 | 1,312 | 225 | 38 |
+
+**PRL production protocol**, trajectories per second (same graph banks)
+
+| p | n | median tau | v2 production engine, 1 thread | v3, 1 thread | v3, all threads | speed-up per thread | KS p-value |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.293 | 32 | 13 | 275.6 | 11,963 | 48,317 | 43× | 0.15 |
+| 0.293 | 64 | 18 | 163.3 | 5,510 | 15,145 | 34× | 0.32 |
+| 0.293 | 128 | 22 | 52.4 | 1,779 | 5,186 | 34× | 0.92 |
+| 0.293 | 256 | 28.5 | 11.9 | 525 | 1,750 | 44× | 0.68 |
+| 0.253 | 32 | 17.5 | 248.8 | 14,820 | 53,127 | 60× | 0.84 |
+| 0.253 | 64 | 24 | 123.1 | 4,535 | 13,217 | 37× | 0.90 |
+| 0.253 | 128 | 34 | 45.9 | 1,233 | 4,798 | 27× | 0.38 |
+| 0.253 | 256 | 48 | 9.9 | 355 | 1,156 | 36× | 0.56 |
+
+</details>
+
+**How the comparison is kept fair** (details in
+[`benchmarks/README.md`](benchmarks/README.md)):
+
+* Identical circuits for every simulator. SparseGF2 applies each random
+  Clifford as one fused gate (`CLIFFORD_2Q`), which is part of what it offers.
+  Stim gets each Clifford in its tightest form, at most five of its native
+  gates with each layer batched into a few instructions; every decomposition
+  is checked against the Clifford's tableau.
+* Each simulator's fastest documented path. Stim runs a prebuilt circuit with
+  `TableauSimulator.do_circuit`. Stim 1.16 from PyPI ships an SSE2 build; a
+  `-march=native` source build was slower on this machine, so the PyPI build
+  is used.
+* One thread each, median of repeated runs after a warm-up; SparseGF2's
+  one-off compilation is excluded, Qiskit Aer's per-run circuit conversion is
+  included (it is part of its API).
+
+**Where other tools are better.** For sampling millions of shots of a
+quantum error-correction circuit, use Stim's detector sampler: Pauli-frame
+simulation is a different algorithm and is far faster than any tableau
+simulator for that job. And deep in the area-law phase at n ≥ 1024, v2's
+sparse representation catches up with v3 when signs are tracked (p = 0.3,
+n = 1024: 4.8 s vs 4.6 s); the planned row cache
+([DESIGN.md §5.3](docs/DESIGN.md#53-operations-and-their-cost)) targets
+exactly that case.
 
 ## Phases: tracked or not
 

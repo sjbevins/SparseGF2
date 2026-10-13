@@ -113,11 +113,13 @@ def save(fig, name: str, mode: str) -> None:
     plt.close(fig)
 
 
-def end_labels(ax, items, theme, *, log=True, min_gap=0.075):
+def end_labels(ax, items, theme, *, log=True, min_gap=0.055):
     """Direct labels at the right end of each line, nudged apart vertically.
 
-    ``items`` is a list of (x, y, text). Labels use the secondary text colour;
-    the line ending beside each label carries the series identity.
+    ``items`` is a list of (x, y, text). Only labels that end at the same x can
+    collide, so each such group is spread out separately, keeping every label
+    inside the axes. Labels use the secondary text colour; the line ending
+    beside each label carries the series identity.
     """
     if not items:
         return
@@ -125,26 +127,32 @@ def end_labels(ax, items, theme, *, log=True, min_gap=0.075):
     to = (lambda v: np.log10(v)) if log else (lambda v: v)
     back = (lambda v: 10**v) if log else (lambda v: v)
     span = to(hi) - to(lo)
-    order = sorted(range(len(items)), key=lambda i: to(items[i][1]))
-    pos = [to(items[i][1]) for i in order]
     gap = min_gap * span
-    for k in range(1, len(pos)):
-        pos[k] = max(pos[k], pos[k - 1] + gap)
-    for k in range(len(pos) - 2, -1, -1):  # pull back down if pushed above the top
-        pos[k] = min(pos[k], pos[k + 1] - gap)
-    for k, i in enumerate(order):
-        x, _, text = items[i]
-        ax.annotate(
-            text,
-            xy=(x, back(pos[k])),
-            xytext=(7, 0),
-            textcoords="offset points",
-            va="center",
-            ha="left",
-            fontsize=9,
-            color=theme["ink2"],
-            annotation_clip=False,
-        )
+    top = to(hi) - 0.02 * span
+    groups: dict[float, list[int]] = {}
+    for i, (x, _, _) in enumerate(items):
+        groups.setdefault(x, []).append(i)
+    for x, members in groups.items():
+        order = sorted(members, key=lambda i: to(items[i][1]))
+        pos = [to(items[i][1]) for i in order]
+        for k in range(1, len(pos)):
+            pos[k] = max(pos[k], pos[k - 1] + gap)
+        if pos[-1] > top:  # pushed out of the axes: pin the top label, push the rest down
+            pos[-1] = top
+            for k in range(len(pos) - 2, -1, -1):
+                pos[k] = min(pos[k], pos[k + 1] - gap)
+        for k, i in enumerate(order):
+            ax.annotate(
+                items[i][2],
+                xy=(x, back(pos[k])),
+                xytext=(7, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left",
+                fontsize=9,
+                color=theme["ink2"],
+                annotation_clip=False,
+            )
 
 
 def legend(ax, **kw):
@@ -210,9 +218,9 @@ def fig_runtime(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
     ax.set_yscale("log")
     ax.set_xlabel("qubits n  (depth 2n, brickwork random Clifford gates)")
     ax.set_ylabel("seconds per circuit")
-    ax.set_title(f"Time to simulate one monitored circuit (measurement rate p = {p})")
+    ax.set_title(f"Time to simulate one monitored circuit (measurement rate p = {p})", pad=52)
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{int(v)}"))
-    legend(ax, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=3)
+    legend(ax, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3, borderaxespad=0.3)
     end_labels(ax, labels, theme)
     caption(fig, machine_line(sim["environment"]), theme)
     save(fig, "runtime", mode)
@@ -253,7 +261,7 @@ def fig_speedup(sim: dict, theme: dict, mode: str) -> None:
         fontsize=8,
         color=theme["muted"],
     )
-    legend(axes[1], loc="upper left", title="measurement rate", title_fontsize=9)
+    legend(axes[1], loc="lower right", title="measurement rate", title_fontsize=9)
     fig.suptitle(
         "Speed-up over Stim on the same circuits",
         x=0.0,
@@ -312,7 +320,7 @@ def fig_throughput(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
     ax.set_xlabel("qubits n  (depth 2n)")
     ax.set_ylabel("circuits per second")
     ax.set_title(f"Throughput on fresh random monitored circuits (p = {p})")
-    legend(ax, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2)
+    legend(ax, loc="lower left")
     end_labels(ax, labels, theme)
     caption(
         fig,
@@ -329,9 +337,9 @@ def fig_production(cross: list, theme: dict, mode: str) -> None:
     rates = sorted({r["p"] for r in cross}, reverse=True)
     threads = cross[0]["threads"]
     series = [
-        ("v3_traj_per_s_all_threads", f"SparseGF2 v3, {threads} threads", 0),
-        ("v3_traj_per_s_1thread", "SparseGF2 v3, 1 thread", 1),
-        ("v2_traj_per_s_1thread", "SparseGF2 v2 production engine, 1 thread", 3),
+        ("v3_traj_per_s_all_threads", f"v3, {threads} threads", 0),
+        ("v3_traj_per_s_1thread", "v3, 1 thread", 1),
+        ("v2_traj_per_s_1thread", "v2 production engine, 1 thread", 3),
     ]
     fig, axes = plt.subplots(
         1, len(rates), figsize=(4.6 * len(rates) + 1.2, 4.2), sharey=True, squeeze=False
@@ -583,6 +591,18 @@ def fig_schematic(theme: dict, mode: str, n: int = 8, depth: int = 7, seed: int 
     save(fig, "circuit", mode)
 
 
+def _ms(seconds: float) -> str:
+    """Milliseconds with three significant digits, without scientific notation."""
+    ms = seconds * 1e3
+    if ms >= 100:
+        return f"{ms:,.0f}"
+    if ms >= 10:
+        return f"{ms:.1f}"
+    if ms >= 1:
+        return f"{ms:.2f}"
+    return f"{ms:.3f}"
+
+
 def tables(sim: dict | None, cross: list | None) -> str:
     """Markdown tables of the benchmark numbers, for the README (exact values from the JSON)."""
     out = []
@@ -593,7 +613,7 @@ def tables(sim: dict | None, cross: list | None) -> str:
             sizes = sorted({r["n"] for r in sim["runs"] if abs(r["p"] - p) < 1e-9})
             present = [k for k, _, _ in SIMULATORS if any(r["simulator"] == k for r in sim["runs"])]
             out.append(
-                f"**Seconds per circuit, p = {p}** (depth 2n; speed-up over Stim in brackets)\n"
+                f"**Milliseconds per circuit, p = {p}** (depth 2n; speed-up over Stim in brackets)\n"
             )
             out.append("| n | " + " | ".join(names[k] for k in present) + " |")
             out.append("|---:|" + "---:|" * len(present))
@@ -608,9 +628,9 @@ def tables(sim: dict | None, cross: list | None) -> str:
                     if k not in t:
                         cells.append("–")
                     elif k.startswith("sparsegf2_v3") and "stim" in t:
-                        cells.append(f"{t[k] * 1e3:.3g} ({t['stim'] / t[k]:.1f}×)")
+                        cells.append(f"{_ms(t[k])} ({t['stim'] / t[k]:.1f}×)")
                     else:
-                        cells.append(f"{t[k] * 1e3:.3g}")
+                        cells.append(_ms(t[k]))
                 out.append(f"| {n} | " + " | ".join(cells) + " |")
             out.append("")
         ens = sorted(sim["ensemble"], key=lambda e: (e["p"], e["n"]))

@@ -17,7 +17,7 @@ them directly).
 pip install -e "./v3[test]" qiskit-aer cirq matplotlib
 python v3/benchmarks/compare_simulators.py
 python v3/benchmarks/crosscheck_v2_production.py --n 32 64 128 256 --graphs 2000 500 200 100 \
-    --out v3/benchmarks/results/crosscheck_v2.json
+    --p 0.293 0.253 --out v3/benchmarks/results/crosscheck_v2.json
 python v3/benchmarks/physics_data.py
 python v3/benchmarks/make_figures.py
 ```
@@ -41,4 +41,7 @@ python v3/benchmarks/make_figures.py
 * **Correctness first.** For every size, v3's final stabilizer group is
   compared with Stim's (and v2's); the script aborts on any mismatch.
 * **Stim's build is recorded.** The PyPI wheel of Stim 1.16 ships only an SSE2
-  build; the environment block of the results names the build used.
+  build; the environment block of the results names the build used. A source
+  build with `-march=native` (so Stim's SIMD words use AVX2) was slower on the
+  benchmark machine (n = 512: 1.16 s vs 0.97 s), so the PyPI build is the
+  baseline.
