@@ -190,6 +190,10 @@ class Simulator:
     def __repr__(self) -> str:
         return f"Simulator(num_qubits={self._n}, phases={self._phases})"
 
+    def _state(self) -> tuple[np.ndarray, int, int]:
+        """(tableau array, num_qubits, stabilizer words): for the observables module."""
+        return self._tab, self._n, self._ws
+
     # -- validation helpers -------------------------------------------------------------
 
     def _qubit(self, q) -> int:

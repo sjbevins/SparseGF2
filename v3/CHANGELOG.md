@@ -1,5 +1,18 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev4: milestone 4, observables and erasure protection
+
+* `sparsegf2_v3.observables`: `entropy`, `mutual_information`,
+  `tripartite_information`, `entropy_profile` (all prefix entropies in one
+  incremental pass), `code_dimension` (S(R)), `lost_logical_information`
+  (I(R:E)), `erasure_is_correctable`, `recovery_probability` (2**-I(R:E)),
+  `random_erasure_statistics` (erasure-threshold curves),
+  `contiguous_code_distance`, `stabilizer_weights`.
+* Compiled kernels for all of the above (incremental GF(2) bases on the column
+  bitsets), reusable by the ensemble engine.
+* Tests against independent state-vector calculations and brute-force
+  definitions, at sizes across 64-bit word boundaries.
+
 ## 3.0.0.dev3: milestone 3, circuits and compiled execution
 
 * `Circuit`: Stim's circuit language (parse, print, append, REPEAT, tags),
