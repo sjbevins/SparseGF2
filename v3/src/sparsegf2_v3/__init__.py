@@ -20,13 +20,17 @@ from sparsegf2_v3.clifford import (
     random_clifford_indices,
     symplectic_group,
 )
+from sparsegf2_v3.errors import PhaseFreeError
 from sparsegf2_v3.gates import GateInfo, all_gates, gate
 from sparsegf2_v3.pauli import PauliString
+from sparsegf2_v3.simulator import Simulator
 
 __all__ = [
     "Clifford",
     "GateInfo",
     "PauliString",
+    "PhaseFreeError",
+    "Simulator",
     "__version__",
     "all_gates",
     "gate",

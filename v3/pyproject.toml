@@ -52,5 +52,10 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# Numba kernels: explicit loops compile to tighter machine code than
+# generator expressions such as all(...), so keep them.
+"src/sparsegf2_v3/_kernel/*.py" = ["SIM108", "SIM110"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["sparsegf2_v3"]
