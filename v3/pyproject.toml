@@ -1,0 +1,56 @@
+# SparseGF2 v3 lives beside the v2 package during the rebuild. It has its own
+# distribution and import name (`sparsegf2_v3`) so both can be installed in the
+# same environment and cross-checked. See docs/DESIGN.md, "Where the code lives".
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparsegf2-v3"
+dynamic = ["version"]
+description = "SparseGF2 v3: a fast stabilizer-circuit simulator for monitored Clifford circuits, verified against Stim."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "sjbevins", email = "sjbevins64@gmail.com" }]
+dependencies = [
+    "numpy>=1.26",
+    # The simulation kernels (milestone 2 onward) are Numba-compiled.
+    "numba>=0.59",
+]
+
+[project.optional-dependencies]
+# Stim is the reference oracle for the whole test suite, so it is required
+# for testing (tests fail, rather than skip, when it is missing). It is never
+# imported by the simulator at runtime.
+test = ["pytest>=8", "stim>=1.15"]
+lint = ["ruff>=0.5"]
+dev = ["sparsegf2-v3[test,lint]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sparsegf2_v3 = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "sparsegf2_v3._version.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+# Lets `pytest` run from this directory even before `pip install -e .`.
+pythonpath = ["src"]
+addopts = "-q --doctest-modules"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sparsegf2_v3"]
