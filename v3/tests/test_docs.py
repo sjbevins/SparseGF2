@@ -1,28 +1,89 @@
-"""The Python examples in README.md run, in order, as written."""
+"""The Python examples in README.md and docs/GETTING_STARTED.md run, in order, as written.
+
+A python block immediately preceded by the line ``<!-- not run -->`` (blank
+lines between them allowed) is shown to the reader but not executed: the
+guides use that marker for full-scale code that would take hours. Every other
+python block of a document runs in one shared namespace, in order, with the
+working directory and ``tempfile``'s default directory moved to pytest's
+temporary directory, so whatever the examples write lands there.
+"""
 
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+NOT_RUN = "<!-- not run -->"
+_FENCE = re.compile(r"```python\n(.*?)```", flags=re.S)
 
 
 def _blocks(path: Path) -> list[str]:
-    return re.findall(r"```python\n(.*?)```", path.read_text(), flags=re.S)
+    """The python blocks of ``path`` that are meant to run (not marked ``<!-- not run -->``)."""
+    text = path.read_text()
+    blocks = []
+    for match in _FENCE.finditer(text):
+        before = text[: match.start()].rstrip().splitlines()
+        if before and before[-1].strip() == NOT_RUN:
+            continue
+        blocks.append(match.group(1))
+    return blocks
 
 
-@pytest.mark.parametrize("doc", ["README.md"])
-def test_readme_examples_run(doc):
+@pytest.mark.parametrize("doc", ["README.md", "docs/GETTING_STARTED.md", "docs/HOW_IT_WORKS.md"])
+def test_doc_examples_run(doc, tmp_path, monkeypatch):
     blocks = _blocks(ROOT / doc)
     assert blocks, f"no python examples found in {doc}"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("MPLBACKEND", "Agg")
     namespace: dict = {}
     for i, code in enumerate(blocks):
         try:
             exec(compile(code, f"{doc} block {i + 1}", "exec"), namespace)
         except Exception as exc:  # pragma: no cover - the message is the point
             raise AssertionError(f"{doc}, python block {i + 1} failed:\n{code}") from exc
+
+
+def test_not_run_marker_is_honoured(tmp_path):
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "```python\nx = 1\n```\n\n<!-- not run -->\n\n```python\nraise SystemExit\n```\n"
+        "text\n```python\ny = 2\n```\n"
+    )
+    assert _blocks(doc) == ["x = 1\n", "y = 2\n"]
+
+
+def test_getting_started_marks_only_full_scale_code_as_not_run():
+    text = (ROOT / "docs" / "GETTING_STARTED.md").read_text()
+    skipped = [m for m in _FENCE.finditer(text) if text[: m.start()].rstrip().endswith(NOT_RUN)]
+    assert 1 <= len(skipped) <= 3
+    for match in skipped:
+        assert "1000" in match.group(1) or "256" in match.group(1), match.group(1)
+
+
+def test_getting_started_cluster_script_is_valid_bash():
+    if shutil.which("bash") is None:  # pragma: no cover
+        pytest.skip("bash not available")
+    text = (ROOT / "docs" / "GETTING_STARTED.md").read_text()
+    scripts = [b for b in re.findall(r"```bash\n(.*?)```", text, flags=re.S) if "#SBATCH" in b]
+    assert scripts, "the SLURM array example is missing"
+    for script in scripts:
+        proc = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_getting_started_links_resolve():
+    path = ROOT / "docs" / "GETTING_STARTED.md"
+    targets = re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", path.read_text())
+    local = [t for t in targets if not t.startswith(("http://", "https://", "mailto:"))]
+    assert local
+    missing = [t for t in local if not (path.parent / t).exists()]
+    assert not missing, f"broken links in GETTING_STARTED.md: {missing}"
 
 
 # -- statements corrected in the review stay true -------------------------------------------

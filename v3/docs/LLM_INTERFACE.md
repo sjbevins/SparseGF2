@@ -26,8 +26,9 @@ arrays are summarized:
 The full data can be written to files with `output_dir`. Whenever anything is left out,
 the result carries `"truncated": true` and a note says what and how to get it.
 
-For the quick version, read [`../AGENTS.md`](../AGENTS.md). This page is the complete
-reference.
+For the quick version, read [`../AGENTS.md`](../AGENTS.md). To set up the MCP server step
+by step (install, connect a client, a first session), follow
+[`MCP_GETTING_STARTED.md`](MCP_GETTING_STARTED.md). This page is the complete reference.
 
 ---
 

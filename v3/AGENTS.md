@@ -8,6 +8,10 @@ Clifford circuits**: measurement-induced and purification transitions, the codes
 circuits generate dynamically, and how well those codes survive erasures. It reads Stim's
 circuit language and its results are checked against Stim in the test suite.
 
+Setting up the MCP server for a person (installing it, connecting Claude Code, Claude
+Desktop or another client, a worked first session, long runs and troubleshooting) is
+described step by step in [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md).
+
 ## Install
 
 ```sh

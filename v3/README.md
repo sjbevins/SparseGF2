@@ -24,6 +24,10 @@ There are three ways in, from interactive to industrial:
 
 …and a [CLI and an MCP server](#for-ai-agents) so that AI agents can run all of it.
 
+**New here?** [Getting started](#getting-started) installs it in three commands
+and points to the step-by-step guides; [Why SparseGF2](#why-sparsegf2) shows
+what it is for, with measurements.
+
 > **Status:** `3.0.0.dev9`, in development (import name `sparsegf2_v3`); it
 > will take over the `sparsegf2` name as 3.0. The old package (v2, import
 > `sparsegf2`) still lives at the repository root. See
@@ -31,7 +35,8 @@ There are three ways in, from interactive to industrial:
 
 ## Contents
 
-* [Install and test](#install-and-test)
+* [Why SparseGF2](#why-sparsegf2)
+* [Getting started](#getting-started)
 * [Quickstart](#quickstart): [Simulator](#1-the-simulator-gate-by-gate), [circuits](#2-circuits-in-stims-language), [ensembles](#3-ensembles-of-random-monitored-circuits), [erasure protection](#4-erasure-protection-of-the-generated-code)
 * [What it shows: three standard experiments](#what-it-shows-three-standard-experiments)
 * [Performance](#performance)
@@ -41,17 +46,124 @@ There are three ways in, from interactive to industrial:
 * [Documentation map](#documentation-map)
 * [Status and roadmap](#status-and-roadmap)
 
-## Install and test
+## Why SparseGF2
 
-Python 3.11 or newer. From the repository root:
+A study of monitored random circuits asks a simulator for the same things
+over and over: run a very large number of short random circuits, look at the
+state many times along each one (entropies, the code it holds, how that code
+survives erasures), and do it reproducibly, on every core, from a script or
+an agent. General-purpose stabilizer simulators are built for a different
+job: one circuit at a time, or many shots of a fixed circuit, with the state
+read out through Python. SparseGF2 puts the whole loop (draw a random
+circuit, simulate it, measure the state, screen the code) inside one compiled
+kernel. Four things follow from that, and each is measured below on the same
+4-core Xeon (2.1 GHz), one thread unless stated.
+
+### Faster per circuit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/runtime-dark.png">
+  <img alt="Seconds per monitored circuit versus n for SparseGF2 v3 (with and without phases), Stim, Qiskit Aer and Cirq; SparseGF2 v3 is fastest at every size" src="docs/figures/runtime-light.png">
+</picture>
+
+Every simulator runs the same monitored circuits (n qubits on a ring, depth
+2n, random two-qubit Cliffords in a brickwork, Z measurements at rate p) on
+one core, and the final states are cross-checked. Without sign tracking,
+which is all that entanglement, codes and purification need, SparseGF2 is
+3–15× faster than Stim for n ≥ 64; with signs tracked it is about 3× faster.
+Qiskit Aer and Cirq are slower by two to four orders of magnitude. The
+method and every number are under [Performance](#performance).
+
+### Measuring the state as it evolves costs little
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/why-observe-dark.png">
+  <img alt="Milliseconds per layer versus n, evolving only and evolving plus measuring after every layer, for SparseGF2 v3 and Stim. Left, the half-cut entropy: measuring adds 0.37 ms per layer at n = 1024 for SparseGF2 and 3.2 ms for Stim. Right, the code dimension: SparseGF2's two lines coincide, Stim's measuring adds 4.3 ms per layer at n = 1024" src="docs/figures/why-observe-light.png">
+</picture>
+
+Most quantities in these studies are watched versus depth: entanglement
+growth, the code rate k/n, purification. Stim has no entropy function, so
+the fastest route there is to read the stabilizer columns out of its inverse
+tableau after every layer and rank them with a compiled GF(2) elimination
+(the route the benchmark gives it; see
+[`benchmarks/README.md`](benchmarks/README.md)). SparseGF2 evaluates the same
+quantity inside its layer loop, on the column-major tableau it already
+holds. On the same circuits (p = 0.16, one thread, n = 32 to 1024), with the
+observable measured after every layer, the whole run takes 5.5–12× less time
+than in Stim for the half-cut entropy and 12–21× less for the code dimension.
+At n = 1024, measuring adds 0.37 ms per layer to SparseGF2 against 3.2 ms to
+Stim for the half-cut entropy, and almost nothing against 4.3 ms for the code
+dimension: SparseGF2 keeps the generators that touch the reference separate,
+so k is a count of rows rather than a rank. Every value Stim produced equals
+SparseGF2's exactly.
+
+### Screening the generated codes against erasures
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/why-erasure-dark.png">
+  <img alt="Milliseconds per code versus n = 64 to 512 for SparseGF2 v3 and a compiled from-scratch baseline, in three panels: every erasure of 1 or 2 qubits (4.8 times faster at n = 512), every erasure of up to 3 qubits (21 times faster at n = 512), and first failure along 100 random orderings (5.0 times faster at n = 512)" src="docs/figures/why-erasure-light.png">
+</picture>
+
+The circuits generate codes, and the question is how well those codes
+survive erasures. Two probes answer it inside the engine at the depths you
+choose (the same routines analyse a saved code through `StabilizerCode`):
+exact counts of the uncorrectable erasures of up to w qubits, and
+first-failure sizes along random orderings of the qubits. Rather than
+computing two ranks from scratch for every erased set, they work in a row
+basis adapted to the code, extend ranks incrementally along each ordering or
+prefix, and settle the last qubit of a set with hash-table lookups. Against a
+compiled baseline on the same data that does compute both ranks from scratch
+(identical answers, checked), on codes made by the engine at n = 64 to 512:
+3.0–4.8× faster for every erasure of 1 or 2 qubits, 6.0–21× for every
+erasure of up to 3 qubits, and 1.5–6.6× for first failure along 100
+orderings. For the exhaustive counts the gap grows with n: at n = 512,
+checking every erasure of up to 3 qubits takes 0.24 s per code instead of
+5.2 s.
+
+### Ensembles on every core, probes inside the kernel, an interface for agents
+
+The ensemble engine draws each trajectory's random circuit from its own
+random stream and simulates it straight away, in parallel over all cores; no
+circuit is ever built in Python. At p = 0.16 that is about 128,000 circuits
+per second at n = 16 and 1,700 at n = 128 on four cores (the throughput
+figure under [Performance](#performance)). Trajectory `t` depends only on
+`(spec, seed, t)`, never on the thread count, so a campaign splits into
+chunks or cluster jobs and merges exactly. The probes (entanglement, the
+code, erasure statistics, the code itself) run inside the same kernel at the
+layers each one asks for, and purification times come with censoring. The
+same simulator is served to AI agents through an MCP server, a JSON command
+line and a JSON Python layer, with runtime and memory estimates and
+resumable background jobs, so an agent can plan and run a study as reliably
+as a script.
+
+## Getting started
+
+Python 3.11 or newer. Until v3 is merged into `main` it lives on the branch
+`claude/intelligent-wright-cc2q2g`:
 
 ```sh
+git clone https://github.com/sjbevins/SparseGF2 && cd SparseGF2
+git checkout claude/intelligent-wright-cc2q2g
 pip install -e "./v3[test]"        # add ,mcp for the MCP server:  "./v3[test,mcp]"
-cd v3 && python -m pytest          # about 590 tests; Stim is required
 ```
 
-The first call to each compiled kernel takes a few seconds while Numba compiles
-it; the result is cached on disk, so later runs start immediately.
+Then follow the guide that fits:
+
+* [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md): from a fresh install
+  to your own campaigns. Concepts (pictures, layers, checkpoints, probes,
+  seeds, graph collections), a first erasure study end to end, scaling it up
+  with time and memory estimates, chunked runs and a SLURM array script, and
+  troubleshooting.
+* [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md): letting an AI
+  agent run your simulations. Installing the MCP server, connecting Claude
+  Code, Claude Desktop or another client, a worked first session, background
+  jobs for long runs, and analysing the saved results in Python.
+* [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md): how the simulator works
+  inside, with diagrams.
+
+To run the tests (about 600; Stim is required), `cd v3 && python -m pytest`.
+The first call to each compiled kernel takes a few seconds while Numba
+compiles it; the result is cached on disk, so later runs start immediately.
 
 ## Quickstart
 
@@ -343,14 +455,10 @@ the probability for a random E of each size, from first-failure sizes; see
 
 ## Performance
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/runtime-dark.png">
-  <img alt="Seconds per monitored circuit versus n for SparseGF2 v3 (with and without phases), Stim, Qiskit Aer and Cirq; SparseGF2 v3 is fastest at every size" src="docs/figures/runtime-light.png">
-</picture>
-
-The workload is the one this simulator exists for: `n` qubits on a ring, depth
-`2n`, uniformly random two-qubit Cliffords in a brickwork, every qubit measured
-in Z with probability `p` after each layer. Every simulator runs the same
+The runtime figure under [Faster per circuit](#faster-per-circuit) uses the
+workload this simulator exists for: `n` qubits on a ring, depth `2n`,
+uniformly random two-qubit Cliffords in a brickwork, every qubit measured in
+Z with probability `p` after each layer. Every simulator runs the same
 circuits on one core, and the final states are cross-checked. On this
 machine (4-core Xeon, 2.1 GHz):
 
@@ -430,6 +538,10 @@ second on one core, or about 210 if run as four perfectly parallel processes.
 
 </details>
 
+The measurements behind the two other figures in [Why SparseGF2](#why-sparsegf2)
+(measuring the state every layer, and erasure screening) are tabulated in
+[`benchmarks/results/tables.md`](benchmarks/results/tables.md).
+
 **How the comparison is kept fair** (details in
 [`benchmarks/README.md`](benchmarks/README.md)):
 
@@ -470,7 +582,11 @@ random). The ensemble engine always runs phase-free.
 ## For AI agents
 
 SparseGF2 is designed to be driven by language-model agents as easily as by
-people:
+people. To set that up, start with
+[`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md): it installs the
+MCP server, connects Claude Code, Claude Desktop or another client, and walks
+through a first session (a circuit, a purification ensemble, an erasure study
+on a graph collection, background jobs, and the analysis of the saved result).
 
 * **MCP server**: `pip install -e "./v3[mcp]"`, then `claude mcp add sparsegf2 -- sparsegf2-mcp`
   (the repository's `.mcp.json` already registers it for Claude Code). Tools
@@ -482,43 +598,61 @@ people:
   `--json` on every command.
 * **Python**: `sparsegf2_v3.api`, the JSON-in/JSON-out layer both of those use.
 
-Start with [`AGENTS.md`](AGENTS.md) (also [`llms.txt`](llms.txt)); the
-reference is [`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md).
+Agents themselves should read [`AGENTS.md`](AGENTS.md) (also
+[`llms.txt`](llms.txt)); the complete reference is
+[`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md).
 
 ## How it works
 
-The state is an Aaronson–Gottesman stabilizer tableau stored **column-major**:
-for every qubit, two bitsets over the stabilizer generators (its X and Z
-components), packed 64 generators per machine word.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/tableau-dark.png">
+  <img alt="A column-major stabilizer tableau for 6 system qubits and one reference: one row per generator, an X and a Z column per qubit, stored as bitsets over the generators; a two-qubit gate rewrites four columns; the entropy of a region is the rank of its columns minus its size; the reference rows give the code dimension" src="docs/figures/tableau-light.png">
+</picture>
 
-* A two-qubit gate rewrites four bitsets with word-wide XORs (each new column
-  is the XOR of at most four old ones), so it costs n/64 word operations no
-  matter how entangled the state is.
-* A measurement finds the anticommuting generators with one word-wide test,
-  then multiplies the pivot into them by XORing one bitset into each column in
-  the pivot's support.
-* The entropy of a region A is the GF(2) rank of A's 2|A| column bitsets, read
-  directly with no transposition; an entanglement profile or an erasure
-  profile is one incremental pass over an ordering.
-* In the ensemble engine the pivot prefers generators that do not touch the
-  reference, which keeps the reference-touching rows a basis: the code
-  dimension is then a popcount and the information an erasure leaks is a rank
-  difference over the erased qubits only.
-* For the erasure probes the system's columns are written in a row basis
-  adapted to the code (the first s rows span S, all n + k rows span N(S)), so
-  l(A) is the difference of two ranks over A's columns. Exhaustive counting
-  skips the N(S) rank while the S-rank is full, and settles the last qubit of
-  every correctable prefix at once: it enumerates the prefix's span and looks
-  up each qubit's X, Z and Y columns in hash tables.
+**The state** is a stabilizer tableau stored **column-major**: for every
+qubit, an X and a Z bitset over the stabilizer generators, packed 64
+generators per machine word.
 
-[`docs/DESIGN.md`](docs/DESIGN.md) explains the layout (chosen by benchmark),
-the sign tracking, the randomness contract and the validation strategy.
+* A two-qubit gate rewrites the four columns of its qubits with word-wide
+  XORs: n/64 word operations, however entangled the state is.
+* A measurement finds the anticommuting generators with one word-wide test
+  and multiplies the pivot into them column by column.
+* The entropy of a region A is the GF(2) rank of its 2|A| columns minus |A|,
+  read directly from storage with no transposition.
+* In the ensemble engine the measurement pivot prefers generators that do
+  not touch the reference, which keeps the reference rows a basis: the code
+  dimension is then a count of rows, and the information an erasure leaks is
+  a rank difference over the erased qubits only.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/engine-dark.png">
+  <img alt="The ensemble engine: a MonitoredCircuit spec (graphs, protocol, checkpoints, probes) is compiled once into arrays; run(trajectories, seed) simulates every trajectory in parallel, each with its own random streams and graph t // c, through setup, layers of gates and measurements, and probe evaluations at checkpoints, writing one flat row of floats; the EnsembleResult feeds analysis, StabilizerCode and save/load/concatenate" src="docs/figures/engine-light.png">
+</picture>
+
+**The ensemble engine** compiles a `MonitoredCircuit` spec into arrays once,
+then runs every trajectory in parallel over the cores. Each trajectory draws
+its circuit from its own random streams (on graph `t // circuits_per_graph`),
+applies the gates and measurements of each layer, and evaluates the probes
+due at each checkpoint into its own row of the result. The erasure probes
+write the system's columns in a row basis adapted to the code, so every lost
+information l(A) is a difference of two ranks over A's columns, extended
+incrementally as qubits are added.
+
+[`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) goes through all of it in
+detail: storage and memory, gates, measurement, reference qubits, entropies,
+circuit compilation, the ensemble engine and its randomness contract, the
+erasure kernels, the agent interfaces, and how correctness is checked.
+[`docs/DESIGN.md`](docs/DESIGN.md) gives the reasons behind the design and
+the benchmarks that settled them.
 
 ## Documentation map
 
 | document | what it covers |
 |---|---|
-| [`docs/DESIGN.md`](docs/DESIGN.md) | architecture, kernel, decisions, roadmap |
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | the full getting-started guide: install, concepts, a first study end to end, scaling up to a campaign (estimates, chunks, a cluster), troubleshooting |
+| [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md) | getting started with the MCP server: install, connect a client, a first agent session, long runs |
+| [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) | how the simulator works inside, with diagrams |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | design decisions and the benchmarks behind them, roadmap |
 | [`docs/LITERATURE.md`](docs/LITERATURE.md) | the literature review behind the feature set (protocols, observables, codes, erasure, graphs) |
 | [`docs/AUDIT.md`](docs/AUDIT.md) | the audit of the old v2 package that shaped this design |
 | [`AGENTS.md`](AGENTS.md), [`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md) | running SparseGF2 from AI agents (MCP, CLI, JSON API) |

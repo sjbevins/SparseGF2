@@ -22,6 +22,9 @@ Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) and `erasure_tolerance` gives e_del
 
 ## Docs
 
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): full getting-started guide for people: install, concepts (pictures, layers, checkpoints, probes, seeds, graph collections), a first erasure study end to end, scaling up (estimates, chunks, SLURM), troubleshooting
+- [docs/MCP_GETTING_STARTED.md](docs/MCP_GETTING_STARTED.md): setting up the MCP server: install, connecting Claude Code, Claude Desktop or other clients, a worked first session, background jobs, troubleshooting
+- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): how the simulator works inside (column-major tableau, reference rows, ensemble engine, randomness contract, erasure kernels), with diagrams
 - [AGENTS.md](AGENTS.md): install, which entry point to use, five-minute tour, conventions, pitfalls
 - [docs/LLM_INTERFACE.md](docs/LLM_INTERFACE.md): full CLI and MCP reference with examples and client registration
 - [README.md](README.md): install, the Python library tour (including the erasure workflow), performance

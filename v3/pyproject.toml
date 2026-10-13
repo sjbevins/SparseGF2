@@ -24,7 +24,9 @@ dependencies = [
 # Stim is the reference oracle for the whole test suite, so it is required
 # for testing (tests fail, rather than skip, when it is missing). It is never
 # imported by the simulator at runtime.
-test = ["pytest>=8", "stim>=1.15"]
+# matplotlib: docs/GETTING_STARTED.md draws its heatmaps, and tests/test_docs.py
+# executes that guide (the simulator itself never imports matplotlib).
+test = ["pytest>=8", "stim>=1.15", "matplotlib>=3.8"]
 lint = ["ruff>=0.5"]
 # The MCP server for LLM agents (sparsegf2-mcp). Imported only by mcp_server.py,
 # so the simulator itself never needs it.
