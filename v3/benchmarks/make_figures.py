@@ -324,6 +324,45 @@ def fig_throughput(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
     save(fig, "throughput", mode)
 
 
+def fig_production(cross: list, theme: dict, mode: str) -> None:
+    """Trajectories per second on the PRL single-reference protocol: v2 production vs v3."""
+    rows = sorted(cross, key=lambda r: r["n"])
+    n = np.array([r["n"] for r in rows])
+    threads = rows[0]["threads"]
+    series = [
+        ("v3_traj_per_s_all_threads", f"SparseGF2 v3, {threads} threads", 0),
+        ("v3_traj_per_s_1thread", "SparseGF2 v3, 1 thread", 1),
+        ("v2_traj_per_s_1thread", "SparseGF2 v2 production engine, 1 thread", 3),
+    ]
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    labels = []
+    for key, label, slot in series:
+        y = np.array([r[key] for r in rows])
+        ax.plot(n, y, marker="o", color=theme["series"][slot], label=label)
+        labels.append(
+            (
+                n[-1],
+                y[-1],
+                label.split(",")[0].replace(" production engine", "") + "," + label.split(",")[-1],
+            )
+        )
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax.set_xlabel("system qubits n")
+    ax.set_ylabel("trajectories per second")
+    ax.set_title("Your production workload: single-reference purification time")
+    legend(ax, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2)
+    end_labels(ax, labels, theme)
+    caption(
+        fig,
+        f"Watts-Strogatz C(n,2), beta = {rows[0]['beta']}, p = {rows[0]['p']:.3f}, one graph per trajectory, "
+        "S(R) every layer, T_max = 8n; same graph banks for both engines.",
+        theme,
+    )
+    save(fig, "production", mode)
+
+
 # ---------------------------------------------------------------------------
 # physics figures
 # ---------------------------------------------------------------------------
@@ -545,6 +584,7 @@ def main() -> None:
     )
     ap.add_argument("--simulators", default=str(HERE / "results" / "simulators.json"))
     ap.add_argument("--physics", default=str(HERE / "results" / "physics.json"))
+    ap.add_argument("--crosscheck", default=str(HERE / "results" / "crosscheck_v2.json"))
     ap.add_argument("--outdir", default=None, help="default: v3/docs/figures")
     args = ap.parse_args()
     if args.outdir:
@@ -552,6 +592,9 @@ def main() -> None:
         FIGURES = Path(args.outdir)
     sim = json.loads(Path(args.simulators).read_text()) if Path(args.simulators).exists() else None
     phys = json.loads(Path(args.physics).read_text()) if Path(args.physics).exists() else None
+    cross = (
+        json.loads(Path(args.crosscheck).read_text()) if Path(args.crosscheck).exists() else None
+    )
     for mode, theme in THEMES.items():
         style(theme)
         fig_schematic(theme, mode)
@@ -559,6 +602,8 @@ def main() -> None:
             fig_runtime(sim, theme, mode)
             fig_speedup(sim, theme, mode)
             fig_throughput(sim, theme, mode)
+        if cross:
+            fig_production(cross, theme, mode)
         if phys:
             fig_transition(phys, theme, mode)
             fig_purification(phys, theme, mode)

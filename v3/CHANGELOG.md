@@ -1,5 +1,39 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev7: production protocol, cheap code observables, agent interface
+
+* **Graph disorder in the engine.** `MonitoredCircuit(edges=[g0, g1, ...])`
+  takes a graph bank; trajectory `t` runs on graph `t mod G` (graphs may have
+  different edge counts; `edge_weights` then takes one array per graph).
+  `spec.graphs`, `spec.num_graphs`; banks round-trip through
+  `EnsembleResult.save/load`. Graph seeds may be tuples, e.g.
+  `graphs.watts_strogatz(n, 4, beta, seed=(17, i))`.
+* **`scramble_matchings`**: layers of uniformly random all-to-all perfect
+  matchings before the dynamics (the PRL production scramble).
+* `examples/purification_time.py` runs the PRL single-reference protocol; on
+  identical graph banks its purification-time distribution agrees with the v2
+  production engine (`benchmarks/crosscheck_v2_production.py`, KS test).
+* **Reference rows.** With a reference, the engine prefers reference-free
+  pivots and keeps the set of stabilizer rows touching the reference. The
+  code dimension is then a popcount and I(R:E) = rank(E) - rank(E over the
+  other rows), so no reference column enters an elimination: k(t) at every
+  layer costs nothing extra (41 -> 13 us per layer at n = 128, purification
+  picture), erasure profiles and contiguous distances are 1.3-2x faster.
+  Results are unchanged (the stabilizer group is the same; tests compare the
+  new kernels with the generic ones on random codes).
+* Removed the `mean_stabilizer_weight` probe: it depended on the generating
+  set, not on the state, so its value changed with implementation details.
+  `observables.stabilizer_length_distribution` (clipped gauge) is the
+  gauge-invariant alternative.
+* **LLM interface.** `sparsegf2_v3.api` (JSON-in, JSON-out service layer), the
+  `sparsegf2` CLI and the `sparsegf2-mcp` MCP server (`pip install
+  "./v3[mcp]"`), with background jobs for long ensembles; `AGENTS.md`,
+  `llms.txt`, `docs/LLM_INTERFACE.md`, the repository's `.mcp.json` and a
+  Claude Code skill.
+* Benchmarks against Stim, Qiskit Aer, Cirq and v2
+  (`benchmarks/compare_simulators.py`), physics data and README figures
+  (`benchmarks/physics_data.py`, `benchmarks/make_figures.py`).
+
 ## 3.0.0.dev6: literature-driven observables
 
 * New probes: `mutual_information`, `tripartite_information` (default: the

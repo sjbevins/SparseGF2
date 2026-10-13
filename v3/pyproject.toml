@@ -26,7 +26,14 @@ dependencies = [
 # imported by the simulator at runtime.
 test = ["pytest>=8", "stim>=1.15"]
 lint = ["ruff>=0.5"]
-dev = ["sparsegf2-v3[test,lint]"]
+# The MCP server for LLM agents (sparsegf2-mcp). Imported only by mcp_server.py,
+# so the simulator itself never needs it.
+mcp = ["mcp>=2.2", "pydantic>=2"]
+dev = ["sparsegf2-v3[test,lint,mcp]"]
+
+[project.scripts]
+sparsegf2 = "sparsegf2_v3.cli:main"
+sparsegf2-mcp = "sparsegf2_v3.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

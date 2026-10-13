@@ -7,9 +7,12 @@ every qubit in the Z basis with probability ``p``.
 
 Fairness rules:
 
-* Every simulator runs the *same* circuit: identical gates (each random Clifford
-  expanded with Stim's ``Tableau.to_circuit("elimination")`` into H, S and CX for
-  the simulators that take gate lists) and identical measurement locations.
+* Every simulator runs the *same* circuit: identical two-qubit Cliffords and
+  identical measurement locations. Simulators without a native random-Clifford
+  gate get each Clifford decomposed: Stim gets the tightest form (at most four
+  of its named single-qubit Cliffords and one of CX / ISWAP / SWAP, every
+  layer's gates grouped into a few batched instructions), the others get Stim's
+  ``Tableau.to_circuit("elimination")`` into H, S and CX.
 * Each gets the circuit in its own prebuilt, native form; building that form is
   excluded from the timing. Stim runs a prebuilt ``stim.Circuit`` with
   ``do_circuit`` (its fastest path, measurements batched per layer); Qiskit Aer
@@ -88,6 +91,85 @@ def decomposition(index: int) -> list[tuple[str, tuple[int, ...]]]:
     return _DECOMP[index]
 
 
+_STIM_DECOMP: dict[int, tuple[str, str, str, str, str]] = {}
+_STIM_TABLES: dict = {}
+
+
+def _stim_tables():
+    """Named single-qubit Cliffords, the four cores, and a symplectic-class lookup."""
+    if not _STIM_TABLES:
+        import itertools
+
+        import stim
+
+        named = {}
+        for name, g in stim.gate_data().items():
+            if g.is_unitary and g.is_single_qubit_gate and name == g.name:
+                named.setdefault(str(g.tableau), name)
+        tab1 = {name: stim.Tableau.from_named_gate(name) for name in named.values()}
+        cores = {c: stim.Tableau.from_named_gate(c) for c in ("I", "CX", "ISWAP", "SWAP")}
+        cores["I"] = stim.Tableau(2)
+        reps = {}
+        for name, t in tab1.items():
+            key = tuple(int(v[0]) for p in (t.x_output(0), t.z_output(0)) for v in p.to_numpy())
+            reps.setdefault(key, name)
+        classes = {}
+        for core_name, core in cores.items():
+            for a, b in itertools.product(reps.values(), repeat=2):
+                for c, d in itertools.product(reps.values(), repeat=2):
+                    t = (tab1[a] + tab1[b]).then(core).then(tab1[c] + tab1[d])
+                    classes.setdefault(_symplectic_key(t), (a, b, core_name, c, d))
+        assert len(classes) == 720
+        _STIM_TABLES.update(named=named, tab1=tab1, cores=cores, classes=classes)
+    return _STIM_TABLES
+
+
+def _symplectic_key(t) -> bytes:
+    rows = [t.x_output(0), t.x_output(1), t.z_output(0), t.z_output(1)]
+    return np.array([np.concatenate(p.to_numpy()) for p in rows], dtype=np.uint8).tobytes()
+
+
+def stim_decomposition(index: int) -> tuple[str, str, str, str, str]:
+    """Clifford ``index`` on (0, 1) as (right_0, right_1, core, left_0, left_1) Stim gates.
+
+    Applied in that order: single-qubit gates on qubits 0 and 1, the core
+    (``I`` / ``CX`` / ``ISWAP`` / ``SWAP``) on (0, 1), single-qubit gates again.
+    Checked against the Clifford's tableau.
+    """
+    if index not in _STIM_DECOMP:
+        import stim
+
+        tb = _stim_tables()
+        target = Clifford.from_index(2, index).to_stim()
+        a, b, core, c, d = tb["classes"][_symplectic_key(target)]
+        t = (
+            (tb["tab1"][a] + tb["tab1"][b])
+            .then(tb["cores"][core])
+            .then(tb["tab1"][c] + tb["tab1"][d])
+        )
+        frame = t.inverse().then(target)  # a Pauli frame: same symplectic part
+        c2 = tb["named"][str(tb["tab1"][c].then(_pauli_1q(frame, 0)))]
+        d2 = tb["named"][str(tb["tab1"][d].then(_pauli_1q(frame, 1)))]
+        check = stim.Circuit("I 0 1")
+        for name, q in ((a, [0]), (b, [1]), (core, [0, 1]), (c2, [0]), (d2, [1])):
+            check.append(name, q)
+        assert stim.Tableau.from_circuit(check) == target, index
+        _STIM_DECOMP[index] = (a, b, core, c2, d2)
+    return _STIM_DECOMP[index]
+
+
+def _pauli_1q(frame, q: int):
+    """The single-qubit Pauli tableau that ``frame`` (a 2-qubit Pauli frame) applies on qubit ``q``."""
+    import stim
+
+    sx = frame.x_output(q).sign.real < 0
+    sz = frame.z_output(q).sign.real < 0
+    name = {(False, False): "I", (False, True): "X", (True, False): "Z", (True, True): "Y"}[
+        (sx, sz)
+    ]
+    return stim.Tableau.from_named_gate(name)
+
+
 # ---------------------------------------------------------------------------
 # adapters: build(workload) -> runner(), and a final-state hook for checks
 # ---------------------------------------------------------------------------
@@ -114,9 +196,19 @@ def build_stim(n, layers):
 
     c = stim.Circuit()
     for pairs, indices, measured in layers:
-        for (a, b), idx in zip(pairs, indices, strict=True):
-            for name, tg in decomposition(idx):
-                c.append(name, [a if t == 0 else b for t in tg])
+        # gates on disjoint pairs commute, so each of the five decomposition slots
+        # becomes one batched instruction per gate name for the whole layer
+        parts = [stim_decomposition(idx) for idx in indices]
+        for slot in range(5):
+            groups: dict[str, list[int]] = {}
+            for (a, b), part in zip(pairs, parts, strict=True):
+                name = part[slot]
+                if name != "I":
+                    groups.setdefault(name, []).extend(
+                        [a] if slot in (0, 3) else [b] if slot in (1, 4) else [a, b]
+                    )
+            for name, targets in groups.items():
+                c.append(name, targets)
         if measured:
             c.append("M", measured)
 

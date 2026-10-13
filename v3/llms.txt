@@ -1,0 +1,32 @@
+# SparseGF2 v3
+
+> Fast stabilizer (Clifford) circuit simulator for monitored random Clifford circuits:
+> measurement-induced and purification transitions, dynamically generated codes, erasure
+> protection. Reads Stim's circuit language; verified against Stim. Python package
+> `sparsegf2_v3`, CLI `sparsegf2`, MCP server `sparsegf2-mcp`.
+
+Agents should use the MCP server (`claude mcp add sparsegf2 -- sparsegf2-mcp`) or
+`sparsegf2 <command> --json`. Every result is a compact JSON summary (under about 8000
+characters); pass `output_dir` to save full arrays. Seeds are ints; qubit lists are
+`[0, 1]` or `"0:2"`; system qubits are 0..n-1 and reference qubits follow.
+
+## Docs
+
+- [AGENTS.md](AGENTS.md): install, which entry point to use, five-minute tour, conventions, pitfalls
+- [docs/LLM_INTERFACE.md](docs/LLM_INTERFACE.md): full CLI and MCP reference with examples and client registration
+- [README.md](README.md): project status, install, and the Python library tour
+- [docs/LITERATURE.md](docs/LITERATURE.md): the observables the monitored-circuit literature uses and how they are computed
+- [docs/DESIGN.md](docs/DESIGN.md): architecture, data layout and benchmarks
+
+## Code
+
+- [src/sparsegf2_v3/api.py](src/sparsegf2_v3/api.py): JSON service layer (capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results)
+- [src/sparsegf2_v3/mipt.py](src/sparsegf2_v3/mipt.py): MonitoredCircuit protocol, probes, EnsembleResult
+- [src/sparsegf2_v3/observables.py](src/sparsegf2_v3/observables.py): entropies, code dimension, erasure statistics, contiguous distance
+- [src/sparsegf2_v3/simulator.py](src/sparsegf2_v3/simulator.py): Simulator (stim.TableauSimulator-style API)
+- [src/sparsegf2_v3/circuit.py](src/sparsegf2_v3/circuit.py): Circuit (Stim syntax, CLIFFORD_1Q/2Q extensions)
+
+## Optional
+
+- [CHANGELOG.md](CHANGELOG.md): version history
+- [docs/AUDIT.md](docs/AUDIT.md): what was wrong with v2

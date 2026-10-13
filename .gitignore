@@ -52,8 +52,9 @@ htmlcov/
 .vscode/tasks.json
 # Note: .vscode/settings.json IS committed (project config)
 
-# Editor / agent local settings
-.claude/
+# Editor / agent local settings (project skills under .claude/skills/ are shared)
+.claude/*
+!.claude/skills/
 
 # LaTeX build artifacts (the .tex and .pdf in docs/ are committed)
 *.aux
