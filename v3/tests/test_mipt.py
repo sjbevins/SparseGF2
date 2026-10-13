@@ -141,7 +141,7 @@ SPECS = {
         system_order=list(range(15, -1, -1)),
         periodic=False,
     ),
-    "production_protocol_ws_bank_matching_scramble": dict(
+    "single_reference_ws_collection_matching_scramble": dict(
         num_system=16,
         edges=[graphs.watts_strogatz(16, 4, 0.2, seed=(5, i)) for i in range(4)],
         circuits_per_graph=2,

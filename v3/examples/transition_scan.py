@@ -9,7 +9,7 @@ the four quarters. ``-I3`` curves for different ``n`` cross at p_c.
         --trajectories 1000 --out scan.json
 
 ``--graph ws --beta 0.1`` runs on Watts-Strogatz graphs instead (with
-``--schedule random_edges`` for the production-style layers). Every
+``--schedule random_edges`` for layers of random graph edges). Every
 (n, p) point uses the same seed, so the measurement masks at different rates
 share their random numbers (common random numbers reduce the noise of
 differences across p).
