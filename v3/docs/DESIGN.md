@@ -1,8 +1,11 @@
 # SparseGF2 v3: design
 
-Status: **proposal for review**, written at milestone 1. Everything here can
-still change; section 12 lists the decisions I need from you. The audit this
-design responds to is in [`AUDIT.md`](AUDIT.md).
+Status: **living design document**, updated at 3.0.0.dev7. It was first
+written at milestone 1 as a proposal; section 12 records the decisions you
+made, and the text below describes what is built (with the reasons) and what
+is planned (section 14). The audit this design responds to is in
+[`AUDIT.md`](AUDIT.md); the literature review behind the feature set is in
+[`LITERATURE.md`](LITERATURE.md).
 
 ---
 
@@ -28,10 +31,15 @@ millions of QEC shots), GPU support, and non-Clifford gates.
 
 ## 2. Principles
 
-1. **One circuit language.** Everything that runs is a `Circuit`, written in
-   Stim's syntax (plus a few extensions, section 6). Circuit *families* (brickwork
-   MIPT, single-reference protocols, surface codes) are ordinary functions that
-   *return* circuits. There is no 20-field config object.
+1. **One circuit language.** Every circuit is a `Circuit`, written in Stim's
+   syntax (plus a few extensions, section 6), and every random monitored
+   circuit the ensemble engine simulates can be exported as one
+   (`spec.circuit(t, seed=...)`), so what ran is always inspectable. The one
+   exception to "circuit families are functions that return circuits" is the
+   ensemble engine (section 8): for speed it generates each trajectory's
+   circuit *inside* the compiled loop, so its protocol is a frozen, validated
+   description (`mipt.MonitoredCircuit`) instead of a circuit. The tests check
+   that the engine and the exported circuits agree exactly.
 2. **One state object with explicit modes.** `Simulator(n, phases=...)`. What is
    tracked is visible at construction.
 3. **No fake data.** If a quantity is not defined in a mode, asking for it
@@ -48,15 +56,11 @@ millions of QEC shots), GPU support, and non-Clifford gates.
 
 ## 3. What using it looks like
 
-This is the target API. Milestone 1 (now) delivers the foundations
-(`PauliString`, `Clifford`, `gate`); the rest arrives milestone by milestone
-(section 11).
-
 ```python
 import sparsegf2_v3 as sg
 
 # Interactive use, mirroring stim.TableauSimulator method names.
-sim = sg.Simulator(3, seed=7)          # phases=True: exact, sign-tracking, Stim-identical
+sim = sg.Simulator(3, seed=7)          # phases=True (default): exact, sign-tracking, Stim-identical
 sim.h(0)
 sim.cx(0, 1)
 sim.cx(1, 2)
@@ -65,7 +69,7 @@ sim.peek_z(2)                          # +1 / -1 if deterministic, 0 if random (
 sim.stabilizers()                      # canonical list of PauliStrings, with signs
 sim.entropy([0])                       # entanglement entropy in bits
 
-# Phase-free mode: entanglement dynamics only; half the rows, so roughly twice as fast.
+# Phase-free mode: entanglement dynamics only; half the rows, no signs.
 fast = sg.Simulator(1024, phases=False, seed=7)
 fast.measure(5)                        # returns None: no outcome exists without phases
 
@@ -80,38 +84,55 @@ result = sg.Simulator(2, seed=1).run(circuit)   # one compiled call
 result.measurements                    # array([b0, b1]): outcome bits
 result.random                          # array([True, False]): which outcomes were random
 result.detectors                       # array([0])
+shots = sg.sample(circuit, shots=10_000, seed=1)  # many shots in parallel
 
 # Interop both ways.
 circuit = sg.Circuit.from_stim(stim_circuit)
 stim_circuit = circuit.to_stim()
 
-# Monitored circuits come from small, readable generator functions.
+# Ensembles of random monitored circuits: describe the protocol, run it.
 from sparsegf2_v3 import graphs, mipt
-edges = graphs.watts_strogatz(n=128, k=2, beta=0.1, seed=11)       # plain (m, 2) array
-circuit = mipt.random_edge_layers(edges, n=128, layers=1024, p=0.16, seed=12)
-sim = sg.Simulator(129, phases=False, seed=13)
-sim.run(circuit)
+spec = mipt.MonitoredCircuit(
+    num_system=128,
+    edges=[graphs.watts_strogatz(128, 4, 0.1, seed=(11, i)) for i in range(1000)],
+    layers=1024, measurement_rate=0.16, schedule="random_edges",
+    reference="single", reference_partner=127, scramble_matchings=32,
+    checkpoints="every_layer", stop_when_purified=True,
+)
+result = spec.run(trajectories=1000, seed=12)     # compiled, parallel over cores
+result.purification_layer                          # tau per trajectory, -1 if censored
+spec.circuit(trajectory=3, seed=12)                # the exact Circuit trajectory 3 ran
 ```
 
 ## 4. Architecture
 
 ```
 sparsegf2_v3/
-  pauli.py        PauliString: Pauli operators with exact phases                 M1 (done)
-  clifford.py     Clifford tableaux; canonical 1q/2q Clifford groups               M1 (done)
-  gates.py        the gate library, Stim names and conventions                    M1 (done; M3 adds M/R/noise)
-  _kernel/        Numba kernels: tableau layout, gates, measurement, probes        M2
-  simulator.py    Simulator, the public state object                               M2
-  circuit.py      Circuit: Stim-syntax IR, parse/print, from/to Stim               M3
-  _compile.py     Circuit -> flat instruction arrays                               M3
-  result.py       RunResult: measurement record, random flags, detectors, probes   M3
-  observables.py  entropy, mutual info, tripartite info, code dimension, distance  M4
-  graphs.py       geometries as edge arrays (cycle, lattice, WS, NW, complete)     M6
-  mipt.py         monitored-circuit generators, pictures, scrambles                M6
+  pauli.py        PauliString: Pauli operators with exact phases
+  clifford.py     Clifford tableaux; canonical 1q/2q Clifford groups and indices
+  gates.py        the gate library, Stim names and conventions
+  _kernel/        Numba kernels
+    bits.py, rng.py, tables.py   bit tricks, xoshiro256** streams, gate tables
+    tableau.py    layout, gates, measurement (both modes), peeks, canonical form
+    program.py    the compiled circuit interpreter (one call per run / per shot)
+    entropy.py    ranks, entanglement profiles, erasure, distance, clipped gauge
+    ensemble.py   the monitored-circuit engine (generate + simulate + probe)
+  simulator.py    Simulator, the public state object
+  circuit.py      Circuit: Stim-syntax IR, parse/print, from/to Stim
+  _compile.py     Circuit -> flat instruction arrays (cached per circuit version)
+  result.py       RunResult / SampleResult: record, random flags, detectors, observables
+  sampling.py     sample(): many shots in parallel
+  observables.py  entropy, mutual/tripartite information, code dimension, erasure, distance
+  analysis.py     mean/error, Kaplan-Meier survival, Bernoulli erasure curves
+  graphs.py       geometries as edge arrays (cycle, lattice, WS, NW, ER, regular, complete)
+  mipt.py         MonitoredCircuit protocols, probes, EnsembleResult
+  api.py          JSON-in/JSON-out service layer shared by the CLI and MCP server
+  cli.py          the `sparsegf2` command
+  mcp_server.py   the `sparsegf2-mcp` Model Context Protocol server
 ```
 
 Layers only depend downward: kernels know nothing about circuits; circuits know
-nothing about MIPT; MIPT generators are just functions that build circuits.
+nothing about MIPT; `api.py` only calls the public library.
 
 ## 5. The kernel
 
@@ -192,7 +213,7 @@ The name stays SparseGF2, but v3's storage is dense bit-packed. What remains
 
 | mode | rows stored | signs | `measure()` returns | use it for |
 |---|---|---|---|---|
-| `phases=True` (proposed default) | n stabilizers + n destabilizers | yes | the physical outcome | anything involving outcomes, detectors, signs, QEC; exact agreement with Stim |
+| `phases=True` (default) | n stabilizers + n destabilizers | yes | the physical outcome | anything involving outcomes, detectors, signs, QEC; exact agreement with Stim |
 | `phases=False` | n stabilizers only | no | `None` | entanglement dynamics (entropies, code dimension, purification time) at maximum speed |
 
 Destabilizers are only needed to compute deterministic outcomes efficiently,
@@ -221,6 +242,19 @@ the lightest one. In the new layout that costs an extra scan per candidate,
 and in the benchmarks it was 2-11x slower overall (the "lightest" variant is
 in the prototype scripts). The pivot choice changes
 which generators you get, never the state or any physical observable.
+
+The ensemble engine refines the rule when there is a reference R (qubits no
+operation touches): it takes the first anticommuting row *without* support on
+R if there is one. That keeps an invariant: the rows touching R (a bitset,
+`ref_rows`) have linearly independent R-parts. Then the code dimension is
+`popcount(ref_rows) - |R|`, the unmarked rows generate the code's stabilizer
+group, and the information an erasure E leaks is
+`I(R:E) = rank(E) - rank(E restricted to unmarked rows)`, so reference
+columns never enter an elimination. This made k(t) at every layer free (41 to
+13 us per layer at n = 128 in the purification picture) and erasure profiles
+about 2x faster. The proof is in the docstring of
+`measure_1q_phase_free_tracked`; the tests compare against the generic
+formulas on random codes.
 
 **Known weak spot, and the fix.** The second table shows it: at n = 2048
 deep in the area-law phase, the column layout falls behind the dual layout,
@@ -266,14 +300,17 @@ Anything unsupported raises an error that names the instruction.
 
 Extensions Stim does not have, needed for monitored circuits:
 
-* `CLIFFORD_2Q(i) a b`: the two-qubit Clifford with canonical index `i`
-  (`Clifford.from_index(2, i)`, defined in M1). A uniform random gate is a
-  uniform `i` in `[0, 11520)`. On export to Stim it is expanded into Stim gates.
-* Observation instructions such as "record the entropy of qubit r here" and
-  "stop the run when qubit r is pure". These are evaluated inside the compiled
-  loop, which the purification-time workload needs, because checking entropy
-  from Python after every layer would cost more than the layer itself. The
-  exact syntax is a milestone-6 decision.
+* `CLIFFORD_1Q(i) q` and `CLIFFORD_2Q(i) a b`: the Clifford with canonical
+  index `i` (`Clifford.from_index(k, i)`). A uniform random two-qubit gate is a
+  uniform `i` in `[0, 11520)`. On export to Stim they are expanded into Stim
+  gates (`Tableau.to_circuit("elimination")`).
+* Observing the state during a circuit: `Simulator.run(circuit, observe=f)`
+  calls `f(sim, tick)` at every `TICK`, so any observable can be recorded as a
+  function of depth. For the purification-time workload, where checking the
+  reference after every layer from Python would cost more than the layer,
+  observation happens inside the compiled ensemble engine instead
+  (checkpoints and probes, section 8). No observation instructions were added
+  to the language.
 
 Internally a circuit is stored as arrays, not one Python object per gate, so
 building a 300,000-gate random circuit costs milliseconds.
@@ -289,7 +326,8 @@ building a 300,000-gate random circuit costs milliseconds.
   from (circuit, seed). Circuits with the same measurement layout share random
   numbers, for example across a p-sweep if you want that. And you can supply
   the bits yourself:
-  `sim.run(circuit, outcomes=bits)` forces every random outcome. This one
+  `sim.run(circuit, coins=bits)` forces every random outcome
+  (`sim.measure(q, coin=b)` for a single measurement). This one
   mechanism serves post-selection studies, replaying a recorded experiment, and
   exact comparison with Stim (for a noiseless circuit, feed Stim's
   measurement record in and every outcome must come back identical).
@@ -297,52 +335,71 @@ building a 300,000-gate random circuit costs milliseconds.
   in both modes; it is a genuine physical property of the trajectory.
   `RunResult.measurements` needs `phases=True` and otherwise raises.
 
-## 7. Observables (M4)
+## 7. Observables
 
-Functions over a simulator state: `entropy(sim, A)`, `mutual_information`,
-`tripartite_information`, `code_dimension`, `contiguous_distance`,
-`stabilizer_weights`, plus `sim.stabilizers()` / `sim.tableau()` export. The
+`sparsegf2_v3.observables`, over any simulator state: `entropy`,
+`mutual_information`, `tripartite_information`, `entropy_profile` (all
+bipartitions of an ordering in one pass), `code_dimension`,
+`lost_logical_information` I(R:E), `erasure_is_correctable`,
+`recovery_probability` (2^-I(R:E)), `random_erasure_statistics`,
+`erasure_profile` (I(R:E_m) for every size m along one random ordering),
+`contiguous_code_distance`, `clipped_gauge` and
+`stabilizer_length_distribution`, `stabilizer_weights`; plus
+`sim.stabilizers()` / `sim.stabilizer_arrays()` / `sim.destabilizers()`. The
 column layout stores, for each qubit, its X and Z bitsets over stabilizers, so
-the entropy of a region is the GF(2) rank of the 2·|A| bitsets of its qubits. That
-calculation is direct, with no transposition. Single-qubit entropy takes a
-few word operations.
+the entropy of a region is the GF(2) rank of the 2·|A| bitsets of its qubits,
+with no transposition. Every observable is checked against a state-vector
+calculation (SVD of the reduced state) on small systems or against brute
+force.
 
-Every observable will be checked against a state-vector calculation (SVD of
-the reduced state) on small systems, which needs no Stim and does not reuse
-the rank formula it is testing.
+## 8. Monitored circuits
 
-## 8. Monitored circuits (M6)
+`mipt.MonitoredCircuit` describes a protocol: graph (or a bank of graphs, one
+per trajectory), schedule (`matching` = brickwork on any graph through an edge
+colouring, `random_edges` with optional edge weights for long-range circuits,
+`all_edges`), measurement rate, picture (`none`, `purification`, `single`
+reference with a fixed or random partner), scramble (random pairs, random
+all-to-all perfect matchings, gate-only layers), gate set, checkpoints, probes
+and early stopping. `spec.run(trajectories, seed=...)` generates and simulates
+every trajectory inside one compiled, parallel kernel and records probes at
+the checkpoints; `EnsembleResult` holds the arrays (`survival()`,
+`save`/`load`, `concatenate`). The PRL production protocol is
+[`examples/purification_time.py`](../examples/purification_time.py).
 
-The production workload, written in v3 terms:
+Why a protocol object here, against principle 1: generating circuits in Python
+and handing them to the simulator costs more than simulating them at the sizes
+the studies use, and checking the reference from Python after every layer
+costs more than the layer. The engine therefore draws each layer from the
+trajectory's own random stream and simulates it immediately. Two safeguards
+keep it honest: `spec.circuit(t, seed)` exports exactly what trajectory `t`
+ran (the generator code is shared), and the tests replay exported circuits
+through the general `Simulator` and require every probe value to agree at
+every checkpoint.
 
-```python
-edges = graphs.watts_strogatz(n, k=2, beta=beta, seed=graph_seed)     # graph disorder
-circuit = mipt.single_reference(                                     # circuit disorder
-    n, edges, p=p, reference_partner="random", scramble_pairs=q * n,
-    max_layers=8 * n, stop_when_reference_pure=True, seed=circuit_seed)
-result = sg.Simulator(n + 1, phases=False, seed=outcome_seed).run(circuit)
-result.stop_layer, result.purified                                   # tau and the censoring flag
-```
+Requirements carried over from the audit, all met:
 
-Requirements carried over from the audit:
-
-* graph disorder, circuit disorder and outcome randomness are separate seeds;
-* graphs are plain edge arrays, generated with their own RNG and not networkx's;
-* the reference site is configurable, including random per circuit;
-* scrambles can be random pairs, brickwork layers, or a global Clifford;
+* graph disorder, circuit disorder and probe sampling use separate seeds, and
+  trajectory `t` is a deterministic function of `(spec, seed, t)` whatever the
+  thread count or chunking;
+* graphs are plain edge arrays generated with SparseGF2's own PRNG;
+* the reference site is configurable, including random per trajectory;
 * "layer" always means what you wrote, with no implicit rescaling;
-* censoring is explicit in the result.
+* censoring is explicit (`purification_layer == -1`), and `analysis` has
+  Kaplan-Meier with Greenwood errors.
 
-Validation: on identical circuits v3 must reproduce v2's entropies exactly
-(both are exact simulators of the same physics), and the ported production
-engine must reproduce existing τ statistics.
+Validation: the engine equals the Simulator on exported circuits (exact), and
+on the PRL protocol its purification-time distribution agrees with the v2
+production engine on identical graph banks
+([`benchmarks/crosscheck_v2_production.py`](../benchmarks/crosscheck_v2_production.py)).
 
 ## 9. QEC and other Clifford circuits (M7)
 
 Any Stim circuit in the supported subset runs in v3: one trajectory per run,
-noise sampled, detectors and observables computed from the record. Example:
+noise sampled, detectors and observables computed from the record; `sample()`
+runs many shots in parallel. Example:
 `Circuit.from_stim(stim.Circuit.generated("surface_code:rotated_memory_z", ...))`.
-Detection-event statistics are tested against Stim's own sampler.
+Detection-event statistics are tested against Stim's own sampler. Detection
+events follow Stim's convention (XOR with a noiseless reference sample).
 
 What v3 adds over Stim here is access to the state *during* the circuit
 (stabilizers, entanglement, code properties) and custom monitored dynamics. For
@@ -377,46 +434,71 @@ tool; a frame sampler in v3 could be a later milestone if you want one.
 
 ## 11. Milestones
 
-Each milestone is one or a few commits on this branch, ends with all tests
-passing, and adds a "try it" section to `v3/README.md`. I stop at each
-milestone boundary for your review.
+| | milestone | status |
+|---|---|---|
+| **M1** | Foundations: Pauli strings, Cliffords, the gate library | done |
+| **M2** | Kernel + `Simulator`, both modes | done (lock-step fuzzing vs Stim with exact signs and outcomes) |
+| **M3** | `Circuit` + compiled `run()` / `sample()` | done (whole-circuit replay identical to Stim; noise statistics match) |
+| **M4** | Observables incl. erasure protection | done (state-vector and brute-force checks) |
+| **M5** | Performance | benchmarks published (`benchmarks/`, README); row cache planned (section 5.3) |
+| **M6** | Monitored circuits | done: ensemble engine, graph banks, pictures, scrambles, probes, survival analysis |
+| **M7** | QEC | circuits run and match Stim's detector statistics; a frame sampler is not planned |
+| **M8** | Studies + docs | in progress: examples, agent interface (section 13), migration notes |
 
-| | milestone | you will be able to | acceptance |
-|---|---|---|---|
-| **M1** | Foundations *(this commit)* | build Pauli strings and Cliffords; look up every Stim gate; enumerate and index the 2-qubit Clifford group | 159 tests vs Stim and textbook matrices |
-| **M2** | Kernel + `Simulator` | apply any gate, measure Z/X/Y/Pauli products, reset, peek, export stabilizers, in both modes | lock-step fuzzing vs Stim with exact signs and outcomes |
-| **M3** | `Circuit` + compiled `run()` | write or import Stim circuits, run them in one call, get the measurement record, detectors, noise | whole-circuit replay identical to Stim; noise statistics match |
-| **M4** | Observables | entropies, mutual/tripartite information, code dimension, distance | state-vector checks; v2 agreement |
-| **M5** | Performance | see fair benchmark tables vs Stim and v2 | published, reproducible numbers |
-| **M6** | Monitored circuits | graphs, layers, pictures, scrambles, purification time with censoring | v2 equivalence on identical circuits; production engine ported |
-| **M7** | QEC | run surface/repetition codes, inspect states mid-circuit | detector statistics match Stim |
-| **M8** | Studies + docs | thin resumable sweep runner, migration guide from v2, tutorials | your call |
+## 12. Decisions
 
-## 12. Decisions I need from you
+Your answers to the milestone-1 questions, and what they mean in the code.
 
-My recommendation is listed first in each.
+1. **Where the code lives:** `v3/`, import name `sparsegf2_v3`, beside v2.
+   After M6 it takes over the `sparsegf2` name as version 3.0.
+2. **Default mode:** `phases=True`. The ensemble engine always runs
+   phase-free (entanglement does not depend on outcomes), so your studies get
+   the speed without passing anything.
+3. **No outcomes without phases:** phase-free `measure()` returns `None`,
+   `RunResult.measurements` raises `PhaseFreeError`, and `RunResult.random`
+   (which outcomes were random) works in both modes. Pauli gates and Pauli
+   noise are exact no-ops on a phase-free state and are accepted.
+4. **Pivot rule:** lowest-index anticommuting stabilizer (Simulator), with the
+   reference-free preference in the engine (section 5.3). Generator-dependent
+   diagnostics are not offered; the clipped gauge is the gauge-invariant way
+   to look at stabilizer lengths.
+5. **v2 extras:** expurgation is still to be ported (section 14); `Study` /
+   `sweep` are replaced by `MonitoredCircuit` + `EnsembleResult` chunking.
+6. **Production campaign:** `studies/prl_production` (single-reference
+   purification time on Watts-Strogatz graphs, 4.27M of 18.7M trajectories
+   done) can continue on v2, or switch to v3 with
+   `examples/purification_time.py`, which reproduces its statistics.
+7. **Python:** 3.11+.
 
-1. **Where the code lives.** *Recommended:* in `v3/` in this repository, with
-   import name `sparsegf2_v3`, beside v2, which stays untouched. Both can be
-   installed together and cross-checked, and your production campaign keeps
-   running on v2. When v3 reaches parity (after M6) it takes over the
-   `sparsegf2` name as version 3.0 and v2 is retired. *Alternative:* a separate
-   repository.
-2. **Default mode.** *Recommended:* `phases=True` by default (safe, exact,
-   Stim-identical), with MIPT generators and your scripts passing
-   `phases=False` explicitly for speed. *Alternative:* default to
-   `phases=False`, since most of your work is entanglement dynamics.
-3. **No outcomes without phases.** *Recommended:* in phase-free mode
-   `measure()` returns `None` and results only report which measurements were
-   random. v2's coin-flip outcomes are not reproduced, even as an option.
-4. **Pivot rule.** *Recommended:* lowest-index anticommuting stabilizer (fastest
-   in the new layout). This changes generator-weight diagnostics compared with
-   v2, though not any physical observable.
-5. **Which v2 extras to port.** *Recommended:* port expurgation as an optional
-   module after M4; replace `Study`/`sweep` with a thin, censoring-aware runner
-   in M8; drop `fss_collapse.py` (unused); use Stim's circuit diagrams through
-   `to_stim()` instead of porting the quantikz drawer (it could come back
-   later if you rely on it for papers).
-6. **Production campaign.** *Recommended:* finish or continue it on v2. Switch
-   only after M6 shows v3 reproduces its statistics.
-7. **Python version.** *Recommended:* 3.11+.
+## 13. Interfaces for AI agents
+
+The simulator is meant to be driven by language-model agents as easily as by
+people. One service layer, `sparsegf2_v3.api`, takes and returns JSON
+(validated arguments, compact summaries with standard errors, errors that say
+how to fix the input), and two thin front ends expose it: the `sparsegf2` CLI
+(`--json` on every command) and the `sparsegf2-mcp` Model Context Protocol
+server (typed tools, background jobs for long ensembles with resumable chunk
+files). `AGENTS.md` and `llms.txt` describe the workflow for agents;
+[`LLM_INTERFACE.md`](LLM_INTERFACE.md) is the reference. The repository's
+`.mcp.json` registers the server for Claude Code.
+
+## 14. Roadmap
+
+From the audit, the literature review ([`LITERATURE.md`](LITERATURE.md)) and
+the benchmarks, in rough priority order:
+
+* **Row cache** for the area-law phase at large n (section 5.3).
+* **Erasure and noise channels in the engine**: append environment rows for
+  erasure / dephasing, information retention I(R:Q) and coherent information
+  under noise (the "first time I(R:sys) = 0" replaces tau, which noise does
+  not define).
+* **Expurgation** (stabilizer/destabilizer pairs in phase-free mode).
+* **Measurement schedules**: exactly floor(p n) measurements per layer,
+  measurement right after each gate, space-time modulated rates.
+* **Graph disorder redrawn every layer** (annealed disorder); per-trajectory
+  disorder (graph banks) is done.
+* **Multi-reference correlators** and participation entropy.
+* **Uniform n-qubit Clifford sampler** for global scramblers and random-code
+  baselines.
+* **Tableau snapshots at checkpoints** (the code's stabilizers, from the
+  reference rows) for offline analysis.

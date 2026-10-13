@@ -31,8 +31,6 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
             return ob.contiguous_code_distance(sim, order, refs, periodic=spec.periodic)
         if p.kind == "lost_information":
             return ob.lost_logical_information(sim, p.regions[0], refs)
-        if p.kind == "mean_weight":
-            return ob.stabilizer_weights(sim).mean()
         if p.kind == "entropy_profile":
             return ob.entropy_profile(sim, order)
         raise AssertionError(p.kind)
@@ -60,7 +58,7 @@ SPECS = {
             mipt.half_cut_entropy(),
             mipt.contiguous_distance(),
             mipt.lost_information([0, 1, 5]),
-            mipt.mean_stabilizer_weight(),
+            mipt.lost_information(list(range(7))),
             mipt.entropy([2, 3, 13]),
             mipt.entropy_profile(),
             mipt.mutual_information([0, 1, 2], [6, 7, 8]),
@@ -102,7 +100,7 @@ SPECS = {
         reference="single",
         reference_partner=4,
         checkpoints="every_layer",
-        probes=[mipt.code_dimension(), mipt.mean_stabilizer_weight()],
+        probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.lost_information([0, 4])],
         stop_when_purified=True,
     ),
     "lattice_scramble_layers_gate_set_orientation": dict(
@@ -118,6 +116,45 @@ SPECS = {
         probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.entropy_profile()],
         system_order=list(range(15, -1, -1)),
         periodic=False,
+    ),
+    "production_protocol_ws_bank_matching_scramble": dict(
+        num_system=16,
+        edges=[graphs.watts_strogatz(16, 4, 0.2, seed=(5, i)) for i in range(4)],
+        layers=30,
+        measurement_rate=0.15,
+        schedule="random_edges",
+        reference="single",
+        reference_partner=15,
+        scramble_matchings=4,
+        checkpoints="every_layer",
+        probes=[mipt.code_dimension()],
+        stop_when_purified=True,
+    ),
+    "ragged_bank_matching_schedule_all_scrambles": dict(
+        num_system=11,
+        edges=[graphs.newman_watts(11, 2, 0.3, seed=i) for i in range(3)],
+        layers=12,
+        measurement_rate=0.2,
+        reference="purification",
+        scramble_gates=5,
+        scramble_matchings=2,
+        scramble_layers=2,
+        checkpoints=[0, 3, 12],
+        probes=[mipt.code_dimension(), mipt.half_cut_entropy(), mipt.contiguous_distance()],
+    ),
+    "weighted_bank": dict(
+        num_system=10,
+        edges=[graphs.complete(10)] * 2,
+        edge_weights=[
+            graphs.power_law_weights(graphs.complete(10), 10, 1.0),
+            graphs.power_law_weights(graphs.complete(10), 10, 3.0),
+        ],
+        layers=8,
+        measurement_rate=0.1,
+        schedule="random_edges",
+        reference="purification",
+        checkpoints="every_layer",
+        probes=[mipt.code_dimension(), mipt.entropy_profile()],
     ),
     "no_reference_word_boundary": dict(
         num_system=65,
@@ -359,3 +396,55 @@ def test_with_edges_and_derived_properties():
     other = spec.with_edges(graphs.complete(6))
     assert len(other.edges) == 15 and len(spec.edges) == 6
     np.testing.assert_array_equal(spec.checkpoint_layers, [2])
+
+
+def test_graph_bank_assigns_graph_t_mod_g():
+    n = 12
+    bank = [graphs.watts_strogatz(n, 4, 0.3, seed=(9, i)) for i in range(3)]
+    spec = mipt.MonitoredCircuit(
+        num_system=n, edges=bank, layers=6, measurement_rate=0.2, schedule="random_edges"
+    )
+    assert spec.num_graphs == 3 and isinstance(spec.edges, tuple)
+    for t in (0, 1, 2, 4, 7):
+        single = spec.with_edges(bank[t % 3])
+        # the circuit of trajectory t on the bank equals trajectory t on graph t mod 3
+        assert str(spec.circuit(t, seed=4)) == str(single.circuit(t, seed=4))
+    a = spec.run(7, seed=4)
+    b = mipt.EnsembleResult.concatenate(
+        [spec.run(3, seed=4), spec.run(4, seed=4, first_trajectory=3)]
+    )
+    np.testing.assert_array_equal(a.num_measurements, b.num_measurements)
+
+
+def test_scramble_matchings_are_perfect_matchings():
+    n = 9
+    spec = mipt.MonitoredCircuit(
+        num_system=n, edges=graphs.cycle(n), layers=0, measurement_rate=0.0, scramble_matchings=3
+    )
+    circuit = spec.circuit(0, seed=1)
+    blocks = [ins for ins in circuit.flattened() if ins.name == "CLIFFORD_2Q"]
+    assert len(blocks) == 3
+    for ins in blocks:
+        qubits = [t.value for t in ins.targets]
+        assert len(qubits) == 2 * (n // 2) and len(set(qubits)) == len(qubits)
+
+
+def test_graph_bank_save_load_round_trip(tmp_path):
+    bank = [graphs.newman_watts(10, 2, 0.4, seed=i) for i in range(3)]
+    spec = mipt.MonitoredCircuit(
+        num_system=10,
+        edges=bank,
+        layers=5,
+        measurement_rate=0.2,
+        reference="single",
+        scramble_matchings=2,
+        probes=[mipt.code_dimension()],
+    )
+    res = spec.run(5, seed=2)
+    res.save(tmp_path / "bank.npz")
+    back = mipt.EnsembleResult.load(tmp_path / "bank.npz")
+    assert back.spec.num_graphs == 3 and back.spec.scramble_matchings == 2
+    for g, h in zip(back.spec.graphs, spec.graphs, strict=True):
+        np.testing.assert_array_equal(g, h)
+    rerun = back.spec.run(5, seed=2)
+    np.testing.assert_array_equal(rerun.values["code_dimension"], res.values["code_dimension"])

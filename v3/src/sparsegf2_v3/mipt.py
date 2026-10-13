@@ -31,8 +31,10 @@ follow):
    one reference ``n`` is Bell-paired with ``reference_partner``. ``"none"``:
    just |0...0>.
 2. **Scramble** (optional). ``scramble_gates`` random two-qubit gates on
-   uniformly random distinct pairs of system qubits, then ``scramble_layers``
-   gate-only layers of the dynamics below.
+   uniformly random distinct pairs of system qubits, then
+   ``scramble_matchings`` layers of gates on uniformly random perfect
+   matchings of the system (all-to-all), then ``scramble_layers`` gate-only
+   layers of the dynamics below.
 3. **Dynamics**, ``layers`` times. Gates on edges of the graph, chosen by
    ``schedule``:
 
@@ -54,11 +56,16 @@ follow):
 A "layer" is exactly one step 3, never rescaled. Everything runs phase-free:
 entanglement does not depend on measurement outcomes.
 
+Graph disorder: ``edges`` may be a list of graphs (a graph bank); trajectory
+``t`` then runs on graph ``t mod len(edges)``, so one realization per
+trajectory is ``edges=[graphs.watts_strogatz(n, 4, beta, seed=(17, i)) for i in
+range(T)]``. Build the graphs with their own seed: graph disorder never draws
+from the circuit's random streams.
+
 Randomness: trajectory ``t`` of ``run(..., seed=s)`` is a deterministic function
 of ``(spec, s, t)``, independent of the thread count and of the other
 trajectories, so ensembles can be split into chunks (``first_trajectory``) and
-merged without changing any result. Graph disorder is separate: build the
-``edges`` with their own seed. The measurement mask uses one uniform draw per
+merged without changing any result. The measurement mask uses one uniform draw per
 qubit per layer whatever the rate, so runs at different ``measurement_rate``
 with the same seed share their random numbers (the measured set at a lower rate
 is a subset of that at a higher rate).
@@ -97,7 +104,6 @@ __all__ = [
     "erasure_lost_profile",
     "half_cut_entropy",
     "lost_information",
-    "mean_stabilizer_weight",
     "mutual_information",
     "tripartite_information",
 ]
@@ -222,11 +228,6 @@ def erasure_correctable_fraction(size: int, samples: int = 100, name: str | None
     )
 
 
-def mean_stabilizer_weight() -> Probe:
-    """Average number of qubits per stabilizer generator: a sparsity diagnostic (basis dependent)."""
-    return Probe("mean_weight", "mean_stabilizer_weight")
-
-
 def entropy_profile() -> Probe:
     """Vector: ``S(system_order[:k])`` for every k = 0..n (entanglement of every bipartition)."""
     return Probe("entropy_profile", "entropy_profile")
@@ -269,7 +270,6 @@ _SCALAR_KINDS = {
     "lost_information": _ens.PROBE_LOST_INFORMATION,
     "erasure_mean_lost": _ens.PROBE_ERASURE_MEAN_LOST,
     "erasure_correctable": _ens.PROBE_ERASURE_CORRECTABLE,
-    "mean_weight": _ens.PROBE_MEAN_WEIGHT,
 }
 _NEEDS_REFERENCE = {
     "code_dimension",
@@ -297,7 +297,8 @@ class MonitoredCircuit:
         Number of system qubits ``n``.
     edges
         Interaction graph on the system qubits, an ``(m, 2)`` array (see
-        :mod:`sparsegf2_v3.graphs`).
+        :mod:`sparsegf2_v3.graphs`), or a list of them for graph disorder:
+        trajectory ``t`` runs on graph ``t mod len(edges)``.
     layers
         Number of dynamics layers.
     measurement_rate
@@ -311,8 +312,10 @@ class MonitoredCircuit:
         ``"none"`` (default), ``"purification"`` or ``"single"``; for
         ``"single"``, the Bell partner is a system qubit index or ``"random"``
         (drawn per trajectory).
-    scramble_gates, scramble_layers
-        Optional pre-scrambling: random all-to-all gates, then gate-only layers.
+    scramble_gates, scramble_matchings, scramble_layers
+        Optional pre-scrambling, in this order: gates on random distinct pairs,
+        layers of random all-to-all perfect matchings, gate-only layers of the
+        dynamics.
     gate_set
         Canonical two-qubit Clifford indices to draw gates from uniformly
         (default: all 11520, i.e. the uniform two-qubit Clifford group).
@@ -343,6 +346,7 @@ class MonitoredCircuit:
     reference: str = "none"
     reference_partner: int | str = "random"
     scramble_gates: int = 0
+    scramble_matchings: int = 0
     scramble_layers: int = 0
     gate_set: np.ndarray | None = None
     random_orientation: bool = False
@@ -357,10 +361,10 @@ class MonitoredCircuit:
         n = int(self.num_system)
         if n < 2:
             raise ValueError("num_system must be at least 2")
-        raw_edges = np.asarray(self.edges, dtype=np.int64).reshape(-1, 2)
-        edges = from_edges(raw_edges, n)
-        if len(edges) == 0:
-            raise ValueError("the graph has no edges")
+        raw_graphs, is_bank = _graph_list(self.edges)
+        graphs_ = [from_edges(g, n) for g in raw_graphs]
+        if not graphs_ or any(len(g) == 0 for g in graphs_):
+            raise ValueError("every graph needs at least one edge")
         object.__setattr__(self, "num_system", n)
         if self.layers < 0:
             raise ValueError("layers must be non-negative")
@@ -373,18 +377,17 @@ class MonitoredCircuit:
         if self.edge_weights is not None:
             if self.schedule != "random_edges":
                 raise ValueError("edge_weights only applies to schedule='random_edges'")
-            weights = np.asarray(self.edge_weights, dtype=np.float64).ravel()
-            if weights.shape != (len(raw_edges),) or len(raw_edges) != len(edges):
+            raw_weights = list(self.edge_weights) if is_bank else [self.edge_weights]
+            if len(raw_weights) != len(graphs_):
                 raise ValueError(
-                    "edge_weights needs one weight per edge of an already normalised edge "
-                    "list (pass edges from sparsegf2_v3.graphs)"
+                    "with a list of graphs, edge_weights must be a list of the same length"
                 )
-            if np.any(weights < 0) or not np.isfinite(weights).all() or weights.sum() <= 0:
-                raise ValueError("edge_weights must be finite, non-negative and not all zero")
-            if not np.array_equal(raw_edges, edges):
-                raise ValueError("edge_weights requires edges in normalised order (sorted, a < b)")
-            object.__setattr__(self, "edge_weights", weights)
-        object.__setattr__(self, "edges", edges)
+            weights = [
+                _checked_weights(w, raw, g)
+                for w, raw, g in zip(raw_weights, raw_graphs, graphs_, strict=True)
+            ]
+            object.__setattr__(self, "edge_weights", tuple(weights) if is_bank else weights[0])
+        object.__setattr__(self, "edges", tuple(graphs_) if is_bank else graphs_[0])
         if self.schedule == "random_edges":
             gpl = n // 2 if self.gates_per_layer is None else int(self.gates_per_layer)
             if gpl < 0:
@@ -399,8 +402,8 @@ class MonitoredCircuit:
             if not 0 <= partner < n:
                 raise ValueError(f"reference_partner must be 'random' or in [0, {n})")
             object.__setattr__(self, "reference_partner", partner)
-        if self.scramble_gates < 0 or self.scramble_layers < 0:
-            raise ValueError("scramble_gates and scramble_layers must be non-negative")
+        if min(self.scramble_gates, self.scramble_matchings, self.scramble_layers) < 0:
+            raise ValueError("scramble_gates, scramble_matchings and scramble_layers must be >= 0")
         pool = (
             np.arange(num_cliffords(2), dtype=np.int64)
             if self.gate_set is None
@@ -489,6 +492,15 @@ class MonitoredCircuit:
     # -- derived quantities ----------------------------------------------------------
 
     @property
+    def graphs(self) -> tuple[np.ndarray, ...]:
+        """The interaction graphs (one, or the graph bank); trajectory t uses ``graphs[t % G]``."""
+        return self.edges if isinstance(self.edges, tuple) else (self.edges,)
+
+    @property
+    def num_graphs(self) -> int:
+        return len(self.graphs)
+
+    @property
     def num_reference(self) -> int:
         return {"none": 0, "purification": self.num_system, "single": 1}[self.reference]
 
@@ -520,15 +532,35 @@ class MonitoredCircuit:
     def with_edges(
         self, edges: np.ndarray, edge_weights: np.ndarray | None = None
     ) -> MonitoredCircuit:
-        """The same protocol on another graph (e.g. a new graph-disorder realization)."""
+        """The same protocol on other graph(s) (one graph, or a list of graphs)."""
         return replace(self, edges=edges, edge_weights=edge_weights, _compiled={})
 
     def _arrays(self) -> dict:
         if not self._compiled:
-            colors = edge_coloring(self.edges, self.num_system)
-            color_ptr = np.zeros(len(colors) + 1, dtype=np.int64)
-            color_ptr[1:] = np.cumsum([len(c) for c in colors])
-            color_idx = np.concatenate(colors).astype(np.int64) if colors else np.zeros(0, np.int64)
+            graph_ptr = np.zeros(self.num_graphs + 1, dtype=np.int64)
+            color_ptr_ptr = np.zeros(self.num_graphs + 1, dtype=np.int64)
+            color_ptr, color_idx, edge_cum = [], [], []
+            weights = self.edge_weights
+            if weights is not None and not isinstance(weights, tuple):
+                weights = (weights,)
+            for g, edges in enumerate(self.graphs):
+                graph_ptr[g + 1] = graph_ptr[g] + len(edges)
+                colors = edge_coloring(edges, self.num_system)
+                color_ptr.append(np.concatenate([[0], np.cumsum([len(c) for c in colors])]))
+                color_ptr_ptr[g + 1] = color_ptr_ptr[g] + len(colors) + 1
+                color_idx.append(np.concatenate(colors))
+                if weights is not None:
+                    cum = np.cumsum(weights[g] / weights[g].sum())
+                    cum[-1] = 1.0
+                    edge_cum.append(cum)
+            self._compiled.update(
+                edges=np.concatenate(self.graphs).astype(np.int64),
+                graph_ptr=graph_ptr,
+                color_ptr=np.concatenate(color_ptr).astype(np.int64),
+                color_ptr_ptr=color_ptr_ptr,
+                color_idx=np.concatenate(color_idx).astype(np.int64),
+                edge_cum=np.concatenate(edge_cum) if edge_cum else np.zeros(0, dtype=np.float64),
+            )
             scalars = self.scalar_probes
             ptr, idx = [], []
             region_len = np.zeros((len(scalars), 3), dtype=np.int64)
@@ -538,15 +570,7 @@ class MonitoredCircuit:
                     idx.extend(region)
                     region_len[j, r] = len(region)
             vectors = self.vector_probes
-            if self.edge_weights is None:
-                edge_cum = np.zeros(0, dtype=np.float64)
-            else:
-                edge_cum = np.cumsum(self.edge_weights / self.edge_weights.sum())
-                edge_cum[-1] = 1.0
             self._compiled.update(
-                color_ptr=color_ptr,
-                color_idx=color_idx,
-                edge_cum=edge_cum,
                 kinds=np.array([_SCALAR_KINDS[p.kind] for p in scalars], dtype=np.int64),
                 ptr=np.array(ptr, dtype=np.int64),
                 region_len=region_len,
@@ -593,10 +617,11 @@ class MonitoredCircuit:
             with threads(num_threads):
                 _ens.run_ensemble(
                     self.num_system, self.num_reference, _REFERENCES[self.reference], a["partner"],
-                    self.edges, a["edge_cum"], a["color_ptr"], a["color_idx"],
-                    _SCHEDULES[self.schedule], a["gpl"], self.gate_set,
+                    a["edges"], a["graph_ptr"], a["edge_cum"], a["color_ptr"], a["color_ptr_ptr"],
+                    a["color_idx"], _SCHEDULES[self.schedule], a["gpl"], self.gate_set,
                     float(self.measurement_rate), int(self.layers), int(self.scramble_gates),
-                    int(self.scramble_layers), bool(self.random_orientation), self.checkpoints,
+                    int(self.scramble_matchings), int(self.scramble_layers),
+                    bool(self.random_orientation), self.checkpoints,
                     bool(self.stop_when_purified), a["kinds"], a["ptr"], a["region_len"], a["idx"],
                     a["size"], a["samples"], a["vkinds"], a["vsamples"], self.system_order,
                     bool(self.periodic), key_struct, key_probe, int(first_trajectory),
@@ -631,10 +656,11 @@ class MonitoredCircuit:
         a = self._arrays()
         key_struct, _ = _keys(seed)
         n = self.num_system
-        max_gates = max(a["gpl"], len(self.edges), self.scramble_gates, 1)
-        total_gate_blocks = 1 + self.scramble_layers + self.layers
+        max_gates = int(_ens._max_gates(n, a["graph_ptr"], a["gpl"], self.scramble_gates))
+        scramble_blocks = self.scramble_matchings + self.scramble_layers
+        total_gate_blocks = 1 + scramble_blocks + self.layers
         ga = np.zeros(
-            self.scramble_gates + (self.scramble_layers + self.layers) * max_gates, dtype=np.int64
+            self.scramble_gates + (scramble_blocks + self.layers) * max_gates, dtype=np.int64
         )
         gb = np.zeros_like(ga)
         gg = np.zeros_like(ga)
@@ -642,9 +668,10 @@ class MonitoredCircuit:
         mq = np.zeros(self.layers * n, dtype=np.int64)
         meas_ptr = np.zeros(self.layers + 1, dtype=np.int64)
         partner = _ens.generate_ops(
-            n, _REFERENCES[self.reference], a["partner"], self.edges, a["edge_cum"], a["color_ptr"],
-            a["color_idx"], _SCHEDULES[self.schedule], a["gpl"], self.gate_set,
-            float(self.measurement_rate), int(self.layers), int(self.scramble_gates),
+            n, _REFERENCES[self.reference], a["partner"], a["edges"], a["graph_ptr"],
+            a["edge_cum"], a["color_ptr"], a["color_ptr_ptr"], a["color_idx"],
+            _SCHEDULES[self.schedule], a["gpl"], self.gate_set, float(self.measurement_rate),
+            int(self.layers), int(self.scramble_gates), int(self.scramble_matchings),
             int(self.scramble_layers), bool(self.random_orientation), key_struct, int(trajectory),
             ga, gb, gg, gate_ptr, mq, meas_ptr,
         )  # fmt: skip
@@ -662,16 +689,43 @@ class MonitoredCircuit:
                 pairs = np.stack([ga[lo:hi], gb[lo:hi]], axis=1).ravel().tolist()
                 c.append("CLIFFORD_2Q", pairs, gg[lo:hi].tolist())
 
-        for block in range(1 + self.scramble_layers):
+        for block in range(1 + scramble_blocks):
             gates(block)
         c.append("TICK")
         for layer in range(self.layers):
-            gates(1 + self.scramble_layers + layer)
+            gates(1 + scramble_blocks + layer)
             lo, hi = meas_ptr[layer], meas_ptr[layer + 1]
             if hi > lo:
                 c.append("M", mq[lo:hi].tolist())
             c.append("TICK")
         return c
+
+
+def _graph_list(edges) -> tuple[list[np.ndarray], bool]:
+    """Split ``edges`` into a list of ``(m, 2)`` arrays; the flag says it was a list of graphs."""
+    if isinstance(edges, np.ndarray) and edges.ndim != 3:
+        return [edges.reshape(-1, 2)], False
+    try:
+        arr = np.asarray(edges, dtype=np.int64)
+    except ValueError:  # ragged: graphs with different numbers of edges
+        return [np.asarray(e, dtype=np.int64).reshape(-1, 2) for e in edges], True
+    if arr.ndim == 3:
+        return list(arr), True
+    return [arr.reshape(-1, 2)], False
+
+
+def _checked_weights(weights, raw_edges: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if w.shape != (len(raw_edges),) or len(raw_edges) != len(edges):
+        raise ValueError(
+            "edge_weights needs one weight per edge of an already normalised edge "
+            "list (pass edges from sparsegf2_v3.graphs)"
+        )
+    if np.any(w < 0) or not np.isfinite(w).all() or w.sum() <= 0:
+        raise ValueError("edge_weights must be finite, non-negative and not all zero")
+    if not np.array_equal(raw_edges, edges):
+        raise ValueError("edge_weights requires edges in normalised order (sorted, a < b)")
+    return w
 
 
 def _keys(seed) -> tuple[np.ndarray, np.ndarray]:
@@ -700,6 +754,7 @@ _SPEC_FIELDS = (
     "reference",
     "reference_partner",
     "scramble_gates",
+    "scramble_matchings",
     "scramble_layers",
     "random_orientation",
     "stop_when_purified",
@@ -807,8 +862,10 @@ class EnsembleResult:
             ],
             "spec": {k: getattr(spec, k) for k in _SPEC_FIELDS},
         }
+        sizes = [len(g) for g in spec.graphs]
         arrays = {
-            "edges": spec.edges,
+            "edges": np.concatenate(spec.graphs),
+            "graph_ptr": np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64),
             "gate_set": spec.gate_set,
             "system_order": spec.system_order,
             "trajectories": self.trajectories,
@@ -817,7 +874,9 @@ class EnsembleResult:
             "num_measurements": self.num_measurements,
         }
         if spec.edge_weights is not None:
-            arrays["edge_weights"] = spec.edge_weights
+            w = spec.edge_weights
+            arrays["edge_weights"] = np.concatenate(w) if isinstance(w, tuple) else w
+        meta["graph_bank"] = isinstance(spec.edges, tuple)
         for name, v in self.values.items():
             arrays[f"value::{name}"] = v
         if self.purification_layer is not None:
@@ -840,17 +899,22 @@ class EnsembleResult:
                 )
                 for p in meta["probes"]
             ]
+            edges, weights = z["edges"], z["edge_weights"] if "edge_weights" in z.files else None
+            if meta.get("graph_bank"):
+                cuts = z["graph_ptr"][1:-1]
+                edges = list(np.split(edges, cuts))
+                weights = None if weights is None else list(np.split(weights, cuts))
             spec = MonitoredCircuit(
-                edges=z["edges"],
+                edges=edges,
                 gate_set=z["gate_set"],
                 system_order=z["system_order"],
-                edge_weights=z["edge_weights"] if "edge_weights" in z.files else None,
+                edge_weights=weights,
                 checkpoints=z["checkpoint_layers"].astype(np.int64),
                 probes=probes,
                 **{
                     k: s[k]
                     for k in _SPEC_FIELDS
-                    if not (k == "gates_per_layer" and s["schedule"] != "random_edges")
+                    if k in s and not (k == "gates_per_layer" and s["schedule"] != "random_edges")
                 },
             )
             return cls(

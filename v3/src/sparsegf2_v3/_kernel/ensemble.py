@@ -12,14 +12,31 @@ shared with :func:`generate_ops`, which records the same draws as operations
 instead of applying them. ``MonitoredCircuit.circuit(t)`` is built from those
 operations, so an exported circuit is exactly what trajectory ``t`` simulated.
 
+Graphs: ``edges`` holds one or more graphs back to back (graph ``g`` is
+``edges[graph_ptr[g]:graph_ptr[g + 1]]``, with its edge colouring and edge
+weights stored the same way); trajectory ``t`` runs on graph ``t mod G``. This
+is how graph disorder enters (one realization per trajectory) without
+touching the random streams.
+
 Random draws per trajectory, in order:
 
 1. single-reference partner (one draw, only if chosen at random);
 2. scramble pairs: per gate, ``a``, then ``b``, then the gate index;
-3. scramble layers, then dynamics layers, each via :func:`gen_layer`: per gate,
+3. scramble matchings, per layer: a Fisher-Yates shuffle of the system
+   (``n - 1`` draws), then one gate index per pair;
+4. scramble layers, then dynamics layers, each via :func:`gen_layer`: per gate,
    [edge: one integer draw, or one uniform draw if edges are weighted, if edges
    are sampled], [orientation bit if enabled], gate index; then (dynamics only)
    one uniform per system qubit for the measurement mask.
+
+Reference qubits
+----------------
+With a reference, every trajectory keeps ``ref_rows``, the stabilizer rows with
+support on the references, under the invariant of
+:func:`~sparsegf2_v3._kernel.tableau.measure_1q_phase_free_tracked`. The code
+dimension S(R) is then a popcount, and the lost information I(R:E) of an
+erasure costs two column ranks over E only (see the ``*_rows`` routines in
+:mod:`~sparsegf2_v3._kernel.entropy`).
 
 Probes
 ------
@@ -36,14 +53,20 @@ from numba import njit, prange
 
 from sparsegf2_v3._kernel.bits import popcount
 from sparsegf2_v3._kernel.entropy import (
-    contiguous_distance,
-    erasure_profile,
-    mutual_information_with,
+    contiguous_distance_rows,
+    erasure_profile_rows,
+    lost_information_rows,
     prefix_entropies,
+    reference_rows,
     region_entropy,
 )
 from sparsegf2_v3._kernel.rng import next_below, next_bit, next_double, stream_state
-from sparsegf2_v3._kernel.tableau import apply_1q, apply_2q, init_zero, measure_1q_phase_free
+from sparsegf2_v3._kernel.tableau import (
+    apply_1q,
+    apply_2q,
+    init_zero,
+    measure_1q_phase_free_tracked,
+)
 
 SCHED_MATCHING = 0
 SCHED_RANDOM_EDGES = 1
@@ -59,9 +82,8 @@ PROBE_CONTIGUOUS_DISTANCE = 2
 PROBE_LOST_INFORMATION = 3
 PROBE_ERASURE_MEAN_LOST = 4
 PROBE_ERASURE_CORRECTABLE = 5
-PROBE_MEAN_WEIGHT = 6
-PROBE_MUTUAL_INFORMATION = 7
-PROBE_TRIPARTITE = 8
+PROBE_MUTUAL_INFORMATION = 6
+PROBE_TRIPARTITE = 7
 
 VPROBE_ENTROPY_PROFILE = 0
 VPROBE_ERASURE_LOST = 1
@@ -130,6 +152,36 @@ def gen_layer(
 
 
 @njit(cache=True)
+def gen_scramble_matching(rng, n_sys, pool, perm, ga, gb, gg):
+    """A uniformly random perfect matching of the system (one qubit idles if n is odd).
+
+    Pairs ``(perm[2j], perm[2j+1])`` of a fresh uniform permutation, each with a
+    gate drawn from ``pool``. Returns the number of gates, ``n_sys // 2``.
+    """
+    for i in range(n_sys):
+        perm[i] = i
+    for i in range(n_sys - 1):
+        r = i + next_below(rng, n_sys - i)
+        tmp = perm[i]
+        perm[i] = perm[r]
+        perm[r] = tmp
+    for j in range(n_sys // 2):
+        ga[j] = perm[2 * j]
+        gb[j] = perm[2 * j + 1]
+        gg[j] = pool[next_below(rng, pool.shape[0])]
+    return n_sys // 2
+
+
+@njit(cache=True)
+def _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates):
+    """Gate-buffer size: the largest layer any schedule or scramble can produce."""
+    m = max(gates_per_layer, scramble_gates, n_sys // 2, 1)
+    for g in range(graph_ptr.shape[0] - 1):
+        m = max(m, graph_ptr[g + 1] - graph_ptr[g])
+    return m
+
+
+@njit(cache=True)
 def gen_scramble_pairs(rng, count, n_sys, pool, ga, gb, gg):
     """``count`` gates on uniformly random distinct pairs of system qubits."""
     for j in range(count):
@@ -140,16 +192,6 @@ def gen_scramble_pairs(rng, count, n_sys, pool, ga, gb, gg):
         ga[j] = a
         gb[j] = b
         gg[j] = pool[next_below(rng, pool.shape[0])]
-
-
-@njit(cache=True)
-def mean_weight(tab, n, ws):
-    """Average number of qubits per stabilizer generator (total support / n)."""
-    total = 0
-    for q in range(n):
-        for w in range(ws):
-            total += np.int64(popcount(tab[2 * q, w] | tab[2 * q + 1, w]))
-    return total / n
 
 
 @njit(cache=True)
@@ -166,13 +208,15 @@ def _entropy_of_union(tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, 
 
 @njit(cache=True)
 def eval_probes(
-    tab, n, ws, n_sys, refs, s_ref, kinds, ptr, region_len, idx, size_param, sample_param, order,
-    periodic, prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
+    tab, n, ws, n_sys, ref_rows, n_ref, s_ref, kinds, ptr, region_len, idx, size_param,
+    sample_param, order, periodic, prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
+    erase_scratch,
 ):  # fmt: skip
     """Evaluate every scalar probe on the current state into ``out_row``.
 
     ``s_ref`` is the reference entropy S(R), computed once per checkpoint by the
     caller (it is both the code-dimension probe and the purification test).
+    ``erase_scratch`` has shape >= (2 n_sys, ws).
     """
     starts = np.zeros(3, dtype=np.int64)
     lens = np.zeros(3, dtype=np.int64)
@@ -191,12 +235,12 @@ def eval_probes(
         elif k == PROBE_CODE_DIMENSION:
             out_row[j] = s_ref
         elif k == PROBE_CONTIGUOUS_DISTANCE:
-            out_row[j] = contiguous_distance(tab, n, ws, order, refs, periodic)
+            out_row[j] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
         elif k == PROBE_LOST_INFORMATION:
             for t in range(lens[0]):
                 region_buf[t] = idx[starts[0] + t]
-            out_row[j] = mutual_information_with(
-                tab, n, ws, refs, region_buf[: lens[0]], mask_buf, comp_buf, scratch, union_buf
+            out_row[j] = lost_information_rows(
+                tab, ws, region_buf[: lens[0]], ref_rows, erase_scratch
             )
         elif k == PROBE_MUTUAL_INFORMATION or k == PROBE_TRIPARTITE:
             # sum over nonempty subsets T of the regions of (-1)^(|T|+1) S(T)
@@ -221,21 +265,17 @@ def eval_probes(
                     tmp = perm[t]
                     perm[t] = perm[r]
                     perm[r] = tmp
-                lost = mutual_information_with(
-                    tab, n, ws, refs, perm[:m], mask_buf, comp_buf, scratch, union_buf
-                )
+                lost = lost_information_rows(tab, ws, perm[:m], ref_rows, erase_scratch)
                 if k == PROBE_ERASURE_MEAN_LOST:
                     acc += lost
                 elif lost == 0:
                     acc += 1.0
             out_row[j] = acc / samples
-        else:  # PROBE_MEAN_WEIGHT
-            out_row[j] = mean_weight(tab, n, ws)
 
 
 @njit(cache=True)
 def eval_vector_probes(
-    tab, n, ws, n_sys, refs, vkinds, vsamples, order, prng, out_block, perm, work
+    tab, n, ws, n_sys, ref_rows, vkinds, vsamples, order, prng, out_block, perm, work
 ):
     """Evaluate every vector probe into ``out_block[v, :]`` (length n_sys + 1 each)."""
     for v in range(vkinds.shape[0]):
@@ -254,7 +294,7 @@ def eval_vector_probes(
                     tmp = perm[t]
                     perm[t] = perm[r]
                     perm[r] = tmp
-                erasure_profile(tab, n, ws, perm, refs, work)
+                erasure_profile_rows(tab, ws, perm, ref_rows, work)
                 for i in range(n_sys + 1):
                     if k == VPROBE_ERASURE_LOST:
                         out_block[v, i] += work[i]
@@ -279,8 +319,9 @@ def _setup(
 
 @njit(parallel=True, cache=True)
 def run_ensemble(
-    n_sys, n_ref, ref_mode, fixed_partner, edges, edge_cum, color_ptr, color_idx, schedule_kind,
-    gates_per_layer, pool, p, layers, scramble_gates, scramble_layers, orient, checkpoints,
+    n_sys, n_ref, ref_mode, fixed_partner, edges, graph_ptr, edge_cum, color_ptr, color_ptr_ptr,
+    color_idx, schedule_kind, gates_per_layer, pool, p, layers, scramble_gates,
+    scramble_matchings, scramble_layers, orient, checkpoints,
     stop_purified, kinds, ptr, region_len, idx, size_param, sample_param, vkinds, vsamples, order,
     periodic, key_struct, key_probe, first, out_values, out_vectors, out_tau, out_final, out_meas,
     h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
@@ -290,8 +331,14 @@ def run_ensemble(
     num_ck = checkpoints.shape[0]
     n = n_sys + n_ref
     ws = (n + 63) // 64
-    max_gates = max(gates_per_layer, edges.shape[0], scramble_gates, 1)
+    max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
+    num_graphs = graph_ptr.shape[0] - 1
     for t in prange(num_traj):
+        g = (first + t) % num_graphs
+        g_edges = edges[graph_ptr[g] : graph_ptr[g + 1]]
+        g_cum = edge_cum[graph_ptr[g] : graph_ptr[g + 1]]  # empty when unweighted
+        g_cidx = color_idx[graph_ptr[g] : graph_ptr[g + 1]]
+        g_cptr = color_ptr[color_ptr_ptr[g] : color_ptr_ptr[g + 1]]
         rng = np.empty(4, dtype=np.uint64)
         prng = np.empty(4, dtype=np.uint64)
         stream_state(key_struct, first + t, rng)
@@ -308,7 +355,10 @@ def run_ensemble(
         comp_buf = np.zeros(n, dtype=np.int64)
         scratch = np.zeros((2 * (n // 2 + 1), ws), dtype=np.uint64)
         union_buf = np.zeros(n, dtype=np.int64)
+        erase_scratch = np.zeros((2 * n_sys, ws), dtype=np.uint64)
+        ref_rows = np.zeros(ws, dtype=np.uint64)
         perm = np.arange(n_sys).astype(np.int64)
+        mperm = np.zeros(n_sys, dtype=np.int64)
         refs = np.arange(n_sys, n).astype(np.int64)
         work = np.zeros(n_sys + 1, dtype=np.int64)
 
@@ -330,13 +380,18 @@ def run_ensemble(
             ident2,
             ws,
         )
+        reference_rows(tab, ws, refs, ref_rows)
 
         gen_scramble_pairs(rng, scramble_gates, n_sys, pool, ga, gb, gg)
         for j in range(scramble_gates):
             apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
+        for _ in range(scramble_matchings):
+            ng = gen_scramble_matching(rng, n_sys, pool, mperm, ga, gb, gg)
+            for j in range(ng):
+                apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
         for s in range(scramble_layers):
             ng, _ = gen_layer(
-                rng, s, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer,
+                rng, s, schedule_kind, g_edges, g_cum, g_cptr, g_cidx, gates_per_layer,
                 pool, n_sys, p, False, orient, ga, gb, gg, mq,
             )  # fmt: skip
             for j in range(ng):
@@ -350,26 +405,26 @@ def run_ensemble(
         for layer in range(layers + 1):
             if layer > 0:
                 ng, nm = gen_layer(
-                    rng, layer - 1, schedule_kind, edges, edge_cum, color_ptr, color_idx,
+                    rng, layer - 1, schedule_kind, g_edges, g_cum, g_cptr, g_cidx,
                     gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,
                 )  # fmt: skip
                 for j in range(ng):
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
                 for j in range(nm):
-                    measure_1q_phase_free(tab, n, ws, mq[j], 2, anti, supp)
+                    measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
                 num_meas += nm
                 final = layer
             if ci < num_ck and checkpoints[ci] == layer:
-                s_ref = 0
-                if ref_mode != REF_NONE:
-                    s_ref = region_entropy(tab, n, ws, refs, mask_buf, comp_buf, scratch)
+                s_ref = -n_ref
+                for w in range(ws):
+                    s_ref += np.int64(popcount(ref_rows[w]))
                 eval_probes(
-                    tab, n, ws, n_sys, refs, s_ref, kinds, ptr, region_len, idx, size_param,
-                    sample_param, order, periodic, prng, out_values[t, ci], mask_buf, comp_buf,
-                    scratch, union_buf, perm,
+                    tab, n, ws, n_sys, ref_rows, n_ref, s_ref, kinds, ptr, region_len, idx,
+                    size_param, sample_param, order, periodic, prng, out_values[t, ci], mask_buf,
+                    comp_buf, scratch, union_buf, perm, erase_scratch,
                 )  # fmt: skip
                 eval_vector_probes(
-                    tab, n, ws, n_sys, refs, vkinds, vsamples, order, prng, out_vectors[t, ci],
+                    tab, n, ws, n_sys, ref_rows, vkinds, vsamples, order, prng, out_vectors[t, ci],
                     perm, work,
                 )  # fmt: skip
                 if ref_mode != REF_NONE and tau < 0 and s_ref == 0:
@@ -391,20 +446,28 @@ def run_ensemble(
 
 @njit(cache=True)
 def generate_ops(
-    n_sys, ref_mode, fixed_partner, edges, edge_cum, color_ptr, color_idx, schedule_kind,
-    gates_per_layer, pool, p, layers, scramble_gates, scramble_layers, orient, key_struct,
-    trajectory, out_ga, out_gb, out_gg, gate_ptr, out_mq, meas_ptr,
+    n_sys, ref_mode, fixed_partner, edges, graph_ptr, edge_cum, color_ptr, color_ptr_ptr,
+    color_idx, schedule_kind, gates_per_layer, pool, p, layers, scramble_gates,
+    scramble_matchings, scramble_layers, orient, key_struct, trajectory, out_ga, out_gb, out_gg,
+    gate_ptr, out_mq, meas_ptr,
 ):  # fmt: skip
     """Record trajectory ``trajectory``'s circuit (same draws as :func:`run_ensemble`).
 
-    Gate block 0 holds the scramble pairs, blocks 1..scramble_layers the
-    scramble layers, then one block per dynamics layer; ``gate_ptr`` /
-    ``meas_ptr`` are CSR offsets (measurement blocks exist for dynamics layers
-    only). Returns the reference partner (or -1).
+    Gate block 0 holds the scramble pairs, the next ``scramble_matchings``
+    blocks the scramble matchings, then ``scramble_layers`` blocks of scramble
+    layers, then one block per dynamics layer; ``gate_ptr`` / ``meas_ptr`` are
+    CSR offsets (measurement blocks exist for dynamics layers only). Returns
+    the reference partner (or -1).
     """
     rng = np.empty(4, dtype=np.uint64)
     stream_state(key_struct, trajectory, rng)
-    max_gates = max(gates_per_layer, edges.shape[0], scramble_gates, 1)
+    max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
+    g = trajectory % (graph_ptr.shape[0] - 1)
+    g_edges = edges[graph_ptr[g] : graph_ptr[g + 1]]
+    g_cum = edge_cum[graph_ptr[g] : graph_ptr[g + 1]]  # empty when unweighted
+    g_cidx = color_idx[graph_ptr[g] : graph_ptr[g + 1]]
+    g_cptr = color_ptr[color_ptr_ptr[g] : color_ptr_ptr[g + 1]]
+    mperm = np.zeros(n_sys, dtype=np.int64)
     ga = np.zeros(max_gates, dtype=np.int64)
     gb = np.zeros(max_gates, dtype=np.int64)
     gg = np.zeros(max_gates, dtype=np.int64)
@@ -423,9 +486,18 @@ def generate_ops(
         g_pos += 1
     block += 1
     gate_ptr[block] = g_pos
+    for _ in range(scramble_matchings):
+        ng = gen_scramble_matching(rng, n_sys, pool, mperm, ga, gb, gg)
+        for j in range(ng):
+            out_ga[g_pos] = ga[j]
+            out_gb[g_pos] = gb[j]
+            out_gg[g_pos] = gg[j]
+            g_pos += 1
+        block += 1
+        gate_ptr[block] = g_pos
     for s in range(scramble_layers):
         ng, _ = gen_layer(
-            rng, s, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer, pool,
+            rng, s, schedule_kind, g_edges, g_cum, g_cptr, g_cidx, gates_per_layer, pool,
             n_sys, p, False, orient, ga, gb, gg, mq,
         )  # fmt: skip
         for j in range(ng):
@@ -439,7 +511,7 @@ def generate_ops(
     meas_ptr[0] = 0
     for layer in range(layers):
         ng, nm = gen_layer(
-            rng, layer, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer,
+            rng, layer, schedule_kind, g_edges, g_cum, g_cptr, g_cidx, gates_per_layer,
             pool, n_sys, p, True, orient, ga, gb, gg, mq,
         )  # fmt: skip
         for j in range(ng):

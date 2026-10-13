@@ -12,6 +12,12 @@ The incremental :class:`basis` routines keep a reduced set of bitsets keyed by
 their lowest set bit, so adding one qubit's two columns costs ``O(rank * ws)``.
 That gives all prefix entropies of an ordering (an entanglement profile) and
 contiguous-region scans in ``O(N * rank * ws)``.
+
+The ``*_rows`` routines at the end serve the ensemble engine, which maintains
+the *reference rows* of a code (see
+:func:`~sparsegf2_v3._kernel.tableau.measure_1q_phase_free_tracked`): with
+that invariant, ``S(R)`` is a popcount and ``I(R:E) = rank(E) - rank(E over
+the other rows)``, so no reference column ever enters an elimination.
 """
 
 from __future__ import annotations
@@ -19,9 +25,9 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
-from sparsegf2_v3._kernel.bits import ZERO, ctz
+from sparsegf2_v3._kernel.bits import ZERO, ctz, popcount
 from sparsegf2_v3._kernel.rng import next_below, stream_state
-from sparsegf2_v3._kernel.tableau import columns_rank, single_qubit_entropy
+from sparsegf2_v3._kernel.tableau import columns_rank, columns_rank_without, single_qubit_entropy
 
 
 @njit(cache=True)
@@ -94,6 +100,17 @@ def basis_add_qubit(tab, q, ws, basis, pivot_owner, num, vec):
     for col in range(2):
         for w in range(ws):
             vec[w] = tab[2 * q + col, w]
+        added += basis_add(vec, basis, pivot_owner, num, ws)
+    return added
+
+
+@njit(cache=True)
+def basis_add_qubit_without(tab, q, ws, skip_rows, basis, pivot_owner, num, vec):
+    """:func:`basis_add_qubit` with the rows set in ``skip_rows`` masked out."""
+    added = 0
+    for col in range(2):
+        for w in range(ws):
+            vec[w] = tab[2 * q + col, w] & ~skip_rows[w]
         added += basis_add(vec, basis, pivot_owner, num, ws)
     return added
 
@@ -344,3 +361,93 @@ def erasure_profiles(tab, n, ws, system, reference, samples, key, out):
             perm[t] = perm[r]
             perm[r] = tmp
         erasure_profile(tab, n, ws, perm, reference, out[j])
+
+
+# -- reference rows (ensemble engine) -----------------------------------------------------
+#
+# Precondition for everything below: ``ref_rows`` marks the stabilizer rows with
+# support on the reference qubits R, and their R-parts are linearly independent
+# (true right after Bell-pairing the references, and kept true by
+# ``measure_1q_phase_free_tracked`` while nothing acts on R). Then, for a set E
+# of system qubits, S(R) = popcount(ref_rows) - |R| and
+# I(R:E) = rank(E) - rank(E restricted to the unmarked rows).
+
+
+@njit(cache=True)
+def reference_rows(tab, ws, reference, out):
+    """``out`` = the stabilizer rows with support on ``reference`` (see the precondition)."""
+    for w in range(ws):
+        out[w] = ZERO
+    for j in range(reference.shape[0]):
+        r = reference[j]
+        for w in range(ws):
+            out[w] |= tab[2 * r, w] | tab[2 * r + 1, w]
+
+
+@njit(cache=True)
+def lost_information_rows(tab, ws, erased, ref_rows, scratch):
+    """I(R:E) for system qubits ``erased``; ``scratch`` has shape >= (2 |E|, ws)."""
+    return columns_rank(tab, erased, ws, scratch) - columns_rank_without(
+        tab, erased, ws, ref_rows, scratch
+    )
+
+
+@njit(cache=True)
+def erasure_profile_rows(tab, ws, order, ref_rows, out):
+    """``out[m] = I(R : order[:m])`` for m = 0..len(order), in one incremental pass."""
+    cap = 64 * ws + 1
+    vec = np.zeros(ws, dtype=np.uint64)
+    all_basis = np.zeros((cap, ws), dtype=np.uint64)
+    all_owner = np.full(64 * ws, -1, dtype=np.int64)
+    all_num = np.zeros(1, dtype=np.int64)
+    free_basis = np.zeros((cap, ws), dtype=np.uint64)
+    free_owner = np.full(64 * ws, -1, dtype=np.int64)
+    free_num = np.zeros(1, dtype=np.int64)
+    lost = 0
+    out[0] = 0
+    for m in range(order.shape[0]):
+        q = order[m]
+        lost += basis_add_qubit(tab, q, ws, all_basis, all_owner, all_num, vec)
+        lost -= basis_add_qubit_without(tab, q, ws, ref_rows, free_basis, free_owner, free_num, vec)
+        out[m + 1] = lost
+
+
+@njit(cache=True)
+def contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic):
+    """:func:`contiguous_distance` for the engine: smallest run of ``system`` with I(R:A) > 0.
+
+    Returns 0 if the code dimension is 0. Each start grows its run one qubit
+    at a time and stops once it cannot beat the best length so far.
+    """
+    k = -num_ref
+    for w in range(ws):
+        k += np.int64(popcount(ref_rows[w]))
+    if k == 0:
+        return 0
+    num_sys = system.shape[0]
+    cap = 64 * ws + 1
+    vec = np.zeros(ws, dtype=np.uint64)
+    all_basis = np.zeros((cap, ws), dtype=np.uint64)
+    all_owner = np.full(64 * ws, -1, dtype=np.int64)
+    all_num = np.zeros(1, dtype=np.int64)
+    free_basis = np.zeros((cap, ws), dtype=np.uint64)
+    free_owner = np.full(64 * ws, -1, dtype=np.int64)
+    free_num = np.zeros(1, dtype=np.int64)
+    best = num_sys
+    for s in range(num_sys):
+        basis_reset(all_owner, all_num)
+        basis_reset(free_owner, free_num)
+        lost = 0
+        max_len = best - 1
+        if not periodic:
+            max_len = min(max_len, num_sys - s)
+        for length in range(1, max_len + 1):
+            q = system[(s + length - 1) % num_sys]
+            lost += basis_add_qubit(tab, q, ws, all_basis, all_owner, all_num, vec)
+            lost -= basis_add_qubit_without(
+                tab, q, ws, ref_rows, free_basis, free_owner, free_num, vec
+            )
+            if lost > 0:
+                best = length
+                break
+    return best

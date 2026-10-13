@@ -18,7 +18,7 @@ _U = np.uint64
 
 
 def seed_state(seed) -> np.ndarray:
-    """Return a fresh xoshiro256** state from an int, a SeedSequence, or None.
+    """Return a fresh xoshiro256** state from an int, a sequence of ints, a SeedSequence, or None.
 
     ``None`` draws OS entropy. The result is never all zeros.
     """

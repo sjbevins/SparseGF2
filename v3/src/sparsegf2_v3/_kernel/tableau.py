@@ -374,10 +374,64 @@ def measure_1q_phase_free(tab, n, ws, q, code, anti, supp):
     """Fast path: measure X/Z/Y (code 1/2/3) on ``q`` in phase-free mode.
 
     Same projection as :func:`collapse` restricted to stabilizer rows, fused
-    into one loop (no signs, no destabilizers). Returns ``2`` if the outcome was
-    random, else ``0``. ``anti`` (length >= ws) and ``supp`` (length >= n) are
-    scratch.
+    into one loop (no signs, no destabilizers); the pivot is the first
+    anticommuting row. Returns ``2`` if the outcome was random, else ``0``.
+    ``anti`` (length >= ws) and ``supp`` (length >= n) are scratch.
     """
+    _anticommuting_1q(tab, ws, q, code, anti)
+    pivot = -1
+    for w in range(ws):
+        if anti[w] != ZERO:
+            pivot = (w << 6) + np.int64(ctz(anti[w]))
+            break
+    if pivot < 0:
+        return 0
+    _collapse_phase_free(tab, n, ws, q, code, anti, supp, pivot)
+    return 2
+
+
+@njit(cache=True)
+def measure_1q_phase_free_tracked(tab, n, ws, q, code, anti, supp, ref_rows):
+    """:func:`measure_1q_phase_free` that maintains the *reference rows* of a code.
+
+    ``ref_rows`` (length ws) marks the stabilizer rows with support on a set R
+    of reference qubits that no operation ever touches. Invariant: the R-parts
+    of the marked rows are linearly independent. Then
+
+    * the unmarked rows generate the stabilizer group of the system's state
+      (the code's stabilizers), and
+    * ``S(R) = popcount(ref_rows) - |R|`` (the code dimension k).
+
+    The pivot is the first anticommuting row *outside* ``ref_rows`` if there is
+    one: multiplying by it leaves every R-part unchanged. Otherwise every
+    anticommuting row is marked; multiplying the others by the pivot keeps
+    their R-parts independent (and nonzero), and the pivot row, replaced by
+    the measured Pauli, leaves the set. Either way the invariant holds and
+    the stabilizer group is the same as with :func:`measure_1q_phase_free`.
+    With ``ref_rows`` all zero the two functions are identical.
+    """
+    _anticommuting_1q(tab, ws, q, code, anti)
+    pivot = -1
+    for w in range(ws):
+        free = anti[w] & ~ref_rows[w]
+        if free != ZERO:
+            pivot = (w << 6) + np.int64(ctz(free))
+            break
+    if pivot < 0:
+        for w in range(ws):
+            if anti[w] != ZERO:
+                pivot = (w << 6) + np.int64(ctz(anti[w]))
+                break
+        if pivot < 0:
+            return 0
+        ref_rows[pivot >> 6] &= ~(ONE << _U(pivot & 63))
+    _collapse_phase_free(tab, n, ws, q, code, anti, supp, pivot)
+    return 2
+
+
+@njit(cache=True)
+def _anticommuting_1q(tab, ws, q, code, anti):
+    """``anti`` = stabilizer rows anticommuting with X/Z/Y (code 1/2/3) on ``q``."""
     xr = 2 * q
     for w in range(ws):
         a = ZERO
@@ -386,13 +440,12 @@ def measure_1q_phase_free(tab, n, ws, q, code, anti, supp):
         if code & 1:
             a ^= tab[xr + 1, w]
         anti[w] = a
-    pivot = -1
-    for w in range(ws):
-        if anti[w] != ZERO:
-            pivot = (w << 6) + np.int64(ctz(anti[w]))
-            break
-    if pivot < 0:
-        return 0
+
+
+@njit(cache=True)
+def _collapse_phase_free(tab, n, ws, q, code, anti, supp, pivot):
+    """Multiply the rows in ``anti`` by row ``pivot`` and replace it by the measured Pauli."""
+    xr = 2 * q
     pw = pivot >> 6
     pbit = ONE << _U(pivot & 63)
     nbit = ~pbit
@@ -416,7 +469,6 @@ def measure_1q_phase_free(tab, n, ws, q, code, anti, supp):
         tab[xr, pw] |= pbit
     if code & 2:
         tab[xr + 1, pw] |= pbit
-    return 2
 
 
 @njit(cache=True)
@@ -501,12 +553,29 @@ def columns_rank(tab, qubits, ws, scratch):
     The 2|A| column bitsets (X and Z for each qubit, restricted to stabilizer
     words) are copied into ``scratch`` (shape >= (2|A|, ws)) and row-reduced.
     """
-    m = 2 * qubits.shape[0]
     for i in range(qubits.shape[0]):
         q = qubits[i]
         for w in range(ws):
             scratch[2 * i, w] = tab[2 * q, w]
             scratch[2 * i + 1, w] = tab[2 * q + 1, w]
+    return _echelon_rank(scratch, 2 * qubits.shape[0], ws)
+
+
+@njit(cache=True)
+def columns_rank_without(tab, qubits, ws, skip_rows, scratch):
+    """:func:`columns_rank` over the stabilizer rows *not* set in ``skip_rows``."""
+    for i in range(qubits.shape[0]):
+        q = qubits[i]
+        for w in range(ws):
+            keep = ~skip_rows[w]
+            scratch[2 * i, w] = tab[2 * q, w] & keep
+            scratch[2 * i + 1, w] = tab[2 * q + 1, w] & keep
+    return _echelon_rank(scratch, 2 * qubits.shape[0], ws)
+
+
+@njit(cache=True)
+def _echelon_rank(scratch, m, ws):
+    """Rank of the first ``m`` bitset rows of ``scratch`` (destroyed)."""
     rank = 0
     for i in range(m):
         lead_w = -1
