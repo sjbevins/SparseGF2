@@ -1,5 +1,25 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev5: the monitored-circuit ensemble engine
+
+* `sparsegf2_v3.graphs`: edge-array graphs (`cycle`, `path`, `complete`,
+  `lattice_2d`, `watts_strogatz`, `newman_watts`, `erdos_renyi`,
+  `random_regular`, `from_networkx`, `from_edges`) with platform-independent
+  seeded generation, plus `edge_coloring` (brickwork on any graph).
+* `sparsegf2_v3.mipt`: `MonitoredCircuit` protocol spec (pictures: none,
+  purification, single reference with fixed or random partner; scrambles;
+  schedules: matching, random_edges, all_edges; gate sets; checkpoints; stop at
+  purification) and probes (`code_dimension`, `half_cut_entropy`, `entropy`,
+  `contiguous_distance`, `lost_information`, `erasure_lost_information`,
+  `erasure_correctable_fraction`, `mean_stabilizer_weight`, profiles).
+* `spec.run(trajectories, seed=...)` generates and simulates every trajectory in
+  compiled code, in parallel; results are independent of thread count and
+  chunking (`first_trajectory`, `EnsembleResult.concatenate`), and saved/loaded
+  with `EnsembleResult.save/load`. `spec.circuit(t, seed=...)` returns the exact
+  circuit of trajectory `t`.
+* Tests: engine output equals the general Simulator running the exported
+  circuits, probe by probe at every checkpoint, for five protocol variants.
+
 ## 3.0.0.dev4: milestone 4, observables and erasure protection
 
 * `sparsegf2_v3.observables`: `entropy`, `mutual_information`,
