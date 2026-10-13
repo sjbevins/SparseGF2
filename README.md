@@ -6,6 +6,11 @@ Aaronson-Gottesman tableau sparsely, so a measurement is a cheap rank update
 instead of a dense $O(n^2)$ step. That makes it fast in the measurement-heavy
 regime where the stabilizers stay low weight (see [SparseGF2 vs Stim](#sparsegf2-vs-stim)).
 
+> **SparseGF2 v3 is being rebuilt from scratch in [`v3/`](v3/README.md)**, checked
+> against Stim at every step. Start with its [design](v3/docs/DESIGN.md) and the
+> [audit of this version](v3/docs/AUDIT.md), which also corrects the Stim
+> benchmark below. The v2 package documented here is unchanged.
+
 ## Getting started
 
 This assumes you already have **git** and **Python 3.12 or newer**. Use the
