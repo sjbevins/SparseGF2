@@ -3,7 +3,8 @@
 Reads ``results/simulators.json`` (from ``compare_simulators.py``) and
 ``results/physics.json`` (from ``physics_data.py``) and writes
 ``v3/docs/figures/<name>-light.png`` and ``<name>-dark.png``; the README shows
-the right one with a ``<picture>`` element.
+the right one with a ``<picture>`` element. The exact numbers go to
+``results/tables.md``.
 
 Usage::
 
@@ -59,9 +60,8 @@ SIMULATORS = [
     ("sparsegf2_v3_phases", "SparseGF2 v3", 0),
     ("sparsegf2_v3_phase_free", "SparseGF2 v3, phase-free", 1),
     ("stim", "Stim", 2),
-    ("sparsegf2_v2", "SparseGF2 v2", 3),
-    ("qiskit_aer", "Qiskit Aer (stabilizer)", 4),
-    ("cirq", "Cirq (Clifford)", 5),
+    ("qiskit_aer", "Qiskit Aer (stabilizer)", 3),
+    ("cirq", "Cirq (Clifford)", 4),
 ]
 
 
@@ -332,51 +332,6 @@ def fig_throughput(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
     save(fig, "throughput", mode)
 
 
-def fig_production(cross: list, theme: dict, mode: str) -> None:
-    """Trajectories per second on the PRL single-reference protocol: v2 production vs v3."""
-    rates = sorted({r["p"] for r in cross}, reverse=True)
-    threads = cross[0]["threads"]
-    series = [
-        ("v3_traj_per_s_all_threads", f"v3, {threads} threads", 0),
-        ("v3_traj_per_s_1thread", "v3, 1 thread", 1),
-        ("v2_traj_per_s_1thread", "v2 production engine, 1 thread", 3),
-    ]
-    fig, axes = plt.subplots(
-        1, len(rates), figsize=(4.6 * len(rates) + 1.2, 4.2), sharey=True, squeeze=False
-    )
-    for ax, p in zip(axes[0], rates, strict=True):
-        rows = sorted((r for r in cross if r["p"] == p), key=lambda r: r["n"])
-        n = np.array([r["n"] for r in rows])
-        for key, label, slot in series:
-            y = np.array([r[key] for r in rows])
-            ax.plot(n, y, marker="o", color=theme["series"][slot], label=label)
-        ax.set_xscale("log", base=2)
-        ax.set_yscale("log")
-        ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{int(v)}"))
-        median_tau = int(np.median([r["v3_median_tau"] for r in rows]))
-        ax.set_title(f"p = {p:.3f} (median tau ~ {median_tau} layers)", fontsize=10)
-        ax.set_xlabel("system qubits n")
-    axes[0][0].set_ylabel("trajectories per second")
-    legend(axes[0][-1], loc="lower left")
-    fig.suptitle(
-        "Your production workload: single-reference purification time",
-        x=0.0,
-        ha="left",
-        fontsize=11,
-        fontweight="bold",
-        color=theme["ink"],
-    )
-    fig.tight_layout()
-    caption(
-        fig,
-        f"Watts-Strogatz C(n,2), beta = {cross[0]['beta']}, one graph per trajectory, 32 matching "
-        "layers of scramble, S(R) every layer, T_max = 8n; the same graph banks for both engines.\n"
-        "v3 is timed end to end, from building the spec on the bank to the purification times.",
-        theme,
-    )
-    save(fig, "production", mode)
-
-
 # ---------------------------------------------------------------------------
 # physics figures
 # ---------------------------------------------------------------------------
@@ -604,7 +559,7 @@ def _ms(seconds: float) -> str:
     return f"{ms:.3f}"
 
 
-def tables(sim: dict | None, cross: list | None) -> str:
+def tables(sim: dict | None) -> str:
     """Markdown tables of the benchmark numbers, for the README (exact values from the JSON)."""
     out = []
     if sim:
@@ -648,24 +603,6 @@ def tables(sim: dict | None, cross: list | None) -> str:
                 row = {e["n"]: e["circuits_per_second"] for e in ens if e["p"] == p}
                 out.append(f"| {p} | " + " | ".join(f"{row[n]:,.0f}" for n in sizes) + " |")
             out.append("")
-    if cross:
-        out.append(
-            "**PRL production protocol**, trajectories per second (same graph banks; v3 timed "
-            "end to end, from building the spec on the bank, one graph per trajectory)\n"
-        )
-        out.append(
-            "| p | n | median tau | v2 production engine, 1 thread | v3, 1 thread | "
-            "v3, all threads | speed-up per thread | KS p-value |"
-        )
-        out.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
-        for r in sorted(cross, key=lambda r: (-r["p"], r["n"])):
-            out.append(
-                f"| {r['p']:.3f} | {r['n']} | {r['v3_median_tau']:g} | "
-                f"{r['v2_traj_per_s_1thread']:,.1f} | {r['v3_traj_per_s_1thread']:,.0f} | "
-                f"{r['v3_traj_per_s_all_threads']:,.0f} | "
-                f"{r['v3_traj_per_s_1thread'] / r['v2_traj_per_s_1thread']:.0f}× | {r['ks_pvalue']:.2f} |"
-            )
-        out.append("")
     return "\n".join(out)
 
 
@@ -675,7 +612,6 @@ def main() -> None:
     )
     ap.add_argument("--simulators", default=str(HERE / "results" / "simulators.json"))
     ap.add_argument("--physics", default=str(HERE / "results" / "physics.json"))
-    ap.add_argument("--crosscheck", default=str(HERE / "results" / "crosscheck_v2.json"))
     ap.add_argument(
         "--outdir",
         default=None,
@@ -690,9 +626,6 @@ def main() -> None:
         tables_path = FIGURES / "tables.md"  # never overwrite the committed tables from a test run
     sim = json.loads(Path(args.simulators).read_text()) if Path(args.simulators).exists() else None
     phys = json.loads(Path(args.physics).read_text()) if Path(args.physics).exists() else None
-    cross = (
-        json.loads(Path(args.crosscheck).read_text()) if Path(args.crosscheck).exists() else None
-    )
     for mode, theme in THEMES.items():
         style(theme)
         fig_schematic(theme, mode)
@@ -700,14 +633,12 @@ def main() -> None:
             fig_runtime(sim, theme, mode)
             fig_speedup(sim, theme, mode)
             fig_throughput(sim, theme, mode)
-        if cross:
-            fig_production(cross, theme, mode)
         if phys:
             fig_transition(phys, theme, mode)
             fig_purification(phys, theme, mode)
             fig_erasure(phys, theme, mode)
     FIGURES.mkdir(parents=True, exist_ok=True)
-    tables_path.write_text(tables(sim, cross))
+    tables_path.write_text(tables(sim))
     print(f"wrote figures to {FIGURES} and tables to {tables_path}")
 
 

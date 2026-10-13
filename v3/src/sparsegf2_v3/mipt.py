@@ -178,9 +178,9 @@ def _schedule(checkpoints) -> str | int | tuple[int, ...] | None:
     """A probe's own checkpoints in a hashable form (lists become tuples)."""
     if checkpoints is None or isinstance(checkpoints, str):
         return checkpoints
-    if isinstance(checkpoints, (int, np.integer)) and not isinstance(checkpoints, (bool, np.bool_)):
-        return int(checkpoints)
-    return tuple(operator.index(c) for c in checkpoints)
+    if isinstance(checkpoints, (int, np.integer, float, np.floating)):
+        return _integer(checkpoints, "checkpoints (a stride)")
+    return tuple(_integer(c, "checkpoints entries") for c in checkpoints)
 
 
 def entropy(region: Sequence[int], name: str | None = None, *, checkpoints=None) -> Probe:
@@ -284,7 +284,7 @@ def erasure_lost_profile(samples: int = 10, name: str | None = None, *, checkpoi
         name or "erasure_lost_profile",
         (),
         0,
-        int(samples),
+        _integer(samples, "samples"),
         _schedule(checkpoints),
     )
 
@@ -308,7 +308,7 @@ def erasure_first_failure(
         name or "erasure_first_failure",
         (),
         0,
-        int(samples),
+        _integer(samples, "samples"),
         _schedule(checkpoints),
     )
 
@@ -321,15 +321,16 @@ def uncorrectable_region_counts(
     Entry ``m - 1`` counts the m-subsets A of the system with I(A:R) > 0, so
     ``count / C(n, m)`` is the exact P_C(m), and all counts are zero exactly
     when every erasure of at most ``max_size`` qubits is correctable (code
-    distance > ``max_size``). The cost grows like C(n, max_size): for n = 256,
-    about 1 ms for 2 and 0.5 s for 3 per evaluation, so give it its own sparse
-    ``checkpoints``.
+    distance > ``max_size``). The cost grows like C(n, max_size - 1): for
+    n = 256 (one thread), about 1 ms for 2, 40 to 50 ms for 3 and about 7 s for 4
+    per evaluation, so give larger sizes their own sparse ``checkpoints``.
     """
+    w = _integer(max_size, "max_size")
     return Probe(
         "uncorrectable_counts",
-        name or f"uncorrectable_region_counts[{max_size}]",
+        name or f"uncorrectable_region_counts[{w}]",
         (),
-        int(max_size),
+        w,
         0,
         _schedule(checkpoints),
     )
@@ -356,6 +357,7 @@ class _Kind:
     reference: bool  # needs a reference qubit system
     length: str  # values per evaluation: "one", "profile" (n + 1), "samples", "size"
     after_purification: str  # value once the reference is pure: "nan", "zero", "n", "n+1"
+    sampled: bool = False  # draws random orderings: Probe.samples must be at least 1
 
 
 _KINDS = {
@@ -367,8 +369,8 @@ _KINDS = {
     "code_dimension": _Kind(_ens.PROBE_CODE_DIMENSION, True, "one", "zero"),
     "contiguous_distance": _Kind(_ens.PROBE_CONTIGUOUS_DISTANCE, True, "one", "nan"),
     "lost_information": _Kind(_ens.PROBE_LOST_INFORMATION, True, "one", "zero"),
-    "erasure_lost_profile": _Kind(_ens.PROBE_ERASURE_LOST_PROFILE, True, "profile", "zero"),
-    "erasure_first_failure": _Kind(_ens.PROBE_FIRST_FAILURE, True, "samples", "n+1"),
+    "erasure_lost_profile": _Kind(_ens.PROBE_ERASURE_LOST_PROFILE, True, "profile", "zero", True),
+    "erasure_first_failure": _Kind(_ens.PROBE_FIRST_FAILURE, True, "samples", "n+1", True),
     "uncorrectable_counts": _Kind(_ens.PROBE_UNCORRECTABLE_COUNTS, True, "size", "zero"),
     "code_snapshot": _Kind(_ens.PROBE_CODE_SNAPSHOT, False, "one", "n"),
 }
@@ -621,7 +623,7 @@ class MonitoredCircuit:
                 raise ValueError(
                     f"probe {p.name!r}: regions must be disjoint and without duplicates"
                 )
-        if _KINDS[p.kind].length == "samples" and p.samples < 1:
+        if _KINDS[p.kind].sampled and p.samples < 1:
             raise ValueError(f"probe {p.name!r}: samples must be at least 1")
         if p.kind == "uncorrectable_counts" and not 1 <= p.size <= n:
             raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}]")
@@ -644,8 +646,10 @@ class MonitoredCircuit:
                 raise ValueError(
                     f"checkpoints must be 'final', 'every_layer', a stride or a list, got {spec!r}"
                 )
-        elif isinstance(spec, (int, np.integer)) and not isinstance(spec, (bool, np.bool_)):
-            spec = int(spec)
+        elif isinstance(spec, (int, np.integer, float, np.floating)) and not isinstance(
+            spec, (bool, np.bool_)
+        ):
+            spec = _integer(spec, "checkpoints (a stride)")
             if spec < 1:
                 raise ValueError("a checkpoint stride must be positive")
             layers = np.unique(np.append(np.arange(0, self.layers + 1, spec), self.layers))

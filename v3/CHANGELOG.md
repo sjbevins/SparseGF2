@@ -1,5 +1,143 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev9: erasure probes, graph collections, codes after the run
+
+v3 is now developed for its own simulation campaigns: the v2 production
+protocol, the cross-check against v2 and the v2 speed comparisons are gone
+(see "Removed"). The old package still lives in the repository root.
+
+Behaviour changes (some existing scripts and results change):
+
+* **Graph collections replace `t mod G`.** `MonitoredCircuit(edges=[g0, g1,
+  ...], circuits_per_graph=c)` runs `c` random circuits on each of the `G`
+  graphs (default `c = 1`); trajectory `t` uses graph `t // c`, so each
+  graph's circuits are consecutive and chunks keep graphs together. The old
+  rule, trajectory `t` on graph `t mod G`, is gone everywhere (engine, API,
+  examples). With one circuit per graph and as many trajectories as graphs,
+  trajectory `t` still runs on graph `t`; asking for more than `G * c`
+  trajectories, which used to wrap around, is now an error.
+  `spec.num_trajectories` is `G * c` (`None` for a single graph), and
+  `spec.run(seed=...)` without a count runs all of them;
+  `run(trajectories, seed=..., first_trajectory=...)` still runs chunks.
+  `circuits_per_graph` must be 1 for a single graph.
+  `EnsembleResult.graph_index` gives each trajectory's graph, and
+  `spec.with_edges(edges, edge_weights, circuits_per_graph)` swaps the graphs.
+  The same collection (same graph seeds) can be reused at every measurement
+  rate; with the same circuit seed the gates and random numbers are shared
+  too.
+* **Removed probes**: `erasure_lost_information`,
+  `erasure_correctable_fraction` and `erasure_correctable_profile` (kinds
+  `erasure_mean_lost`, `erasure_correctable`, `erasure_correctable_profile`).
+  Use `erasure_first_failure` (P_C(m), the uncorrectable fraction at every
+  size m), `uncorrectable_region_counts` (exact P_C(m) for small m),
+  `erasure_lost_profile` or `lost_information`.
+* **Exact values after a stop.** With `stop_when_purified`, evaluations after
+  a trajectory stops hold the probe's exact value for a pure reference instead
+  of NaN: `code_dimension`, `lost_information`, `erasure_lost_profile` and
+  `uncorrectable_region_counts` 0, `erasure_first_failure` n + 1,
+  `code_snapshot` n (no code stored; snapshot count -1). Entanglement probes
+  (`entropy`, `half_cut_entropy`, `mutual_information`,
+  `tripartite_information`, `entropy_profile`) and `contiguous_distance` stay
+  NaN there. Code-rate and erasure averages over all trajectories need no NaN
+  handling.
+
+New:
+
+* **Per-probe checkpoints.** Every probe factory takes `checkpoints=`
+  (`"final"`, `"every_layer"`, a positive stride or a list of layers; default:
+  the spec's `checkpoints`), so a cheap probe can run every layer and an
+  expensive one at a few depths. `values[name]` has shape `(trajectories,
+  evaluations)` or `(trajectories, evaluations, length)`, one evaluation per
+  layer of `result.layers(name)` (also `spec.probe_layers(name)`). The
+  purification layer is still detected only at the spec's `checkpoints`.
+* **`erasure_first_failure(samples=100)`**: for each of `samples` uniformly
+  random orderings of the system qubits, the first-failure size D, the
+  smallest m such that erasing the first m qubits leaks logical information
+  (I(A:R) > 0); n + 1 when k = 0. The fraction of samples with D <= m
+  estimates P_C(m) for every m at once.
+* **`uncorrectable_region_counts(max_size=2)`**: the number of uncorrectable
+  m-qubit erasures for m = 1..w, by exhaustion (exact P_C(m) = count / C(n, m);
+  all zero exactly when the distance exceeds w). Default name
+  `uncorrectable_region_counts[w]`.
+* **`code_snapshot()`**: saves the code's stabilizer generators at its
+  checkpoints (at most one per spec; give it its own, e.g. `"final"`). Its
+  value is the number of generators, n - k. `result.snapshots[name]` holds the
+  packed generators and counts, `result.code(t, c)` returns a
+  `StabilizerCode`, and snapshots are saved and loaded with the result
+  (`.npz`).
+* **`codes.StabilizerCode`** (also `sparsegf2_v3.StabilizerCode`): a code from
+  an (s, 2n) 0/1 array (X bits, then Z bits) or Pauli strings (`"XZZX_"`;
+  commuting, not necessarily independent), or from packed rows
+  (`from_packed`). `num_qubits`, `num_stabilizers`, `num_logical`,
+  `stabilizer_matrix()`, `lost_information(A)` (l(A) = I(A:R)),
+  `is_correctable(A)`, `first_failure_sizes(samples, seed=...)` and
+  `uncorrectable_counts(max_size)`, computed by the engine's kernels.
+* **Erasure estimators in `analysis`**: `failure_by_size` (P_C(m), m = 0..n,
+  from first-failure samples), `exact_failure_by_size` (exact P_C(m),
+  m = 1..w, from counts), `erasure_failure_probability` (Phi_C(e) =
+  sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) = mean_j Pr[Bin(n, e) >= D_j], for
+  independent erasure with probability e; with `exact_counts`, the hybrid
+  estimator that is exact for m <= w) and `erasure_tolerance`
+  (e_delta = sup{e : Phi(e) <= delta} for an ensemble, by bisection).
+  Purified codes (D = n + 1) give Phi = 0.
+* Examples: `examples/code_and_erasure.py` runs the erasure workflow versus
+  depth on a graph collection (`--graphs`, `--circuits-per-graph`);
+  `examples/purification_time.py` takes `--graphs`, `--circuits-per-graph` and
+  `--graph-seed`.
+
+Interfaces (API, CLI, MCP):
+
+* JSON spec key `circuits_per_graph`; `"realizations": G` in `graph` builds a
+  collection (graph `i` from seed `[seed, i]`). `trajectories` may be omitted
+  for a collection (all `G * c` run); asking for more than `G * c` is an
+  error.
+* MCP tools `run_ensemble(spec, trajectories=None, ...)`,
+  `estimate_ensemble(spec, trajectories=None)` and
+  `start_ensemble_job(spec, output_dir, trajectories=None, ...)` (`output_dir`
+  now comes before `trajectories`). CLI `sparsegf2 ensemble`: `--trajectories`
+  is optional for graph collections.
+* Probes accept `"checkpoints"` in JSON. Summaries show each probe on its own
+  layers (a `layers` key appears when they differ from the spec's);
+  `erasure_first_failure` and `uncorrectable_region_counts` are summarized as
+  P_C(m) curves (index = m) with a `what` description, `code_snapshot` as the
+  mean generator count with a note (the codes are saved only with
+  `output_dir`).
+* `estimate_ensemble` returns `trajectories` and `result_megabytes` and
+  counts each probe on its own layers; runs whose result would exceed 8 GB
+  (`api.MAX_RESULT_GB`) are refused with a message saying what to change.
+* The MCP erasure prompt uses `erasure_first_failure` and
+  `uncorrectable_region_counts`.
+
+Performance:
+
+* The erasure kernels work on the columns of the system qubits in a row basis
+  adapted to the code (the first s rows span S, all r = n + k rows span
+  N(S)). First-failure scans skip the N(S) rank while the S-rank is full and
+  build the N(S) basis once, at the first deficient prefix. Exhaustive counting
+  prunes failing prefixes, builds N(S) bases only when needed, and finds the
+  uncorrectable last qubits of each prefix with hash lookups over the prefix's
+  span. Measured one-thread costs per evaluation at n = 256 (codes from random
+  circuits): `erasure_first_failure` with 100 samples 3 to 7 ms;
+  `uncorrectable_region_counts` about 1 ms for w = 2, 40 to 50 ms for w = 3
+  and about 7 s for w = 4 (C(256, 4) = 1.7e8 sets; practical only at a few
+  depths); `code_snapshot` under 1 ms. Trajectories run in parallel over all
+  cores.
+
+Removed:
+
+* The v2 cross-check and production benchmark:
+  `benchmarks/crosscheck_v2_production.py`,
+  `benchmarks/results/crosscheck_v2.json`, the production figure
+  (`docs/figures/production-*.png`) and table, and every PRL production
+  protocol speed-up claim.
+* The v2 engine in the simulator comparison (`benchmarks/compare_simulators.py`,
+  `benchmarks/results/simulators.json`, the figures and `tables.md`).
+* The migration guide, `docs/MIGRATING_FROM_V2.md`.
+
+Documentation: `docs/DESIGN.md` documents the probe registry and how to add a
+probe, graph collections, and the erasure kernels; `README.md`, `AGENTS.md`,
+`llms.txt` and `docs/LLM_INTERFACE.md` describe the erasure workflow.
+
 ## 3.0.0.dev8: fixes from the review
 
 Behaviour changes (results of some existing seeds change):

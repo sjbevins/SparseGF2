@@ -7,17 +7,14 @@ them directly).
 
 | script | what it measures | output |
 |---|---|---|
-| [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 v3 (both modes), Stim, Qiskit Aer, Cirq and SparseGF2 v2 on identical circuits; v3's ensemble throughput | `results/simulators.json` |
-| [`crosscheck_v2_production.py`](crosscheck_v2_production.py) | the PRL single-reference protocol through the v2 production engine and v3 on identical graph banks: purification-time distributions (KS test) and trajectories per second, both engines timed from the prebuilt bank to the purification times (for v3: building the spec, preparing every graph, running), compilation excluded | `results/crosscheck_v2.json` |
+| [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 v3 (both modes), Stim, Qiskit Aer and Cirq on identical circuits; v3's ensemble throughput | `results/simulators.json` |
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
-| [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `v3/docs/figures/` | PNGs |
+| [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `v3/docs/figures/`, and the exact numbers into `results/tables.md` | PNGs, `results/tables.md` |
 | [`prototypes/`](prototypes/) | the layout experiments that chose the kernel's data layout (see DESIGN.md §5.1) | printed tables |
 
 ```sh
 pip install -e "./v3[test]" qiskit-aer cirq matplotlib
 python v3/benchmarks/compare_simulators.py
-python v3/benchmarks/crosscheck_v2_production.py --n 32 64 128 256 --graphs 2000 500 200 100 \
-    --p 0.293 0.253 --out v3/benchmarks/results/crosscheck_v2.json
 python v3/benchmarks/physics_data.py
 python v3/benchmarks/make_figures.py
 ```
@@ -42,7 +39,7 @@ python v3/benchmarks/make_figures.py
 * **One thread each**, median of repeated runs after a warm-up. The ensemble
   rows are labelled with their thread count.
 * **Correctness first.** For every size, v3's final stabilizer group is
-  compared with Stim's (and v2's); the script aborts on any mismatch.
+  compared with Stim's; the script aborts on any mismatch.
 * **Stim's build is recorded.** The PyPI wheel of Stim 1.16 ships only an SSE2
   build; the environment block of the results names the build used. A source
   build with `-march=native` (so Stim's SIMD words use AVX2) was slower on the

@@ -20,6 +20,8 @@ a live reference compute ``l(A)``, first-failure sizes and exhaustive counts.
 
 from __future__ import annotations
 
+import math
+import operator
 from collections.abc import Iterable
 
 import numpy as np
@@ -38,9 +40,10 @@ class StabilizerCode:
     ----------
     stabilizers
         The generators: an ``(s, 2n)`` 0/1 array whose row holds the X bits of
-        qubits 0..n-1 then the Z bits, or a sequence of Pauli strings
-        (``PauliString`` or text such as ``"XZ_Y"``; signs are ignored). The
-        generators must commute; they need not be independent.
+        qubits 0..n-1 then the Z bits, or Pauli strings (``PauliString`` or
+        text such as ``"XZ_Y"``, case-insensitive; a leading sign is ignored);
+        a single string is one generator. The generators must commute; they
+        need not be independent.
     num_qubits
         ``n``; needed only when there are no generators.
 
@@ -73,6 +76,10 @@ class StabilizerCode:
         wsys = (n + 63) // 64
         if packed.ndim != 2 or packed.shape[1] != 2 * wsys:
             raise ValueError(f"packed generators need shape (s, {2 * wsys}) for n = {n}")
+        if n % 64 and packed.size:
+            pad = ~((np.uint64(1) << np.uint64(n % 64)) - np.uint64(1))
+            if np.any(packed[:, [wsys - 1, 2 * wsys - 1]] & pad):
+                raise ValueError(f"packed generators have bits beyond qubit {n - 1}")
         if not _ent.generators_commute(packed):
             raise ValueError("the stabilizer generators do not all commute")
         normalizer, rank = _ent.symplectic_complement(packed, n)
@@ -148,16 +155,19 @@ class StabilizerCode:
 
         Entry ``m - 1`` divided by C(n, m) is the exact probability that a
         uniformly random m-qubit erasure is uncorrectable. The code distance
-        exceeds ``max_size`` exactly when every count is 0.
+        exceeds ``max_size`` exactly when every count is 0. The counts are
+        int64 while every C(n, m) is below 2**53 (so the counts are exact);
+        beyond that they are float64, exact to double precision.
         """
-        if not 1 <= max_size <= self._n:
+        w = operator.index(max_size)
+        if not 1 <= w <= self._n:
             raise ValueError(f"max_size must be in [1, {self._n}]")
-        out = np.zeros(int(max_size), dtype=np.float64)
+        out = np.zeros(w, dtype=np.float64)
         if self.num_logical > 0:
-            _ent.uncorrectable_counts_rows(
-                self._tab, self._ws, self._system, self._marked, int(max_size), out
-            )
-        return out.astype(np.int64)
+            _ent.uncorrectable_counts_rows(self._tab, self._ws, self._system, self._marked, w, out)
+        if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**53:
+            return out.astype(np.int64)
+        return out
 
     def _qubits(self, qubits: Iterable[int]) -> np.ndarray:
         a = np.array([int(q) for q in qubits], dtype=np.int64)
@@ -170,15 +180,21 @@ class StabilizerCode:
 
 def _bit_rows(stabilizers, num_qubits: int | None) -> np.ndarray:
     """Generators as an ``(s, 2n)`` uint8 array from bit rows or Pauli strings."""
+    if isinstance(stabilizers, (str, PauliString)):
+        stabilizers = [stabilizers]  # one generator, not one per character
     if isinstance(stabilizers, np.ndarray) and stabilizers.dtype != object:
         rows = np.asarray(stabilizers)
     else:
         items = list(stabilizers)
         if items and all(isinstance(p, (str, PauliString)) for p in items):
-            paulis = [p if isinstance(p, PauliString) else PauliString(p) for p in items]
+            paulis = [p if isinstance(p, PauliString) else _pauli_text(p) for p in items]
             n = len(paulis[0])
             if any(len(p) != n for p in paulis):
                 raise ValueError("all stabilizers must act on the same number of qubits")
+            if num_qubits is not None and n != num_qubits:
+                raise ValueError(
+                    f"the stabilizers act on {n} qubits, not num_qubits = {num_qubits}"
+                )
             return np.array([np.concatenate([p.xs, p.zs]) for p in paulis], dtype=np.uint8).reshape(
                 len(paulis), 2 * n
             )
@@ -194,6 +210,12 @@ def _bit_rows(stabilizers, num_qubits: int | None) -> np.ndarray:
     if num_qubits is not None and rows.shape[1] != 2 * num_qubits:
         raise ValueError(f"rows have {rows.shape[1] // 2} qubits, not num_qubits = {num_qubits}")
     return rows.astype(np.uint8)
+
+
+def _pauli_text(text: str) -> PauliString:
+    """A stabilizer written as text: a leading sign is dropped and the letters upper-cased,
+    so a lowercase identity ``i`` is never read as a phase."""
+    return PauliString(text.strip().lstrip("+-").upper())
 
 
 def _pack(rows: np.ndarray) -> np.ndarray:

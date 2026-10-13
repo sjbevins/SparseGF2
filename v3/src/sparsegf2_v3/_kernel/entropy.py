@@ -591,10 +591,10 @@ def _column_table(cols, length, mask_last):
 def _span_hits(basis, top, length, keys, hashes, slots, after, hits, require, cur):
     """Mark ``hits[c] |= 1 << j`` for every column (c, j), c > ``after``, inside span(basis[:top]).
 
-    Walks the ``2**top`` elements of the span in Gray-code order. With
-    ``require`` given (non-empty), only qubits with ``require[c] != 0`` are
-    marked. Returns the qubits newly marked, as a count written to ``hits``'
-    companion list by the caller (see :func:`uncorrectable_counts_rows`).
+    Walks the ``2**top`` elements of the span in Gray-code order and looks
+    each up in the table of :func:`_column_table`. With ``require`` given
+    (non-empty), only qubits with ``require[c] != 0`` are marked. Nothing is
+    returned; ``cur`` is work space of the key length.
     """
     size = slots.shape[0]
     for v in range(length):
@@ -643,6 +643,9 @@ def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
       elements of P's S-span and looking each up in a hash table of all
       X, Z and Y columns finds the few c with ``K_S`` non-empty; only those
       are checked against the N(S)-span.
+
+    The counts are float64: exact while below 2**53 (always when every
+    C(n, m), m <= ``max_size``, is), rounded beyond.
     """
     n = system.shape[0]
     w = max_size

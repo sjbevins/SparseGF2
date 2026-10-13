@@ -22,7 +22,7 @@ Fairness rules:
 * Single thread for every simulator; median of ``--repeats`` runs after one
   warm-up.
 * Correctness: for every size, SparseGF2 v3's final stabilizer group is checked
-  against Stim's (and v2's, when included); the run aborts on any mismatch.
+  against Stim's; the run aborts on any mismatch.
 
 The ensemble rows measure SparseGF2 v3's ``mipt`` engine generating *and*
 simulating fresh random circuits of the same family on all cores.
@@ -54,7 +54,7 @@ sys.path.insert(0, str(REPO / "v3" / "src"))
 
 import sparsegf2_v3 as sg  # noqa: E402
 from sparsegf2_v3 import graphs, mipt  # noqa: E402
-from sparsegf2_v3.clifford import Clifford, symplectic_group  # noqa: E402
+from sparsegf2_v3.clifford import Clifford  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # the workload
@@ -280,35 +280,6 @@ def build_cirq(n, layers):
     return run
 
 
-def build_v2(n, layers):
-    sys.path.insert(0, str(REPO / "src"))
-    from sparsegf2 import SparseGF2
-    from sparsegf2.core.sparse_tableau import _build_2q_lut
-
-    group = symplectic_group(2)
-    luts = np.stack([_build_2q_lut(m) for m in group]).astype(np.uint8)
-    prepared = []
-    for pairs, indices, measured in layers:
-        prepared.append(
-            (
-                np.asarray(pairs, dtype=np.int64),
-                np.asarray(indices, dtype=np.int64) // 16,  # v2 is phase-free: symplectic part
-                np.asarray(measured, dtype=np.int64),
-            )
-        )
-
-    def run():
-        sim = SparseGF2(n, rng=np.random.default_rng(1), hybrid=True)
-        for pairs, sym, measured in prepared:
-            sim._dispatch_2q_batch(pairs, sym, luts)
-            if measured.size:
-                sim._measure_z_batch(measured)
-        return sim
-
-    run()  # JIT warm-up
-    return run
-
-
 # ---------------------------------------------------------------------------
 # correctness checks
 # ---------------------------------------------------------------------------
@@ -318,29 +289,12 @@ def unsigned_group(paulis) -> list[str]:
     return [str(p)[1:] for p in paulis]
 
 
-def check(n, layers, include_v2):
-    import stim
-
+def check(n, layers):
     sim = build_v3(n, layers, phases=False)()
     ours = unsigned_group(sim.stabilizers())
     ref = build_stim(n, layers)()
-    if ours != [str(p)[1:] for p in ref.canonical_stabilizers()]:
+    if ours != unsigned_group(ref.canonical_stabilizers()):
         raise AssertionError(f"v3 and Stim disagree at n={n}")
-    if include_v2:
-        v2 = build_v2(n, layers)()
-        sym = v2.canonical_form()
-        tab = stim.Tableau.from_stabilizers(
-            [
-                stim.PauliString(
-                    "".join("_XZY"[x + 2 * z] for x, z in zip(row[:n], row[n:], strict=True))
-                )
-                for row in sym
-            ],
-            allow_underconstrained=False,
-        )
-        theirs = [str(p)[1:] for p in tab.to_stabilizers(canonicalize=True)]
-        if ours != theirs:
-            raise AssertionError(f"v3 and v2 disagree at n={n}")
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +353,6 @@ SIMULATORS = {
     "stim": build_stim,
     "qiskit_aer": build_qiskit,
     "cirq": build_cirq,
-    "sparsegf2_v2": build_v2,
 }
 MAX_N = {"cirq": 64, "qiskit_aer": 256}
 
@@ -442,7 +395,7 @@ def main() -> None:
         for n in args.sizes:
             depth = 2 * n
             layers = make_workload(n, p, depth, seed=n)
-            check(n, layers, include_v2="sparsegf2_v2" not in args.skip and n <= 512)
+            check(n, layers)
             for name, builder in SIMULATORS.items():
                 if name in args.skip or n > MAX_N.get(name, 10**9) or (name, p) in exhausted:
                     continue

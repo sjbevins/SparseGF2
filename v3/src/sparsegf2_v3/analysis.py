@@ -172,6 +172,17 @@ def _histogram(d: np.ndarray, num_qubits: int) -> np.ndarray:
     return (hist.reshape(flat.shape[0], num_qubits + 2) / samples).reshape(*lead, num_qubits + 2)
 
 
+def _matching_counts(exact_counts, d: np.ndarray) -> np.ndarray:
+    """``exact_counts`` as an array whose leading axes are those of the samples ``d``."""
+    c = np.asarray(exact_counts, dtype=np.float64)
+    if c.ndim == 0 or c.shape[:-1] != d.shape[:-1]:
+        raise ValueError(
+            f"exact_counts must have shape {d.shape[:-1]} + (w,), one row per code of "
+            f"first_failure; got {c.shape}"
+        )
+    return c
+
+
 def _exact_part(counts, num_qubits: int, weights: np.ndarray) -> tuple[np.ndarray, int]:
     p_exact = exact_failure_by_size(counts, num_qubits)  # (..., w)
     w = p_exact.shape[-1]
@@ -204,6 +215,8 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
     if w > num_qubits:
         raise ValueError(f"counts cover sizes up to {w} > n = {num_qubits}")
     binom = np.array([math.comb(num_qubits, m) for m in range(1, w + 1)], dtype=np.float64)
+    if not np.all(np.isfinite(c)) or np.any((c < 0) | (c > binom)):
+        raise ValueError("counts[..., m - 1] must lie in [0, C(n, m)]")
     return c / binom
 
 
@@ -226,6 +239,8 @@ def erasure_failure_probability(first_failure, num_qubits: int, e, *, exact_coun
     if es.ndim != 1 or np.any((es < 0) | (es > 1)):
         raise ValueError("e must be a number or a 1-D array of probabilities in [0, 1]")
     hist = _histogram(d, n)  # (..., n + 2)
+    if exact_counts is not None:
+        exact_counts = _matching_counts(exact_counts, d)
     log_binom = _log_binomial(n)
     out = np.empty(hist.shape[:-1] + (es.size,))
     for i, ei in enumerate(es):
@@ -245,37 +260,48 @@ def erasure_tolerance(first_failure, num_qubits: int, delta: float, *, exact_cou
     """e_delta = sup{e : Phi(e) <= delta} for the ensemble of codes in ``first_failure``.
 
     Phi(e) is the mean of Phi_C(e) over the codes (all leading axes of
-    ``first_failure``; select the ensemble first, e.g. codes with k > 0).
-    Phi is non-decreasing in e, so e_delta is found by bisection to about
-    1e-12. Returns 1.0 if Phi(1) <= delta.
+    ``first_failure``; select the ensemble first, e.g. codes with k > 0, and
+    the same rows of ``exact_counts``). The true Phi is non-decreasing in e,
+    but the hybrid estimate need not be (with few samples a code's sampled
+    P_C(w + 1) can fall below its exact P_C(w)), so the last crossing is
+    located on a grid of 2048 steps in e and refined by bisection to about
+    1e-12. Returns 1.0 if Phi stays <= delta up to e = 1, and NaN for an
+    empty ensemble. With ``delta = 0`` the answer is 0 unless no code ever
+    fails (Phi = 0 for every e), then 1.
     """
     if not 0.0 <= delta <= 1.0:
         raise ValueError("delta must be in [0, 1]")
     n = int(num_qubits)
     d = _first_failure_array(first_failure, n)
+    if d.size == 0:
+        return math.nan
     pooled = _histogram(d, n).reshape(-1, n + 2).mean(axis=0)
     log_binom = _log_binomial(n)
     mean_counts = None
     if exact_counts is not None:
-        c = np.asarray(exact_counts, dtype=np.float64)
-        mean_counts = c.reshape(-1, c.shape[-1]).mean(axis=0)
+        c = _matching_counts(exact_counts, d)
+        mean_counts = exact_failure_by_size(c, n).reshape(-1, c.shape[-1]).mean(axis=0)
 
     def phi(e: float) -> float:
         weights = _binomial_weights(n, e, log_binom)
         tail = _tail(weights)
         if mean_counts is None:
             return float(pooled @ tail)
-        exact, w = _exact_part(mean_counts, n, weights)
+        w = mean_counts.size
         sampled = tail.copy()
-        sampled[: w + 1] = tail[w + 1]
-        return float(exact + pooled @ sampled)
+        sampled[: w + 1] = tail[w + 1]  # Pr[Bin >= max(D, w + 1)]
+        return float(mean_counts @ weights[1 : w + 1] + pooled @ sampled)
 
-    if phi(1.0) <= delta:
+    if delta == 0.0:  # Phi(e) > 0 for every e > 0 as soon as some erasure can fail
+        never_fails = pooled[: n + 1].sum() == 0 and (mean_counts is None or not mean_counts.any())
+        return 1.0 if never_fails else 0.0
+    grid = np.linspace(0.0, 1.0, 2049)
+    below = np.array([phi(float(e)) <= delta for e in grid])
+    if below[-1]:
         return 1.0
-    lo, hi = 0.0, 1.0  # phi(lo) <= delta < phi(hi)
-    if phi(0.0) > delta:
-        return 0.0
-    for _ in range(60):
+    i = int(np.flatnonzero(below)[-1])  # Phi(0) = P_C(0) = 0, so below[0] holds
+    lo, hi = float(grid[i]), float(grid[i + 1])  # phi(lo) <= delta < phi(hi)
+    for _ in range(50):
         mid = 0.5 * (lo + hi)
         if phi(mid) <= delta:
             lo = mid

@@ -42,18 +42,6 @@ def test_readme_speedup_claims_match_the_benchmark_data():
     ]
     readme = _flat(ROOT / "README.md")
     assert f"{round(min(big))}–{round(max(big))}× at n = 512–1024" in readme
-    cross = json.loads((ROOT / "benchmarks" / "results" / "crosscheck_v2.json").read_text())
-    one = [r["v3_traj_per_s_1thread"] / r["v2_traj_per_s_1thread"] for r in cross]
-    every = [r["v3_traj_per_s_all_threads"] / r["v2_traj_per_s_1thread"] for r in cross]
-    claim = f"{round(min(one))}–{round(max(one))}×"
-    for doc in (
-        ROOT / "README.md",
-        ROOT.parent / "README.md",
-        ROOT / "docs" / "MIGRATING_FROM_V2.md",
-    ):
-        assert claim in _flat(doc), doc
-    assert f"({round(min(every))}–{round(max(every))}× on all 4 cores)" in readme
-    assert "timed end to end" in readme
     assert "Simulator.run (phase-free) on one thread" in readme  # the throughput figure
 
 
@@ -74,15 +62,23 @@ def test_make_figures_outdir_leaves_the_committed_tables_alone(tmp_path, monkeyp
 
     committed = ROOT / "benchmarks" / "results" / "tables.md"
     before = committed.read_text()
-    cross = tmp_path / "cross.json"
-    row = {"n": 8, "beta": 0.1, "p": 0.3, "graphs": 1, "v2_traj_per_s_1thread": 1.0,
-           "v3_traj_per_s_1thread": 2.0, "v3_traj_per_s_all_threads": 3.0,
-           "v3_median_tau": 5.0, "ks_pvalue": 0.5, "threads": 4}  # fmt: skip
-    cross.write_text(json.dumps([row, {**row, "n": 16}]))
+    sim = tmp_path / "sim.json"
+    runs = [{"simulator": name, "n": n, "p": 0.16, "depth": 2 * n, "seconds": seconds * n}
+            for n in (8, 16)
+            for name, seconds in (("stim", 4e-6), ("sparsegf2_v3_phase_free", 1e-6),
+                                  ("sparsegf2_v3_phases", 2e-6))]  # fmt: skip
+    ensemble = [{"n": n, "p": 0.16, "depth": 2 * n, "threads": 4, "trajectories": 64,
+                 "circuits_per_second": 1e5 / n} for n in (8, 16)]  # fmt: skip
+    environment = {"cpu_model": "test CPU", "stim": "1.0"}
+    sim.write_text(json.dumps({"environment": environment, "runs": runs, "ensemble": ensemble}))
     missing = str(tmp_path / "missing.json")
-    argv = ["make_figures.py", "--simulators", missing, "--physics", missing,
-            "--crosscheck", str(cross), "--outdir", str(tmp_path / "figs")]  # fmt: skip
+    argv = ["make_figures.py", "--simulators", str(sim), "--physics", missing,
+            "--outdir", str(tmp_path / "figs")]  # fmt: skip
     monkeypatch.setattr(sys, "argv", argv)
     runpy.run_path(str(ROOT / "benchmarks" / "make_figures.py"), run_name="__main__")
     assert committed.read_text() == before
-    assert "| 0.300 | 16 |" in (tmp_path / "figs" / "tables.md").read_text()
+    tables = (tmp_path / "figs" / "tables.md").read_text()
+    assert "| 16 | 0.032 (2.0×) | 0.016 (4.0×) | 0.064 |" in tables
+    assert "| 0.16 | 12,500 | 6,250 |" in tables
+    for name in ("runtime", "speedup", "throughput"):
+        assert (tmp_path / "figs" / f"{name}-dark.png").exists(), name

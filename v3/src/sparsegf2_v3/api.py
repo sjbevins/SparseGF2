@@ -1474,10 +1474,19 @@ def _probe_us(p: mipt.Probe, n: int, words: int) -> float:
         return 50.0 + 0.03 * n**2.25
     if p.kind == "erasure_lost_profile":
         return p.samples * (0.8 * n + 0.05 * n * words)
+    # The erasure kernels first row-reduce the code's columns (2n columns of at
+    # most 2n bits); fitted to n = 256..2048 and rounded up.
+    code_words = (2 * n + 63) // 64
+    columns = 0.004 * n**2 * math.sqrt(code_words)
     if p.kind == "erasure_first_failure":
-        return 0.02 * n**2 + p.samples * 0.03 * n**1.5
-    if p.kind == "uncorrectable_counts":  # prefixes of size w - 1, then hash lookups
-        return 0.02 * n**2 + math.comb(n, p.size - 1) * 0.1 * 4 ** (p.size - 1)
+        return columns + p.samples * 0.03 * n**1.5
+    if p.kind == "uncorrectable_counts":
+        # C(n, w - 1) prefixes, each with up to 4**(w - 1) hash lookups; in logs,
+        # so an absurd max_size gives a huge estimate rather than an overflow
+        w = p.size
+        log_prefixes = math.lgamma(n + 1) - math.lgamma(w) - math.lgamma(n - w + 2)
+        log_us = log_prefixes + (w - 1) * math.log(4) + math.log(0.15 + 0.015 * code_words)
+        return columns + math.exp(min(log_us, 700.0))
     if p.kind == "code_snapshot":
         return 1.0 + 0.01 * n**2
     return 10.0 + 0.5 * n + 0.05 * n * words  # entropy_profile, and any newer probe
@@ -1664,7 +1673,7 @@ def _summary_names(names: Sequence[str]) -> dict[str, str]:
 
 
 def _vector_summary(
-    curves: Callable[[np.ndarray], np.ndarray],
+    stats: Callable[[int], tuple[np.ndarray, np.ndarray]],
     alive: np.ndarray,
     layers: np.ndarray,
     sizes_shown: int,
@@ -1672,21 +1681,20 @@ def _vector_summary(
 ) -> dict[str, Any]:
     """A vector probe: one curve over erasure or region size m = 0, 1, ... per evaluation.
 
-    ``curves(evals)`` returns the per-trajectory curves at those evaluations,
-    shape ``(trajectories, len(evals), sizes)``; ``alive`` (trajectories x
-    evaluations) marks the values that exist (with ``stop_when_purified``,
-    entanglement profiles of stopped trajectories do not). ``mean``/``stderr``
-    are at the last evaluation that has data, and ``vs_depth`` gives the mean
-    on a coarse grid of evaluations x sizes, so the change with circuit depth
-    stays visible. ``index`` lists the sizes m shown when not all are.
+    ``stats(c)`` returns the mean and standard error over trajectories of the
+    curve at evaluation ``c``; ``alive`` (trajectories x evaluations) marks
+    the values that exist (with ``stop_when_purified``, entanglement profiles
+    of stopped trajectories do not). ``mean``/``stderr`` are at the last
+    evaluation that has data, and ``vs_depth`` gives the mean on a coarse
+    grid of evaluations x sizes, so the change with circuit depth stays
+    visible. ``index`` lists the sizes m shown when not all are.
     """
     count = alive.sum(axis=0)
     with_data = np.flatnonzero(count > 0)
     if not with_data.size:
         return {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
     last = int(with_data[-1])
-    final = curves(np.array([last]))[:, 0, :]
-    mean, err = analysis.mean_and_error(final, axis=0)
+    mean, err = stats(last)
     sizes = _subsample(mean.size, sizes_shown)
     entry: dict[str, Any] = {
         "vector": True,
@@ -1700,29 +1708,54 @@ def _vector_summary(
     if len(with_data) > 1:
         depth_idx = with_data[_subsample(len(with_data), depths_shown)]
         grid_sizes = _subsample(mean.size, 17)
-        grid_mean, _ = analysis.mean_and_error(curves(depth_idx), axis=0)
         entry["vs_depth"] = {
             "layers": layers[depth_idx],
             "count": count[depth_idx],
             "index": grid_sizes,
-            "mean": grid_mean[:, grid_sizes],
+            "mean": np.array([stats(int(c))[0][grid_sizes] for c in depth_idx]),
         }
     return entry
 
 
-def _failure_curves(values: np.ndarray, n: int) -> Callable[[np.ndarray], np.ndarray]:
-    """First-failure samples -> per-trajectory P_C(m), m = 0..n, at the requested evaluations."""
-    return lambda evals: analysis.failure_by_size(values[:, evals, :], n)
+def _vector_stats(
+    probe: mipt.Probe, values: np.ndarray, n: int, cache: dict
+) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
+    """Mean and standard error of a vector probe's curve at one evaluation, memoized in ``cache``.
 
+    Profiles are averaged as stored. First-failure samples become per-trajectory
+    P_C(m), m = 0..n (fraction of samples with D <= m), in chunks of
+    trajectories so the memory stays bounded whatever the ensemble size;
+    exhaustive counts become the exact P_C(m), m = 0..w (P_C(0) = 0).
+    """
 
-def _count_curves(values: np.ndarray, n: int) -> Callable[[np.ndarray], np.ndarray]:
-    """Exhaustive counts -> per-trajectory exact P_C(m), m = 0..w (P_C(0) = 0)."""
+    def compute(c: int) -> tuple[np.ndarray, np.ndarray]:
+        if probe.kind == "uncorrectable_counts":
+            exact = analysis.exact_failure_by_size(values[:, c, :], n)
+            curves = np.concatenate([np.zeros((exact.shape[0], 1)), exact], axis=1)
+            return analysis.mean_and_error(curves, axis=0)
+        if probe.kind != "erasure_first_failure":
+            return analysis.mean_and_error(values[:, c, :], axis=0)
+        total = np.zeros(n + 1)
+        squares = np.zeros(n + 1)
+        chunk = max(1, (1 << 22) // (n + 2))
+        for start in range(0, values.shape[0], chunk):
+            curves = analysis.failure_by_size(values[start : start + chunk, c, :], n)
+            total += curves.sum(axis=0)
+            squares += (curves**2).sum(axis=0)
+        t = values.shape[0]
+        mean = total / t
+        with np.errstate(invalid="ignore", divide="ignore"):
+            var = np.maximum(squares - t * mean**2, 0.0) / (t - 1)
+            err = np.sqrt(var / t)
+        return mean, err
 
-    def curves(evals: np.ndarray) -> np.ndarray:
-        exact = analysis.exact_failure_by_size(values[:, evals, :], n)
-        return np.concatenate([np.zeros(exact.shape[:-1] + (1,)), exact], axis=-1)
+    def stats(c: int) -> tuple[np.ndarray, np.ndarray]:
+        key = (probe.name, c)
+        if key not in cache:
+            cache[key] = compute(c)
+        return cache[key]
 
-    return curves
+    return stats
 
 
 _VECTOR_MEANING = {
@@ -1745,7 +1778,9 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
     the first and last, the same ones for every probe and the survival curve)
     before the generic cut of :func:`_bounded` is used as a last resort.
     """
-    total = len(result.checkpoint_layers)
+    total = max(
+        [len(result.checkpoint_layers)] + [len(result.layers(name)) for name in result.values]
+    )
     long_extras = [
         key
         for key, value in extra.items()
@@ -1755,25 +1790,27 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
     if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
         extra = {**extra, **{key: "too long to show; see the saved files" for key in long_extras}}
     out: dict[str, Any] = {}
+    cache: dict = {}
     for shown in (MAX_CHECKPOINTS_SHOWN, 32, 16, 8, 4, 2):
-        out = {**_summarize_ensemble(result, shown), **extra}
+        out = {**_summarize_ensemble(result, shown, cache), **extra}
         if long_extras:
             _mark_truncated(out, f"not shown: {', '.join(long_extras)} (too long)")
+        if shown < min(MAX_CHECKPOINTS_SHOWN, total):
+            _mark_truncated(
+                out,
+                f"only {shown} of up to {total} evaluations per probe are shown (evenly "
+                "spaced, first and last included) to fit the size limit; pass output_dir or "
+                "read the saved files for all of them",
+            )
         if len(json.dumps(_jsonable(out))) <= MAX_OUTPUT_CHARS:
-            if shown < min(MAX_CHECKPOINTS_SHOWN, total):
-                _mark_truncated(
-                    out,
-                    f"only {shown} of {total} checkpoints are shown (evenly spaced, first and "
-                    "last included) to fit the size limit; pass output_dir or read the saved "
-                    "files for all of them",
-                )
             return _bounded(out)
     return _bounded(out)
 
 
 def _summarize_ensemble(
-    result: mipt.EnsembleResult, shown: int = MAX_CHECKPOINTS_SHOWN
+    result: mipt.EnsembleResult, shown: int = MAX_CHECKPOINTS_SHOWN, cache: dict | None = None
 ) -> dict[str, Any]:
+    cache = {} if cache is None else cache  # vector-probe statistics, reused across sizes
     spec = result.spec
     layers = np.asarray(result.checkpoint_layers)
     idx = _subsample(len(layers), shown)
@@ -1831,15 +1868,15 @@ def _summarize_ensemble(
                     "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
                 )
         else:
-            if probe.kind == "erasure_first_failure":
-                curves, alive = _failure_curves(values, n), np.ones(values.shape[:2], dtype=bool)
-            elif probe.kind == "uncorrectable_counts":
-                curves, alive = _count_curves(values, n), np.ones(values.shape[:2], dtype=bool)
-            else:
-                curves, alive = (lambda evals, v=values: v[:, evals, :]), ~np.isnan(values[:, :, 0])
+            alive = (
+                ~np.isnan(values[:, :, 0])
+                if mipt._KINDS[probe.kind].after_purification == "nan"
+                else np.ones(values.shape[:2], dtype=bool)
+            )
+            stats = _vector_stats(probe, values, n, cache)
             entry = {
                 "what": _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)"),
-                **_vector_summary(curves, alive, own, sizes_shown, min(MAX_VECTOR_DEPTHS, shown)),
+                **_vector_summary(stats, alive, own, sizes_shown, min(MAX_VECTOR_DEPTHS, shown)),
             }
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
@@ -2656,13 +2693,19 @@ run_ensemble(spec={
 Pictures: reference="purification" (system maximally mixed with n references),
 "single" (one reference qubit Bell-paired with a system qubit), "none".
 Probes: <PROBES>.
-Erasure probes need a reference. A "layer" is one round of gates followed by
-measuring each system qubit with probability measurement_rate.
+Erasure probes need a reference; any probe may take its own "checkpoints". A
+"layer" is one round of gates followed by measuring each system qubit with
+probability measurement_rate.
+
+Graph disorder: "graph": {..., "seed": 1, "realizations": G} plus
+"circuits_per_graph": c runs c circuits on each of G graphs (trajectory t on
+graph t // c); omit trajectories to run all G * c.
 
 ## 3. Long runs
 
-estimate_ensemble(spec, trajectories) gives a rough runtime. Above ~60 s use
-start_ensemble_job(spec, trajectories, output_dir=...), then
+estimate_ensemble(spec, trajectories) gives a rough runtime and the result's
+memory. Above ~60 s use
+start_ensemble_job(spec, output_dir=..., trajectories=...), then
 job_status(job_id, wait_seconds=30) until "completed", then
 load_results(output_dir). Jobs save every chunk; call start_ensemble_job
 again with the same output_dir to resume or extend.

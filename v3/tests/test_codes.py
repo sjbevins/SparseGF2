@@ -236,3 +236,43 @@ def test_estimators_check_their_inputs():
         analysis.erasure_failure_probability(np.array([2]), 4, 1.5)
     with pytest.raises(ValueError, match="sizes up to"):
         analysis.exact_failure_by_size(np.zeros(5), 4)
+
+
+# -- regressions from the review ------------------------------------------------------
+
+
+def test_text_inputs_are_read_as_whole_generators():
+    assert StabilizerCode("ZZ").num_qubits == 2  # one generator, not one per character
+    assert StabilizerCode(["ixx", "izz"]).num_logical == 1  # lowercase identity, not a phase
+    assert StabilizerCode(["-XX", "+ZZ"]).num_logical == 0
+    with pytest.raises(ValueError, match="num_qubits = 3"):
+        StabilizerCode(["XX"], num_qubits=3)
+    rows = np.array([[0b11, 0], [0, 0b11]], dtype=np.uint64)  # X0, Z0 plus a stray bit
+    with pytest.raises(ValueError, match="beyond qubit 0"):
+        StabilizerCode.from_packed(rows, 1)
+
+
+def test_counts_switch_to_floats_beyond_exact_integers():
+    small = StabilizerCode(np.zeros((0, 16), dtype=np.uint8)).uncorrectable_counts(3)
+    assert small.dtype == np.int64 and small.tolist() == [8, 28, 56]
+    big = StabilizerCode(np.zeros((0, 400), dtype=np.uint8)).uncorrectable_counts(13)
+    assert big.dtype == np.float64
+    assert big[12] == pytest.approx(math.comb(200, 13), rel=1e-12)
+
+
+def test_erasure_tolerance_edge_cases():
+    assert math.isnan(analysis.erasure_tolerance(np.zeros((0, 20)), 9, 0.1))
+    assert analysis.erasure_tolerance(np.full(5, 64), 64, 0.0) == 0.0  # Phi(e) = e**64 > 0
+    assert analysis.erasure_tolerance(np.full(5, 65), 64, 0.0) == 1.0  # no code ever fails
+    # a hybrid estimate that rises and falls: the last crossing is the supremum
+    d = np.random.default_rng(0).integers(15, 41, size=100)
+    e = analysis.erasure_tolerance(d, 64, 8e-5, exact_counts=[0, 2])
+    grid = np.linspace(0, 0.5, 20001)
+    phi = analysis.erasure_failure_probability(d, 64, grid, exact_counts=[0, 2])
+    assert e == pytest.approx(grid[np.flatnonzero(phi <= 8e-5)[-1]], abs=1e-4)
+    with pytest.raises(ValueError, match="one row per code"):
+        analysis.erasure_failure_probability(np.full((4, 20), 3), 9, 0.1, exact_counts=[0, 1])
+    with pytest.raises(ValueError, match="one row per code"):
+        analysis.erasure_tolerance(np.full((4, 20), 3), 9, 0.1, exact_counts=np.zeros((2, 2)))
+    with pytest.raises(ValueError, match=r"\[0, C\(n, m\)\]"):
+        analysis.exact_failure_by_size([-1, 0], 9)

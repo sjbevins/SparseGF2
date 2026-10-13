@@ -15,8 +15,9 @@ random circuits each. At every checkpoint this records
 From these, :mod:`sparsegf2_v3.analysis` gives the failure probability under
 independent erasure of each qubit with probability e,
 Phi(e) = sum_m C(n, m) e^m (1 - e)^(n - m) P_C(m) (hybrid estimator: exact for
-m <= w, sampled above), conditioned on k > 0, and the tolerance
-e_delta = sup{e : Phi(e) <= delta}.
+m <= w, sampled above), over all circuits (a purified circuit, k = 0, never
+fails) and conditioned on k > 0 at e = e0, and the tolerance
+e_delta = sup{e : Phi(e) <= delta} of the codes with k > 0.
 
     python v3/examples/code_and_erasure.py --n 64 --p 0.05 --layers 256 --every 32 --out code.npz
 
@@ -45,7 +46,8 @@ def main() -> None:
     ap.add_argument("--circuits-per-graph", type=int, default=4)
     ap.add_argument("--samples", type=int, default=100, help="random orderings per code")
     ap.add_argument("--exhaustive", type=int, default=2, help="largest exhaustively tested size w")
-    ap.add_argument("--delta", type=float, default=0.1)
+    ap.add_argument("--e0", type=float, default=0.1, help="erasure probability of the k>0 column")
+    ap.add_argument("--delta", type=float, default=0.1, help="failure probability for e_delta")
     ap.add_argument("--graph-seed", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", default="code_and_erasure.npz")
@@ -79,7 +81,7 @@ def main() -> None:
     print(
         " layer     r=k/n    q+   Phi(e) for e = "
         + " ".join(f"{e:4.2f}" for e in rates)
-        + f"   (k>0)   e_{args.delta:g}|k>0"
+        + f"   Phi({args.e0:g})|k>0   e_{args.delta:g}|k>0"
     )
     for c, layer in enumerate(res.checkpoint_layers):
         code = k[:, c] > 0
@@ -90,12 +92,12 @@ def main() -> None:
         line += " ".join(f"{f:5.3f}" for f in phi)
         if code.any():
             phi_code = analysis.erasure_failure_probability(
-                first[code, c], n, args.delta, exact_counts=counts[code, c]
+                first[code, c], n, args.e0, exact_counts=counts[code, c]
             ).mean()
             e_delta = analysis.erasure_tolerance(
                 first[code, c], n, args.delta, exact_counts=counts[code, c]
             )
-            line += f"   {phi_code:5.3f}   {e_delta:6.3f}"
+            line += f"   {phi_code:11.3f}   {e_delta:9.3f}"
         print(line)
 
     # The saved codes can be analysed again, e.g. with many more orderings.

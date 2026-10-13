@@ -74,4 +74,4 @@ def test_code_and_erasure(tmp_path, monkeypatch, capsys, p):
     assert list(res.checkpoint_layers) == [0, 4, 8] and res.num_trajectories == 6
     assert res.values["erasure_first_failure"].shape == (6, 3, 10)
     assert res.layers("code_snapshot").tolist() == [8]
-    assert "e_0.1|k>0" in capsys.readouterr().out
+    assert "Phi(0.1)|k>0   e_0.1|k>0" in capsys.readouterr().out

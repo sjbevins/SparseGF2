@@ -1032,3 +1032,37 @@ def test_contiguous_distance_summary_leaves_out_trajectories_without_a_code():
     entry = out["probes"]["contiguous_distance"]
     assert min(entry["mean"]) >= 1 and "count" in entry
     assert any("contiguous_distance" in note for note in out["notes"])
+
+
+def test_summary_of_dense_probe_schedules_is_flagged_and_keeps_every_probe():
+    spec = dict(
+        SMALL_SPEC,
+        num_system=64,
+        graph={"family": "cycle"},
+        layers=200,
+        reference="purification",
+        stop_when_purified=False,
+        checkpoints="final",
+        probes=[{"kind": "entropy", "region": [i, i + 1], "checkpoints": "every_layer"}
+                for i in range(0, 20, 2)]
+        + [{"kind": "code_dimension", "checkpoints": "every_layer"},
+           {"kind": "erasure_first_failure", "samples": 10, "checkpoints": 3},
+           {"kind": "uncorrectable_region_counts", "checkpoints": 3},
+           {"kind": "entropy_profile", "checkpoints": 3}],
+    )  # fmt: skip
+    out = api.run_ensemble(spec, 8, seed=1)
+    assert _size(out) <= api.MAX_OUTPUT_CHARS
+    assert len(out["probes"]) == 14  # nothing cut: fewer evaluations are shown instead
+    assert out["truncated"] and any("evaluations per probe" in n for n in out["notes"])
+
+
+def test_huge_exhaustive_sizes_give_a_huge_estimate_not_an_error():
+    spec = dict(
+        SMALL_SPEC,
+        num_system=600,
+        graph={"family": "cycle"},
+        reference="purification",
+        probes=[{"kind": "uncorrectable_region_counts", "max_size": 520}],
+    )
+    est = api.estimate_ensemble(spec, 1)
+    assert not est["fits_sync_limit"] and est["estimated_seconds"] > 1e100

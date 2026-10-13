@@ -883,3 +883,23 @@ def test_contiguous_distance_is_nan_without_a_code():
     assert np.isnan(d[k == 0]).all() and (d[k > 0] >= 1).all()
     with_code = np.where(k > 0, d, 0).sum(axis=0) / np.maximum((k > 0).sum(axis=0), 1)
     np.testing.assert_allclose(r.mean("contiguous_distance"), with_code)
+
+
+def test_probe_arguments_are_validated_like_the_spec():
+    assert mipt.uncorrectable_region_counts(2.0).name == "uncorrectable_region_counts[2]"
+    with pytest.raises(TypeError, match="max_size must be an integer"):
+        mipt.uncorrectable_region_counts(2.7)
+    with pytest.raises(TypeError, match="samples must be an integer"):
+        mipt.erasure_first_failure(2.5)
+    with pytest.raises(TypeError, match="checkpoints"):
+        mipt.code_dimension(checkpoints=2.5)
+    base = dict(num_system=8, edges=graphs.cycle(8), layers=256, measurement_rate=0.1)
+    spec = mipt.MonitoredCircuit(
+        **base, checkpoints=256 / 8, probes=[mipt.half_cut_entropy(checkpoints=64.0)]
+    )
+    np.testing.assert_array_equal(spec.checkpoint_layers, np.arange(0, 257, 32))  # a stride
+    np.testing.assert_array_equal(spec.probe_layers("half_cut_entropy"), np.arange(0, 257, 64))
+    with pytest.raises(ValueError, match="samples must be at least 1"):
+        mipt.MonitoredCircuit(
+            **base, reference="purification", probes=[mipt.erasure_lost_profile(samples=0)]
+        )

@@ -79,9 +79,12 @@ claude mcp add sparsegf2 -- sparsegf2-mcp
 
    The summary has probe means and standard errors at up to 50 checkpoints, purification
    statistics with censoring, and throughput. `output_dir` keeps everything:
-   `result.npz`, `spec.json` and `provenance.json`.
-6. **Long runs.** `estimate_ensemble` gives a pessimistic runtime estimate. Above about
-   60 s, call `start_ensemble_job(spec, trajectories, output_dir=...)`, then
+   `result.npz`, `spec.json` and `provenance.json`. For a collection of graphs
+   (`"realizations"` in `graph`, see below) `trajectories` may be left out: every graph
+   then gets `circuits_per_graph` circuits.
+6. **Long runs.** `estimate_ensemble` gives a pessimistic runtime estimate, the number of
+   trajectories and the memory of the result (`result_megabytes`). Above about 60 s, call
+   `start_ensemble_job(spec, output_dir=..., trajectories=...)`, then
    `job_status(job_id, wait_seconds=30)` until it reports `completed`, then
    `load_results(output_dir)`. Every chunk is saved as soon as it finishes. To resume
    after a crash or cancel, or to extend a finished run, call `start_ensemble_job` again
@@ -110,31 +113,50 @@ The spec keys are the parameters of `sparsegf2_v3.mipt.MonitoredCircuit`.
   After the gates, each system qubit is measured in Z with probability `measurement_rate`.
   A "layer" always means exactly this. It is never rescaled.
 * **Checkpoints:** `"final"`, `"every_layer"`, an integer stride, or a list of layers.
-  Layer 0 is the state after setup and scramble.
-* **Probes:** recorded at each checkpoint:
-  * `code_dimension` (k = S(R)), `half_cut_entropy`, `entropy`, `mutual_information`,
-    `tripartite_information`;
-  * code and erasure probes: `contiguous_distance`, `lost_information`,
-    `erasure_lost_information`, `erasure_correctable_fraction`;
-  * vector probes, giving one value per region size m = 0..n: `entropy_profile`,
-    `erasure_lost_profile`, `erasure_correctable_profile`. The summary shows them at the
-    last checkpoint with data, plus `vs_depth`, a grid of up to 8 checkpoints by 17
-    sizes.
+  Layer 0 is the state after setup and scramble. Purification is tested at these layers.
+* **Graph collections:** `"realizations": G` in `graph` builds `G` graphs, graph `i` from
+  seed `[seed, i]`, and `"circuits_per_graph": c` (default 1) runs `c` random circuits on
+  each. Trajectory `t` runs on graph `t // c`, so there are `G * c` trajectories; leave
+  `trajectories` out to run them all (asking for more is an error). A graph is never
+  redrawn during a trajectory. The same graph seed gives the same collection at every
+  measurement rate, and the same circuit seed gives the same gates and random numbers
+  (the qubits measured at a lower rate are a subset of those measured at a higher one).
+* **Probes:** recorded at the spec's checkpoints, or at the probe's own `"checkpoints"`
+  (same forms), so a cheap probe can run every layer and an expensive one at a few depths:
+  * entanglement: `half_cut_entropy`, `entropy`, `mutual_information`,
+    `tripartite_information`, and the vector `entropy_profile` (S of the first m qubits
+    of `system_order`, m = 0..n);
+  * code (need a reference): `code_dimension` (k = S(R)), `contiguous_distance`,
+    `lost_information` (one fixed region), and the vector `erasure_lost_profile` (mean
+    bits lost by a random m-qubit erasure, m = 0..n);
+  * erasure (need a reference): `erasure_first_failure` (`samples`, default 100) records,
+    for each of `samples` random orderings of the system qubits, the first-failure size D:
+    the smallest m such that erasing the first m qubits loses logical information (n + 1
+    when k = 0). `uncorrectable_region_counts` (`max_size` w, default 2; key
+    `uncorrectable_region_counts[w]`) counts the uncorrectable m-qubit erasures for
+    m = 1..w by exhaustion, so count / C(n, m) is the exact P_C(m), the fraction of
+    m-qubit erasures that are uncorrectable; all counts are 0 exactly when the distance
+    exceeds w;
+  * `code_snapshot`: saves the code's stabilizer generators; its value is their number,
+    n - k. At most one per spec; give it its own `"checkpoints": "final"`, since codes are
+    large. The summary shows only the generator count; the codes are in the saved result
+    (`output_dir`; `EnsembleResult.code(t, c)` in Python).
 
-  Every probe takes an optional `"name"`, its key in the results.
-
-  Code and erasure probes need a reference.
-* **Purification time tau:** the first checkpoint at which the reference is pure. `-1`
-  means censored: the reference never purified within the horizon.
+  Every probe takes an optional `"name"`, its key in the results. The summary shows a
+  vector probe as a curve over m (`index`) at the last checkpoint with data, with a `what`
+  line saying what the curve is, plus `vs_depth`, a grid of up to 8 checkpoints by 17
+  sizes. The two erasure probes are shown as P_C(m): `erasure_first_failure` as an
+  estimate for m = 0..n, `uncorrectable_region_counts` exactly for m = 0..w. A scalar
+  probe on its own schedule gets a `layers` key in the summary.
+* **Purification time tau:** the first of the spec's checkpoints at which the reference
+  is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
+  never purified within the horizon.
 
 ## Conventions
 
 * **Seeds.** Pass integers to make a run reproducible. `seed: null` draws a fresh seed and
   reports it as `seed` in the result. Graph seeds (inside `graph`) are separate from the
   circuit seed, so graph disorder and circuit disorder can be varied independently.
-  For one graph realization per trajectory (the usual small-world protocol), add
-  `"realizations": G` to the graph: trajectory `t` runs on graph `t mod G`, generated from
-  seed `[seed, t mod G]`.
   Trajectory `t` depends only on `(spec, seed, t)`, so chunked and single runs agree
   exactly.
 * **Phases.** `phases=true` (the default) tracks signs: measurement outcomes, detectors and
@@ -158,10 +180,19 @@ The spec keys are the parameters of `sparsegf2_v3.mipt.MonitoredCircuit`.
   `kaplan_meier(np.where(tau >= 0, tau, final_layer), tau >= 0)` with
   `tau = result.purification_layer` and `final_layer = result.final_layer` (passing tau
   itself raises an error).
-* With `stop_when_purified`, a probe's mean at a checkpoint averages only the trajectories
-  still running there. The per-checkpoint `count` says how many there were.
-  `contiguous_distance` likewise averages only trajectories that still hold a code (it is
-  NaN where the code dimension is 0).
+* With `stop_when_purified`, code probes record their exact values for a pure reference
+  after a trajectory stops (`code_dimension`, `lost_information`, `erasure_lost_profile`
+  and `uncorrectable_region_counts` 0, `erasure_first_failure` n + 1, `code_snapshot` n
+  with no code saved), so code averages need no correction. Entanglement probes are NaN
+  there and average only the trajectories still running; the per-checkpoint `count` says
+  how many there were. `contiguous_distance` averages only trajectories that still hold a
+  code (it is NaN wherever the code dimension is 0).
+* Results that would need more than 8 GB of memory are refused. `erasure_first_failure`
+  stores `samples` numbers per evaluation and `code_snapshot` a whole code, so give them
+  few checkpoints of their own. Measured one-thread costs per evaluation at n = 256:
+  `erasure_first_failure` with 100 samples 3 to 7 ms; `uncorrectable_region_counts` about
+  1 ms for w = 2, 40 to 50 ms for w = 3, about 7 s for w = 4 (practical only at a few
+  depths).
 * `stabilizers` lists generators only up to 32 qubits. For large states use
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means
@@ -175,6 +206,55 @@ The spec keys are the parameters of `sparsegf2_v3.mipt.MonitoredCircuit`.
   or a suggestion to use a background job. Fix the input and retry. Do not work around
   the error.
 
+## Erasure analysis in Python
+
+The summaries show P_C(m). The failure probability under independent erasure,
+Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m), and the tolerance
+e_delta = sup{e : Phi(e) <= delta} are computed from the saved arrays. A run that
+records what they need (50 graphs with 4 circuits each, 200 trajectories):
+
+```json
+{"spec": {"num_system": 64,
+          "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 0,
+                    "realizations": 50},
+          "circuits_per_graph": 4, "layers": 256, "measurement_rate": 0.05,
+          "schedule": "random_edges", "reference": "purification", "checkpoints": 32,
+          "probes": [{"kind": "code_dimension"},
+                     {"kind": "erasure_first_failure", "samples": 100},
+                     {"kind": "uncorrectable_region_counts", "max_size": 2},
+                     {"kind": "code_snapshot", "checkpoints": "final"}]},
+ "seed": 1, "output_dir": "runs/erasure"}
+```
+
+```python
+import numpy as np
+from sparsegf2_v3 import StabilizerCode, analysis, mipt
+
+res = mipt.EnsembleResult.load("runs/erasure/result.npz")
+n = res.spec.num_system
+k = res.values["code_dimension"][:, -1]                       # last checkpoint
+first = res.values["erasure_first_failure"][:, -1]            # (trajectories, samples)
+counts = res.values["uncorrectable_region_counts[2]"][:, -1]  # (trajectories, 2): m = 1, 2
+e = np.array([0.05, 0.1, 0.2])
+phi = analysis.erasure_failure_probability(first, n, e, exact_counts=counts).mean(axis=0)
+code = k > 0                          # q+ = code.mean(), code rate = k.mean() / n
+e10 = analysis.erasure_tolerance(first[code], n, 0.1, exact_counts=counts[code])
+c = res.code(0, 0)                    # StabilizerCode of trajectory row 0, first snapshot
+more = c.first_failure_sizes(10_000, seed=0)  # more orderings than the run used
+p_m = analysis.failure_by_size(more, n)                       # P_C(m), m = 0..n
+StabilizerCode(["XXXX", "ZZZZ"]).uncorrectable_counts(2)      # [0, 6]: the [[4, 2, 2]] code
+```
+
+With `exact_counts` the terms m <= w are exact and the samples cover m > w. A code with
+k = 0 (D = n + 1) has Phi = 0, so the first mean counts purified circuits as protected;
+select `k > 0` to condition on a code. `[:, -1]` is each probe's last evaluation
+(`res.layers(name)` lists them). `StabilizerCode` takes generators as Pauli strings or an
+(s, 2n) 0/1 array (X bits, then Z bits), and has `num_logical`, `lost_information(A)`,
+`is_correctable(A)`, `first_failure_sizes(samples, seed=...)` and
+`uncorrectable_counts(w)`.
+[`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole analysis
+versus depth.
+
 ## Where things are
 
 | Path | What |
@@ -183,6 +263,8 @@ The spec keys are the parameters of `sparsegf2_v3.mipt.MonitoredCircuit`.
 | `src/sparsegf2_v3/cli.py` | `sparsegf2` command line |
 | `src/sparsegf2_v3/mcp_server.py` | `sparsegf2-mcp` MCP server: tools, `docs://` resources, prompts |
 | `src/sparsegf2_v3/mipt.py` | `MonitoredCircuit`, probes, `EnsembleResult` |
+| `src/sparsegf2_v3/codes.py` | `StabilizerCode`: erasure analysis of a saved code |
+| `src/sparsegf2_v3/analysis.py` | P_C(m), Phi(e), e_delta, Kaplan-Meier, means with errors |
 | `src/sparsegf2_v3/observables.py` | entanglement, code and erasure observables of one state |
 | `docs/LLM_INTERFACE.md` | full CLI and MCP reference |
 | `docs/LITERATURE.md` | which observables the literature uses, and why |
