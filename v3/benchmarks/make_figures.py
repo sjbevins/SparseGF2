@@ -326,38 +326,43 @@ def fig_throughput(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
 
 def fig_production(cross: list, theme: dict, mode: str) -> None:
     """Trajectories per second on the PRL single-reference protocol: v2 production vs v3."""
-    rows = sorted(cross, key=lambda r: r["n"])
-    n = np.array([r["n"] for r in rows])
-    threads = rows[0]["threads"]
+    rates = sorted({r["p"] for r in cross}, reverse=True)
+    threads = cross[0]["threads"]
     series = [
         ("v3_traj_per_s_all_threads", f"SparseGF2 v3, {threads} threads", 0),
         ("v3_traj_per_s_1thread", "SparseGF2 v3, 1 thread", 1),
         ("v2_traj_per_s_1thread", "SparseGF2 v2 production engine, 1 thread", 3),
     ]
-    fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    labels = []
-    for key, label, slot in series:
-        y = np.array([r[key] for r in rows])
-        ax.plot(n, y, marker="o", color=theme["series"][slot], label=label)
-        labels.append(
-            (
-                n[-1],
-                y[-1],
-                label.split(",")[0].replace(" production engine", "") + "," + label.split(",")[-1],
-            )
-        )
-    ax.set_xscale("log", base=2)
-    ax.set_yscale("log")
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{int(v)}"))
-    ax.set_xlabel("system qubits n")
-    ax.set_ylabel("trajectories per second")
-    ax.set_title("Your production workload: single-reference purification time")
-    legend(ax, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2)
-    end_labels(ax, labels, theme)
+    fig, axes = plt.subplots(
+        1, len(rates), figsize=(4.6 * len(rates) + 1.2, 4.2), sharey=True, squeeze=False
+    )
+    for ax, p in zip(axes[0], rates, strict=True):
+        rows = sorted((r for r in cross if r["p"] == p), key=lambda r: r["n"])
+        n = np.array([r["n"] for r in rows])
+        for key, label, slot in series:
+            y = np.array([r[key] for r in rows])
+            ax.plot(n, y, marker="o", color=theme["series"][slot], label=label)
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{int(v)}"))
+        median_tau = int(np.median([r["v3_median_tau"] for r in rows]))
+        ax.set_title(f"p = {p:.3f} (median tau ~ {median_tau} layers)", fontsize=10)
+        ax.set_xlabel("system qubits n")
+    axes[0][0].set_ylabel("trajectories per second")
+    legend(axes[0][-1], loc="upper right")
+    fig.suptitle(
+        "Your production workload: single-reference purification time",
+        x=0.0,
+        ha="left",
+        fontsize=11,
+        fontweight="bold",
+        color=theme["ink"],
+    )
+    fig.tight_layout()
     caption(
         fig,
-        f"Watts-Strogatz C(n,2), beta = {rows[0]['beta']}, p = {rows[0]['p']:.3f}, one graph per trajectory, "
-        "S(R) every layer, T_max = 8n; same graph banks for both engines.",
+        f"Watts-Strogatz C(n,2), beta = {cross[0]['beta']}, one graph per trajectory, 32 matching "
+        "layers of scramble, S(R) every layer, T_max = 8n; the same graph banks for both engines.",
         theme,
     )
     save(fig, "production", mode)
@@ -625,13 +630,14 @@ def tables(sim: dict | None, cross: list | None) -> str:
     if cross:
         out.append("**PRL production protocol**, trajectories per second (same graph banks)\n")
         out.append(
-            "| n | v2 production engine, 1 thread | v3, 1 thread | v3, all threads | "
-            "speed-up per thread | KS p-value |"
+            "| p | n | median tau | v2 production engine, 1 thread | v3, 1 thread | "
+            "v3, all threads | speed-up per thread | KS p-value |"
         )
-        out.append("|---:|---:|---:|---:|---:|---:|")
-        for r in sorted(cross, key=lambda r: r["n"]):
+        out.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for r in sorted(cross, key=lambda r: (-r["p"], r["n"])):
             out.append(
-                f"| {r['n']} | {r['v2_traj_per_s_1thread']:,.1f} | {r['v3_traj_per_s_1thread']:,.0f} | "
+                f"| {r['p']:.3f} | {r['n']} | {r['v3_median_tau']:g} | "
+                f"{r['v2_traj_per_s_1thread']:,.1f} | {r['v3_traj_per_s_1thread']:,.0f} | "
                 f"{r['v3_traj_per_s_all_threads']:,.0f} | "
                 f"{r['v3_traj_per_s_1thread'] / r['v2_traj_per_s_1thread']:.0f}× | {r['ks_pvalue']:.2f} |"
             )

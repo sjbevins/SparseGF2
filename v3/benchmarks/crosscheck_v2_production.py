@@ -11,7 +11,7 @@ Usage::
 
     python v3/benchmarks/crosscheck_v2_production.py --n 32 --beta 0.1 --graphs 2000
     python v3/benchmarks/crosscheck_v2_production.py --n 32 64 128 256 --graphs 2000 500 200 100 \
-        --out v3/benchmarks/results/crosscheck_v2.json
+        --p 0.293 0.253 --out v3/benchmarks/results/crosscheck_v2.json
 """
 
 from __future__ import annotations
@@ -110,21 +110,24 @@ def main() -> None:
     )
     ap.add_argument("--n", type=int, nargs="+", default=[32])
     ap.add_argument("--beta", type=float, default=0.1)
-    ap.add_argument("--p", type=float, default=None, help="default: the production grid centre")
+    ap.add_argument(
+        "--p", type=float, nargs="+", default=None, help="default: the production grid centre"
+    )
     ap.add_argument("--graphs", type=int, nargs="+", default=[2000], help="one value, or one per n")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    p = p_center(args.beta) if args.p is None else args.p
+    rates = [p_center(args.beta)] if args.p is None else args.p
     graphs = args.graphs * len(args.n) if len(args.graphs) == 1 else args.graphs
     reports = []
-    for n, g in zip(args.n, graphs, strict=True):
-        reports.append(compare(n, args.beta, p, g))
-        print(json.dumps(reports[-1], indent=1), flush=True)
+    for p in rates:
+        for n, g in zip(args.n, graphs, strict=True):
+            reports.append(compare(n, args.beta, p, g))
+            print(json.dumps(reports[-1], indent=1), flush=True)
     if args.out:
         Path(args.out).write_text(json.dumps(reports, indent=1))
-    bad = [r["n"] for r in reports if r["ks_pvalue"] < 1e-3]
+    bad = [(r["n"], r["p"]) for r in reports if r["ks_pvalue"] < 1e-3]
     if bad:
-        raise SystemExit(f"purification-time distributions disagree for n = {bad}")
+        raise SystemExit(f"purification-time distributions disagree for (n, p) = {bad}")
 
 
 if __name__ == "__main__":
