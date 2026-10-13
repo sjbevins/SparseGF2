@@ -25,6 +25,7 @@ characters); pass `output_dir` to save full arrays. Seeds are ints; qubit lists 
 - [src/sparsegf2_v3/observables.py](src/sparsegf2_v3/observables.py): entropies, code dimension, erasure statistics, contiguous distance
 - [src/sparsegf2_v3/simulator.py](src/sparsegf2_v3/simulator.py): Simulator (stim.TableauSimulator-style API)
 - [src/sparsegf2_v3/circuit.py](src/sparsegf2_v3/circuit.py): Circuit (Stim syntax, CLIFFORD_1Q/2Q extensions)
+- [examples/](examples/): complete study scripts (purification time on Watts-Strogatz graphs, transition scans, code and erasure vs depth)
 
 ## Optional
 

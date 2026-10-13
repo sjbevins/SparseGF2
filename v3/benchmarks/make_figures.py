@@ -578,6 +578,67 @@ def fig_schematic(theme: dict, mode: str, n: int = 8, depth: int = 7, seed: int 
     save(fig, "circuit", mode)
 
 
+def tables(sim: dict | None, cross: list | None) -> str:
+    """Markdown tables of the benchmark numbers, for the README (exact values from the JSON)."""
+    out = []
+    if sim:
+        rates = sorted({r["p"] for r in sim["runs"]})
+        names = {key: label for key, label, _ in SIMULATORS}
+        for p in rates:
+            sizes = sorted({r["n"] for r in sim["runs"] if abs(r["p"] - p) < 1e-9})
+            present = [k for k, _, _ in SIMULATORS if any(r["simulator"] == k for r in sim["runs"])]
+            out.append(
+                f"**Seconds per circuit, p = {p}** (depth 2n; speed-up over Stim in brackets)\n"
+            )
+            out.append("| n | " + " | ".join(names[k] for k in present) + " |")
+            out.append("|---:|" + "---:|" * len(present))
+            for n in sizes:
+                t = {
+                    r["simulator"]: r["seconds"]
+                    for r in sim["runs"]
+                    if r["n"] == n and abs(r["p"] - p) < 1e-9
+                }
+                cells = []
+                for k in present:
+                    if k not in t:
+                        cells.append("–")
+                    elif k.startswith("sparsegf2_v3") and "stim" in t:
+                        cells.append(f"{t[k] * 1e3:.3g} ({t['stim'] / t[k]:.1f}×)")
+                    else:
+                        cells.append(f"{t[k] * 1e3:.3g}")
+                out.append(f"| {n} | " + " | ".join(cells) + " |")
+            out.append("")
+        ens = sorted(sim["ensemble"], key=lambda e: (e["p"], e["n"]))
+        if ens:
+            out.append(
+                f"**Ensemble engine throughput** (fresh random circuits, depth 2n, "
+                f"{ens[0]['threads']} threads), circuits per second\n"
+            )
+            sizes = sorted({e["n"] for e in ens})
+            ps = sorted({e["p"] for e in ens})
+            out.append("| p | " + " | ".join(f"n = {n}" for n in sizes) + " |")
+            out.append("|---:|" + "---:|" * len(sizes))
+            for p in ps:
+                row = {e["n"]: e["circuits_per_second"] for e in ens if e["p"] == p}
+                out.append(f"| {p} | " + " | ".join(f"{row[n]:,.0f}" for n in sizes) + " |")
+            out.append("")
+    if cross:
+        out.append("**PRL production protocol**, trajectories per second (same graph banks)\n")
+        out.append(
+            "| n | v2 production engine, 1 thread | v3, 1 thread | v3, all threads | "
+            "speed-up per thread | KS p-value |"
+        )
+        out.append("|---:|---:|---:|---:|---:|---:|")
+        for r in sorted(cross, key=lambda r: r["n"]):
+            out.append(
+                f"| {r['n']} | {r['v2_traj_per_s_1thread']:,.1f} | {r['v3_traj_per_s_1thread']:,.0f} | "
+                f"{r['v3_traj_per_s_all_threads']:,.0f} | "
+                f"{r['v3_traj_per_s_1thread'] / r['v2_traj_per_s_1thread']:.0f}× | {r['ks_pvalue']:.2f} |"
+            )
+        out.append("")
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -608,7 +669,8 @@ def main() -> None:
             fig_transition(phys, theme, mode)
             fig_purification(phys, theme, mode)
             fig_erasure(phys, theme, mode)
-    print(f"wrote figures to {FIGURES}")
+    (HERE / "results" / "tables.md").write_text(tables(sim, cross))
+    print(f"wrote figures to {FIGURES} and tables to {HERE / 'results' / 'tables.md'}")
 
 
 if __name__ == "__main__":

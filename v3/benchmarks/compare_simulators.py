@@ -401,7 +401,7 @@ SIMULATORS = {
     "cirq": build_cirq,
     "sparsegf2_v2": build_v2,
 }
-MAX_N = {"cirq": 64, "qiskit_aer": 512}
+MAX_N = {"cirq": 64, "qiskit_aer": 256}
 
 
 def main() -> None:
