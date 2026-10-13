@@ -23,8 +23,8 @@ from sparsegf2_v3 import Clifford, all_gates
 from sparsegf2_v3._kernel.rng import next_bit
 from sparsegf2_v3.simulator import Simulator
 
-GATES_1Q = [g.name for g in all_gates() if g.num_qubits == 1]
-GATES_2Q = [g.name for g in all_gates() if g.num_qubits == 2]
+GATES_1Q = [g.name for g in all_gates("unitary") if g.num_qubits == 1]
+GATES_2Q = [g.name for g in all_gates("unitary") if g.num_qubits == 2]
 
 _PEEK = {"Z": "peek_z", "X": "peek_x", "Y": "peek_y"}
 _POST = {"Z": "postselect_z", "X": "postselect_x", "Y": "postselect_y"}

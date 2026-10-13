@@ -31,7 +31,7 @@ def test_every_stim_unitary_gate_is_defined_identically(stim_gate):
 
 def test_no_gates_beyond_stim():
     stim_names = {g.name for g in stim_unitary_gates()}
-    assert {g.name for g in all_gates()} == stim_names
+    assert {g.name for g in all_gates("unitary")} == stim_names
 
 
 @pytest.mark.parametrize("stim_gate", stim_unitary_gates(), ids=lambda g: g.name)
@@ -103,3 +103,21 @@ def test_dagger_pairs_are_inverses():
     for name in ["S", "SQRT_X", "SQRT_Y", "ISWAP", "SQRT_XX", "SQRT_YY", "SQRT_ZZ"]:
         c = gate(name).clifford
         assert c.then(gate(name + "_DAG").clifford) == Clifford.identity(c.num_qubits)
+
+
+def test_non_unitary_instructions_match_stim_names_and_aliases():
+    for info in all_gates():
+        if info.kind in ("unitary", "clifford_index"):
+            continue
+        stim_gate = stim.gate_data(info.name)
+        assert stim_gate.name == info.name
+        assert set(info.aliases) == set(stim_gate.aliases) - {info.name}
+        if info.num_args is not None:
+            assert set(info.num_args) <= set(stim_gate.num_parens_arguments_range)
+
+
+def test_kinds_filter():
+    assert {g.name for g in all_gates("reset")} == {"R", "RX", "RY"}
+    assert {g.name for g in all_gates("clifford_index")} == {"CLIFFORD_1Q", "CLIFFORD_2Q"}
+    with pytest.raises(ValueError):
+        all_gates("bogus")

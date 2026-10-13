@@ -1,5 +1,28 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev3: milestone 3, circuits and compiled execution
+
+* `Circuit`: Stim's circuit language (parse, print, append, REPEAT, tags),
+  lossless `from_stim`/`to_stim`, and validation with line-numbered errors.
+  Supports every Clifford gate, `M MX MY MR MRX MRY MXX MYY MZZ MPP R RX RY`,
+  inverted results (`!q`), classically controlled Paulis (`CX rec[-1] q`),
+  Pauli noise (`X/Y/Z_ERROR`, `DEPOLARIZE1/2`, `PAULI_CHANNEL_1/2`, `M(p)`),
+  `DETECTOR`, `OBSERVABLE_INCLUDE`, `QUBIT_COORDS`, `SHIFT_COORDS`, `TICK`.
+* Extensions `CLIFFORD_1Q(i...)` / `CLIFFORD_2Q(i...)` apply Cliffords by
+  canonical index; `to_stim()` expands them into Stim gates.
+* `Simulator.run(circuit, coins=None, observe=None)`: one compiled Numba call;
+  `observe(sim, tick)` runs at every TICK to measure the state as it evolves.
+  `RunResult` has `measurements`, `random`, `detectors`, `observables`,
+  `observations`. Detectors/observables follow Stim's convention (XOR with the
+  noiseless reference sample).
+* `sample(circuit, shots, seed=..., num_threads=...)`: many shots in parallel;
+  results independent of the thread count.
+* Tests: Stim-generated QEC circuits round-trip exactly; random noiseless
+  circuits replayed with Stim's record reproduce every outcome, final signed
+  state and deterministic detector/observable; 11 noise channels match Stim's
+  sampler statistically; a noisy d=3 surface code matches Stim's per-detector
+  rates.
+
 ## 3.0.0.dev2: milestone 2, the kernel and `Simulator`
 
 * Column-major, bit-packed tableau kernel (Numba): one 64-bit word holds one

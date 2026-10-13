@@ -68,8 +68,8 @@ def test_random_unitary_circuits_match_stim_exactly(n, rng):
     sim = Simulator(n)
     ref = stim.TableauSimulator()
     ref.set_num_qubits(n)
-    gates_1q = [g.name for g in all_gates() if g.num_qubits == 1]
-    gates_2q = [g.name for g in all_gates() if g.num_qubits == 2]
+    gates_1q = [g.name for g in all_gates("unitary") if g.num_qubits == 1]
+    gates_2q = [g.name for g in all_gates("unitary") if g.num_qubits == 2]
     for step in range(300):
         if n == 1 or rng.random() < 0.4:
             name, targets = gates_1q[rng.integers(len(gates_1q))], [int(rng.integers(n))]
@@ -83,7 +83,7 @@ def test_random_unitary_circuits_match_stim_exactly(n, rng):
     _forward_tableau_matches(sim, ref)
 
 
-@pytest.mark.parametrize("name", [g.name for g in all_gates()])
+@pytest.mark.parametrize("name", [g.name for g in all_gates("unitary")])
 def test_every_gate_on_random_states(name, rng):
     n = 6
     info = gate(name)
@@ -249,7 +249,7 @@ def test_argument_validation():
 
 def test_gate_methods_exist_for_every_name_and_alias():
     sim = Simulator(2)
-    for info in all_gates():
+    for info in all_gates("unitary"):
         for name in (info.name, *info.aliases):
             assert callable(getattr(sim, name.lower()))
     sim.cnot(0, 1)

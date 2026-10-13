@@ -40,7 +40,9 @@ from collections.abc import Iterable
 
 import numpy as np
 
+from sparsegf2_v3._compile import compile_circuit
 from sparsegf2_v3._kernel import tableau as _k
+from sparsegf2_v3._kernel.program import run_program
 from sparsegf2_v3._kernel.rng import next_bit, seed_state
 from sparsegf2_v3._kernel.tables import (
     ANF1,
@@ -50,10 +52,12 @@ from sparsegf2_v3._kernel.tables import (
     LIN1,
     LIN2,
 )
+from sparsegf2_v3.circuit import Circuit
 from sparsegf2_v3.clifford import Clifford
 from sparsegf2_v3.errors import PhaseFreeError
 from sparsegf2_v3.gates import all_gates, gate
 from sparsegf2_v3.pauli import PauliString, pauli_product_phase
+from sparsegf2_v3.result import RunResult
 
 __all__ = ["Simulator"]
 
@@ -453,6 +457,71 @@ class Simulator:
         xs, zs, _ = _k.rows_of(self._tab, self._n, 64 * self._ws, self._n)
         return [PauliString.from_bits(xs[i], zs[i], 0) for i in range(self._n)]
 
+    # -- circuits --------------------------------------------------------------------------
+
+    def run(self, circuit: Circuit, *, coins=None, observe=None) -> RunResult:
+        """Execute a :class:`~sparsegf2_v3.Circuit` on this state, in one compiled call.
+
+        Parameters
+        ----------
+        circuit
+            The circuit. It may use fewer qubits than the simulator, not more.
+        coins
+            Optional 0/1 array with one entry per measurement result: the
+            *recorded* value to produce if that measurement is random
+            (deterministic results ignore it). Use it for post-selection or to
+            replay a recorded run. Resets still draw from the simulator's stream.
+        observe
+            Optional callback ``observe(sim, tick)`` called after every ``TICK``
+            instruction, with the simulator paused in its current state. Its
+            return values are collected in ``RunResult.observations`` as
+            ``(tick, value)`` pairs. This is how to measure stabilizer-tableau
+            properties as a circuit evolves. The callback should only read the
+            state.
+
+        Returns
+        -------
+        RunResult
+            ``measurements`` (phases mode), ``random``, ``detectors``,
+            ``observables`` and ``observations``.
+        """
+        program = compile_circuit(circuit)
+        if program.num_qubits > self._n:
+            raise ValueError(
+                f"circuit uses {program.num_qubits} qubits but the simulator has {self._n}"
+            )
+        m = program.num_measurements
+        record = np.zeros(m, dtype=np.uint8)
+        random_flags = np.zeros(m, dtype=np.uint8)
+        if coins is None:
+            coin_array = np.zeros(0, dtype=np.uint8)
+            use_coins = False
+        else:
+            coin_array = np.asarray(coins).astype(np.int64).ravel()
+            if coin_array.shape != (m,):
+                raise ValueError(
+                    f"coins must have one entry per measurement ({m}), got {coin_array.shape}"
+                )
+            if np.any((coin_array != 0) & (coin_array != 1)):
+                raise ValueError("coins must be 0 or 1")
+            coin_array = coin_array.astype(np.uint8)
+            use_coins = True
+        observations: list = []
+        position, done, tick = 0, 0, 0
+        while True:
+            position, done, at_tick = run_program(
+                self._tab, self._n, self._ws, self._phases, program.ops, program.params,
+                program.mpp_qubits, program.mpp_codes, position, observe is not None,
+                coin_array, use_coins, self._rng, record, random_flags, done,
+                LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
+                self._anti, self._supp, self._lo, self._hi, self._qbuf, self._cbuf, False,
+            )  # fmt: skip
+            if not at_tick:
+                break
+            observations.append((tick, observe(self, tick)))
+            tick += 1
+        return RunResult(self._phases, program, record, random_flags, observations)
+
     # -- entanglement ---------------------------------------------------------------------
 
     def entropy(self, qubits: Iterable[int]) -> int:
@@ -486,6 +555,11 @@ def _gate_index(name: str) -> tuple[int, int]:
     cached = _GATE_INDEX.get(key)
     if cached is None:
         info = gate(key)
+        if info.kind != "unitary":
+            raise ValueError(
+                f"{info.name} is not a unitary gate; use the measure/reset methods "
+                "or Simulator.run(circuit) for non-unitary instructions"
+            )
         cached = (info.num_qubits, info.clifford.index())
         _GATE_INDEX[key] = cached
     return cached
@@ -508,7 +582,7 @@ def _make_gate_method(canonical: str, k: int, index: int):
 
 
 # One lowercase method per gate name and alias (sim.h, sim.cx, sim.cnot, sim.sqrt_x_dag, ...).
-for _info in all_gates():
+for _info in all_gates("unitary"):
     _k_arity, _index = _info.num_qubits, _info.clifford.index()
     for _name in (_info.name, *_info.aliases):
         _method = _make_gate_method(_info.name, _k_arity, _index)

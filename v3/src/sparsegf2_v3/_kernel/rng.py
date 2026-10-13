@@ -74,3 +74,35 @@ def next_below(s, bound):
             m = x * b
             low = m & _U(0xFFFFFFFF)
     return np.int64(m >> _U(32))
+
+
+@njit(cache=True, inline="always")
+def _splitmix64(x):
+    x = x + _U(0x9E3779B97F4A7C15)
+    z = x
+    z = (z ^ (z >> _U(30))) * _U(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> _U(27))) * _U(0x94D049BB133111EB)
+    return x, z ^ (z >> _U(31))
+
+
+@njit(cache=True)
+def stream_state(key, index, out):
+    """Fill ``out`` (length 4) with the xoshiro state of stream ``index`` under ``key``.
+
+    ``key`` is a length-2 uint64 array (from :func:`stream_key`). Streams for
+    different indices are independent, and stream ``index`` depends only on
+    ``(key, index)``, so trajectory/shot ``i`` is reproducible on its own and
+    regardless of how work is split across threads.
+    """
+    x = key[0] ^ (_U(index) * _U(0xD1B54A32D192ED03)) ^ key[1]
+    for j in range(4):
+        x, z = _splitmix64(x)
+        out[j] = z
+    if out[0] == _U(0) and out[1] == _U(0) and out[2] == _U(0) and out[3] == _U(0):
+        out[0] = _U(1)  # pragma: no cover
+
+
+def stream_key(seed) -> np.ndarray:
+    """A 128-bit key for :func:`stream_state` from an int, SeedSequence, or None."""
+    ss = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
+    return ss.generate_state(2, dtype=np.uint64)

@@ -14,6 +14,18 @@ Milestone 1 (this version) provides the foundations every later layer uses:
 """
 
 from sparsegf2_v3._version import __version__
+from sparsegf2_v3.circuit import (
+    Circuit,
+    Instruction,
+    RepeatBlock,
+    Target,
+    target_combiner,
+    target_inv,
+    target_rec,
+    target_x,
+    target_y,
+    target_z,
+)
 from sparsegf2_v3.clifford import (
     Clifford,
     num_cliffords,
@@ -23,18 +35,33 @@ from sparsegf2_v3.clifford import (
 from sparsegf2_v3.errors import PhaseFreeError
 from sparsegf2_v3.gates import GateInfo, all_gates, gate
 from sparsegf2_v3.pauli import PauliString
+from sparsegf2_v3.result import RunResult, SampleResult
+from sparsegf2_v3.sampling import sample
 from sparsegf2_v3.simulator import Simulator
 
 __all__ = [
+    "Circuit",
     "Clifford",
     "GateInfo",
+    "Instruction",
     "PauliString",
     "PhaseFreeError",
+    "RepeatBlock",
+    "RunResult",
+    "SampleResult",
     "Simulator",
+    "Target",
     "__version__",
     "all_gates",
     "gate",
     "num_cliffords",
     "random_clifford_indices",
+    "sample",
     "symplectic_group",
+    "target_combiner",
+    "target_inv",
+    "target_rec",
+    "target_x",
+    "target_y",
+    "target_z",
 ]
