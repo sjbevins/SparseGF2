@@ -1,0 +1,238 @@
+"""Stabilizer codes (sparsegf2_v3.codes) and the erasure estimators of sparsegf2_v3.analysis."""
+
+import itertools
+import math
+
+import numpy as np
+import pytest
+
+from sparsegf2_v3 import analysis, graphs, mipt
+from sparsegf2_v3.codes import StabilizerCode
+
+FIVE_QUBIT = ["XZZX_", "_XZZX", "X_XZZ", "ZX_XZ"]
+
+
+def _gf2_rank(m: np.ndarray) -> int:
+    m = (np.array(m, dtype=np.uint8) % 2).copy()
+    rank = 0
+    for col in range(m.shape[1]):
+        rows = np.flatnonzero(m[rank:, col]) + rank
+        if rows.size == 0:
+            continue
+        m[[rank, rows[0]]] = m[[rows[0], rank]]
+        others = np.flatnonzero(m[:, col])
+        others = others[others != rank]
+        m[others] ^= m[rank]
+        rank += 1
+        if rank == m.shape[0]:
+            break
+    return rank
+
+
+def _lost_by_formula(h: np.ndarray, erased) -> int:
+    """l(A) = 2|A| - s - rank(H_A) + rank(H_Abar) from the check matrix H = (X | Z)."""
+    n = h.shape[1] // 2
+    a = sorted(erased)
+    abar = [q for q in range(n) if q not in a]
+
+    def cols(qs):
+        return h[:, [*qs, *(n + q for q in qs)]]
+
+    s = _gf2_rank(h)
+    return 2 * len(a) - s - _gf2_rank(cols(a)) + _gf2_rank(cols(abar))
+
+
+def _engine_codes(n, count, seed, reference="purification"):
+    """Codes left by short monitored circuits, as StabilizerCode objects."""
+    out = []
+    rng = np.random.default_rng(seed)
+    while len(out) < count:
+        spec = mipt.MonitoredCircuit(
+            num_system=n,
+            edges=graphs.watts_strogatz(n, 4, 0.3, seed=int(rng.integers(1 << 30))),
+            layers=int(rng.integers(1, 3 * n)),
+            measurement_rate=float(rng.uniform(0.0, 0.3)),
+            reference=reference,
+            checkpoints="final",
+            probes=[mipt.code_snapshot()],
+        )
+        r = spec.run(1, seed=int(rng.integers(1 << 30)))
+        if r.snapshots["code_snapshot"][1][0, 0] >= 0:
+            out.append(r.code(0, 0))
+    return out
+
+
+# -- StabilizerCode -------------------------------------------------------------------
+
+
+def test_four_two_two_code():
+    code = StabilizerCode(["XXXX", "ZZZZ"])
+    assert (code.num_qubits, code.num_stabilizers, code.num_logical) == (4, 2, 2)
+    assert code.lost_information([]) == 0
+    assert all(code.is_correctable([q]) for q in range(4))
+    assert all(code.lost_information(a) == 2 for a in itertools.combinations(range(4), 2))
+    assert code.lost_information(range(4)) == 4  # all 2k bits
+    assert code.uncorrectable_counts(2).tolist() == [0, 6]
+    np.testing.assert_array_equal(code.first_failure_sizes(50, seed=1), 2)
+
+
+def test_five_qubit_code_has_distance_three():
+    code = StabilizerCode(FIVE_QUBIT)
+    assert code.num_logical == 1
+    assert code.uncorrectable_counts(3).tolist() == [0, 0, 10]
+    np.testing.assert_array_equal(code.first_failure_sizes(40, seed=2), 3)
+
+
+def test_bit_rows_pauli_strings_and_redundant_generators_agree():
+    from_text = StabilizerCode(FIVE_QUBIT)
+    rows = from_text.stabilizer_matrix()
+    assert rows.shape == (4, 10)
+    redundant = np.vstack([rows, rows[0] ^ rows[1]])  # a dependent generator
+    code = StabilizerCode(redundant)
+    assert code.num_stabilizers == 4 and code.num_logical == 1
+    for a in itertools.combinations(range(5), 3):
+        assert code.lost_information(a) == from_text.lost_information(a)
+    packed = StabilizerCode.from_packed(from_text._packed, 5)
+    np.testing.assert_array_equal(packed.stabilizer_matrix(), rows)
+    assert "k=1" in repr(code)
+
+
+def test_no_stabilizers_and_no_logical_qubits():
+    free = StabilizerCode(np.zeros((0, 6), dtype=np.uint8))  # three bare qubits: k = n
+    assert free.num_logical == 3
+    assert free.uncorrectable_counts(2).tolist() == [3, 3]
+    np.testing.assert_array_equal(free.first_failure_sizes(10, seed=0), 1)
+    assert StabilizerCode([], num_qubits=2).num_logical == 2
+    full = StabilizerCode(["ZI", "IZ"])  # k = 0: nothing to lose
+    assert full.uncorrectable_counts(2).tolist() == [0, 0]
+    np.testing.assert_array_equal(full.first_failure_sizes(5, seed=0), 3)
+    assert full.lost_information([0, 1]) == 0
+
+
+def test_invalid_codes_are_refused():
+    with pytest.raises(ValueError, match="do not all commute"):
+        StabilizerCode(["XI", "ZI"])
+    with pytest.raises(ValueError, match="num_qubits"):
+        StabilizerCode([])
+    with pytest.raises(ValueError, match="0/1"):
+        StabilizerCode(np.array([[2, 0]]))
+    with pytest.raises(ValueError, match="same number of qubits"):
+        StabilizerCode(["XX", "ZZZ"])
+    code = StabilizerCode(["XXXX", "ZZZZ"])
+    with pytest.raises(ValueError, match="distinct"):
+        code.lost_information([0, 0])
+    with pytest.raises(ValueError, match=r"in \[0, 4\)"):
+        code.lost_information([4])
+    with pytest.raises(ValueError, match="max_size"):
+        code.uncorrectable_counts(5)
+
+
+@pytest.mark.parametrize("reference", ["purification", "single"])
+def test_lost_information_and_counts_match_brute_force(reference):
+    for code in _engine_codes(7, 6, seed=11 if reference == "single" else 12, reference=reference):
+        h = code.stabilizer_matrix()
+        n = code.num_qubits
+        expected = np.zeros(4)
+        for m in range(1, 5):
+            for a in itertools.combinations(range(n), m):
+                lost = code.lost_information(a)
+                assert lost == _lost_by_formula(h, a)
+                expected[m - 1] += lost > 0
+        np.testing.assert_array_equal(code.uncorrectable_counts(4), expected)
+
+
+def test_counts_on_codes_wider_than_one_word():
+    """n > 64: columns span several words; a few correctable pairs/triples are checked by hand."""
+    for code in _engine_codes(70, 2, seed=5):
+        counts = code.uncorrectable_counts(2)
+        singles = sum(not code.is_correctable([q]) for q in range(70))
+        assert counts[0] == singles
+        rng = np.random.default_rng(0)
+        pairs = [tuple(rng.choice(70, 2, replace=False)) for _ in range(200)]
+        frac = np.mean([not code.is_correctable(p) for p in pairs])
+        assert abs(frac - counts[1] / math.comb(70, 2)) < 0.15
+
+
+def test_first_failure_law_matches_exact_failure_by_size():
+    code = _engine_codes(8, 1, seed=3)[0]
+    exact = [
+        np.mean([not code.is_correctable(a) for a in itertools.combinations(range(8), m)])
+        for m in range(9)
+    ]
+    sampled = analysis.failure_by_size(code.first_failure_sizes(20000, seed=4), 8)
+    np.testing.assert_allclose(sampled, exact, atol=0.02)
+    again = code.first_failure_sizes(20000, seed=4)
+    np.testing.assert_array_equal(again, code.first_failure_sizes(20000, seed=4))
+
+
+# -- analysis -------------------------------------------------------------------------
+
+
+def test_failure_probability_is_the_binomial_mixture_of_failure_by_size():
+    n = 12
+    rng = np.random.default_rng(1)
+    d = rng.integers(1, n + 2, size=(3, 50))  # including n + 1 (no logical qubits)
+    p_m = analysis.failure_by_size(d, n)
+    assert p_m.shape == (3, n + 1)
+    np.testing.assert_allclose(p_m[:, 0], 0)
+    for e in (0.0, 0.05, 0.3, 1.0):
+        phi = analysis.erasure_failure_probability(d, n, e)
+        weights = np.array([math.comb(n, m) * e**m * (1 - e) ** (n - m) for m in range(n + 1)])
+        np.testing.assert_allclose(phi, p_m @ weights, atol=1e-13)
+    curve = analysis.erasure_failure_probability(d, n, [0.1, 0.2])
+    assert curve.shape == (3, 2)
+    assert np.all(
+        np.diff(analysis.erasure_failure_probability(d, n, np.linspace(0, 1, 30))) >= -1e-12
+    )
+    np.testing.assert_allclose(analysis.erasure_failure_probability(np.full(4, n + 1), n, 0.7), 0)
+
+
+def test_hybrid_estimator_uses_exact_counts_for_small_regions():
+    code = _engine_codes(10, 1, seed=8)[0]
+    n = 10
+    exact_all = np.array(
+        [0.0]
+        + [
+            np.mean([not code.is_correctable(a) for a in itertools.combinations(range(n), m)])
+            for m in range(1, n + 1)
+        ]
+    )
+    d = code.first_failure_sizes(400, seed=1)
+    counts = code.uncorrectable_counts(3)
+    np.testing.assert_allclose(analysis.exact_failure_by_size(counts, n), exact_all[1:4])
+    for e in (0.05, 0.2):
+        weights = np.array([math.comb(n, m) * e**m * (1 - e) ** (n - m) for m in range(n + 1)])
+        hybrid = analysis.erasure_failure_probability(d, n, e, exact_counts=counts)
+        tail = np.array([weights[max(int(x), 4) :].sum() for x in d])  # Pr[Bin >= max(D, w + 1)]
+        expected = weights[1:4] @ exact_all[1:4] + tail.mean()
+        assert hybrid == pytest.approx(expected, abs=1e-13)
+        assert hybrid == pytest.approx(exact_all @ weights, abs=0.05)
+
+
+def test_erasure_tolerance_inverts_the_failure_curve():
+    n = 16
+    d = np.random.default_rng(2).integers(3, 12, size=(20, 30))
+    for delta in (0.01, 0.1, 0.5):
+        e = analysis.erasure_tolerance(d, n, delta)
+        assert np.mean(analysis.erasure_failure_probability(d, n, e)) == pytest.approx(
+            delta, abs=1e-9
+        )
+    assert analysis.erasure_tolerance(np.full((2, 3), n + 1), n, 0.1) == 1.0
+    assert analysis.erasure_tolerance(np.ones((2, 3), dtype=int), n, 0.0) == 0.0
+    with pytest.raises(ValueError, match="delta"):
+        analysis.erasure_tolerance(d, n, 1.5)
+    counts = np.zeros((20, 2))  # distance > 2 for every code: the hybrid can only lower Phi
+    assert analysis.erasure_tolerance(d, n, 0.1, exact_counts=counts) >= analysis.erasure_tolerance(
+        d, n, 0.1
+    )
+
+
+def test_estimators_check_their_inputs():
+    with pytest.raises(ValueError):
+        analysis.failure_by_size(np.array([0, 3]), 4)  # sizes are 1..n+1
+    with pytest.raises(ValueError):
+        analysis.failure_by_size(np.array([6]), 4)
+    with pytest.raises(ValueError, match="e must be"):
+        analysis.erasure_failure_probability(np.array([2]), 4, 1.5)
+    with pytest.raises(ValueError, match="sizes up to"):
+        analysis.exact_failure_by_size(np.zeros(5), 4)

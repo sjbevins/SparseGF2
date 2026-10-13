@@ -161,7 +161,12 @@ def _build_parser() -> _Parser:
         "ensemble", "Run an ensemble of random monitored circuits from a JSON spec.", _ENSEMBLE_HELP
     )
     p.add_argument("spec", metavar="SPEC.json", help="spec file, or - for stdin")
-    p.add_argument("--trajectories", type=int, default=None, help="number of trajectories")
+    p.add_argument(
+        "--trajectories",
+        type=int,
+        default=None,
+        help="number of trajectories (default for a graph collection: all of its circuits)",
+    )
     p.add_argument(
         "--seed", type=int, default=None, help="random seed (default: from file, else fresh)"
     )
@@ -313,12 +318,17 @@ def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
         spec, trajectories, seed = data, None, None
     trajectories = args.trajectories if args.trajectories is not None else trajectories
     seed = args.seed if args.seed is not None else seed
-    if trajectories is None:
-        raise ValueError("give --trajectories (or a 'trajectories' entry in SPEC.json)")
+    collection = isinstance(spec, dict) and "realizations" in (spec.get("graph") or {})
+    if trajectories is None and not collection:
+        raise ValueError(
+            "give --trajectories (or a 'trajectories' entry in SPEC.json); only a graph "
+            "collection (graph.realizations) runs all of its circuits by default"
+        )
     if args.chunk_size is None:
         estimate = api.estimate_ensemble(spec, trajectories)
         _log(
-            f"running {trajectories} trajectories (estimated <= {estimate['estimated_seconds']} s)"
+            f"running {estimate['trajectories']} trajectories "
+            f"(estimated <= {estimate['estimated_seconds']} s)"
         )
         result = api.run_ensemble(
             spec,

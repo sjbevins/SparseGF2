@@ -20,12 +20,13 @@ def test_purification_time(tmp_path, monkeypatch):
     out = tmp_path / "pt.npz"
     _run(
         "purification_time.py",
-        ["--n", "12", "--trajectories", "20", "--out", str(out)],
+        ["--n", "12", "--graphs", "10", "--circuits-per-graph", "2", "--out", str(out)],
         monkeypatch,
     )
     res = mipt.EnsembleResult.load(out)
-    assert res.spec.num_graphs == 20 and res.spec.scramble_matchings == 32
+    assert res.spec.num_graphs == 10 and res.spec.scramble_matchings == 32
     assert res.spec.reference_partner == 11 and res.purification_layer.shape == (20,)
+    assert res.graph_index.tolist() == [g for g in range(10) for _ in range(2)]
 
 
 def test_purification_time_mostly_censored_point(tmp_path, monkeypatch, capsys):
@@ -34,7 +35,7 @@ def test_purification_time_mostly_censored_point(tmp_path, monkeypatch, capsys):
     out = tmp_path / "mixed.npz"
     _run(
         "purification_time.py",
-        ["--n", "12", "--p", "0.06", "--trajectories", "40", "--out", str(out)],
+        ["--n", "12", "--p", "0.06", "--graphs", "40", "--out", str(out)],
         monkeypatch,
     )
     printed = capsys.readouterr().out
@@ -63,10 +64,14 @@ def test_transition_scan(tmp_path, monkeypatch):
     assert out.exists()
 
 
-@pytest.mark.parametrize("graph", ["ring", "ws"])
-def test_code_and_erasure(tmp_path, monkeypatch, graph):
+@pytest.mark.parametrize("p", [0.02, 0.4])  # codes survive / mostly purify
+def test_code_and_erasure(tmp_path, monkeypatch, capsys, p):
     out = tmp_path / "code.npz"
-    args = ["--n", "12", "--layers", "8", "--every", "4", "--trajectories", "5", "--graph", graph]
+    args = ["--n", "12", "--p", str(p), "--layers", "8", "--every", "4", "--graphs", "3"]
+    args += ["--circuits-per-graph", "2", "--samples", "10"]
     _run("code_and_erasure.py", [*args, "--out", str(out)], monkeypatch)
     res = mipt.EnsembleResult.load(out)
-    assert list(res.checkpoint_layers) == [0, 4, 8]
+    assert list(res.checkpoint_layers) == [0, 4, 8] and res.num_trajectories == 6
+    assert res.values["erasure_first_failure"].shape == (6, 3, 10)
+    assert res.layers("code_snapshot").tolist() == [8]
+    assert "e_0.1|k>0" in capsys.readouterr().out

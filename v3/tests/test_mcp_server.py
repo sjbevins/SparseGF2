@@ -124,7 +124,7 @@ def test_run_ensemble_matches_api_and_guard():
     assert out["purification"] == expected["purification"]
     assert out["probes"] == expected["probes"]
 
-    big = dict(SPEC, num_system=1024, layers=8192)
+    big = dict(SPEC, num_system=1024, layers=8192, checkpoints="final")
     text = error_text(call("run_ensemble", {"spec": big, "trajectories": 1_000_000}))
     assert "start_ensemble_job" in text
     text = error_text(call("run_ensemble", {"spec": dict(SPEC, layrs=3), "trajectories": 2}))
@@ -145,7 +145,7 @@ def test_run_ensemble_builds_the_spec_once(monkeypatch):
 
     monkeypatch.setattr(api, "_build_spec", counting)
     bank = dict(SPEC, graph={"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 1,
-                             "realizations": 5})  # fmt: skip
+                             "realizations": 5}, circuits_per_graph=2)  # fmt: skip
     out = ok(call("run_ensemble", {"spec": bank, "trajectories": 10, "seed": 2}))
     assert out["num_trajectories"] == 10 and len(calls) == 1
 

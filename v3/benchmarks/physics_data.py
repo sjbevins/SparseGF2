@@ -110,15 +110,16 @@ def erasure(n, rates, trajectories):
             schedule="matching",
             reference="purification",
             checkpoints=checkpoints,
-            probes=[mipt.code_dimension(), mipt.erasure_correctable_profile(samples=4)],
+            probes=[mipt.code_dimension(), mipt.erasure_first_failure(samples=4)],
         )
         res = spec.run(trajectories, seed=13)
         out["layers"] = res.checkpoint_layers.tolist()
         out["code_rate"][str(p)] = (res.mean("code_dimension") / n).tolist()
         at = int(np.searchsorted(res.checkpoint_layers, n))
-        profile = res.mean("erasure_correctable_profile")[at]
+        first = res.values["erasure_first_failure"][:, at]  # (trajectories, samples)
+        failing = analysis.failure_by_size(first, n).mean(axis=0)  # P(m-qubit erasure fails)
         out["erased_fraction"] = (np.arange(n + 1) / n).tolist()
-        out["correctable"][str(p)] = profile.tolist()
+        out["correctable"][str(p)] = (1.0 - failing).tolist()
         print(f"erasure p={p} done", flush=True)
     return out
 

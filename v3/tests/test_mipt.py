@@ -5,11 +5,15 @@ The central test runs each trajectory's exported circuit through the general
 values to match exactly at every checkpoint.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
-from sparsegf2_v3 import Simulator, gate, graphs, mipt
+from sparsegf2_v3 import Simulator, analysis, gate, graphs, mipt
 from sparsegf2_v3 import observables as ob
+
+RANDOM_KINDS = ("erasure_first_failure", "erasure_lost_profile")  # checked separately
 
 
 def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
@@ -36,10 +40,18 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
             return ob.lost_logical_information(sim, p.regions[0], refs)
         if p.kind == "entropy_profile":
             return ob.entropy_profile(sim, order)
+        if p.kind == "uncorrectable_counts":
+            counts = np.zeros(p.size)
+            for m in range(1, p.size + 1):
+                for region in itertools.combinations(spec.system_qubits, m):
+                    counts[m - 1] += ob.lost_logical_information(sim, region, refs) > 0
+            return counts
+        if p.kind == "code_snapshot":  # the recorded value: n - k generators
+            return spec.num_system - (sim.entropy(refs) if refs else 0)
         raise AssertionError(p.kind)
 
     def observe(sim, tick):
-        values = {p.name: probe(sim, p) for p in spec.probes if not p.kind.startswith("erasure")}
+        values = {p.name: probe(sim, p) for p in spec.probes if p.kind not in RANDOM_KINDS}
         pure = sim.entropy(refs) == 0 if refs else False
         return values, pure
 
@@ -66,6 +78,8 @@ SPECS = {
             mipt.entropy_profile(),
             mipt.mutual_information([0, 1, 2], [6, 7, 8]),
             mipt.tripartite_information(),
+            mipt.uncorrectable_region_counts(2, checkpoints=[0, 5, 20]),
+            mipt.code_snapshot(checkpoints=[10, 20]),
         ],
     ),
     "random_edges_ws_single_random_partner": dict(
@@ -103,7 +117,14 @@ SPECS = {
         reference="single",
         reference_partner=4,
         checkpoints="every_layer",
-        probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.lost_information([0, 4])],
+        probes=[
+            mipt.code_dimension(),
+            mipt.contiguous_distance(),
+            mipt.lost_information([0, 4]),
+            mipt.uncorrectable_region_counts(2, checkpoints=2),
+            mipt.code_snapshot(checkpoints=3),
+            mipt.half_cut_entropy(checkpoints=[0, 7, 30]),
+        ],
         stop_when_purified=True,
     ),
     "lattice_scramble_layers_gate_set_orientation": dict(
@@ -123,6 +144,7 @@ SPECS = {
     "production_protocol_ws_bank_matching_scramble": dict(
         num_system=16,
         edges=[graphs.watts_strogatz(16, 4, 0.2, seed=(5, i)) for i in range(4)],
+        circuits_per_graph=2,
         layers=30,
         measurement_rate=0.15,
         schedule="random_edges",
@@ -136,6 +158,7 @@ SPECS = {
     "ragged_bank_matching_schedule_all_scrambles": dict(
         num_system=11,
         edges=[graphs.newman_watts(11, 2, 0.3, seed=i) for i in range(3)],
+        circuits_per_graph=2,
         layers=12,
         measurement_rate=0.2,
         reference="purification",
@@ -143,11 +166,16 @@ SPECS = {
         scramble_matchings=2,
         scramble_layers=2,
         checkpoints=[0, 3, 12],
-        probes=[mipt.code_dimension(), mipt.half_cut_entropy(), mipt.contiguous_distance()],
+        probes=[
+            mipt.code_dimension(),
+            mipt.half_cut_entropy(checkpoints=5),
+            mipt.contiguous_distance(checkpoints="every_layer"),
+        ],
     ),
     "weighted_bank": dict(
         num_system=10,
         edges=[graphs.complete(10)] * 2,
+        circuits_per_graph=3,
         edge_weights=[
             graphs.power_law_weights(graphs.complete(10), 10, 1.0),
             graphs.power_law_weights(graphs.complete(10), 10, 3.0),
@@ -174,27 +202,40 @@ SPECS = {
 
 @pytest.mark.parametrize("name", list(SPECS))
 def test_engine_matches_exported_circuits_exactly(name):
+    """Every deterministic probe, at its own layers, equals the replayed circuit.
+
+    After a trajectory stops (stop_when_purified) the engine records the
+    probe's exact value for a pure reference: the replay, which keeps
+    simulating, must agree with it; entanglement probes are NaN there.
+    """
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
     result = spec.run(6, seed=seed)
     for t in range(6):
         obs = _replay(spec, t, seed)
         tau_expected = -1
-        stopped = False
-        for ci, layer in enumerate(spec.checkpoint_layers):
-            values, pure = obs[int(layer)]
-            if stopped:
-                for p in spec.probes:
-                    assert np.all(np.isnan(result.values[p.name][t, ci]))
-                continue
-            for name, expected in values.items():
-                got = result.values[name][t, ci]
-                np.testing.assert_allclose(got, expected, err_msg=f"{name} t={t} layer={layer}")
-            if pure and tau_expected < 0 and spec.reference != "none":
+        for layer in spec.checkpoint_layers:
+            _, pure = obs[int(layer)]
+            if pure and spec.reference != "none":
                 tau_expected = int(layer)
-                stopped = spec.stop_when_purified
+                break
         if spec.reference != "none":
             assert result.purification_layer[t] == tau_expected
+        stop = tau_expected if (spec.stop_when_purified and tau_expected >= 0) else None
+        for p in spec.probes:
+            if p.kind in RANDOM_KINDS:
+                continue
+            for c, layer in enumerate(result.layers(p.name)):
+                got = result.values[p.name][t, c]
+                expected = obs[int(layer)][0][p.name]
+                if (
+                    stop is not None
+                    and layer > stop
+                    and np.isnan(mipt._probe_fill(p, spec.num_system))
+                ):
+                    assert np.all(np.isnan(got)), f"{p.name} t={t} layer={layer}"
+                    continue
+                np.testing.assert_allclose(got, expected, err_msg=f"{p.name} t={t} layer={layer}")
 
 
 def test_results_independent_of_threads_and_chunking():
@@ -246,19 +287,51 @@ def test_erasure_profile_probes():
         probes=[
             mipt.code_dimension(),
             mipt.erasure_lost_profile(samples=6),
-            mipt.erasure_correctable_profile(samples=6),
+            mipt.erasure_first_failure(samples=40),
         ],
     )
     r = spec.run(10, seed=4)
     lost = r.values["erasure_lost_profile"]
-    frac = r.values["erasure_correctable_profile"]
+    first = r.values["erasure_first_failure"]
     k = r.values["code_dimension"]
-    assert lost.shape == (10, 2, n + 1)
+    assert lost.shape == (10, 2, n + 1) and first.shape == (10, 2, 40)
     np.testing.assert_array_equal(lost[:, :, 0], 0)
     np.testing.assert_allclose(lost[:, :, n], 2 * k)
-    np.testing.assert_array_equal(frac[:, :, 0], 1)
     assert np.all(np.diff(lost, axis=2) >= -1e-12)  # mean of monotone curves is monotone
     assert np.all(lost[:, 0, 1:] == 2 * np.arange(1, n + 1))  # fresh Bell pairs: 2 bits per qubit
+    np.testing.assert_array_equal(first[:, 0], 1)  # every single qubit carries logical info
+    assert np.all((first >= 1) & (first <= n))  # k > 0: some prefix always fails
+
+
+def test_first_failure_agrees_with_the_saved_code():
+    """The engine's first-failure samples follow the same law as the saved code's."""
+    n = 16
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=16,
+        measurement_rate=0.08,
+        reference="purification",
+        checkpoints=[16],
+        probes=[
+            mipt.code_dimension(),
+            mipt.erasure_first_failure(samples=4000),
+            mipt.uncorrectable_region_counts(3),
+            mipt.code_snapshot(),
+        ],
+    )
+    r = spec.run(3, seed=11)
+    for t in range(3):
+        code = r.code(t, 0)
+        assert code.num_logical == r.values["code_dimension"][t, 0]
+        np.testing.assert_array_equal(
+            code.uncorrectable_counts(3), r.values["uncorrectable_region_counts[3]"][t, 0]
+        )
+        engine = analysis.failure_by_size(r.values["erasure_first_failure"][t, 0], n)
+        offline = analysis.failure_by_size(code.first_failure_sizes(4000, seed=t), n)
+        assert np.max(np.abs(engine - offline)) < 0.05  # 4000 samples each: ~0.01 noise
+        exact = analysis.exact_failure_by_size(code.uncorrectable_counts(3), n)
+        assert np.max(np.abs(engine[1:4] - exact)) < 0.05
 
 
 def test_long_range_weights_follow_power_law():
@@ -308,7 +381,7 @@ def test_survival_function():
     np.testing.assert_allclose(surv, r.mean("code_dimension"))
 
 
-def test_erasure_probes_are_consistent():
+def test_erasure_probes_without_measurements():
     n = 10
     spec = mipt.MonitoredCircuit(
         num_system=n,
@@ -319,19 +392,17 @@ def test_erasure_probes_are_consistent():
         checkpoints=[0, 6],
         probes=[
             mipt.code_dimension(),
-            mipt.erasure_lost_information(0, samples=5),
-            mipt.erasure_lost_information(n, samples=5),
-            mipt.erasure_lost_information(3, samples=50),
-            mipt.erasure_correctable_fraction(1, samples=20),
+            mipt.erasure_first_failure(samples=5),
+            mipt.uncorrectable_region_counts(2),
+            mipt.lost_information([1, 2, 3]),
         ],
     )
     r = spec.run(5, seed=0)
-    k = r.values["code_dimension"]
-    np.testing.assert_array_equal(k, n)  # no measurements: nothing purifies
-    np.testing.assert_array_equal(r.values["erasure_lost_information[0]"], 0)
-    np.testing.assert_array_equal(r.values[f"erasure_lost_information[{n}]"], 2 * k)
-    np.testing.assert_array_equal(r.values["erasure_lost_information[3]"], 6)
-    np.testing.assert_array_equal(r.values["erasure_correctable_fraction[1]"], 0)
+    np.testing.assert_array_equal(r.values["code_dimension"], n)  # nothing purifies
+    np.testing.assert_array_equal(r.values["erasure_first_failure"], 1)
+    counts = r.values["uncorrectable_region_counts[2]"]
+    np.testing.assert_array_equal(counts, np.broadcast_to([n, n * (n - 1) / 2], counts.shape))
+    np.testing.assert_array_equal(r.values["lost_information[1, 2, 3]"], 6)
 
 
 def test_mean_and_censoring_helpers():
@@ -401,22 +472,117 @@ def test_with_edges_and_derived_properties():
     np.testing.assert_array_equal(spec.checkpoint_layers, [2])
 
 
-def test_graph_bank_assigns_graph_t_mod_g():
+def test_graph_collection_gives_each_graph_a_block_of_circuits():
     n = 12
     bank = [graphs.watts_strogatz(n, 4, 0.3, seed=(9, i)) for i in range(3)]
     spec = mipt.MonitoredCircuit(
-        num_system=n, edges=bank, layers=6, measurement_rate=0.2, schedule="random_edges"
+        num_system=n,
+        edges=bank,
+        circuits_per_graph=4,
+        layers=6,
+        measurement_rate=0.2,
+        schedule="random_edges",
     )
-    assert spec.num_graphs == 3 and isinstance(spec.edges, tuple)
-    for t in (0, 1, 2, 4, 7):
-        single = spec.with_edges(bank[t % 3])
-        # the circuit of trajectory t on the bank equals trajectory t on graph t mod 3
+    assert spec.num_graphs == 3 and spec.num_trajectories == 12
+    for t in (0, 3, 4, 7, 11):
+        single = spec.with_edges(bank[t // 4])
+        # trajectory t of the collection is trajectory t on graph t // circuits_per_graph
         assert str(spec.circuit(t, seed=4)) == str(single.circuit(t, seed=4))
-    a = spec.run(7, seed=4)
-    b = mipt.EnsembleResult.concatenate(
-        [spec.run(3, seed=4), spec.run(4, seed=4, first_trajectory=3)]
+    everything = spec.run(seed=4)  # all 3 * 4 trajectories by default
+    np.testing.assert_array_equal(everything.graph_index, np.repeat(np.arange(3), 4))
+    chunks = mipt.EnsembleResult.concatenate(
+        [spec.run(5, seed=4), spec.run(seed=4, first_trajectory=5)]
     )
-    np.testing.assert_array_equal(a.num_measurements, b.num_measurements)
+    np.testing.assert_array_equal(everything.num_measurements, chunks.num_measurements)
+    # the same collection at another rate: same graphs, same circuit randomness
+    other = mipt.MonitoredCircuit(
+        num_system=n, edges=bank, circuits_per_graph=4, layers=6, measurement_rate=0.5,
+        schedule="random_edges",
+    )  # fmt: skip
+    np.testing.assert_array_equal(other.run(seed=4).graph_index, everything.graph_index)
+    with pytest.raises(ValueError, match="has 12 trajectories"):
+        spec.run(13, seed=4)
+    with pytest.raises(ValueError, match="has 12 trajectories"):
+        spec.circuit(12, seed=4)
+    with pytest.raises(ValueError, match="circuits_per_graph applies"):
+        mipt.MonitoredCircuit(
+            num_system=n, edges=bank[0], circuits_per_graph=2, layers=1, measurement_rate=0.1
+        )
+    with pytest.raises(ValueError, match="give the number of trajectories"):
+        mipt.MonitoredCircuit(num_system=n, edges=bank[0], layers=1, measurement_rate=0.1).run(
+            seed=1
+        )
+
+
+def test_probes_run_on_their_own_checkpoints():
+    n = 10
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=20,
+        measurement_rate=0.3,
+        reference="single",
+        reference_partner=0,
+        checkpoints="final",  # purification is tested only here
+        probes=[
+            mipt.code_dimension(checkpoints="every_layer"),
+            mipt.uncorrectable_region_counts(2, checkpoints=[5, 10]),
+            mipt.erasure_first_failure(samples=3, checkpoints=4),
+        ],
+        stop_when_purified=True,
+    )
+    r = spec.run(20, seed=3)
+    np.testing.assert_array_equal(r.layers("code_dimension"), np.arange(21))
+    np.testing.assert_array_equal(r.layers("uncorrectable_region_counts[2]"), [5, 10])
+    np.testing.assert_array_equal(r.layers("erasure_first_failure"), [0, 4, 8, 12, 16, 20])
+    assert r.values["code_dimension"].shape == (20, 21)
+    assert r.values["uncorrectable_region_counts[2]"].shape == (20, 2, 2)
+    assert r.values["erasure_first_failure"].shape == (20, 6, 3)
+    # detection only at the spec's checkpoints: tau is the final layer or censored
+    assert set(np.unique(r.purification_layer)) <= {-1, 20}
+    k = r.values["code_dimension"]
+    first_zero = [int(np.argmax(row == 0)) if (row == 0).any() else -1 for row in k]
+    assert any(z not in (-1, 20) for z in first_zero)  # purified earlier, but not tested there
+
+
+def test_code_probes_keep_exact_values_after_a_stop():
+    n = 8
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=40,
+        measurement_rate=0.5,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=[
+            mipt.code_dimension(),
+            mipt.erasure_first_failure(samples=4),
+            mipt.uncorrectable_region_counts(2),
+            mipt.lost_information([0, 1]),
+            mipt.erasure_lost_profile(samples=2),
+            mipt.half_cut_entropy(),
+            mipt.code_snapshot(checkpoints=[39, 40]),
+        ],
+        stop_when_purified=True,
+    )
+    r = spec.run(30, seed=5)
+    tau = r.purification_layer
+    assert (tau >= 0).mean() > 0.5
+    for t in np.flatnonzero(tau >= 0):
+        after = np.arange(41) > tau[t]
+        np.testing.assert_array_equal(r.values["code_dimension"][t, after], 0)
+        np.testing.assert_array_equal(r.values["erasure_first_failure"][t, after], n + 1)
+        np.testing.assert_array_equal(r.values["uncorrectable_region_counts[2]"][t, after], 0)
+        np.testing.assert_array_equal(r.values["lost_information[0, 1]"][t, after], 0)
+        np.testing.assert_array_equal(r.values["erasure_lost_profile"][t, after], 0)
+        assert np.all(np.isnan(r.values["half_cut_entropy"][t, after]))
+        if tau[t] < 39:
+            np.testing.assert_array_equal(r.values["code_snapshot"][t], n)
+            np.testing.assert_array_equal(r.snapshots["code_snapshot"][1][t], -1)
+            with pytest.raises(ValueError, match="had stopped"):
+                r.code(t, 0)
+    # the code rate counts purified circuits as k = 0 (no NaN to drop)
+    assert not np.isnan(r.values["code_dimension"]).any()
 
 
 def test_scramble_matchings_are_perfect_matchings():
@@ -437,19 +603,30 @@ def test_graph_bank_save_load_round_trip(tmp_path):
     spec = mipt.MonitoredCircuit(
         num_system=10,
         edges=bank,
+        circuits_per_graph=2,
         layers=5,
         measurement_rate=0.2,
         reference="single",
         scramble_matchings=2,
-        probes=[mipt.code_dimension()],
+        probes=[
+            mipt.code_dimension(),
+            mipt.uncorrectable_region_counts(2, checkpoints=[2, 5]),
+            mipt.code_snapshot(checkpoints=[3]),
+        ],
     )
-    res = spec.run(5, seed=2)
+    res = spec.run(seed=2)
     res.save(tmp_path / "bank.npz")
     back = mipt.EnsembleResult.load(tmp_path / "bank.npz")
     assert back.spec.num_graphs == 3 and back.spec.scramble_matchings == 2
+    assert back.spec.circuits_per_graph == 2
     for g, h in zip(back.spec.graphs, spec.graphs, strict=True):
         np.testing.assert_array_equal(g, h)
-    rerun = back.spec.run(5, seed=2)
+    np.testing.assert_array_equal(back.layers("uncorrectable_region_counts[2]"), [2, 5])
+    for name in res.values:
+        np.testing.assert_array_equal(back.values[name], res.values[name])
+    for a, b in zip(back.snapshots["code_snapshot"], res.snapshots["code_snapshot"], strict=True):
+        np.testing.assert_array_equal(a, b)
+    rerun = back.spec.run(seed=2)
     np.testing.assert_array_equal(rerun.values["code_dimension"], res.values["code_dimension"])
 
 

@@ -451,3 +451,513 @@ def contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic):
                 best = length
                 break
     return best
+
+
+@njit(cache=True)
+def basis_clear(basis, pivot_owner, num, ws):
+    """Empty an incremental basis in O(num * ws) (only the owners of its pivots are reset).
+
+    A stored vector never changes after insertion, so its pivot is its lowest set bit.
+    """
+    for i in range(num[0]):
+        for w in range(ws):
+            x = basis[i, w]
+            if x != ZERO:
+                pivot_owner[(w << 6) + np.int64(ctz(x))] = -1
+                break
+    num[0] = 0
+
+
+@njit(cache=True)
+def _small_add(vec, basis, pw, pm, top, ws):
+    """Reduce ``vec`` against basis vectors [0, top) (insertion-order echelon); append if independent.
+
+    Each stored vector has zeros at the pivots of all earlier ones, so one
+    pass in insertion order clears every pivot. Returns the new top.
+    """
+    for b in range(top):
+        if vec[pw[b]] & pm[b]:
+            for w in range(ws):
+                vec[w] ^= basis[b, w]
+    for w in range(ws):
+        x = vec[w]
+        if x != ZERO:
+            for v in range(ws):
+                basis[top, v] = vec[v]
+            pw[top] = w
+            pm[top] = x & (~x + np.uint64(1))
+            return top + 1
+    return top
+
+
+@njit(cache=True)
+def code_columns(tab, ws, system, ref_rows):
+    """The columns of ``system`` in a row basis adapted to the code; returns ``(cols, s, r)``.
+
+    The generator rows restricted to ``system`` are row-reduced, the rows
+    outside ``ref_rows`` first: the first ``s`` basis rows span the code's
+    stabilizers S and all ``r`` span N(S). Row ``2 i + c`` of ``cols`` is the X
+    (c = 0) or Z (c = 1) column of qubit ``system[i]`` over those ``r`` rows, so
+    for any set A of qubits ``rank(N(S)|_A)`` is the rank of its columns and
+    ``rank(S|_A)`` the rank of their first ``s`` bits. Ranks of column sets are
+    unchanged by row operations, and the columns are ``ceil(r / 64)`` words
+    instead of ``ws``: ``r = n + k`` rows instead of the tableau's ``n + n_ref``.
+    """
+    n = system.shape[0]
+    nc = 2 * n
+    wr = (nc + 63) // 64
+    nrows = 64 * ws
+    echelon = np.zeros((min(nrows, nc), wr), dtype=np.uint64)
+    pw = np.zeros(min(nrows, nc), dtype=np.int64)
+    pm = np.zeros(min(nrows, nc), dtype=np.uint64)
+    row = np.zeros(wr, dtype=np.uint64)
+    rank = 0
+    s = 0
+    for free_pass in range(2):
+        for r in range(nrows):
+            rw = r >> 6
+            rb = np.uint64(1) << np.uint64(r & 63)
+            if ((ref_rows[rw] & rb) == ZERO) != (free_pass == 0):
+                continue
+            for v in range(wr):
+                row[v] = ZERO
+            nonzero = False
+            for j in range(nc):
+                if tab[2 * system[j >> 1] + (j & 1), rw] & rb:
+                    row[j >> 6] |= np.uint64(1) << np.uint64(j & 63)
+                    nonzero = True
+            if nonzero and rank < echelon.shape[0]:
+                rank = _small_add(row, echelon, pw, pm, rank, wr)
+        if free_pass == 0:
+            s = rank
+    wc = max((rank + 63) // 64, 1)
+    cols = np.zeros((nc, wc), dtype=np.uint64)
+    for i in range(rank):
+        ib = np.uint64(1) << np.uint64(i & 63)
+        for v in range(wr):
+            x = echelon[i, v]
+            while x != ZERO:
+                j = 64 * v + ctz(x)
+                cols[j, i >> 6] |= ib
+                x &= x - np.uint64(1)
+    return cols, s, rank
+
+
+@njit(cache=True)
+def _vector_hash(vec, length):
+    h = np.uint64(0x9E3779B97F4A7C15)
+    for w in range(length):
+        h = (h ^ vec[w]) * np.uint64(0xBF58476D1CE4E5B9)
+        h ^= h >> np.uint64(29)
+    return h
+
+
+@njit(cache=True)
+def _column_table(cols, length, mask_last):
+    """Open-addressing multimap from the X, Z and Y columns of every qubit to (qubit, kind).
+
+    ``keys[3 c + j]`` is column j of qubit c (X, Z, X^Z), cut to ``length``
+    words with ``mask_last`` applied to the last word; ``slots`` holds key
+    indices (-1 empty) at their hash positions, probed linearly.
+    """
+    n = cols.shape[0] // 2
+    keys = np.zeros((3 * n, length), dtype=np.uint64)
+    hashes = np.zeros(3 * n, dtype=np.uint64)
+    for c in range(n):
+        for v in range(length):
+            x = cols[2 * c, v]
+            z = cols[2 * c + 1, v]
+            if v == length - 1:
+                x &= mask_last
+                z &= mask_last
+            keys[3 * c, v] = x
+            keys[3 * c + 1, v] = z
+            keys[3 * c + 2, v] = x ^ z
+        for j in range(3):
+            hashes[3 * c + j] = _vector_hash(keys[3 * c + j], length)
+    size = 4
+    while size < 4 * 3 * n:
+        size *= 2
+    slots = np.full(size, -1, dtype=np.int64)
+    for e in range(3 * n):
+        slot = np.int64(hashes[e] & np.uint64(size - 1))
+        while slots[slot] >= 0:
+            slot = (slot + 1) & (size - 1)
+        slots[slot] = e
+    return keys, hashes, slots
+
+
+@njit(cache=True)
+def _span_hits(basis, top, length, keys, hashes, slots, after, hits, require, cur):
+    """Mark ``hits[c] |= 1 << j`` for every column (c, j), c > ``after``, inside span(basis[:top]).
+
+    Walks the ``2**top`` elements of the span in Gray-code order. With
+    ``require`` given (non-empty), only qubits with ``require[c] != 0`` are
+    marked. Returns the qubits newly marked, as a count written to ``hits``'
+    companion list by the caller (see :func:`uncorrectable_counts_rows`).
+    """
+    size = slots.shape[0]
+    for v in range(length):
+        cur[v] = ZERO
+    for g in range(1 << top):
+        if g > 0:
+            b = ctz(np.uint64(g))
+            for v in range(length):
+                cur[v] ^= basis[b, v]
+        h = _vector_hash(cur, length)
+        slot = np.int64(h & np.uint64(size - 1))
+        while slots[slot] >= 0:
+            e = slots[slot]
+            slot = (slot + 1) & (size - 1)
+            if hashes[e] != h:
+                continue
+            c = e // 3
+            if c <= after or (require.shape[0] > 0 and require[c] == 0):
+                continue
+            same = True
+            for v in range(length):
+                if keys[e, v] != cur[v]:
+                    same = False
+                    break
+            if same:
+                hits[c] |= np.uint8(1) << np.uint8(e - 3 * c)
+
+
+@njit(cache=True)
+def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
+    """``out[m - 1]`` = number of m-subsets of ``system`` whose erasure leaks logical information.
+
+    Exhaustive over m = 1..``max_size``, on the columns of :func:`code_columns`,
+    with ``l(A) = rank(N(S)|_A) - rank(S|_A)``:
+
+    * Prefixes of up to ``max_size - 1`` qubits are walked depth-first in
+      increasing index order, keeping small echelon bases of their S and N(S)
+      columns. ``l`` only grows with the set: once a prefix fails, all of its
+      extensions fail too and are counted without being visited. A prefix
+      whose S-columns have full rank ``2 |A|`` is correctable without its
+      N(S) rank (both are at most ``2 |A|``), which is built only when needed.
+    * The last qubit c of a correctable prefix P is not looped over. Adding c
+      raises a rank by ``2 - dim K``, with K the pairs (a, b) such that
+      ``a x_c + b z_c`` lies in the span of P's columns, so ``l(P + c) > 0``
+      exactly when ``K_S != K_N``. Enumerating the at most ``4**|P|``
+      elements of P's S-span and looking each up in a hash table of all
+      X, Z and Y columns finds the few c with ``K_S`` non-empty; only those
+      are checked against the N(S)-span.
+    """
+    n = system.shape[0]
+    w = max_size
+    for m in range(w):
+        out[m] = 0.0
+    if w <= 0 or n == 0:
+        return
+    cols, s, r = code_columns(tab, ws, system, ref_rows)
+    if r == s:
+        return  # no logical qubits: every erasure is correctable
+    wa = cols.shape[1]
+    wf = max((s + 63) // 64, 1)
+    fmask = ZERO
+    if s > 0:
+        fmask = ~ZERO if s % 64 == 0 else (np.uint64(1) << np.uint64(s % 64)) - np.uint64(1)
+    skeys, shashes, sslots = _column_table(cols, wf, fmask)
+    nkeys, nhashes, nslots = _column_table(cols, wa, ~ZERO)
+    comb = np.zeros((n + 1, w + 1), dtype=np.float64)  # comb[a, j] = C(a, j), exact below 2**53
+    for a in range(n + 1):
+        comb[a, 0] = 1.0
+        for j in range(1, min(a, w) + 1):
+            comb[a, j] = comb[a - 1, j - 1] + (comb[a - 1, j] if j <= a - 1 else 0.0)
+    cap = max(2 * (w - 1), 1)
+    ab = np.zeros((cap, wa), dtype=np.uint64)
+    apw = np.zeros(cap, dtype=np.int64)
+    apm = np.zeros(cap, dtype=np.uint64)
+    fb = np.zeros((cap, wf), dtype=np.uint64)
+    fpw = np.zeros(cap, dtype=np.int64)
+    fpm = np.zeros(cap, dtype=np.uint64)
+    atop = np.zeros(w + 1, dtype=np.int64)
+    ftop = np.zeros(w + 1, dtype=np.int64)
+    built = np.zeros(w + 1, dtype=np.bool_)  # atop[j] holds the N(S) rank of the j-prefix
+    built[0] = True
+    cand = np.zeros(w + 1, dtype=np.int64)
+    avec = np.zeros(wa, dtype=np.uint64)
+    fvec = np.zeros(wf, dtype=np.uint64)
+    hits_s = np.zeros(n, dtype=np.uint8)
+    hits_n = np.zeros(n, dtype=np.uint8)
+    no_filter = np.zeros(0, dtype=np.uint8)
+    lvl = 0  # the prefix being extended has lvl qubits: cand[0..lvl-1]
+    while lvl >= 0:
+        size = lvl + 1
+        if size == w:
+            # count the uncorrectable one-qubit extensions of the correctable prefix
+            after = cand[lvl - 1] if lvl > 0 else -1
+            _span_hits(fb, ftop[lvl], wf, skeys, shashes, sslots, after, hits_s, no_filter, fvec)
+            any_hit = False
+            for c in range(after + 1, n):
+                if hits_s[c] != 0:
+                    any_hit = True
+                    break
+            if any_hit:
+                if not built[lvl]:
+                    j0 = lvl
+                    while not built[j0]:
+                        j0 -= 1
+                    for j in range(j0, lvl):
+                        t = atop[j]
+                        for c in range(2 * cand[j], 2 * cand[j] + 2):
+                            for v in range(wa):
+                                avec[v] = cols[c, v]
+                            t = _small_add(avec, ab, apw, apm, t, wa)
+                        atop[j + 1] = t
+                        built[j + 1] = True
+                _span_hits(ab, atop[lvl], wa, nkeys, nhashes, nslots, after, hits_n, hits_s, avec)
+                for c in range(after + 1, n):
+                    if hits_s[c] != hits_n[c]:
+                        out[w - 1] += 1.0
+                    hits_s[c] = 0
+                    hits_n[c] = 0
+            lvl -= 1
+            if lvl >= 0:
+                cand[lvl] += 1
+            continue
+        i = cand[lvl]
+        if i >= n:
+            lvl -= 1
+            if lvl >= 0:
+                cand[lvl] += 1
+            continue
+        top = ftop[lvl]
+        for c in range(2 * i, 2 * i + 2):
+            for v in range(wf):
+                fvec[v] = cols[c, v]
+            fvec[wf - 1] &= fmask
+            top = _small_add(fvec, fb, fpw, fpm, top, wf)
+        ftop[size] = top
+        failed = False
+        if top < 2 * size:  # S-rank deficient: compare with the N(S) rank
+            if not built[lvl]:
+                j0 = lvl
+                while not built[j0]:
+                    j0 -= 1
+                for j in range(
+                    j0, lvl
+                ):  # rebuild the prefix's N(S) basis from the last valid level
+                    t = atop[j]
+                    for c in range(2 * cand[j], 2 * cand[j] + 2):
+                        for v in range(wa):
+                            avec[v] = cols[c, v]
+                        t = _small_add(avec, ab, apw, apm, t, wa)
+                    atop[j + 1] = t
+                    built[j + 1] = True
+            t = atop[lvl]
+            for c in range(2 * i, 2 * i + 2):
+                for v in range(wa):
+                    avec[v] = cols[c, v]
+                t = _small_add(avec, ab, apw, apm, t, wa)
+            atop[size] = t
+            built[size] = True
+            failed = t > top
+        else:
+            built[size] = False
+        if failed:  # this prefix is uncorrectable, so is every extension
+            remaining = n - 1 - i
+            for j in range(0, w - size + 1):
+                out[size - 1 + j] += comb[remaining, j]
+            cand[lvl] += 1
+        else:
+            lvl += 1
+            cand[lvl] = i + 1
+
+
+@njit(cache=True)
+def code_snapshot_rows(tab, n_sys, n_rows, ref_rows, out):
+    """Write the code's stabilizer generators row-major into ``out``; return how many.
+
+    The generators are the rows outside ``ref_rows`` (no support on the
+    reference). Row ``i`` of ``out`` holds the X bits of qubits 0..n_sys-1 in
+    words ``[0, wsys)`` and the Z bits in ``[wsys, 2 wsys)``, with
+    ``wsys = out.shape[1] // 2``.
+    """
+    wsys = out.shape[1] // 2
+    count = 0
+    for r in range(n_rows):
+        rw = r >> 6
+        rb = np.uint64(1) << np.uint64(r & 63)
+        if ref_rows[rw] & rb:
+            continue
+        for v in range(2 * wsys):
+            out[count, v] = ZERO
+        for q in range(n_sys):
+            qb = np.uint64(1) << np.uint64(q & 63)
+            if tab[2 * q, rw] & rb:
+                out[count, q >> 6] |= qb
+            if tab[2 * q + 1, rw] & rb:
+                out[count, wsys + (q >> 6)] |= qb
+        count += 1
+    return count
+
+
+@njit(cache=True)
+def first_failure_samples(tab, ws, ref_rows, k, prng, system, out):
+    """``out[i]`` = first-failure size along a fresh uniformly random ordering of ``system``.
+
+    The smallest m such that erasing the first m qubits of the ordering
+    leaks logical information, found by one incremental scan per ordering
+    (Fisher-Yates, ``len - 1`` draws from ``prng`` per sample) on the columns
+    of :func:`code_columns`. While the S-columns of the prefix have full rank
+    ``2 m`` the prefix is correctable and the N(S) basis is skipped; it is
+    built once, at the first deficient prefix, after which S-rank deficiency
+    persists. With no logical qubits (``k == 0``) every entry is
+    ``len(system) + 1`` and no draws are made.
+    """
+    n = system.shape[0]
+    if k == 0:
+        for i in range(out.shape[0]):
+            out[i] = n + 1
+        return
+    cols, s, r = code_columns(tab, ws, system, ref_rows)
+    wa = cols.shape[1]
+    wf = max((s + 63) // 64, 1)
+    fmask = ZERO
+    if s > 0:
+        fmask = ~ZERO if s % 64 == 0 else (np.uint64(1) << np.uint64(s % 64)) - np.uint64(1)
+    fb = np.zeros((max(s, 1), wf), dtype=np.uint64)
+    fo = np.full(64 * wf, -1, dtype=np.int64)
+    fn = np.zeros(1, dtype=np.int64)
+    ab = np.zeros((max(r, 1), wa), dtype=np.uint64)
+    ao = np.full(64 * wa, -1, dtype=np.int64)
+    an = np.zeros(1, dtype=np.int64)
+    fvec = np.zeros(wf, dtype=np.uint64)
+    avec = np.zeros(wa, dtype=np.uint64)
+    idx = np.arange(n)
+    for i in range(out.shape[0]):
+        for t in range(n - 1):
+            j = t + next_below(prng, n - t)
+            tmp = idx[t]
+            idx[t] = idx[j]
+            idx[j] = tmp
+        basis_clear(fb, fo, fn, wf)
+        basis_clear(ab, ao, an, wa)
+        built = False
+        result = n + 1
+        rank_s = 0
+        rank_n = 0
+        for m in range(n):
+            c = idx[m]
+            for col in range(2 * c, 2 * c + 2):
+                for v in range(wf):
+                    fvec[v] = cols[col, v]
+                fvec[wf - 1] &= fmask
+                rank_s += basis_add(fvec, fb, fo, fn, wf)
+            if rank_s == 2 * (m + 1):
+                continue  # full S-rank: correctable
+            if not built:
+                for e in range(m):
+                    for col in range(2 * idx[e], 2 * idx[e] + 2):
+                        for v in range(wa):
+                            avec[v] = cols[col, v]
+                        rank_n += basis_add(avec, ab, ao, an, wa)
+                built = True
+            for col in range(2 * c, 2 * c + 2):
+                for v in range(wa):
+                    avec[v] = cols[col, v]
+                rank_n += basis_add(avec, ab, ao, an, wa)
+            if rank_n > rank_s:
+                result = m + 1
+                break
+        out[i] = result
+
+
+@njit(cache=True)
+def symplectic_complement(rows, num_qubits):
+    """Basis of the Paulis commuting with every row (packed: X words, then Z words).
+
+    ``rows`` is ``(s, 2 wsys)`` uint64. Returns ``(basis, rank)``: the
+    ``2 n - rank`` basis vectors of {v : <h, v> = 0 for every row h} in the same
+    packing, and the GF(2) rank of ``rows``. With ``h = (x, z)``, the
+    symplectic product <h, v> = x.v_z + z.v_x is the dot product of
+    ``(z | x)`` with ``v``, so this is the null space of the half-swapped rows.
+    """
+    s = rows.shape[0]
+    wsys = rows.shape[1] // 2
+    width = 2 * num_qubits
+    m = np.zeros((s, 2 * wsys), dtype=np.uint64)
+    for i in range(s):
+        for w in range(wsys):
+            m[i, w] = rows[i, wsys + w]  # (z | x)
+            m[i, wsys + w] = rows[i, w]
+    pivots = np.zeros(width, dtype=np.int64)
+    rank = 0
+    for col in range(width):
+        word = (col // num_qubits) * wsys + ((col % num_qubits) >> 6)
+        bit = np.uint64(1) << np.uint64((col % num_qubits) & 63)
+        found = -1
+        for i in range(rank, s):
+            if m[i, word] & bit:
+                found = i
+                break
+        if found < 0:
+            continue
+        if found != rank:
+            for w in range(2 * wsys):
+                tmp = m[found, w]
+                m[found, w] = m[rank, w]
+                m[rank, w] = tmp
+        for i in range(s):
+            if i != rank and (m[i, word] & bit):
+                for w in range(2 * wsys):
+                    m[i, w] ^= m[rank, w]
+        pivots[rank] = col
+        rank += 1
+    is_pivot = np.zeros(width, dtype=np.bool_)
+    for i in range(rank):
+        is_pivot[pivots[i]] = True
+    basis = np.zeros((width - rank, 2 * wsys), dtype=np.uint64)
+    b = 0
+    for col in range(width):
+        if is_pivot[col]:
+            continue
+        word = (col // num_qubits) * wsys + ((col % num_qubits) >> 6)
+        bit = np.uint64(1) << np.uint64((col % num_qubits) & 63)
+        basis[b, word] |= bit
+        for i in range(rank):
+            if m[i, word] & bit:
+                pc = pivots[i]
+                basis[b, (pc // num_qubits) * wsys + ((pc % num_qubits) >> 6)] |= np.uint64(
+                    1
+                ) << np.uint64((pc % num_qubits) & 63)
+        b += 1
+    return basis, rank
+
+
+@njit(cache=True)
+def columns_from_rows(rows, num_qubits, out):
+    """Column-major bitsets of packed rows: ``out[2q]`` / ``out[2q+1]`` = X / Z bit of qubit q per row."""
+    wsys = rows.shape[1] // 2
+    for c in range(out.shape[0]):
+        for w in range(out.shape[1]):
+            out[c, w] = ZERO
+    for r in range(rows.shape[0]):
+        rw = r >> 6
+        rb = np.uint64(1) << np.uint64(r & 63)
+        for q in range(num_qubits):
+            qb = np.uint64(1) << np.uint64(q & 63)
+            if rows[r, q >> 6] & qb:
+                out[2 * q, rw] |= rb
+            if rows[r, wsys + (q >> 6)] & qb:
+                out[2 * q + 1, rw] |= rb
+
+
+@njit(cache=True)
+def generators_commute(rows):
+    """Whether all packed rows (X words, then Z words) commute pairwise."""
+    s = rows.shape[0]
+    wsys = rows.shape[1] // 2
+    for i in range(s):
+        for j in range(i + 1, s):
+            parity = 0
+            for w in range(wsys):
+                parity ^= (
+                    popcount((rows[i, w] & rows[j, wsys + w]) ^ (rows[i, wsys + w] & rows[j, w]))
+                    & 1
+                )
+            if parity:
+                return False
+    return True

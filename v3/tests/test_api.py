@@ -55,8 +55,9 @@ def test_capabilities_lists_everything_and_fits():
     assert "CX" in caps["instructions"]["unitary"]
     assert "CLIFFORD_2Q" in caps["instructions"]["clifford_index"]
     assert set(caps["schedules"]) == set(api.SCHEDULES)
-    for name in ("code_dimension", "erasure_correctable_profile", "tripartite_information"):
-        assert name in caps["probes"]
+    probes = caps["probes"].get("names", caps["probes"])  # names only if the overview is full
+    for name in ("code_dimension", "erasure_first_failure", "uncorrectable_region_counts"):
+        assert name in probes
     for name in ("entropy", "code_dimension", "random_erasure_statistics", "expectation"):
         assert name in caps["observables"]
     assert "watts_strogatz" in caps["graph_families"]
@@ -67,7 +68,8 @@ def test_capabilities_lists_everything_and_fits():
 def test_capabilities_section_and_unknown_section():
     probes = api.capabilities("probes")
     assert list(probes) == ["probes"]
-    assert probes["probes"]["erasure_correctable_fraction"]["params"]["size"] == "required"
+    assert probes["probes"]["lost_information"]["params"]["region"] == "required"
+    assert probes["probes"]["uncorrectable_region_counts"]["params"]["max_size"] == 2
     with pytest.raises(ValueError, match="unknown section"):
         api.capabilities("nope")
 
@@ -605,7 +607,8 @@ def test_bounded_last_resort_keeps_scalars_and_files():
         ({"graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": -1}}, "seed"),
         ({"checkpoints": 4.5}, "checkpoints"),
         ({"checkpoints": None}, "checkpoints must be"),
-        ({"probes": [{"kind": "erasure_lost_information", "size": "2"}]}, "size must be"),
+        ({"probes": [{"kind": "uncorrectable_region_counts", "max_size": "2"}]}, "max_size must"),
+        ({"probes": [{"kind": "code_dimension", "checkpoints": 2.5}]}, "checkpoints"),
         ({"probes": [{"kind": "code_dimension", "name": ""}]}, "name must be"),
         ({"schedule": 3}, "schedule must be a string"),
     ],
@@ -640,16 +643,17 @@ def test_every_probe_accepts_a_name():
 def test_vector_probe_with_stop_when_purified_has_data_and_depth_grid():
     spec = dict(
         SMALL_SPEC,
-        probes=[{"kind": "entropy_profile"}, {"kind": "erasure_correctable_profile", "samples": 3}],
+        probes=[{"kind": "entropy_profile"}, {"kind": "erasure_lost_profile", "samples": 3}],
     )
     out = api.run_ensemble(spec, 40, seed=2)
     direct = _direct_spec(
-        probes=[mipt.entropy_profile(), mipt.erasure_correctable_profile(samples=3)]
+        probes=[mipt.entropy_profile(), mipt.erasure_lost_profile(samples=3)]
     ).run(40, seed=2)
-    for name in ("entropy_profile", "erasure_correctable_profile"):
+    for name in ("entropy_profile", "erasure_lost_profile"):
         entry = out["probes"][name]
         values = direct.values[name]
-        alive = ~np.isnan(values[:, :, 0])
+        alive = ~np.isnan(values[:, :, 0])  # the lost profile is exact (0) after a stop
+        assert alive.all() == (name == "erasure_lost_profile")
         last = np.flatnonzero(alive.any(axis=0))[-1]
         assert entry["at_layer"] == int(direct.checkpoint_layers[last])
         assert entry["count"] == int(alive[:, last].sum())
@@ -660,6 +664,44 @@ def test_vector_probe_with_stop_when_purified_has_data_and_depth_grid():
             np.nanmean(values[:, 0, grid["index"]], axis=0), abs=1e-5
         )
     assert _size(out) <= api.MAX_OUTPUT_CHARS
+
+
+def test_erasure_probe_summaries_give_failure_by_size():
+    from sparsegf2_v3 import analysis
+
+    spec = dict(
+        SMALL_SPEC,
+        reference="purification",
+        stop_when_purified=False,
+        checkpoints=10,
+        probes=[
+            {"kind": "erasure_first_failure", "samples": 20},
+            {"kind": "uncorrectable_region_counts", "max_size": 2, "checkpoints": [5, 30]},
+            {"kind": "code_snapshot", "checkpoints": "final"},
+        ],
+    )
+    out = api.run_ensemble(spec, 12, seed=3)
+    direct = api._build_spec(spec).run(12, seed=3)
+    first = out["probes"]["erasure_first_failure"]
+    expected = analysis.failure_by_size(direct.values["erasure_first_failure"][:, -1], 10).mean(0)
+    assert first["mean"] == pytest.approx(expected, abs=1e-5) and first["at_layer"] == 30
+    assert "uncorrectable" in first["what"]
+    counts = out["probes"]["uncorrectable_region_counts[2]"]
+    exact = analysis.exact_failure_by_size(
+        direct.values["uncorrectable_region_counts[2]"][:, -1], 10
+    )
+    assert counts["mean"] == pytest.approx([0.0, *exact.mean(0)], abs=1e-5)
+    assert counts["vs_depth"]["layers"] == [5, 30]
+    snap = out["probes"]["code_snapshot"]
+    assert snap["layers"] == [30] and any("code_snapshot" in note for note in out["notes"])
+
+
+def test_ensemble_result_memory_is_bounded():
+    spec = dict(SMALL_SPEC, probes=[{"kind": "erasure_first_failure", "samples": 100000}])
+    est = api.estimate_ensemble(spec, 10)
+    assert est["result_megabytes"] == pytest.approx(10 * 8 * (31 * 100000 + 4) / 1e6, rel=1e-4)
+    with pytest.raises(ValueError, match="GB of memory"):
+        api.run_ensemble(spec, 5000, seed=1)
 
 
 def test_inspect_and_run_catch_bad_record_lookbacks():
@@ -768,10 +810,11 @@ def test_estimate_accounts_for_idle_threads():
     assert many == pytest.approx(one, rel=1e-3)
 
 
-def test_graph_realizations_give_one_graph_per_trajectory():
+def test_graph_realizations_give_a_collection_of_graphs():
     spec = {
         "num_system": 16,
         "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 3, "realizations": 5},
+        "circuits_per_graph": 2,
         "layers": 24,
         "measurement_rate": 0.2,
         "schedule": "random_edges",
@@ -782,12 +825,20 @@ def test_graph_realizations_give_one_graph_per_trajectory():
         "stop_when_purified": True,
     }
     mc = api._build_spec(spec)
-    assert mc.num_graphs == 5
+    assert mc.num_graphs == 5 and mc.num_trajectories == 10
     for i, g in enumerate(mc.graphs):
         np.testing.assert_array_equal(g, graphs.watts_strogatz(16, 4, 0.2, seed=[3, i]))
-    direct = mc.run(10, seed=4)
-    summary = api.run_ensemble(spec, trajectories=10, seed=4)
+    direct = mc.run(seed=4)
+    summary = api.run_ensemble(spec, seed=4)  # trajectories omitted: all 5 x 2 circuits
+    assert summary["num_trajectories"] == 10
     assert summary["purification"]["purified"] == int((direct.purification_layer >= 0).sum())
+    assert api.estimate_ensemble(spec)["trajectories"] == 10
+    with pytest.raises(ValueError, match="give 10"):
+        api.run_ensemble(spec, trajectories=11, seed=4)
+    with pytest.raises(ValueError, match="give trajectories"):
+        api.run_ensemble({**spec, "graph": {"family": "cycle"}, "circuits_per_graph": 1}, seed=4)
+    with pytest.raises(ValueError, match="circuits_per_graph"):
+        api._build_spec({**spec, "graph": {"family": "cycle"}})  # one graph: c must be 1
     with pytest.raises(ValueError, match="random family"):
         api._build_spec({**spec, "graph": {"family": "cycle", "realizations": 2}})
     with pytest.raises(ValueError, match="at least 1"):
@@ -895,7 +946,7 @@ def test_estimate_includes_graph_generation_and_times_are_wall_clock():
     assert wall * 0.8 <= out["elapsed_seconds"] <= wall
     assert out["elapsed_seconds"] <= large["estimated_seconds"] * 1.1 + 0.5
     with pytest.raises(ValueError, match="start_ensemble_job"):
-        api.run_ensemble(bank, 10**8, seed=1, max_seconds=1.0)
+        api.run_ensemble(dict(bank, circuits_per_graph=50_000), 10**8, seed=1, max_seconds=1.0)
 
 
 def test_phase_free_stabilizers_carry_no_signs():

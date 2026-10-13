@@ -97,8 +97,11 @@ MAX_OUTPUT_CHARS = 8000
 """Target upper bound on the JSON size of every result."""
 
 SYNC_ENSEMBLE_MAX_SECONDS = 60.0
-MAX_GRAPH_REALIZATIONS = 100_000
 """Estimated runtime above which interactive callers should use a background job."""
+
+MAX_GRAPH_REALIZATIONS = 100_000
+MAX_RESULT_GB = 8.0
+"""Largest ensemble result (probe values and code snapshots) one run or job may hold in memory."""
 
 MAX_CHECKPOINTS_SHOWN = 50
 MAX_BITS_SHOWN = 256
@@ -1193,12 +1196,13 @@ def _call_with(fn: Callable, given: dict, fill: dict, what: str) -> Any:
 
 
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
-    """One edge array, or a graph bank (a list) when ``realizations`` is given.
+    """One edge array, or a collection of graphs (a list) when ``realizations`` is given.
 
     With ``"realizations": G`` a random family yields ``G`` independent graphs,
-    graph ``i`` generated from seed ``(seed, i)``; trajectory ``t`` of the
-    ensemble runs on graph ``t mod G`` (one realization per trajectory when
-    ``G`` equals the number of trajectories).
+    graph ``i`` generated from seed ``(seed, i)``. The ensemble then runs
+    ``circuits_per_graph`` circuits (default 1) on each graph: trajectory ``t``
+    uses graph ``t // circuits_per_graph``, and all ``G * circuits_per_graph``
+    trajectories run unless fewer are asked for.
     """
     families = _graph_families()
     if not isinstance(graph, dict) or "family" not in graph:
@@ -1212,8 +1216,8 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
         realizations = _require_int(realizations, "graph.realizations", minimum=1)
         if realizations > MAX_GRAPH_REALIZATIONS:
             raise ValueError(
-                f"graph.realizations must be at most {MAX_GRAPH_REALIZATIONS}; reuse graphs "
-                "(trajectory t runs on graph t mod realizations) or pass explicit edges in Python"
+                f"graph.realizations must be at most {MAX_GRAPH_REALIZATIONS}; run more "
+                "circuits per graph (circuits_per_graph) or pass explicit edges in Python"
             )
         if "seed" not in params:
             raise ValueError("graph.realizations needs a random family with its own 'seed'")
@@ -1277,6 +1281,8 @@ def _build_probe(spec: Any, index: int) -> mipt.Probe:
     for key, value in list(params.items()):
         if key in _QUBIT_ARGS and value is not None:
             params[key] = _qubit_list(value, f"{where}.{key}")
+    if params.get("checkpoints") is not None:
+        params["checkpoints"] = _checkpoints(params["checkpoints"], f"{where}.checkpoints")
     probe = _call_with(kinds[kind], params, {"name": None}, f"{where} ({kind})")
     return dataclasses.replace(probe, name=name) if name is not None else probe
 
@@ -1422,15 +1428,15 @@ def _reference_partner(value: Any) -> int | str:
     return _require_int(value, "reference_partner", minimum=0)
 
 
-def _checkpoints(value: Any) -> str | int | list[int]:
+def _checkpoints(value: Any, what: str = "checkpoints") -> str | int | list[int]:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        return [_require_int(c, "checkpoints entries", minimum=0) for c in value]
+        return [_require_int(c, f"{what} entries", minimum=0) for c in value]
     if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
-        return _require_int(value, "checkpoints (a stride)", minimum=1)
+        return _require_int(value, f"{what} (a stride)", minimum=1)
     raise ValueError(
-        'checkpoints must be "final", "every_layer", a positive integer stride or a list of '
+        f'{what} must be "final", "every_layer", a positive integer stride or a list of '
         f"layers, got {value!r}"
     )
 
@@ -1464,12 +1470,16 @@ def _probe_us(p: mipt.Probe, n: int, words: int) -> float:
     if p.kind == "tripartite":
         a, b, c = r
         return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], words)
-    if p.kind in ("erasure_mean_lost", "erasure_correctable"):
-        return p.samples * (1.0 + 0.1 * p.size * words)
     if p.kind == "contiguous_distance":
         return 50.0 + 0.03 * n**2.25
-    if p.kind in ("erasure_lost_profile", "erasure_correctable_profile"):
+    if p.kind == "erasure_lost_profile":
         return p.samples * (0.8 * n + 0.05 * n * words)
+    if p.kind == "erasure_first_failure":
+        return 0.02 * n**2 + p.samples * 0.03 * n**1.5
+    if p.kind == "uncorrectable_counts":  # prefixes of size w - 1, then hash lookups
+        return 0.02 * n**2 + math.comb(n, p.size - 1) * 0.1 * 4 ** (p.size - 1)
+    if p.kind == "code_snapshot":
+        return 1.0 + 0.01 * n**2
     return 10.0 + 0.5 * n + 0.05 * n * words  # entropy_profile, and any newer probe
 
 
@@ -1493,9 +1503,10 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
         mc.scramble_gates + mc.scramble_matchings * (n // 2) + mc.scramble_layers * gates_per_layer
     )
     dynamics = mc.layers * layer + scramble_gates * gate_us
-    probes = sum(_probe_us(p, n, words) for p in mc.probes)
+    probes = sum(len(mc.probe_layers(p.name)) * _probe_us(p, n, words) for p in mc.probes)
+    detection = len(mc.checkpoint_layers) * (1.0 + 0.06 * n) if mc.reference != "none" else 0.0
     setup = 5.0 + 0.01 * mc.num_qubits * words
-    return setup + dynamics + len(mc.checkpoint_layers) * probes
+    return setup + dynamics + probes + detection
 
 
 _CALL_OVERHEAD_SECONDS = 0.05
@@ -1528,22 +1539,68 @@ def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) 
     return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
 
 
-def estimate_ensemble(spec: dict[str, Any], trajectories: int) -> dict[str, Any]:
+def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
+    """Memory of the run's result: every probe value (float64) plus the saved codes."""
+    n = mc.num_system
+    values = sum(len(mc.probe_layers(p.name)) * mipt._probe_length(p, n) for p in mc.probes)
+    codes = sum(
+        len(mc.probe_layers(p.name)) * n * 2 * ((n + 63) // 64)
+        for p in mc.probes
+        if p.kind == "code_snapshot"
+    )
+    return trajectories * 8 * (values + codes + 4)
+
+
+def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
+    """The number of trajectories to run: as given, or every circuit of a graph collection."""
+    if trajectories is None:
+        if mc.num_trajectories is None:
+            raise ValueError(
+                "give trajectories (the number of random circuits); it may be omitted only for "
+                "a collection of graphs (graph.realizations), which runs circuits_per_graph "
+                "circuits on each graph"
+            )
+        trajectories = mc.num_trajectories
+    trajectories = _require_int(trajectories, "trajectories", minimum=1)
+    if trajectories > MAX_TRAJECTORIES:
+        raise ValueError(f"at most {MAX_TRAJECTORIES:,} trajectories per call")
+    if mc.num_trajectories is not None and trajectories > mc.num_trajectories:
+        raise ValueError(
+            f"{trajectories} trajectories requested, but {mc.num_graphs} graphs x "
+            f"circuits_per_graph={mc.circuits_per_graph} give {mc.num_trajectories}: raise "
+            "circuits_per_graph (or graph.realizations), or omit trajectories to run them all"
+        )
+    gigabytes = _result_bytes(mc, trajectories) / 1e9
+    if gigabytes > MAX_RESULT_GB:
+        raise ValueError(
+            f"the result would take about {gigabytes:.1f} GB of memory (limit {MAX_RESULT_GB:g} "
+            "GB): give the large probes (erasure_first_failure samples, code_snapshot, vector "
+            "probes) fewer checkpoints of their own, or split the trajectories into several "
+            "output directories"
+        )
+    return trajectories
+
+
+def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> dict[str, Any]:
     """A rough (deliberately pessimistic) runtime estimate for :func:`run_ensemble`.
 
     Returns ``estimated_seconds`` (building the spec, generating and
     preprocessing its graphs, and the trajectories), the thread count it
-    assumes, and whether a synchronous run fits within
-    :data:`SYNC_ENSEMBLE_MAX_SECONDS`. Trajectories that stop early
-    (``stop_when_purified``) make real runs faster.
+    assumes, whether a synchronous run fits within
+    :data:`SYNC_ENSEMBLE_MAX_SECONDS`, the trajectory count (every circuit of a
+    graph collection when ``trajectories`` is omitted) and the memory the
+    result needs. Trajectories that stop early (``stop_when_purified``) make
+    real runs faster.
     """
     import numba
 
     mc = _build_spec(spec)
-    trajectories = _require_int(trajectories, "trajectories", minimum=1)
+    trajectories = _trajectory_count(mc, trajectories)
     seconds = _estimate_seconds(spec, mc, trajectories)
     return {
         "estimated_seconds": _num(seconds),
+        "trajectories": trajectories,
+        "result_megabytes": _num(_result_bytes(mc, trajectories) / 1e6),
         "threads": numba.get_num_threads(),
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
@@ -1607,22 +1664,29 @@ def _summary_names(names: Sequence[str]) -> dict[str, str]:
 
 
 def _vector_summary(
-    values: np.ndarray, layers: np.ndarray, sizes_shown: int, depths_shown: int
+    curves: Callable[[np.ndarray], np.ndarray],
+    alive: np.ndarray,
+    layers: np.ndarray,
+    sizes_shown: int,
+    depths_shown: int,
 ) -> dict[str, Any]:
-    """A vector probe (one value per region size m = 0..n at every checkpoint).
+    """A vector probe: one curve over erasure or region size m = 0, 1, ... per evaluation.
 
-    ``mean``/``stderr`` are at the last checkpoint that still has data (with
-    ``stop_when_purified`` later checkpoints may be empty), and ``vs_depth``
-    gives the mean on a coarse grid of checkpoints x sizes, so the change with
-    circuit depth stays visible.
+    ``curves(evals)`` returns the per-trajectory curves at those evaluations,
+    shape ``(trajectories, len(evals), sizes)``; ``alive`` (trajectories x
+    evaluations) marks the values that exist (with ``stop_when_purified``,
+    entanglement profiles of stopped trajectories do not). ``mean``/``stderr``
+    are at the last evaluation that has data, and ``vs_depth`` gives the mean
+    on a coarse grid of evaluations x sizes, so the change with circuit depth
+    stays visible. ``index`` lists the sizes m shown when not all are.
     """
-    alive = ~np.isnan(values[:, :, 0])  # (trajectories, checkpoints)
     count = alive.sum(axis=0)
     with_data = np.flatnonzero(count > 0)
     if not with_data.size:
         return {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
     last = int(with_data[-1])
-    mean, err = analysis.mean_and_error(values[:, last, :], axis=0)
+    final = curves(np.array([last]))[:, 0, :]
+    mean, err = analysis.mean_and_error(final, axis=0)
     sizes = _subsample(mean.size, sizes_shown)
     entry: dict[str, Any] = {
         "vector": True,
@@ -1636,7 +1700,7 @@ def _vector_summary(
     if len(with_data) > 1:
         depth_idx = with_data[_subsample(len(with_data), depths_shown)]
         grid_sizes = _subsample(mean.size, 17)
-        grid_mean, _ = analysis.mean_and_error(values[:, depth_idx, :], axis=0)
+        grid_mean, _ = analysis.mean_and_error(curves(depth_idx), axis=0)
         entry["vs_depth"] = {
             "layers": layers[depth_idx],
             "count": count[depth_idx],
@@ -1644,6 +1708,34 @@ def _vector_summary(
             "mean": grid_mean[:, grid_sizes],
         }
     return entry
+
+
+def _failure_curves(values: np.ndarray, n: int) -> Callable[[np.ndarray], np.ndarray]:
+    """First-failure samples -> per-trajectory P_C(m), m = 0..n, at the requested evaluations."""
+    return lambda evals: analysis.failure_by_size(values[:, evals, :], n)
+
+
+def _count_curves(values: np.ndarray, n: int) -> Callable[[np.ndarray], np.ndarray]:
+    """Exhaustive counts -> per-trajectory exact P_C(m), m = 0..w (P_C(0) = 0)."""
+
+    def curves(evals: np.ndarray) -> np.ndarray:
+        exact = analysis.exact_failure_by_size(values[:, evals, :], n)
+        return np.concatenate([np.zeros(exact.shape[:-1] + (1,)), exact], axis=-1)
+
+    return curves
+
+
+_VECTOR_MEANING = {
+    "entropy_profile": "mean S(first m qubits of system_order) vs m (index)",
+    "erasure_lost_profile": "mean bits of logical information lost vs erasure size m (index)",
+    "erasure_first_failure": (
+        "P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), "
+        "estimated from the first-failure samples"
+    ),
+    "uncorrectable_counts": (
+        "exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index)"
+    ),
+}
 
 
 def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict[str, Any]:
@@ -1714,21 +1806,41 @@ def _summarize_ensemble(
     sizes_shown = MAX_PROFILE_SHOWN if num_vectors <= 2 else 33
     if shown < MAX_CHECKPOINTS_SHOWN:  # a tighter budget: coarser profiles too
         sizes_shown = min(sizes_shown, max(shown, 4) + 1)
-    kinds = {p.name: p.kind for p in spec.probes}
+    probes = {p.name: p for p in spec.probes}
+    n = spec.num_system
     for name, values in result.values.items():
         values = np.asarray(values, dtype=np.float64)
+        probe = probes[name]
+        own = np.asarray(result.layers(name))
         if values.ndim == 2:
+            pidx = _subsample(len(own), shown)
             mean, err = analysis.mean_and_error(values, axis=0)
-            entry: dict[str, Any] = {"mean": mean[idx], "stderr": err[idx]}
+            entry: dict[str, Any] = {"mean": mean[pidx], "stderr": err[pidx]}
+            if not np.array_equal(own, layers):
+                entry["layers"] = own[pidx]
             if np.isnan(values).any():
-                entry["count"] = np.sum(~np.isnan(values), axis=0)[idx]
-                if kinds.get(name) == "contiguous_distance":
+                entry["count"] = np.sum(~np.isnan(values), axis=0)[pidx]
+                if probe.kind == "contiguous_distance":
                     notes.append(
                         f"{keys[name]}: the distance is undefined without a code, so it averages "
                         "only trajectories whose code dimension is above 0 (see 'count')"
                     )
+            if probe.kind == "code_snapshot":
+                notes.append(
+                    f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
+                    "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
+                )
         else:
-            entry = _vector_summary(values, layers, sizes_shown, min(MAX_VECTOR_DEPTHS, shown))
+            if probe.kind == "erasure_first_failure":
+                curves, alive = _failure_curves(values, n), np.ones(values.shape[:2], dtype=bool)
+            elif probe.kind == "uncorrectable_counts":
+                curves, alive = _count_curves(values, n), np.ones(values.shape[:2], dtype=bool)
+            else:
+                curves, alive = (lambda evals, v=values: v[:, evals, :]), ~np.isnan(values[:, :, 0])
+            entry = {
+                "what": _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)"),
+                **_vector_summary(curves, alive, own, sizes_shown, min(MAX_VECTOR_DEPTHS, shown)),
+            }
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
         out["purification"] = _purification_summary(result.purification_layer, layers, shown)
@@ -1740,8 +1852,9 @@ def _summarize_ensemble(
     )
     if spec.stop_when_purified:
         notes.append(
-            "stop_when_purified: probe means at a checkpoint average only trajectories still "
-            "running there (see 'count')"
+            "stop_when_purified: code probes take their exact values for a purified trajectory "
+            "(k = 0, nothing lost); entanglement probes average only trajectories still running "
+            "(see 'count')"
         )
     if notes:
         out["notes"] = notes
@@ -1972,7 +2085,7 @@ def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]
 
 def run_ensemble(
     spec: dict[str, Any],
-    trajectories: int,
+    trajectories: int | None = None,
     seed: int | None = None,
     output_dir: str | None = None,
     num_threads: int | None = None,
@@ -1980,6 +2093,9 @@ def run_ensemble(
     max_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run ``trajectories`` random monitored circuits and summarize them.
+
+    For a collection of graphs (``graph.realizations``) ``trajectories`` may
+    be omitted: every graph then gets ``circuits_per_graph`` circuits.
 
     ``spec`` holds :class:`sparsegf2_v3.mipt.MonitoredCircuit` parameters as
     JSON (see ``capabilities()["ensemble_spec"]``), with the graph given as
@@ -1997,9 +2113,7 @@ def run_ensemble(
     """
     start = time.perf_counter()
     mc = _build_spec(spec)
-    trajectories = _require_int(trajectories, "trajectories", minimum=1)
-    if trajectories > MAX_TRAJECTORIES:
-        raise ValueError(f"at most {MAX_TRAJECTORIES:,} trajectories per call")
+    trajectories = _trajectory_count(mc, trajectories)
     if max_seconds is not None:
         max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
         estimate = _estimate_seconds(spec, mc, trajectories)
@@ -2136,8 +2250,8 @@ def _default_chunk_size(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
 
 def start_ensemble_job(
     spec: dict[str, Any],
-    trajectories: int,
-    output_dir: str,
+    trajectories: int | None = None,
+    output_dir: str | None = None,
     seed: int | None = None,
     chunk_size: int | None = None,
     num_threads: int | None = None,
@@ -2155,12 +2269,12 @@ def start_ensemble_job(
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
     larger ``trajectories`` extends a finished run. A directory holding a
-    different spec or seed is refused.
+    different spec or seed is refused. For a collection of graphs
+    ``trajectories`` may be omitted (every graph gets ``circuits_per_graph``
+    circuits).
     """
     mc = _build_spec(spec)
-    trajectories = _require_int(trajectories, "trajectories", minimum=1)
-    if trajectories > MAX_TRAJECTORIES:
-        raise ValueError(f"at most {MAX_TRAJECTORIES:,} trajectories per job")
+    trajectories = _trajectory_count(mc, trajectories)
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     if output_dir is None:
@@ -2424,7 +2538,7 @@ def _capability_sections() -> dict[str, Any]:
         "ensemble_spec": spec_keys,
         "probes": {
             name: {
-                "params": {**_signature_summary(fn, ("name",)), "name": None},
+                "params": {**_signature_summary(fn, ("name", "checkpoints")), "name": None},
                 "description": _first_sentence(fn),
             }
             for name, fn in _probe_kinds().items()
@@ -2452,6 +2566,7 @@ def _capability_sections() -> dict[str, Any]:
             "phases=True (default) tracks signs; ensembles always run phase-free",
             "entropies are in bits; purification layer -1 means censored",
             "every probe and observable takes an optional 'name': its key in the results",
+            "every probe takes optional 'checkpoints' (its own layers; default: the spec's)",
         ],
         "examples": {
             "run_circuit": {

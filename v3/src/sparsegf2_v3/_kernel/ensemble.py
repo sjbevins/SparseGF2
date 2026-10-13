@@ -14,9 +14,10 @@ operations, so an exported circuit is exactly what trajectory ``t`` simulated.
 
 Graphs: ``edges`` holds one or more graphs back to back (graph ``g`` is
 ``edges[graph_ptr[g]:graph_ptr[g + 1]]``, with its edge colouring and edge
-weights stored the same way); trajectory ``t`` runs on graph ``t mod G``. This
-is how graph disorder enters (one realization per trajectory) without
-touching the random streams.
+weights stored the same way). With several graphs, trajectory ``t`` runs on
+graph ``t // circuits_per_graph``: each graph carries a block of
+``circuits_per_graph`` consecutive trajectories. This is how graph disorder
+enters without touching the random streams.
 
 Random draws per trajectory, in order:
 
@@ -43,10 +44,17 @@ erasure costs two column ranks over E only (see the ``*_rows`` routines in
 
 Probes
 ------
-Scalar probes write one number per checkpoint. Their qubit sets are stored
-flat in ``idx``: probe ``j``'s block starts at ``ptr[j]`` and holds up to three
-consecutive regions of lengths ``region_len[j, 0..2]``. Vector probes write
-``n_sys + 1`` numbers per checkpoint (entanglement profile, erasure profiles).
+Every probe writes ``plen[j]`` numbers each time it is evaluated, into its own
+slice of the trajectory's flat output row: evaluation ``c`` of probe ``j``
+fills ``out[t, poff[j] + c * plen[j] : ... + plen[j]]``. Probe ``j`` is
+evaluated at its own checkpoint layers ``pck[pck_ptr[j]:pck_ptr[j + 1]]``
+(sorted); the engine stops at the union ``gck`` of all of them, and tests
+purification only where ``detect`` is set. Qubit sets are stored flat in
+``idx``: probe ``j``'s block starts at ``ptr[j]`` and holds up to three
+consecutive regions of lengths ``region_len[j, 0..2]``. Evaluations that a
+trajectory never reaches (``stop_when_purified``) are filled with ``pfill[j]``,
+the probe's exact value once the reference is pure, or NaN where that value
+is not determined.
 """
 
 from __future__ import annotations
@@ -56,12 +64,15 @@ from numba import njit, prange
 
 from sparsegf2_v3._kernel.bits import popcount
 from sparsegf2_v3._kernel.entropy import (
+    code_snapshot_rows,
     contiguous_distance_rows,
     erasure_profile_rows,
+    first_failure_samples,
     lost_information_rows,
     prefix_entropies,
     reference_rows,
     region_entropy,
+    uncorrectable_counts_rows,
 )
 from sparsegf2_v3._kernel.rng import next_below, next_bit, next_double, stream_state
 from sparsegf2_v3._kernel.tableau import (
@@ -83,14 +94,13 @@ PROBE_ENTROPY = 0
 PROBE_CODE_DIMENSION = 1
 PROBE_CONTIGUOUS_DISTANCE = 2
 PROBE_LOST_INFORMATION = 3
-PROBE_ERASURE_MEAN_LOST = 4
-PROBE_ERASURE_CORRECTABLE = 5
-PROBE_MUTUAL_INFORMATION = 6
-PROBE_TRIPARTITE = 7
-
-VPROBE_ENTROPY_PROFILE = 0
-VPROBE_ERASURE_LOST = 1
-VPROBE_ERASURE_CORRECTABLE = 2
+PROBE_MUTUAL_INFORMATION = 4
+PROBE_TRIPARTITE = 5
+PROBE_ENTROPY_PROFILE = 6
+PROBE_ERASURE_LOST_PROFILE = 7
+PROBE_FIRST_FAILURE = 8
+PROBE_UNCORRECTABLE_COUNTS = 9
+PROBE_CODE_SNAPSHOT = 10
 
 
 @njit(cache=True, inline="always")
@@ -210,104 +220,89 @@ def _entropy_of_union(tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, 
 
 
 @njit(cache=True)
-def eval_probes(
-    tab, n, ws, n_sys, ref_rows, n_ref, s_ref, kinds, ptr, region_len, idx, size_param,
-    sample_param, order, periodic, prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
-    erase_scratch,
-):  # fmt: skip
-    """Evaluate every scalar probe on the current state into ``out_row``.
-
-    ``s_ref`` is the reference entropy S(R), computed once per checkpoint by the
-    caller (it is both the code-dimension probe and the purification test).
-    ``erase_scratch`` has shape >= (2 n_sys, ws).
-    """
-    starts = np.zeros(3, dtype=np.int64)
-    lens = np.zeros(3, dtype=np.int64)
-    region_buf = np.zeros(n, dtype=np.int64)
-    for j in range(kinds.shape[0]):
-        k = kinds[j]
-        s0 = ptr[j]
-        for r in range(3):
-            starts[r] = s0
-            lens[r] = region_len[j, r]
-            s0 += region_len[j, r]
-        if k == PROBE_ENTROPY:
-            out_row[j] = _entropy_of_union(
-                tab, n, ws, idx, starts, lens, 1, mask_buf, comp_buf, scratch, union_buf
-            )
-        elif k == PROBE_CODE_DIMENSION:
-            out_row[j] = s_ref
-        elif k == PROBE_CONTIGUOUS_DISTANCE:
-            if s_ref == 0:
-                out_row[j] = np.nan  # no code, no distance (never averaged as 0)
-            else:
-                out_row[j] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
-        elif k == PROBE_LOST_INFORMATION:
-            for t in range(lens[0]):
-                region_buf[t] = idx[starts[0] + t]
-            out_row[j] = lost_information_rows(
-                tab, ws, region_buf[: lens[0]], ref_rows, erase_scratch
-            )
-        elif k == PROBE_MUTUAL_INFORMATION or k == PROBE_TRIPARTITE:
-            # sum over nonempty subsets T of the regions of (-1)^(|T|+1) S(T)
-            num_regions = 2 if k == PROBE_MUTUAL_INFORMATION else 3
-            total = 0
-            for which in range(1, 1 << num_regions):
-                bits = 0
-                for r in range(num_regions):
-                    bits += (which >> r) & 1
-                s = _entropy_of_union(
-                    tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, scratch, union_buf
-                )
-                total += s if bits % 2 == 1 else -s
-            out_row[j] = total
-        elif k == PROBE_ERASURE_MEAN_LOST or k == PROBE_ERASURE_CORRECTABLE:
-            m = size_param[j]
-            samples = sample_param[j]
-            acc = 0.0
-            for _ in range(samples):
-                for t in range(m):
-                    r = t + next_below(prng, n_sys - t)
-                    tmp = perm[t]
-                    perm[t] = perm[r]
-                    perm[r] = tmp
-                lost = lost_information_rows(tab, ws, perm[:m], ref_rows, erase_scratch)
-                if k == PROBE_ERASURE_MEAN_LOST:
-                    acc += lost
-                elif lost == 0:
-                    acc += 1.0
-            out_row[j] = acc / samples
+def _shuffle(prng, perm):
+    """Uniformly random permutation of ``perm`` in place (Fisher-Yates, len - 1 draws)."""
+    n = perm.shape[0]
+    for t in range(n - 1):
+        r = t + next_below(prng, n - t)
+        tmp = perm[t]
+        perm[t] = perm[r]
+        perm[r] = tmp
 
 
 @njit(cache=True)
-def eval_vector_probes(
-    tab, n, ws, n_sys, ref_rows, vkinds, vsamples, order, prng, out_block, perm, work
-):
-    """Evaluate every vector probe into ``out_block[v, :]`` (length n_sys + 1 each)."""
-    for v in range(vkinds.shape[0]):
-        k = vkinds[v]
-        if k == VPROBE_ENTROPY_PROFILE:
-            prefix_entropies(tab, n, ws, order, work)
-            for i in range(n_sys + 1):
-                out_block[v, i] = work[i]
+def eval_probe(
+    j, kind, row, tab, n, ws, n_sys, ref_rows, n_ref, s_ref, ptr, region_len, idx, size_param,
+    sample_param, order, periodic, prng, mask_buf, comp_buf, scratch, union_buf, perm,
+    erase_scratch, work, snap_out,
+):  # fmt: skip
+    """Evaluate probe ``j`` (kernel code ``kind``) on the current state into ``row``.
+
+    ``s_ref`` is the reference entropy S(R) = k, read once per checkpoint by
+    the caller. Code and erasure probes take their trivial values when k = 0.
+    ``snap_out`` receives the code's generators for a snapshot probe.
+    """
+    starts = np.zeros(3, dtype=np.int64)
+    lens = np.zeros(3, dtype=np.int64)
+    s0 = ptr[j]
+    for r in range(3):
+        starts[r] = s0
+        lens[r] = region_len[j, r]
+        s0 += region_len[j, r]
+    if kind == PROBE_ENTROPY:
+        row[0] = _entropy_of_union(
+            tab, n, ws, idx, starts, lens, 1, mask_buf, comp_buf, scratch, union_buf
+        )
+    elif kind == PROBE_CODE_DIMENSION:
+        row[0] = s_ref
+    elif kind == PROBE_CONTIGUOUS_DISTANCE:
+        if s_ref == 0:
+            row[0] = np.nan  # no code, no distance (never averaged as 0)
         else:
-            samples = vsamples[v]
-            for i in range(n_sys + 1):
-                out_block[v, i] = 0.0
+            row[0] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
+    elif kind == PROBE_LOST_INFORMATION:
+        row[0] = lost_information_rows(
+            tab, ws, idx[starts[0] : starts[0] + lens[0]], ref_rows, erase_scratch
+        )
+    elif kind == PROBE_MUTUAL_INFORMATION or kind == PROBE_TRIPARTITE:
+        # sum over nonempty subsets T of the regions of (-1)^(|T|+1) S(T)
+        num_regions = 2 if kind == PROBE_MUTUAL_INFORMATION else 3
+        total = 0
+        for which in range(1, 1 << num_regions):
+            bits = 0
+            for r in range(num_regions):
+                bits += (which >> r) & 1
+            s = _entropy_of_union(
+                tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, scratch, union_buf
+            )
+            total += s if bits % 2 == 1 else -s
+        row[0] = total
+    elif kind == PROBE_ENTROPY_PROFILE:
+        prefix_entropies(tab, n, ws, order, work)
+        for i in range(n_sys + 1):
+            row[i] = work[i]
+    elif kind == PROBE_ERASURE_LOST_PROFILE:
+        samples = sample_param[j]
+        for i in range(n_sys + 1):
+            row[i] = 0.0
+        if s_ref > 0:
             for _ in range(samples):
-                for t in range(n_sys - 1):  # full Fisher-Yates shuffle of the system
-                    r = t + next_below(prng, n_sys - t)
-                    tmp = perm[t]
-                    perm[t] = perm[r]
-                    perm[r] = tmp
+                _shuffle(prng, perm)
                 erasure_profile_rows(tab, ws, perm, ref_rows, work)
                 for i in range(n_sys + 1):
-                    if k == VPROBE_ERASURE_LOST:
-                        out_block[v, i] += work[i]
-                    elif work[i] == 0:
-                        out_block[v, i] += 1.0
+                    row[i] += work[i]
             for i in range(n_sys + 1):
-                out_block[v, i] /= samples
+                row[i] /= samples
+    elif kind == PROBE_FIRST_FAILURE:
+        first_failure_samples(tab, ws, ref_rows, s_ref, prng, order, row)
+    elif kind == PROBE_UNCORRECTABLE_COUNTS:
+        if s_ref == 0:
+            for m in range(size_param[j]):
+                row[m] = 0.0
+        else:
+            uncorrectable_counts_rows(tab, ws, order, ref_rows, size_param[j], row)
+    else:  # PROBE_CODE_SNAPSHOT: the generators go to snap_out, the row holds their number
+        row[0] = code_snapshot_rows(tab, n_sys, n, ref_rows, snap_out)
 
 
 @njit(cache=True)
@@ -325,22 +320,28 @@ def _setup(
 
 @njit(parallel=True, cache=True)
 def run_ensemble(
-    n_sys, n_ref, ref_mode, fixed_partner, edges, graph_ptr, edge_cum, color_ptr, color_ptr_ptr,
-    color_idx, schedule_kind, gates_per_layer, pool, p, layers, scramble_gates,
-    scramble_matchings, scramble_layers, orient, checkpoints,
-    stop_purified, kinds, ptr, region_len, idx, size_param, sample_param, vkinds, vsamples, order,
-    periodic, key_struct, key_probe, first, out_values, out_vectors, out_tau, out_final, out_meas,
-    h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
+    n_sys, n_ref, ref_mode, fixed_partner, edges, graph_ptr, circuits_per_graph, edge_cum,
+    color_ptr, color_ptr_ptr, color_idx, schedule_kind, gates_per_layer, pool, p, layers,
+    scramble_gates, scramble_matchings, scramble_layers, orient, gck, detect, stop_purified,
+    pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
+    order, periodic, key_struct, key_probe, first, out, snap, snap_rows, out_tau, out_final,
+    out_meas, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
 ):  # fmt: skip
-    """Simulate ``out_values.shape[0]`` trajectories; see the module docstring."""
-    num_traj = out_values.shape[0]
-    num_ck = checkpoints.shape[0]
+    """Simulate ``out.shape[0]`` trajectories; see the module docstring.
+
+    ``snap`` (trajectories, evaluations, n_sys, 2 wsys) and ``snap_rows``
+    receive the code snapshots of the (at most one) snapshot probe; rows of
+    evaluations a trajectory never reaches are marked -1 in ``snap_rows``.
+    """
+    num_traj = out.shape[0]
+    num_gck = gck.shape[0]
+    num_probes = pkind.shape[0]
     n = n_sys + n_ref
     ws = (n + 63) // 64
     max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
     num_graphs = graph_ptr.shape[0] - 1
     for t in prange(num_traj):
-        g = (first + t) % num_graphs
+        g = 0 if num_graphs == 1 else (first + t) // circuits_per_graph
         g_edges = edges[graph_ptr[g] : graph_ptr[g + 1]]
         g_cum = edge_cum[graph_ptr[g] : graph_ptr[g + 1]]  # empty when unweighted
         g_cidx = color_idx[graph_ptr[g] : graph_ptr[g + 1]]
@@ -367,6 +368,7 @@ def run_ensemble(
         mperm = np.zeros(n_sys, dtype=np.int64)
         refs = np.arange(n_sys, n).astype(np.int64)
         work = np.zeros(n_sys + 1, dtype=np.int64)
+        next_eval = np.zeros(num_probes, dtype=np.int64)  # next evaluation index per probe
 
         partner = fixed_partner
         if ref_mode == REF_SINGLE and fixed_partner < 0:
@@ -421,31 +423,37 @@ def run_ensemble(
                     measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
                 num_meas += nm
                 final = layer
-            if ci < num_ck and checkpoints[ci] == layer:
+            if ci < num_gck and gck[ci] == layer:
                 s_ref = -n_ref
                 for w in range(ws):
                     s_ref += np.int64(popcount(ref_rows[w]))
-                eval_probes(
-                    tab, n, ws, n_sys, ref_rows, n_ref, s_ref, kinds, ptr, region_len, idx,
-                    size_param, sample_param, order, periodic, prng, out_values[t, ci], mask_buf,
-                    comp_buf, scratch, union_buf, perm, erase_scratch,
-                )  # fmt: skip
-                eval_vector_probes(
-                    tab, n, ws, n_sys, ref_rows, vkinds, vsamples, order, prng, out_vectors[t, ci],
-                    perm, work,
-                )  # fmt: skip
-                if ref_mode != REF_NONE and tau < 0 and s_ref == 0:
+                for j in range(num_probes):
+                    c = next_eval[j]
+                    if c < pck_ptr[j + 1] - pck_ptr[j] and pck[pck_ptr[j] + c] == layer:
+                        base = poff[j] + c * plen[j]
+                        eval_probe(
+                            j, pkind[j], out[t, base : base + plen[j]], tab, n, ws, n_sys,
+                            ref_rows, n_ref, s_ref, ptr, region_len, idx, size_param,
+                            sample_param, order, periodic, prng, mask_buf, comp_buf, scratch,
+                            union_buf, perm, erase_scratch, work,
+                            snap[t, min(c, snap.shape[1] - 1)],
+                        )  # fmt: skip
+                        if pkind[j] == PROBE_CODE_SNAPSHOT:
+                            snap_rows[t, c] = np.int64(out[t, base])
+                        next_eval[j] = c + 1
+                if detect[ci] and ref_mode != REF_NONE and tau < 0 and s_ref == 0:
                     tau = layer
                     stopped = stop_purified
                 ci += 1
             if stopped:
                 break
-        for c in range(ci, num_ck):
-            for j in range(out_values.shape[2]):
-                out_values[t, c, j] = np.nan
-            for v in range(out_vectors.shape[2]):
-                for i in range(out_vectors.shape[3]):
-                    out_vectors[t, c, v, i] = np.nan
+        for j in range(num_probes):  # evaluations never reached: exact values for k = 0, or NaN
+            for c in range(next_eval[j], pck_ptr[j + 1] - pck_ptr[j]):
+                base = poff[j] + c * plen[j]
+                for i in range(plen[j]):
+                    out[t, base + i] = pfill[j]
+                if pkind[j] == PROBE_CODE_SNAPSHOT:
+                    snap_rows[t, c] = -1
         out_tau[t] = tau
         out_final[t] = final
         out_meas[t] = num_meas
@@ -453,8 +461,8 @@ def run_ensemble(
 
 @njit(cache=True)
 def generate_ops(
-    n_sys, ref_mode, fixed_partner, edges, graph_ptr, edge_cum, color_ptr, color_ptr_ptr,
-    color_idx, schedule_kind, gates_per_layer, pool, p, layers, scramble_gates,
+    n_sys, ref_mode, fixed_partner, edges, graph_ptr, circuits_per_graph, edge_cum, color_ptr,
+    color_ptr_ptr, color_idx, schedule_kind, gates_per_layer, pool, p, layers, scramble_gates,
     scramble_matchings, scramble_layers, orient, key_struct, trajectory, out_ga, out_gb, out_gg,
     gate_ptr, out_mq, meas_ptr,
 ):  # fmt: skip
@@ -469,7 +477,7 @@ def generate_ops(
     rng = np.empty(4, dtype=np.uint64)
     stream_state(key_struct, trajectory, rng)
     max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
-    g = trajectory % (graph_ptr.shape[0] - 1)
+    g = 0 if graph_ptr.shape[0] == 2 else trajectory // circuits_per_graph
     g_edges = edges[graph_ptr[g] : graph_ptr[g + 1]]
     g_cum = edge_cum[graph_ptr[g] : graph_ptr[g + 1]]  # empty when unweighted
     g_cidx = color_idx[graph_ptr[g] : graph_ptr[g + 1]]

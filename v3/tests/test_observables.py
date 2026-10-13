@@ -318,9 +318,15 @@ def test_erasure_docstrings_give_the_failure_probability_correctly():
     profile = ob.erasure_profile(sim, range(n), range(n, 2 * n), samples=5, seed=1)
     failure = analysis.bernoulli_erasure_curve(1 - profile["correctable_fraction"], p)
     assert failure == pytest.approx(1 - (1 - p) ** n)
-    for fn in (ob.erasure_profile, mipt.erasure_correctable_profile):
-        doc = " ".join(fn.__doc__.split())
-        assert "1 - " in doc and "success probability" in doc, fn.__name__
+    doc = " ".join(ob.erasure_profile.__doc__.split())
+    assert "1 - " in doc and "success probability" in doc
+    # the engine's first-failure sizes give the same curve
+    spec = mipt.MonitoredCircuit(
+        num_system=n, edges=[(i, (i + 1) % n) for i in range(n)], layers=0, measurement_rate=0.0,
+        reference="purification", probes=[mipt.erasure_first_failure(samples=5)],
+    )  # fmt: skip
+    first = spec.run(2, seed=1).values["erasure_first_failure"]
+    assert analysis.erasure_failure_probability(first, n, p) == pytest.approx(1 - (1 - p) ** n)
 
 
 def test_kaplan_meier_refuses_the_censoring_marker():

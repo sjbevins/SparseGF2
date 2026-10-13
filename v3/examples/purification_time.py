@@ -1,10 +1,10 @@
-"""Single-reference purification time on Watts-Strogatz graphs (the PRL production protocol).
-
-This is ``studies/prl_production/PROTOCOL.md`` expressed with SparseGF2 v3:
+"""Single-reference purification time on Watts-Strogatz graphs.
 
 * ``n`` system qubits plus one reference, Bell-paired with system qubit ``n - 1``;
-* one Watts-Strogatz realization of the circulant C(n, 2) (``2n`` edges, mean
-  degree 4) per trajectory;
+* a collection of ``--graphs`` Watts-Strogatz realizations of the circulant
+  C(n, 2) (``2n`` edges, mean degree 4), each evolved with
+  ``--circuits-per-graph`` random circuits (the same graphs serve every
+  measurement rate when ``--graph-seed`` is kept);
 * scramble: 32 layers of random all-to-all perfect matchings;
 * each measured layer: ``n / 2`` graph edges drawn uniformly with replacement,
   a uniform two-qubit Clifford on each, then a Z measurement of every system
@@ -14,7 +14,7 @@ This is ``studies/prl_production/PROTOCOL.md`` expressed with SparseGF2 v3:
 
 Run it::
 
-    python v3/examples/purification_time.py --n 64 --beta 0.1 --p 0.29 --trajectories 10000
+    python v3/examples/purification_time.py --n 64 --beta 0.1 --p 0.29 --graphs 10000
 
 It prints the purification statistics and writes ``purification_n64_b0.1_p0.29.npz``
 (an :class:`~sparsegf2_v3.mipt.EnsembleResult`; reload with
@@ -32,13 +32,14 @@ import numpy as np
 from sparsegf2_v3 import analysis, graphs, mipt
 
 
-def production_spec(
-    n: int, beta: float, p: float, graph_bank, t_max_factor: int = 8
+def purification_spec(
+    n: int, p: float, graph_list, circuits_per_graph: int = 1, t_max_factor: int = 8
 ) -> mipt.MonitoredCircuit:
-    """The protocol for one point; trajectory ``t`` uses ``graph_bank[t % len(graph_bank)]``."""
+    """The protocol for one point; trajectory ``t`` uses graph ``t // circuits_per_graph``."""
     return mipt.MonitoredCircuit(
         num_system=n,
-        edges=graph_bank,
+        edges=graph_list,
+        circuits_per_graph=circuits_per_graph,
         layers=t_max_factor * n,
         measurement_rate=p,
         schedule="random_edges",  # n // 2 edges per layer, uniformly with replacement
@@ -50,7 +51,7 @@ def production_spec(
     )
 
 
-def watts_strogatz_bank(n: int, beta: float, count: int, seed: int = 0) -> list[np.ndarray]:
+def watts_strogatz_graphs(n: int, beta: float, count: int, seed: int = 0) -> list[np.ndarray]:
     """``count`` independent realizations of WS-rewired C(n, 2), graph ``i`` from seed ``(seed, i)``."""
     return [graphs.watts_strogatz(n, 4, beta, seed=(seed, i)) for i in range(count)]
 
@@ -62,15 +63,16 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=64)
     ap.add_argument("--beta", type=float, default=0.1)
     ap.add_argument("--p", type=float, default=0.29)
-    ap.add_argument("--trajectories", type=int, default=10_000)
+    ap.add_argument("--graphs", type=int, default=10_000)
+    ap.add_argument("--circuits-per-graph", type=int, default=1)
     ap.add_argument("--graph-seed", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    bank = watts_strogatz_bank(args.n, args.beta, args.trajectories, args.graph_seed)
-    spec = production_spec(args.n, args.beta, args.p, bank)
-    result = spec.run(args.trajectories, seed=args.seed)
+    graph_list = watts_strogatz_graphs(args.n, args.beta, args.graphs, args.graph_seed)
+    spec = purification_spec(args.n, args.p, graph_list, args.circuits_per_graph)
+    result = spec.run(seed=args.seed)  # every graph, circuits_per_graph circuits each
 
     out = args.out or f"purification_n{args.n}_b{args.beta}_p{args.p}.npz"
     result.save(out)  # first, so that the run is never lost to the summary below

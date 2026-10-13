@@ -52,18 +52,31 @@ follow):
    ``gate_set``). Then each system qubit is measured in the Z basis with
    probability ``measurement_rate``.
 4. **Checkpoints.** After the layers listed in ``checkpoints`` (layer 0 is the
-   state after setup and scramble), every probe is evaluated. With a reference,
-   the first checkpoint at which the reference is pure (code dimension 0) is
-   the purification layer; ``stop_when_purified`` ends the trajectory there.
+   state after setup and scramble), every probe is evaluated, except probes
+   given their own ``checkpoints`` (e.g. a cheap probe every layer, an
+   expensive one at a few depths). With a reference, the first checkpoint at
+   which the reference is pure (code dimension 0) is the purification layer;
+   ``stop_when_purified`` ends the trajectory there, and later evaluations
+   record each probe's exact value for a pure reference (k = 0, nothing lost,
+   first failure n + 1), or NaN for entanglement probes, which keep changing.
 
 A "layer" is exactly one step 3, never rescaled. Everything runs phase-free:
 entanglement does not depend on measurement outcomes.
 
-Graph disorder: ``edges`` may be a list of graphs (a graph bank); trajectory
-``t`` then runs on graph ``t mod len(edges)``, so one realization per
-trajectory is ``edges=[graphs.watts_strogatz(n, 4, beta, seed=(17, i)) for i in
-range(T)]``. Build the graphs with their own seed: graph disorder never draws
-from the circuit's random streams.
+Graph disorder: ``edges`` may be a collection of G graphs (a list), each run
+with ``circuits_per_graph`` random circuits (default 1): trajectory ``t`` uses
+graph ``t // circuits_per_graph`` and ``run()`` runs all ``G *
+circuits_per_graph`` trajectories by default. Build the graphs with their own
+seed (``[graphs.watts_strogatz(n, 4, beta, seed=(17, i)) for i in range(G)]``):
+graph disorder never draws from the circuit's random streams, so the same
+collection can be reused at every measurement rate.
+
+Erasure: with a reference, the code the circuit has generated at a checkpoint
+is probed by ``erasure_first_failure`` (first-failure sizes over random
+orderings, from which :mod:`sparsegf2_v3.analysis` estimates P_C(m), the
+failure probability Phi_C(e) under independent erasure, and e_delta),
+``uncorrectable_region_counts`` (exhaustive small erasures: exact P_C(m)) and
+``code_snapshot`` (the code itself, for :class:`sparsegf2_v3.codes.StabilizerCode`).
 
 Randomness: trajectory ``t`` of ``run(..., seed=s)`` is a deterministic function
 of ``(spec, s, t)``, independent of the thread count and of the other
@@ -100,17 +113,17 @@ __all__ = [
     "MonitoredCircuit",
     "Probe",
     "code_dimension",
+    "code_snapshot",
     "contiguous_distance",
     "entropy",
     "entropy_profile",
-    "erasure_correctable_fraction",
-    "erasure_correctable_profile",
-    "erasure_lost_information",
+    "erasure_first_failure",
     "erasure_lost_profile",
     "half_cut_entropy",
     "lost_information",
     "mutual_information",
     "tripartite_information",
+    "uncorrectable_region_counts",
 ]
 
 _SCHEDULES = {
@@ -134,10 +147,14 @@ _CX_INDEX = gate("CX").clifford.index()
 
 @dataclass(frozen=True)
 class Probe:
-    """Something to record at every checkpoint. Build one with the functions below.
+    """Something to record at checkpoints. Build one with the functions below.
 
-    Scalar probes record one number per checkpoint; vector probes (profiles)
-    record ``num_system + 1`` numbers, indexed by region size.
+    Each probe records a fixed number of values per evaluation (one for a
+    scalar probe; one per region size, permutation sample or erased-region
+    size for a vector probe). It is evaluated at the spec's ``checkpoints``,
+    or at its own ``checkpoints`` (same forms: ``"final"``, ``"every_layer"``,
+    a stride or a list of layers), so expensive probes can run at a few
+    depths while cheap ones run at every layer.
     """
 
     kind: str
@@ -145,10 +162,11 @@ class Probe:
     regions: tuple[tuple[int, ...], ...] = ()
     size: int = 0
     samples: int = 0
+    checkpoints: str | int | tuple[int, ...] | None = None
 
     @property
     def is_vector(self) -> bool:
-        return self.kind in _VECTOR_KINDS
+        return _KINDS[self.kind].length != "one"
 
 
 def _region(qubits: Sequence[int]) -> tuple[int, ...]:
@@ -156,22 +174,36 @@ def _region(qubits: Sequence[int]) -> tuple[int, ...]:
     return tuple(operator.index(q) for q in qubits)
 
 
-def entropy(region: Sequence[int], name: str | None = None) -> Probe:
+def _schedule(checkpoints) -> str | int | tuple[int, ...] | None:
+    """A probe's own checkpoints in a hashable form (lists become tuples)."""
+    if checkpoints is None or isinstance(checkpoints, str):
+        return checkpoints
+    if isinstance(checkpoints, (int, np.integer)) and not isinstance(checkpoints, (bool, np.bool_)):
+        return int(checkpoints)
+    return tuple(operator.index(c) for c in checkpoints)
+
+
+def entropy(region: Sequence[int], name: str | None = None, *, checkpoints=None) -> Probe:
     """Entanglement entropy S(A) of the given qubits (system and/or reference)."""
     r = _region(region)
-    return Probe("entropy", name or f"entropy{list(r)}", (r,))
+    return Probe("entropy", name or f"entropy{list(r)}", (r,), checkpoints=_schedule(checkpoints))
 
 
-def half_cut_entropy() -> Probe:
+def half_cut_entropy(*, checkpoints=None) -> Probe:
     """S of the first half of the system (in ``system_order``), the usual MIPT order parameter."""
-    return Probe("half_cut", "half_cut_entropy")
+    return Probe("half_cut", "half_cut_entropy", checkpoints=_schedule(checkpoints))
 
 
-def mutual_information(a: Sequence[int], b: Sequence[int], name: str | None = None) -> Probe:
+def mutual_information(
+    a: Sequence[int], b: Sequence[int], name: str | None = None, *, checkpoints=None
+) -> Probe:
     """I(A:B) = S(A) + S(B) - S(AB) for disjoint regions."""
     ra, rb = _region(a), _region(b)
     return Probe(
-        "mutual_information", name or f"mutual_information{[list(ra), list(rb)]}", (ra, rb)
+        "mutual_information",
+        name or f"mutual_information{[list(ra), list(rb)]}",
+        (ra, rb),
+        checkpoints=_schedule(checkpoints),
     )
 
 
@@ -180,6 +212,8 @@ def tripartite_information(
     b: Sequence[int] | None = None,
     c: Sequence[int] | None = None,
     name: str | None = None,
+    *,
+    checkpoints=None,
 ) -> Probe:
     """I3(A:B:C) for disjoint regions; the standard critical-point locator.
 
@@ -187,110 +221,168 @@ def tripartite_information(
     ``system_order`` (the usual choice for a ring split into four arcs).
     """
     if a is None and b is None and c is None:
-        return Probe("tripartite", name or "tripartite_information")
+        return Probe(
+            "tripartite", name or "tripartite_information", checkpoints=_schedule(checkpoints)
+        )
     if a is None or b is None or c is None:
         raise ValueError("give all three regions, or none for the default quarters")
     regions = (_region(a), _region(b), _region(c))
     return Probe(
-        "tripartite", name or f"tripartite_information{[list(r) for r in regions]}", regions
+        "tripartite",
+        name or f"tripartite_information{[list(r) for r in regions]}",
+        regions,
+        checkpoints=_schedule(checkpoints),
     )
 
 
-def code_dimension() -> Probe:
-    """Number of logical qubits still protected: k = S(R). Needs a reference."""
-    return Probe("code_dimension", "code_dimension")
+def entropy_profile(*, checkpoints=None) -> Probe:
+    """Vector: ``S(system_order[:m])`` for every m = 0..n (entanglement of every bipartition)."""
+    return Probe("entropy_profile", "entropy_profile", checkpoints=_schedule(checkpoints))
 
 
-def contiguous_distance() -> Probe:
+def code_dimension(*, checkpoints=None) -> Probe:
+    """Number of logical qubits k = S(R) of the code the circuit has generated. Needs a reference.
+
+    The code rate is k / n; ``k > 0`` says whether the circuit produced a code at all.
+    """
+    return Probe("code_dimension", "code_dimension", checkpoints=_schedule(checkpoints))
+
+
+def contiguous_distance(*, checkpoints=None) -> Probe:
     """Shortest contiguous run (in ``system_order``, wrapping if ``periodic``) whose erasure loses logical info; NaN without a code.
 
     The distance is undefined without a code: where the code dimension is 0 the
     probe records NaN, so means (:meth:`EnsembleResult.mean`, the API
     summaries) average only over trajectories that still hold a code.
     """
-    return Probe("contiguous_distance", "contiguous_distance")
+    return Probe("contiguous_distance", "contiguous_distance", checkpoints=_schedule(checkpoints))
 
 
-def lost_information(region: Sequence[int], name: str | None = None) -> Probe:
-    """I(R:E) for a fixed set E of system qubits: logical information lost by erasing E."""
+def lost_information(region: Sequence[int], name: str | None = None, *, checkpoints=None) -> Probe:
+    """l_C(A) = I(A:R) for a fixed set A of system qubits: logical information lost by erasing A.
+
+    The erasure of A is correctable exactly when this is 0.
+    """
     r = _region(region)
-    return Probe("lost_information", name or f"lost_information{list(r)}", (r,))
-
-
-def erasure_lost_information(size: int, samples: int = 100, name: str | None = None) -> Probe:
-    """Mean I(R:E) over ``samples`` random erasures of ``size`` system qubits."""
     return Probe(
-        "erasure_mean_lost",
-        name or f"erasure_lost_information[{size}]",
-        (),
-        int(size),
-        int(samples),
+        "lost_information",
+        name or f"lost_information{list(r)}",
+        (r,),
+        checkpoints=_schedule(checkpoints),
     )
 
 
-def erasure_correctable_fraction(size: int, samples: int = 100, name: str | None = None) -> Probe:
-    """Fraction of ``samples`` random erasures of ``size`` system qubits that are correctable."""
-    return Probe(
-        "erasure_correctable",
-        name or f"erasure_correctable_fraction[{size}]",
-        (),
-        int(size),
-        int(samples),
-    )
-
-
-def entropy_profile() -> Probe:
-    """Vector: ``S(system_order[:k])`` for every k = 0..n (entanglement of every bipartition)."""
-    return Probe("entropy_profile", "entropy_profile")
-
-
-def erasure_lost_profile(samples: int = 10, name: str | None = None) -> Probe:
-    """Vector: mean I(R:E_m) over random erasures E_m of every size m = 0..n.
+def erasure_lost_profile(samples: int = 10, name: str | None = None, *, checkpoints=None) -> Probe:
+    """Vector: mean I(R:A_m) over random erasures A_m of every size m = 0..n.
 
     Each sample erases the prefixes of one uniformly random ordering of the
     system, which gives a uniformly random erasure of every size in a single
     incremental pass.
     """
-    return Probe("erasure_lost_profile", name or "erasure_lost_profile", (), 0, int(samples))
-
-
-def erasure_correctable_profile(samples: int = 10, name: str | None = None) -> Probe:
-    """Vector: fraction of random erasures of each size m = 0..n that are correctable.
-
-    Pass ``1 - profile`` to :func:`sparsegf2_v3.analysis.bernoulli_erasure_curve`
-    to get the failure probability when each qubit is erased independently
-    with probability p (the profile itself gives the success probability).
-    """
     return Probe(
-        "erasure_correctable_profile", name or "erasure_correctable_profile", (), 0, int(samples)
+        "erasure_lost_profile",
+        name or "erasure_lost_profile",
+        (),
+        0,
+        int(samples),
+        _schedule(checkpoints),
     )
 
 
-_VECTOR_KINDS = {
-    "entropy_profile": _ens.VPROBE_ENTROPY_PROFILE,
-    "erasure_lost_profile": _ens.VPROBE_ERASURE_LOST,
-    "erasure_correctable_profile": _ens.VPROBE_ERASURE_CORRECTABLE,
+def erasure_first_failure(
+    samples: int = 100, name: str | None = None, *, checkpoints=None
+) -> Probe:
+    """Vector of ``samples`` first-failure sizes, one per uniformly random ordering of the system.
+
+    For an ordering pi, the first-failure size is the smallest m such that
+    erasing pi_1..pi_m is uncorrectable (I(A:R) > 0); it is n + 1 when the code
+    has no logical qubits (then no erasure ever fails). The erased regions
+    are nested, so the fraction of samples with D <= m estimates P_C(m), the
+    probability that a uniformly random m-qubit erasure is uncorrectable, for
+    every m at once, and ``analysis.erasure_failure_probability`` turns the
+    samples into Phi_C(e) for independent erasure with probability e. Each
+    scan stops at its first failure.
+    """
+    return Probe(
+        "erasure_first_failure",
+        name or "erasure_first_failure",
+        (),
+        0,
+        int(samples),
+        _schedule(checkpoints),
+    )
+
+
+def uncorrectable_region_counts(
+    max_size: int = 2, name: str | None = None, *, checkpoints=None
+) -> Probe:
+    """Vector: the number of uncorrectable m-qubit erasures for m = 1..``max_size``, by exhaustion.
+
+    Entry ``m - 1`` counts the m-subsets A of the system with I(A:R) > 0, so
+    ``count / C(n, m)`` is the exact P_C(m), and all counts are zero exactly
+    when every erasure of at most ``max_size`` qubits is correctable (code
+    distance > ``max_size``). The cost grows like C(n, max_size): for n = 256,
+    about 1 ms for 2 and 0.5 s for 3 per evaluation, so give it its own sparse
+    ``checkpoints``.
+    """
+    return Probe(
+        "uncorrectable_counts",
+        name or f"uncorrectable_region_counts[{max_size}]",
+        (),
+        int(max_size),
+        0,
+        _schedule(checkpoints),
+    )
+
+
+def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
+    """The code itself: its stabilizer generators, saved for analysis after the run.
+
+    The recorded value is the number of generators (n - k); the generators
+    are in ``EnsembleResult.snapshots`` and ``EnsembleResult.code(...)`` returns
+    a :class:`~sparsegf2_v3.codes.StabilizerCode`. Without a reference this is
+    the stabilizer group of the (pure) system state. One snapshot probe per
+    spec.
+    """
+    return Probe("code_snapshot", name or "code_snapshot", checkpoints=_schedule(checkpoints))
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """How the engine treats one probe kind (one table, so adding a probe is one entry here
+    plus its kernel branch)."""
+
+    code: int  # kernel probe code (``_kernel.ensemble.PROBE_*``)
+    reference: bool  # needs a reference qubit system
+    length: str  # values per evaluation: "one", "profile" (n + 1), "samples", "size"
+    after_purification: str  # value once the reference is pure: "nan", "zero", "n", "n+1"
+
+
+_KINDS = {
+    "entropy": _Kind(_ens.PROBE_ENTROPY, False, "one", "nan"),
+    "half_cut": _Kind(_ens.PROBE_ENTROPY, False, "one", "nan"),
+    "mutual_information": _Kind(_ens.PROBE_MUTUAL_INFORMATION, False, "one", "nan"),
+    "tripartite": _Kind(_ens.PROBE_TRIPARTITE, False, "one", "nan"),
+    "entropy_profile": _Kind(_ens.PROBE_ENTROPY_PROFILE, False, "profile", "nan"),
+    "code_dimension": _Kind(_ens.PROBE_CODE_DIMENSION, True, "one", "zero"),
+    "contiguous_distance": _Kind(_ens.PROBE_CONTIGUOUS_DISTANCE, True, "one", "nan"),
+    "lost_information": _Kind(_ens.PROBE_LOST_INFORMATION, True, "one", "zero"),
+    "erasure_lost_profile": _Kind(_ens.PROBE_ERASURE_LOST_PROFILE, True, "profile", "zero"),
+    "erasure_first_failure": _Kind(_ens.PROBE_FIRST_FAILURE, True, "samples", "n+1"),
+    "uncorrectable_counts": _Kind(_ens.PROBE_UNCORRECTABLE_COUNTS, True, "size", "zero"),
+    "code_snapshot": _Kind(_ens.PROBE_CODE_SNAPSHOT, False, "one", "n"),
 }
-_SCALAR_KINDS = {
-    "entropy": _ens.PROBE_ENTROPY,
-    "half_cut": _ens.PROBE_ENTROPY,
-    "mutual_information": _ens.PROBE_MUTUAL_INFORMATION,
-    "tripartite": _ens.PROBE_TRIPARTITE,
-    "code_dimension": _ens.PROBE_CODE_DIMENSION,
-    "contiguous_distance": _ens.PROBE_CONTIGUOUS_DISTANCE,
-    "lost_information": _ens.PROBE_LOST_INFORMATION,
-    "erasure_mean_lost": _ens.PROBE_ERASURE_MEAN_LOST,
-    "erasure_correctable": _ens.PROBE_ERASURE_CORRECTABLE,
-}
-_NEEDS_REFERENCE = {
-    "code_dimension",
-    "contiguous_distance",
-    "lost_information",
-    "erasure_mean_lost",
-    "erasure_correctable",
-    "erasure_lost_profile",
-    "erasure_correctable_profile",
-}
+
+
+def _probe_length(p: Probe, n: int) -> int:
+    rule = _KINDS[p.kind].length
+    return {"one": 1, "profile": n + 1, "samples": p.samples, "size": p.size}[rule]
+
+
+def _probe_fill(p: Probe, n: int) -> float:
+    """The probe's exact value once the reference is pure (k = 0), or NaN if not determined."""
+    rule = _KINDS[p.kind].after_purification
+    return {"nan": np.nan, "zero": 0.0, "n": float(n), "n+1": float(n + 1)}[rule]
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +400,13 @@ class MonitoredCircuit:
         Number of system qubits ``n``.
     edges
         Interaction graph on the system qubits, an ``(m, 2)`` array (see
-        :mod:`sparsegf2_v3.graphs`), or a list of them for graph disorder:
-        trajectory ``t`` runs on graph ``t mod len(edges)``.
+        :mod:`sparsegf2_v3.graphs`), or a collection of graphs (a list of such
+        arrays) for graph disorder.
+    circuits_per_graph
+        With a collection of G graphs: how many random circuits run on each
+        (default 1). Trajectory ``t`` runs on graph ``t // circuits_per_graph``,
+        so the ensemble has ``G * circuits_per_graph`` trajectories, and the
+        same collection can be reused unchanged at every measurement rate.
     layers
         Number of dynamics layers.
     measurement_rate
@@ -337,14 +434,20 @@ class MonitoredCircuit:
     checkpoints
         ``"final"`` (default), ``"every_layer"``, an int stride ``k`` (layers
         0, k, 2k, ... and the last), or an explicit list of layers in
-        ``[0, layers]`` (sorted and deduplicated). :attr:`checkpoint_layers`
-        holds the resulting layers; ``"final"``, ``"every_layer"`` and strides
-        are kept as given, so a copy made with ``dataclasses.replace(spec,
-        layers=...)`` follows the new depth.
+        ``[0, layers]`` (sorted and deduplicated). These are the layers where
+        purification is tested and where probes without their own
+        ``checkpoints`` are evaluated. :attr:`checkpoint_layers` holds the
+        resulting layers; ``"final"``, ``"every_layer"`` and strides are kept
+        as given, so a copy made with ``dataclasses.replace(spec, layers=...)``
+        follows the new depth.
     probes
-        What to record at each checkpoint (:func:`code_dimension`, ...).
+        What to record (:func:`code_dimension`, ...), each at the spec's
+        checkpoints or at its own.
     stop_when_purified
-        End each trajectory at the first checkpoint where the reference is pure.
+        End each trajectory at the first checkpoint where the reference is
+        pure. Probe evaluations after that hold the value they would have had
+        (k = 0: no code, no failing erasure) or NaN where it is not determined
+        (entanglement of the still-evolving system).
     system_order, periodic
         Qubit ordering used by the half-cut entropy, default tripartite regions,
         entanglement profile and contiguous distance (default ``0..n-1``), and
@@ -358,6 +461,7 @@ class MonitoredCircuit:
     schedule: str = "matching"
     gates_per_layer: int | None = None
     edge_weights: np.ndarray | None = None
+    circuits_per_graph: int = 1
     reference: str = "none"
     reference_partner: int | str = "random"
     scramble_gates: int = 0
@@ -373,6 +477,7 @@ class MonitoredCircuit:
     # Per-instance caches, never copied by dataclasses.replace (init=False): a
     # derived spec always resolves and compiles its own fields.
     _checkpoint_layers: np.ndarray = field(init=False, repr=False, compare=False, default=None)
+    _probe_layers: tuple = field(init=False, repr=False, compare=False, default=())
     _compiled: dict = field(init=False, default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -410,6 +515,15 @@ class MonitoredCircuit:
             ]
             object.__setattr__(self, "edge_weights", tuple(weights) if is_bank else weights[0])
         object.__setattr__(self, "edges", tuple(graphs_) if is_bank else graphs_[0])
+        per_graph = _integer(self.circuits_per_graph, "circuits_per_graph")
+        if per_graph < 1:
+            raise ValueError("circuits_per_graph must be at least 1")
+        if not is_bank and per_graph != 1:
+            raise ValueError(
+                "circuits_per_graph applies to a collection of graphs (a list); with a single "
+                "graph, choose the number of circuits with run(trajectories=...)"
+            )
+        object.__setattr__(self, "circuits_per_graph", per_graph)
         if self.schedule == "random_edges":
             gpl = (
                 n // 2
@@ -459,6 +573,18 @@ class MonitoredCircuit:
         names = [p.name for p in self.probes]
         if len(set(names)) != len(names):
             raise ValueError(f"probe names must be unique, got {names}")
+        if sum(p.kind == "code_snapshot" for p in self.probes) > 1:
+            raise ValueError("use at most one code_snapshot probe (give it all the checkpoints)")
+        object.__setattr__(
+            self,
+            "_probe_layers",
+            tuple(
+                self._checkpoint_layers
+                if p.checkpoints is None
+                else self._resolve_checkpoints(p.checkpoints)[1]
+                for p in self.probes
+            ),
+        )
         if self.stop_when_purified and self.reference == "none":
             raise ValueError("stop_when_purified needs a reference")
 
@@ -466,12 +592,16 @@ class MonitoredCircuit:
         """Validate a probe and fill in default regions."""
         if not isinstance(p, Probe):
             raise TypeError("probes must be created with the mipt probe functions")
+        if p.kind not in _KINDS:
+            raise ValueError(f"unknown probe kind {p.kind!r}")
         n = self.num_system
         order = self.system_order.tolist()
-        if p.kind in _NEEDS_REFERENCE and self.reference == "none":
+        if _KINDS[p.kind].reference and self.reference == "none":
             raise ValueError(
                 f"probe {p.name!r} needs a reference (reference='purification' or 'single')"
             )
+        if p.checkpoints is not None:
+            self._resolve_checkpoints(p.checkpoints)  # validates against layers
         if p.kind == "half_cut":
             return replace(p, regions=(tuple(order[: n // 2]),))
         if p.kind == "tripartite" and not p.regions:
@@ -491,14 +621,10 @@ class MonitoredCircuit:
                 raise ValueError(
                     f"probe {p.name!r}: regions must be disjoint and without duplicates"
                 )
-        if p.kind in ("erasure_mean_lost", "erasure_correctable") and not (
-            0 <= p.size <= n and p.samples >= 1
-        ):
-            raise ValueError(f"probe {p.name!r}: need 0 <= size <= {n} and samples >= 1")
-        if p.kind in ("erasure_lost_profile", "erasure_correctable_profile") and p.samples < 1:
+        if _KINDS[p.kind].length == "samples" and p.samples < 1:
             raise ValueError(f"probe {p.name!r}: samples must be at least 1")
-        if p.kind not in _SCALAR_KINDS and p.kind not in _VECTOR_KINDS:
-            raise ValueError(f"unknown probe kind {p.kind!r}")
+        if p.kind == "uncorrectable_counts" and not 1 <= p.size <= n:
+            raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}]")
         return p
 
     def _resolve_checkpoints(self, spec) -> tuple[str | int | np.ndarray, np.ndarray]:
@@ -538,7 +664,7 @@ class MonitoredCircuit:
 
     @property
     def graphs(self) -> tuple[np.ndarray, ...]:
-        """The interaction graphs (one, or the graph bank); trajectory t uses ``graphs[t % G]``."""
+        """The interaction graphs (one, or the collection); trajectory t uses graph t // circuits_per_graph."""
         return self.edges if isinstance(self.edges, tuple) else (self.edges,)
 
     @property
@@ -568,6 +694,20 @@ class MonitoredCircuit:
         return self._checkpoint_layers
 
     @property
+    def num_trajectories(self) -> int | None:
+        """``len(edges) * circuits_per_graph`` for a collection of graphs; None for a single graph."""
+        if not isinstance(self.edges, tuple):
+            return None
+        return len(self.edges) * self.circuits_per_graph
+
+    def probe_layers(self, name: str) -> np.ndarray:
+        """The layers at which the probe ``name`` is evaluated (sorted, read-only)."""
+        for p, layers in zip(self.probes, self._probe_layers, strict=True):
+            if p.name == name:
+                return layers
+        raise KeyError(f"no probe named {name!r}; probes: {[p.name for p in self.probes]}")
+
+    @property
     def scalar_probes(self) -> list[Probe]:
         return [p for p in self.probes if not p.is_vector]
 
@@ -576,10 +716,21 @@ class MonitoredCircuit:
         return [p for p in self.probes if p.is_vector]
 
     def with_edges(
-        self, edges: np.ndarray, edge_weights: np.ndarray | None = None
+        self,
+        edges: np.ndarray,
+        edge_weights: np.ndarray | None = None,
+        circuits_per_graph: int | None = None,
     ) -> MonitoredCircuit:
-        """The same protocol on other graph(s) (one graph, or a list of graphs)."""
-        return replace(self, edges=edges, edge_weights=edge_weights)
+        """The same protocol on other graph(s) (one graph, or a list of graphs).
+
+        ``circuits_per_graph`` defaults to this protocol's value for a list of
+        graphs and to 1 for a single graph.
+        """
+        if circuits_per_graph is None:
+            circuits_per_graph = self.circuits_per_graph if _graph_list(edges)[1] else 1
+        return replace(
+            self, edges=edges, edge_weights=edge_weights, circuits_per_graph=circuits_per_graph
+        )
 
     def _arrays(self) -> dict:
         if not self._compiled:
@@ -623,24 +774,36 @@ class MonitoredCircuit:
                 order=np.array(self.system_order, dtype=np.int64),
                 checkpoints=np.array(self.checkpoint_layers, dtype=np.int64),
             )
-            scalars = self.scalar_probes
+            n = self.num_system
             ptr, idx = [], []
-            region_len = np.zeros((len(scalars), 3), dtype=np.int64)
-            for j, p in enumerate(scalars):
+            region_len = np.zeros((len(self.probes), 3), dtype=np.int64)
+            for j, p in enumerate(self.probes):
                 ptr.append(len(idx))
                 for r, region in enumerate(p.regions[:3]):
                     idx.extend(region)
                     region_len[j, r] = len(region)
-            vectors = self.vector_probes
+            plen = np.array([_probe_length(p, n) for p in self.probes], dtype=np.int64)
+            counts = np.array([len(layers) for layers in self._probe_layers], dtype=np.int64)
+            poff = np.concatenate([[0], np.cumsum(counts * plen)]).astype(np.int64)
+            pck_ptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+            union = np.unique(np.concatenate([self.checkpoint_layers, *self._probe_layers]))
+            snapshot = [j for j, p in enumerate(self.probes) if p.kind == "code_snapshot"]
             self._compiled.update(
-                kinds=np.array([_SCALAR_KINDS[p.kind] for p in scalars], dtype=np.int64),
+                pkind=np.array([_KINDS[p.kind].code for p in self.probes], dtype=np.int64),
+                plen=plen,
+                poff=poff[:-1].copy(),
+                total_len=int(poff[-1]),
+                pck_ptr=pck_ptr,
+                pck=np.concatenate([np.zeros(0, np.int64), *self._probe_layers]).astype(np.int64),
+                pfill=np.array([_probe_fill(p, n) for p in self.probes], dtype=np.float64),
+                gck=union.astype(np.int64),
+                detect=np.isin(union, self.checkpoint_layers),
                 ptr=np.array(ptr, dtype=np.int64),
                 region_len=region_len,
                 idx=np.array(idx, dtype=np.int64),
-                size=np.array([p.size for p in scalars], dtype=np.int64),
-                samples=np.array([p.samples for p in scalars], dtype=np.int64),
-                vkinds=np.array([_VECTOR_KINDS[p.kind] for p in vectors], dtype=np.int64),
-                vsamples=np.array([p.samples for p in vectors], dtype=np.int64),
+                size=np.array([p.size for p in self.probes], dtype=np.int64),
+                samples=np.array([p.samples for p in self.probes], dtype=np.int64),
+                snapshot=snapshot[0] if snapshot else -1,
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
             )
@@ -648,9 +811,20 @@ class MonitoredCircuit:
 
     # -- running ---------------------------------------------------------------------
 
+    def _check_trajectories(self, first: int, count: int) -> None:
+        total = self.num_trajectories
+        if first < 0 or count < 0:
+            raise ValueError("first_trajectory and trajectories must be non-negative")
+        if total is not None and first + count > total:
+            raise ValueError(
+                f"trajectories {first}..{first + count - 1} do not exist: this collection of "
+                f"{len(self.edges)} graphs with circuits_per_graph={self.circuits_per_graph} "
+                f"has {total} trajectories (raise circuits_per_graph for more circuits per graph)"
+            )
+
     def run(
         self,
-        trajectories: int,
+        trajectories: int | None = None,
         *,
         seed,
         first_trajectory: int = 0,
@@ -658,44 +832,62 @@ class MonitoredCircuit:
     ) -> EnsembleResult:
         """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``.
 
-        Runs in parallel over CPU cores (``num_threads`` limits that). Returns an
+        With a collection of graphs, ``trajectories`` defaults to every
+        remaining trajectory (all ``len(edges) * circuits_per_graph`` of them
+        for ``first_trajectory=0``); with a single graph it is required. Runs in
+        parallel over CPU cores (``num_threads`` limits that). Returns an
         :class:`EnsembleResult`.
         """
-        if trajectories < 0:
-            raise ValueError("trajectories must be non-negative")
+        first_trajectory = _integer(first_trajectory, "first_trajectory")
+        if trajectories is None:
+            if self.num_trajectories is None:
+                raise ValueError("with a single graph, give the number of trajectories")
+            trajectories = self.num_trajectories - first_trajectory
+        trajectories = _integer(trajectories, "trajectories")
+        self._check_trajectories(first_trajectory, trajectories)
         start = time.perf_counter()  # includes the one-off graph preprocessing below
         a = self._arrays()
         # One SeedSequence for both the random streams and the record, so the
         # recorded seed is the one used (also for seed=None or spawned sequences).
         ss = _seed_sequence(seed)
         key_struct, key_probe = _keys(ss)
-        num_ck = len(self.checkpoint_layers)
-        scalars, vectors = self.scalar_probes, self.vector_probes
-        values = np.zeros((trajectories, num_ck, len(scalars)), dtype=np.float64)
-        vec_values = np.zeros(
-            (trajectories, num_ck, len(vectors), self.num_system + 1), dtype=np.float64
-        )
+        out = np.full((trajectories, a["total_len"]), np.nan, dtype=np.float64)
+        n = self.num_system
+        if a["snapshot"] >= 0:
+            wsys = (n + 63) // 64
+            evaluations = len(self._probe_layers[a["snapshot"]])
+            snap = np.zeros((trajectories, evaluations, n, 2 * wsys), dtype=np.uint64)
+            snap_rows = np.zeros((trajectories, evaluations), dtype=np.int64)
+        else:  # one dummy slot: the kernel always has somewhere to point
+            snap = np.zeros((trajectories, 1, 1, 2), dtype=np.uint64)
+            snap_rows = np.zeros((trajectories, 1), dtype=np.int64)
         tau = np.zeros(trajectories, dtype=np.int64)
         final = np.zeros(trajectories, dtype=np.int64)
         meas = np.zeros(trajectories, dtype=np.int64)
         if trajectories:
             with threads(num_threads):
                 _ens.run_ensemble(
-                    self.num_system, self.num_reference, _REFERENCES[self.reference], a["partner"],
-                    a["edges"], a["graph_ptr"], a["edge_cum"], a["color_ptr"], a["color_ptr_ptr"],
-                    a["color_idx"], _SCHEDULES[self.schedule], a["gpl"], a["pool"],
-                    float(self.measurement_rate), int(self.layers), int(self.scramble_gates),
-                    int(self.scramble_matchings), int(self.scramble_layers),
-                    bool(self.random_orientation), a["checkpoints"],
-                    bool(self.stop_when_purified), a["kinds"], a["ptr"], a["region_len"], a["idx"],
-                    a["size"], a["samples"], a["vkinds"], a["vsamples"], a["order"],
-                    bool(self.periodic), key_struct, key_probe, int(first_trajectory),
-                    values, vec_values, tau, final, meas,
+                    n, self.num_reference, _REFERENCES[self.reference], a["partner"],
+                    a["edges"], a["graph_ptr"], self.circuits_per_graph, a["edge_cum"],
+                    a["color_ptr"], a["color_ptr_ptr"], a["color_idx"],
+                    _SCHEDULES[self.schedule], a["gpl"], a["pool"], float(self.measurement_rate),
+                    int(self.layers), int(self.scramble_gates), int(self.scramble_matchings),
+                    int(self.scramble_layers), bool(self.random_orientation), a["gck"],
+                    a["detect"], bool(self.stop_when_purified), a["pkind"], a["plen"], a["poff"],
+                    a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"], a["idx"],
+                    a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
+                    key_probe, first_trajectory, out, snap, snap_rows, tau, final, meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
-        out = {p.name: values[:, :, j] for j, p in enumerate(scalars)}
-        out.update({p.name: vec_values[:, :, v, :] for v, p in enumerate(vectors)})
+        values, snapshots = {}, {}
+        for j, p in enumerate(self.probes):
+            count, length = len(self._probe_layers[j]), int(a["plen"][j])
+            block = out[:, a["poff"][j] : a["poff"][j] + count * length]
+            block = block.reshape(trajectories, count, length)
+            values[p.name] = block if p.is_vector else block[:, :, 0]
+            if j == a["snapshot"]:
+                snapshots[p.name] = (snap, snap_rows)
         return EnsembleResult(
             spec=self,
             seed_entropy=ss.entropy,
@@ -705,11 +897,12 @@ class MonitoredCircuit:
                 first_trajectory, first_trajectory + trajectories, dtype=np.int64
             ),
             checkpoint_layers=self.checkpoint_layers.copy(),
-            values={p.name: out[p.name] for p in self.probes},
+            values=values,
             purification_layer=tau if self.reference != "none" else None,
             final_layer=final,
             num_measurements=meas,
             elapsed_seconds=elapsed,
+            snapshots=snapshots,
         )
 
     def circuit(self, trajectory: int, *, seed) -> Circuit:
@@ -720,6 +913,8 @@ class MonitoredCircuit:
         ``TICK``. So tick ``t`` of ``Simulator.run(circuit, observe=...)``
         sees the state after layer ``t``.
         """
+        trajectory = _integer(trajectory, "trajectory")
+        self._check_trajectories(trajectory, 1)
         a = self._arrays()
         key_struct, _ = _keys(_seed_sequence(seed))
         n = self.num_system
@@ -736,7 +931,8 @@ class MonitoredCircuit:
         meas_ptr = np.zeros(self.layers + 1, dtype=np.int64)
         partner = _ens.generate_ops(
             n, _REFERENCES[self.reference], a["partner"], a["edges"], a["graph_ptr"],
-            a["edge_cum"], a["color_ptr"], a["color_ptr_ptr"], a["color_idx"],
+            self.circuits_per_graph, a["edge_cum"], a["color_ptr"], a["color_ptr_ptr"],
+            a["color_idx"],
             _SCHEDULES[self.schedule], a["gpl"], a["pool"], float(self.measurement_rate),
             int(self.layers), int(self.scramble_gates), int(self.scramble_matchings),
             int(self.scramble_layers), bool(self.random_orientation), key_struct, int(trajectory),
@@ -879,6 +1075,7 @@ _SPEC_FIELDS = (
     "measurement_rate",
     "schedule",
     "gates_per_layer",
+    "circuits_per_graph",
     "reference",
     "reference_partner",
     "scramble_gates",
@@ -942,11 +1139,21 @@ class EnsembleResult:
     Attributes
     ----------
     values
-        ``values[probe_name]`` has shape ``(trajectories, checkpoints)`` for
-        scalar probes and ``(trajectories, checkpoints, num_system + 1)`` for
-        vector probes. Entries after a trajectory stopped
-        (``stop_when_purified``) are NaN, and so is ``contiguous_distance``
-        where the code dimension is 0.
+        ``values[probe_name]`` has shape ``(trajectories, evaluations)`` for a
+        scalar probe and ``(trajectories, evaluations, length)`` for a vector
+        probe, one evaluation per layer in :meth:`layers` (the probe's own
+        checkpoints, or the spec's). Evaluations after a trajectory stopped
+        (``stop_when_purified``) hold the probe's exact value for a pure
+        reference (k = 0: code dimension and lost information 0, first-failure
+        size n + 1, no uncorrectable regions) or NaN where that is not
+        determined (entanglement probes); ``contiguous_distance`` is NaN
+        wherever k = 0.
+    snapshots
+        For a :func:`code_snapshot` probe: ``(generators, counts)``, where
+        ``generators[t, c, i]`` is generator ``i`` of the code at evaluation
+        ``c`` of trajectory ``t`` (X bits of the system qubits in the first half
+        of the words, Z bits in the second) and ``counts[t, c]`` how many rows
+        are used (-1 for evaluations after a stop). :meth:`code` decodes one.
     purification_layer
         First checkpoint layer at which the reference was pure, or -1 if it
         never was (right-censored at the last checkpoint). ``None`` without a
@@ -976,6 +1183,7 @@ class EnsembleResult:
     seed_spawn_key: tuple[int, ...] = ()
     seed_pool_size: int = 4
     version: str | None = __version__
+    snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -996,6 +1204,41 @@ class EnsembleResult:
         )
 
     @property
+    def graph_index(self) -> np.ndarray:
+        """The graph each trajectory ran on (all 0 with a single graph)."""
+        if not isinstance(self.spec.edges, tuple):
+            return np.zeros(self.num_trajectories, dtype=np.int64)
+        return np.asarray(self.trajectories, dtype=np.int64) // self.spec.circuits_per_graph
+
+    def layers(self, name: str) -> np.ndarray:
+        """The layers at which probe ``name`` was evaluated (the columns of ``values[name]``)."""
+        return self.spec.probe_layers(name)
+
+    def code(self, trajectory: int, evaluation: int, name: str | None = None):
+        """The saved code of row ``trajectory`` at evaluation ``evaluation`` of a snapshot probe.
+
+        Returns a :class:`~sparsegf2_v3.codes.StabilizerCode`; ``trajectory`` is a
+        row index into this result (see :attr:`trajectories` for the global
+        index) and ``evaluation`` indexes ``layers(name)``.
+        """
+        from sparsegf2_v3.codes import StabilizerCode
+
+        if not self.snapshots:
+            raise ValueError("this result has no code snapshots (add mipt.code_snapshot())")
+        if name is None:
+            (name,) = self.snapshots
+        generators, counts = self.snapshots[name]
+        rows = int(counts[trajectory, evaluation])
+        if rows < 0:
+            raise ValueError(
+                f"trajectory row {trajectory} had stopped (reference pure) before evaluation "
+                f"{evaluation}: there is no code to return"
+            )
+        return StabilizerCode.from_packed(
+            generators[trajectory, evaluation, :rows], self.spec.num_system
+        )
+
+    @property
     def censored(self) -> np.ndarray | None:
         """True where the reference never purified (right-censored)."""
         return None if self.purification_layer is None else self.purification_layer < 0
@@ -1009,10 +1252,10 @@ class EnsembleResult:
         )
 
     def mean(self, name: str) -> np.ndarray:
-        """Average of a probe over trajectories at each checkpoint, ignoring NaN entries.
+        """Average of a probe over trajectories at each of its evaluations, ignoring NaN entries.
 
-        NaN marks trajectories that had stopped (``stop_when_purified``) and
-        ``contiguous_distance`` without a code (code dimension 0).
+        NaN marks entanglement probes of trajectories that had stopped
+        (``stop_when_purified``) and ``contiguous_distance`` without a code.
         """
         v = self.values[name]
         if v.shape[0] == 0:
@@ -1062,6 +1305,9 @@ class EnsembleResult:
                     "regions": [list(r) for r in p.regions],
                     "size": p.size,
                     "samples": p.samples,
+                    "checkpoints": list(p.checkpoints)
+                    if isinstance(p.checkpoints, tuple)
+                    else p.checkpoints,
                 }
                 for p in spec.probes
             ],
@@ -1086,6 +1332,9 @@ class EnsembleResult:
         meta["graph_bank"] = isinstance(spec.edges, tuple)
         for name, v in self.values.items():
             arrays[f"value::{name}"] = v
+        for name, (generators, counts) in self.snapshots.items():
+            arrays[f"snapshot::{name}"] = generators
+            arrays[f"snapshot_counts::{name}"] = counts
         if self.purification_layer is not None:
             arrays["purification_layer"] = self.purification_layer
         text = json.dumps(meta, default=_json_default)
@@ -1104,6 +1353,7 @@ class EnsembleResult:
                     tuple(tuple(r) for r in p["regions"]),
                     p["size"],
                     p["samples"],
+                    _schedule(p.get("checkpoints")),
                 )
                 for p in meta["probes"]
             ]
@@ -1144,6 +1394,11 @@ class EnsembleResult:
                 seed_spawn_key=tuple(meta.get("seed_spawn_key", ())),
                 seed_pool_size=meta.get("seed_pool_size", 4),
                 version=meta.get("version"),
+                snapshots={
+                    p.name: (z[f"snapshot::{p.name}"], z[f"snapshot_counts::{p.name}"])
+                    for p in probes
+                    if f"snapshot::{p.name}" in z.files
+                },
             )
 
     @staticmethod
@@ -1200,4 +1455,11 @@ class EnsembleResult:
             seed_spawn_key=first.seed_spawn_key,
             seed_pool_size=first.seed_pool_size,
             version=first.version,
+            snapshots={
+                name: (
+                    np.concatenate([r.snapshots[name][0] for r in results]),
+                    np.concatenate([r.snapshots[name][1] for r in results]),
+                )
+                for name in first.snapshots
+            },
         )
