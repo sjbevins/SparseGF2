@@ -43,7 +43,7 @@ from sparsegf2_v3._kernel.entropy import (
     region_entropy,
 )
 from sparsegf2_v3._kernel.rng import next_below, next_bit, next_double, stream_state
-from sparsegf2_v3._kernel.tableau import apply_1q, apply_2q, init_zero, measure_1q
+from sparsegf2_v3._kernel.tableau import apply_1q, apply_2q, init_zero, measure_1q_phase_free
 
 SCHED_MATCHING = 0
 SCHED_RANDOM_EDGES = 1
@@ -166,10 +166,14 @@ def _entropy_of_union(tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, 
 
 @njit(cache=True)
 def eval_probes(
-    tab, n, ws, n_sys, refs, kinds, ptr, region_len, idx, size_param, sample_param, order,
+    tab, n, ws, n_sys, refs, s_ref, kinds, ptr, region_len, idx, size_param, sample_param, order,
     periodic, prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
 ):  # fmt: skip
-    """Evaluate every scalar probe on the current state into ``out_row``."""
+    """Evaluate every scalar probe on the current state into ``out_row``.
+
+    ``s_ref`` is the reference entropy S(R), computed once per checkpoint by the
+    caller (it is both the code-dimension probe and the purification test).
+    """
     starts = np.zeros(3, dtype=np.int64)
     lens = np.zeros(3, dtype=np.int64)
     region_buf = np.zeros(n, dtype=np.int64)
@@ -185,7 +189,7 @@ def eval_probes(
                 tab, n, ws, idx, starts, lens, 1, mask_buf, comp_buf, scratch, union_buf
             )
         elif k == PROBE_CODE_DIMENSION:
-            out_row[j] = region_entropy(tab, n, ws, refs, mask_buf, comp_buf, scratch)
+            out_row[j] = s_ref
         elif k == PROBE_CONTIGUOUS_DISTANCE:
             out_row[j] = contiguous_distance(tab, n, ws, order, refs, periodic)
         elif k == PROBE_LOST_INFORMATION:
@@ -296,10 +300,6 @@ def run_ensemble(
         init_zero(tab, n, ws, False)
         anti = np.zeros(ws, dtype=np.uint64)
         supp = np.zeros(max(n, ws), dtype=np.int64)
-        lo = np.zeros(ws, dtype=np.uint64)
-        hi = np.zeros(ws, dtype=np.uint64)
-        qbuf = np.zeros(1, dtype=np.int64)
-        cbuf = np.zeros(1, dtype=np.int64)
         ga = np.zeros(max_gates, dtype=np.int64)
         gb = np.zeros(max_gates, dtype=np.int64)
         gg = np.zeros(max_gates, dtype=np.int64)
@@ -356,12 +356,15 @@ def run_ensemble(
                 for j in range(ng):
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
                 for j in range(nm):
-                    measure_1q(tab, n, ws, False, mq[j], 2, 0, anti, supp, lo, hi, qbuf, cbuf)
+                    measure_1q_phase_free(tab, n, ws, mq[j], 2, anti, supp)
                 num_meas += nm
                 final = layer
             if ci < num_ck and checkpoints[ci] == layer:
+                s_ref = 0
+                if ref_mode != REF_NONE:
+                    s_ref = region_entropy(tab, n, ws, refs, mask_buf, comp_buf, scratch)
                 eval_probes(
-                    tab, n, ws, n_sys, refs, kinds, ptr, region_len, idx, size_param,
+                    tab, n, ws, n_sys, refs, s_ref, kinds, ptr, region_len, idx, size_param,
                     sample_param, order, periodic, prng, out_values[t, ci], mask_buf, comp_buf,
                     scratch, union_buf, perm,
                 )  # fmt: skip
@@ -369,11 +372,7 @@ def run_ensemble(
                     tab, n, ws, n_sys, refs, vkinds, vsamples, order, prng, out_vectors[t, ci],
                     perm, work,
                 )  # fmt: skip
-                if (
-                    ref_mode != REF_NONE
-                    and tau < 0
-                    and region_entropy(tab, n, ws, refs, mask_buf, comp_buf, scratch) == 0
-                ):
+                if ref_mode != REF_NONE and tau < 0 and s_ref == 0:
                     tau = layer
                     stopped = stop_purified
                 ci += 1

@@ -370,6 +370,56 @@ def collapse(tab, n, ws, phases, anti, qs, codes, coin, supp, lo, hi):
 
 
 @njit(cache=True)
+def measure_1q_phase_free(tab, n, ws, q, code, anti, supp):
+    """Fast path: measure X/Z/Y (code 1/2/3) on ``q`` in phase-free mode.
+
+    Same projection as :func:`collapse` restricted to stabilizer rows, fused
+    into one loop (no signs, no destabilizers). Returns ``2`` if the outcome was
+    random, else ``0``. ``anti`` (length >= ws) and ``supp`` (length >= n) are
+    scratch.
+    """
+    xr = 2 * q
+    for w in range(ws):
+        a = ZERO
+        if code & 2:
+            a ^= tab[xr, w]
+        if code & 1:
+            a ^= tab[xr + 1, w]
+        anti[w] = a
+    pivot = -1
+    for w in range(ws):
+        if anti[w] != ZERO:
+            pivot = (w << 6) + np.int64(ctz(anti[w]))
+            break
+    if pivot < 0:
+        return 0
+    pw = pivot >> 6
+    pbit = ONE << _U(pivot & 63)
+    nbit = ~pbit
+    anti[pw] &= nbit
+    ns = 0
+    for c in range(n):
+        if ((tab[2 * c, pw] | tab[2 * c + 1, pw]) & pbit) != ZERO:
+            supp[ns] = c
+            ns += 1
+    for j in range(ns):
+        r = 2 * supp[j]
+        if (tab[r, pw] & pbit) != ZERO:
+            for w in range(ws):
+                tab[r, w] ^= anti[w]
+            tab[r, pw] &= nbit
+        if (tab[r + 1, pw] & pbit) != ZERO:
+            for w in range(ws):
+                tab[r + 1, w] ^= anti[w]
+            tab[r + 1, pw] &= nbit
+    if code & 1:
+        tab[xr, pw] |= pbit
+    if code & 2:
+        tab[xr + 1, pw] |= pbit
+    return 2
+
+
+@njit(cache=True)
 def measure_pauli(tab, n, ws, phases, qs, codes, coin, anti, supp, lo, hi):
     """Measure ``prod_j codes[j] on qs[j]``; see :func:`collapse` for the return value."""
     anticommuting_rows(tab, qs, codes, anti)
@@ -379,6 +429,8 @@ def measure_pauli(tab, n, ws, phases, qs, codes, coin, anti, supp, lo, hi):
 @njit(cache=True)
 def measure_1q(tab, n, ws, phases, q, code, coin, anti, supp, lo, hi, qbuf, cbuf):
     """Measure a single-qubit Pauli (X=1, Z=2, Y=3) on ``q``."""
+    if not phases:
+        return measure_1q_phase_free(tab, n, ws, q, code, anti, supp)
     width = tab.shape[1]
     for w in range(width):
         a = ZERO
