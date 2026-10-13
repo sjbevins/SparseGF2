@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from sparsegf2_v3.circuit import Circuit, Instruction
+from sparsegf2_v3.circuit import Circuit, Instruction, _combine_product, _split_products
 
 OP_1Q = 1
 OP_2Q = 2
@@ -80,10 +80,18 @@ class Program:
     _reference: np.ndarray | None = None
 
     def reference_record(self) -> np.ndarray:
-        """Stim's reference sample: the noiseless record with every collapse biased to +1.
+        """The noiseless reference record: every random collapse biased to +1, as in Stim.
 
-        Detection events and observable flips are reported relative to it,
-        exactly as Stim's samplers do. Computed once and cached.
+        Detection events and observable flips are reported relative to it, as
+        Stim's samplers do; computed once and cached. Collapses happen in target
+        order. Stim does the same in the Z basis, but collapses the random
+        targets of one X- or Y-basis instruction (``MX``, ``MY``, ``MRX``,
+        ``MRY``, ``RX``, ``RY``, ``MXX``, ``MYY``) in ascending qubit order, so
+        when such an instruction acts on several entangled qubits (``MY 1 0``)
+        the record can differ from Stim's ``reference_sample()``. Deterministic
+        detectors and observables (fixed in every noiseless run) are
+        unaffected; the per-shot values of non-deterministic ones can differ
+        from Stim's, with the same distribution.
         """
         if self._reference is None:
             from sparsegf2_v3._kernel.program import run_program
@@ -136,6 +144,7 @@ class Program:
 class _Builder:
     def __init__(self, max_ops: int):
         self.max_ops = max_ops
+        self.current: Instruction | None = None  # for error messages
         self.ops: list[tuple[int, int, int, int, int]] = []
         self.params: list[float] = []
         self.mpp_q: list[int] = []
@@ -149,8 +158,9 @@ class _Builder:
     def emit(self, *fields: int) -> None:
         if len(self.ops) >= self.max_ops:
             raise ValueError(
-                f"circuit unrolls to more than {self.max_ops} operations; "
-                "raise max_ops if this is intended"
+                f"circuit unrolls to more than {self.max_ops:,} operations; if this is "
+                "intended, raise the limit: Simulator.run(circuit, max_ops=...) or "
+                "sample(circuit, shots, max_ops=...)"
             )
         self.ops.append((*fields, *([0] * (5 - len(fields)))))
 
@@ -167,11 +177,13 @@ class _Builder:
         idx = self.num_meas + lookback
         if idx < 0:
             raise ValueError(
-                f"rec[{lookback}] refers to a measurement before the start of the circuit"
+                f"rec[{lookback}] in '{self.current}' refers to a measurement before the start "
+                f"of the circuit (only {self.num_meas} recorded before it)"
             )
         return idx
 
     def instruction(self, ins: Instruction) -> None:
+        self.current = ins
         info = ins.info
         kind = info.kind
         name = info.name
@@ -225,23 +237,7 @@ class _Builder:
                 self.num_meas += 1
         elif kind == "measure_product":
             slot = self.slot(ins.args) if ins.args else -1
-            # Factors joined by '*' form one product; a factor not preceded by
-            # '*' starts a new product.
-            products: list[list] = []
-            current: list = []
-            expect_factor = True
-            for tg in t:
-                if tg.kind == "combiner":
-                    expect_factor = True
-                    continue
-                if not expect_factor:
-                    products.append(current)
-                    current = []
-                current.append(tg)
-                expect_factor = False
-            if current:
-                products.append(current)
-            for factors in products:
+            for factors in _split_products(t):
                 self._emit_product(factors, slot)
         elif kind == "reset":
             for tg in t:
@@ -271,26 +267,9 @@ class _Builder:
 
     def _emit_product(self, factors, slot: int) -> None:
         """One MPP product: combine repeated qubits exactly, then emit."""
-        acc: dict[int, tuple[int, int]] = {}
-        phase = 0
-        invert = 0
+        acc, invert = _combine_product(factors)
         for f in factors:
-            invert ^= int(f.inverted)
-            code = _CODE[f.pauli]
-            x2, z2 = code & 1, code >> 1
-            x1, z1 = acc.get(f.value, (0, 0))
-            # power of i from multiplying single-qubit Paulis (x1,z1)*(x2,z2)
-            if x1 and z1:
-                phase += z2 - x2
-            elif x1:
-                phase += z2 * (2 * x2 - 1)
-            elif z1:
-                phase += x2 * (1 - 2 * z2)
-            acc[f.value] = (x1 ^ x2, z1 ^ z2)
             self.qubit(f.value)
-        if phase % 2:
-            raise ValueError("an MPP product is anti-Hermitian (repeated qubits multiply to +-i)")
-        invert ^= (phase % 4) // 2
         start = len(self.mpp_q)
         for q in sorted(acc):
             x, z = acc[q]
@@ -326,16 +305,36 @@ class _Builder:
 
 
 def compile_circuit(circuit: Circuit, *, max_ops: int = DEFAULT_MAX_OPS) -> Program:
-    """Compile ``circuit`` (cached on the circuit until it is modified)."""
+    """Compile ``circuit`` (cached on the circuit until it, or a REPEAT body in it, is modified).
+
+    A cached program is reused whenever it fits within ``max_ops``.
+    """
+    if not isinstance(circuit, Circuit):
+        raise TypeError(_not_a_circuit(circuit))
+    key = circuit._state_key()
     cached = getattr(circuit, "_compiled", None)
-    if cached is not None and cached[0] == circuit._version and cached[1] == max_ops:
-        return cached[2]
+    if cached is not None and cached[0] == key and len(cached[1].ops) <= max_ops:
+        return cached[1]
     builder = _Builder(max_ops)
     for ins in circuit.flattened():
         builder.instruction(ins)
     program = builder.build()
-    circuit._compiled = (circuit._version, max_ops, program)
+    circuit._compiled = (key, program)
     return program
+
+
+def _not_a_circuit(obj) -> str:
+    what = f"{type(obj).__module__.split('.')[0]}.{type(obj).__name__}"
+    hint = ""
+    if what.startswith("stim."):
+        hint = "; convert it once with sparsegf2_v3.Circuit.from_stim(stim_circuit)"
+        what = "a stim.Circuit" if type(obj).__name__ == "Circuit" else f"a {what}"
+    elif isinstance(obj, str):
+        hint = "; parse Stim circuit text with sparsegf2_v3.Circuit(text)"
+        what = "a str"
+    else:
+        what = f"a {type(obj).__name__}"
+    return f"expected a sparsegf2_v3.Circuit, got {what}{hint}"
 
 
 def parity_of(record: np.ndarray, ptr: np.ndarray, idx: np.ndarray) -> np.ndarray:

@@ -154,9 +154,14 @@ The spec keys are the parameters of `sparsegf2_v3.mipt.MonitoredCircuit`.
 * Never average tau with the `-1` (censored) entries included. Use `censored_fraction`,
   `tau_median_all` (defined when more than half the trajectories purified), the survival
   curve `purification.survival`, or `sparsegf2_v3.analysis.kaplan_meier` on the saved
-  arrays.
+  arrays. `-1` is a marker, not a time: call
+  `kaplan_meier(np.where(tau >= 0, tau, final_layer), tau >= 0)` with
+  `tau = result.purification_layer` and `final_layer = result.final_layer` (passing tau
+  itself raises an error).
 * With `stop_when_purified`, a probe's mean at a checkpoint averages only the trajectories
   still running there. The per-checkpoint `count` says how many there were.
+  `contiguous_distance` likewise averages only trajectories that still hold a code (it is
+  NaN where the code dimension is 0).
 * `stabilizers` lists generators only up to 32 qubits. For large states use
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means

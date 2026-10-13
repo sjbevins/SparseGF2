@@ -67,7 +67,7 @@ import numpy as np
 
 from sparsegf2_v3 import __version__, analysis, graphs, mipt, observables
 from sparsegf2_v3._compile import DEFAULT_MAX_OPS
-from sparsegf2_v3.circuit import Circuit, Instruction, RepeatBlock
+from sparsegf2_v3.circuit import Circuit, Instruction, RepeatBlock, _strip_comment
 from sparsegf2_v3.errors import PhaseFreeError
 from sparsegf2_v3.gates import KINDS, all_gates, gate
 from sparsegf2_v3.sampling import sample
@@ -114,6 +114,8 @@ MAX_TICK_ROWS = 10_000
 MAX_QUBITS = 65_536
 MAX_SHOT_RESULTS = 200_000_000
 MAX_TRAJECTORIES = 100_000_000
+MAX_INT = 2**62
+"""Largest integer accepted for counts, sizes and indices (seeds excepted): nothing larger fits."""
 
 SCHEDULES = ("matching", "random_edges", "all_edges")
 REFERENCES = ("none", "purification", "single")
@@ -142,19 +144,26 @@ def _num(x: float) -> float | None:
     return float(f"{x:.6g}")
 
 
-def _jsonable(obj: Any) -> Any:
-    """Recursively convert numpy values, tuples and paths to plain JSON values."""
+def _jsonable(obj: Any, *, exact: bool = False) -> Any:
+    """Recursively convert numpy values, tuples and paths to plain JSON values.
+
+    Floats are rounded to 6 significant digits for display; ``exact=True``
+    keeps them as they are (for files and stored specs; non-finite values
+    still become None).
+    """
     if isinstance(obj, dict):
-        return {str(k): _jsonable(v) for k, v in obj.items()}
+        return {str(k): _jsonable(v, exact=exact) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_jsonable(v) for v in obj]
+        return [_jsonable(v, exact=exact) for v in obj]
     if isinstance(obj, np.ndarray):
-        return _jsonable(obj.tolist())
+        return _jsonable(obj.tolist(), exact=exact)
     if isinstance(obj, (bool, np.bool_)):
         return bool(obj)
     if isinstance(obj, (int, np.integer)):
         return int(obj)
     if isinstance(obj, (float, np.floating)):
+        if exact:
+            return float(obj) if math.isfinite(obj) else None
         return _num(obj)
     if isinstance(obj, Path):
         return str(obj)
@@ -226,7 +235,10 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
     return {"truncated": True, "notes": ["result too large to show; pass output_dir to save it"]}
 
 
-def _require_int(value: Any, what: str, *, minimum: int | None = None) -> int:
+def _require_int(
+    value: Any, what: str, *, minimum: int | None = None, maximum: int | None = MAX_INT
+) -> int:
+    """``value`` as an int; ``maximum=None`` lifts the size bound (for seeds)."""
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
         if isinstance(value, float) and value.is_integer():
             value = int(value)
@@ -235,6 +247,8 @@ def _require_int(value: Any, what: str, *, minimum: int | None = None) -> int:
     value = int(value)
     if minimum is not None and value < minimum:
         raise ValueError(f"{what} must be at least {minimum}, got {value}")
+    if maximum is not None and abs(value) > maximum:
+        raise ValueError(f"{what} is too large (at most {maximum:,}), got {value}")
     return value
 
 
@@ -284,14 +298,14 @@ def _check_type(value: Any, annotation: Any, what: str) -> Any:
             return bool(value)
     elif isinstance(value, (int, np.integer)):
         if "int" in parts:
-            return int(value)
+            return _require_int(value, what)
         if "float" in parts:
             return float(value)
     elif isinstance(value, (float, np.floating)):
         if "float" in parts:
             return float(value)
         if "int" in parts and float(value).is_integer():
-            return int(value)
+            return _require_int(value, what)
     elif isinstance(value, str) and "str" in parts:
         return value
     expected = " or ".join(_SIMPLE_TYPES[p] for p in parts)
@@ -302,7 +316,7 @@ def _resolve_seed(seed: Any) -> int:
     """A concrete non-negative int seed; ``None`` draws a fresh 63-bit one."""
     if seed is None:
         return secrets.randbits(63)
-    return _require_int(seed, "seed", minimum=0)
+    return _require_int(seed, "seed", minimum=0, maximum=None)
 
 
 _RANGE_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?::\s*(\d+)\s*)?$")
@@ -384,11 +398,12 @@ _QUBIT_ARGS = {"region", "a", "b", "c", "reference", "erased", "system", "order"
 
 @dataclasses.dataclass(frozen=True)
 class _Observable:
-    compute: Callable[[Simulator, dict], Any]
+    compute: Callable[[Simulator, dict], Any]  # the full value (saved with output_dir)
     required: tuple[str, ...]
     optional: tuple[str, ...]
     description: str
     needs_phases: bool = False
+    show: Callable[[Any], Any] | None = None  # the full value -> its summary in results
 
 
 def _profile_summary(values: np.ndarray) -> dict[str, Any]:
@@ -415,7 +430,9 @@ def _stabilizer_strings(sim: Simulator, a: dict) -> list[str]:
             f"(this state has {sim.num_qubits}); use 'stabilizer_weights' or "
             "'stabilizer_length_distribution' for large states"
         )
-    return [str(p) for p in sim.stabilizers()]
+    strings = [str(p) for p in sim.stabilizers()]
+    # Without sign tracking every sign would read "+": report the Paulis unsigned.
+    return strings if sim.phases else [text[1:] for text in strings]
 
 
 def _erasure_stats(sim: Simulator, a: dict) -> dict[str, Any]:
@@ -432,10 +449,18 @@ def _erasure_stats(sim: Simulator, a: dict) -> dict[str, Any]:
 
 def _erasure_profile(sim: Simulator, a: dict) -> dict[str, Any]:
     s = observables.erasure_profile(sim, a["system"], a["reference"], a["samples"], seed=a["seed"])
-    return {
-        "correctable_fraction": _profile_summary(s["correctable_fraction"]),
-        "mean_lost": _profile_summary(s["mean_lost"]),
-    }
+    return {"correctable_fraction": s["correctable_fraction"], "mean_lost": s["mean_lost"]}
+
+
+def _profiles_summary(value: dict[str, np.ndarray]) -> dict[str, Any]:
+    return {key: _profile_summary(v) for key, v in value.items()}
+
+
+def _subsampled(value: Any) -> bool:
+    """Whether a shown observable value had a vector subsampled (see :func:`_profile_summary`)."""
+    if isinstance(value, dict):
+        return bool(value.get("subsampled")) or any(_subsampled(v) for v in value.values())
+    return False
 
 
 _OBSERVABLES: dict[str, _Observable] = {
@@ -458,10 +483,11 @@ _OBSERVABLES: dict[str, _Observable] = {
         "I3(A:B:C) for disjoint regions (negative at an MIPT).",
     ),
     "entropy_profile": _Observable(
-        lambda sim, a: _profile_summary(observables.entropy_profile(sim, a.get("order"))),
+        lambda sim, a: observables.entropy_profile(sim, a.get("order")),
         (),
         ("order",),
         "S(order[:k]) for k = 0..len(order) (default order 0..n-1).",
+        show=_profile_summary,
     ),
     "code_dimension": _Observable(
         lambda sim, a: observables.code_dimension(sim, a["reference"]),
@@ -498,6 +524,7 @@ _OBSERVABLES: dict[str, _Observable] = {
         ("system", "reference"),
         ("samples", "seed"),
         "Correctable fraction and mean lost bits for random erasures of every size 0..|system|.",
+        show=_profiles_summary,
     ),
     "contiguous_code_distance": _Observable(
         lambda sim, a: observables.contiguous_code_distance(
@@ -514,18 +541,18 @@ _OBSERVABLES: dict[str, _Observable] = {
         "Mean/min/max generator weight (basis dependent; a sparsity diagnostic).",
     ),
     "stabilizer_length_distribution": _Observable(
-        lambda sim, a: _profile_summary(
-            observables.stabilizer_length_distribution(sim, a.get("order"))
-        ),
+        lambda sim, a: observables.stabilizer_length_distribution(sim, a.get("order")),
         (),
         ("order",),
         "Histogram of clipped-gauge stabilizer lengths (index = length).",
+        show=_profile_summary,
     ),
     "stabilizers": _Observable(
         _stabilizer_strings,
         (),
         (),
-        f"Canonical stabilizer generators as Pauli strings (up to {MAX_STABILIZER_QUBITS} qubits).",
+        f"Canonical stabilizer generators as Pauli strings (up to {MAX_STABILIZER_QUBITS} "
+        "qubits): signed with phases=true, unsigned ('XZ_') with phases=false.",
     ),
     "expectation": _Observable(
         lambda sim, a: sim.peek_pauli(a["pauli"]),
@@ -545,15 +572,15 @@ _OBSERVABLES: dict[str, _Observable] = {
 
 def _compile_observables(
     specs: Any, num_qubits: int, phases: bool, seed: int
-) -> list[tuple[str, Callable[[Simulator], Any]]]:
-    """Validate observable specs up front and return ``(name, fn(sim))`` pairs."""
+) -> list[tuple[str, Callable[[Simulator], Any], Callable[[Any], Any]]]:
+    """Validate observable specs up front: ``(name, fn(sim) -> full value, show(value))``."""
     if specs is None:
         return []
     if not isinstance(specs, list):
         raise ValueError(
             'observables must be a list of objects like {"kind": "entropy", "region": [0, 1]}'
         )
-    compiled: list[tuple[str, Callable[[Simulator], Any]]] = []
+    compiled: list[tuple[str, Callable[[Simulator], Any], Callable[[Any], Any]]] = []
     names: Counter[str] = Counter()
     for i, spec in enumerate(specs):
         where = f"observables[{i}]"
@@ -585,7 +612,10 @@ def _compile_observables(
                 args[key] = [_require_int(v, f"{where}.sizes entries", minimum=0) for v in value]
             elif key in ("samples", "seed"):
                 args[key] = _require_int(
-                    value, f"{where}.{key}", minimum=1 if key == "samples" else 0
+                    value,
+                    f"{where}.{key}",
+                    minimum=1 if key == "samples" else 0,
+                    maximum=MAX_INT if key == "samples" else None,
                 )
             elif key == "periodic":
                 args[key] = _require_bool(value, f"{where}.periodic")
@@ -609,7 +639,7 @@ def _compile_observables(
             except (ValueError, IndexError, PhaseFreeError) as exc:
                 raise ValueError(f"{_where} ({_kind}): {exc}") from None
 
-        compiled.append((name, fn))
+        compiled.append((name, fn, obs.show or (lambda value: value)))
     return compiled
 
 
@@ -670,9 +700,7 @@ def _semantic_errors(circuit: Circuit, text: str) -> list[dict[str, Any]]:
     measurements precede it; REPEAT blocks are never unrolled.
     """
     lines = iter(
-        lineno
-        for lineno, raw in enumerate(text.splitlines(), start=1)
-        if raw.split("#", 1)[0].strip()
+        lineno for lineno, raw in enumerate(text.splitlines(), start=1) if _strip_comment(raw)
     )
     errors: list[dict[str, Any]] = []
 
@@ -726,7 +754,7 @@ def _circuit_errors(text: str, first_error: str) -> list[dict[str, Any]]:
     else:
         errors[None] = first_error
     for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
+        line = _strip_comment(raw)
         if not line or line == "}" or line.upper().startswith("REPEAT"):
             continue
         try:
@@ -904,7 +932,10 @@ def run_circuit(
     start = time.perf_counter()
 
     def evaluate(sim: Simulator) -> dict[str, Any]:
-        return {name: fn(sim) for name, fn in compiled}
+        return {name: fn(sim) for name, fn, _ in compiled}
+
+    def shown(values: dict[str, Any]) -> dict[str, Any]:
+        return {name: show(values[name]) for name, _, show in compiled}
 
     def observe(sim: Simulator, tick: int) -> dict[str, Any] | None:
         if tick % stride == 0 or tick == num_ticks - 1:
@@ -934,10 +965,13 @@ def run_circuit(
     out["random_fraction"] = float(random_flags.mean()) if random_flags.size else 0.0
     arrays["random"] = random_flags
     if not phases:
-        notes.append(
+        note = (
             "phases=false: measurement outcomes, detectors and observable flips do not exist; "
             "only which measurements were random is reported"
         )
+        if any(isinstance(o, dict) and o.get("kind") == "stabilizers" for o in observables or []):
+            note += "; stabilizers are listed without signs (they are not tracked)"
+        notes.append(note)
     cut: list[str] = []
     if shots == 1:
         if m <= MAX_BITS_SHOWN:
@@ -987,27 +1021,36 @@ def run_circuit(
         arrays["observable_flips"] = obs_flips
 
     if compiled:
-        out["observables"] = final_values
+        out["observables"] = shown(final_values)
+        if _subsampled(out["observables"]):
+            cut.append(f"profile entries beyond {MAX_PROFILE_SHOWN} per observable")
         if shots > 1:
             notes.append("observables are evaluated on the final state of the shots=1 run")
     if observe_ticks:
         idx = _subsample(len(tick_rows), MAX_CHECKPOINTS_SHOWN)
+        rows = [shown(tick_rows[i][1]) for i in idx]
         out["tick_observables"] = {
             "ticks": [tick_rows[i][0] for i in idx],
-            "values": {name: [tick_rows[i][1][name] for i in idx] for name, _ in compiled},
+            "values": {name: [row[name] for row in rows] for name, _, _ in compiled},
             "num_ticks": num_ticks,
             "num_evaluated": len(tick_rows),
             "tick_stride": stride,
             "subsampled": len(idx) < len(tick_rows),
         }
+        if any(_subsampled(row) for row in rows):
+            cut.append("profile entries in tick_observables")
     if output_dir is not None:
         out["files"] = _save_circuit_run(
             output_dir, parsed, arrays, tick_rows, final_values, seed, command
         )
     if cut:
         out["truncated"] = True
-        where = "they are in files.arrays" if output_dir is not None else "pass output_dir"
-        notes.append(f"not shown: {'; '.join(cut)} ({where} to get them)")
+        where = (
+            "every value is in the saved files listed under 'files'"
+            if output_dir is not None
+            else "pass output_dir to save every value"
+        )
+        notes.append(f"not shown: {'; '.join(cut)}; {where}")
     if notes:
         out["notes"] = notes
     return _bounded(out)
@@ -1058,7 +1101,8 @@ def _save_circuit_run(
         obs_path.write_text(
             json.dumps(
                 _jsonable(
-                    {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]}
+                    {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]},
+                    exact=True,
                 ),
                 indent=1,
             )
@@ -1129,9 +1173,9 @@ def _call_with(fn: Callable, given: dict, fill: dict, what: str) -> Any:
     for key, value in given.items():
         if key == "seed" and params[key].annotation is inspect.Parameter.empty:
             kwargs[key] = (
-                [_require_int(v, f"{what}: seed entries", minimum=0) for v in value]
+                [_require_int(v, f"{what}: seed entries", minimum=0, maximum=None) for v in value]
                 if isinstance(value, list) and value
-                else _require_int(value, f"{what}: seed", minimum=0)
+                else _require_int(value, f"{what}: seed", minimum=0, maximum=None)
             )
         else:
             kwargs[key] = _check_type(value, params[key].annotation, f"{what}: {key}")
@@ -1290,17 +1334,26 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         kwargs["reference_partner"] = _reference_partner(spec["reference_partner"])
     if "checkpoints" in spec:
         kwargs["checkpoints"] = _checkpoints(spec["checkpoints"])
-    edges = (
-        _build_graph(spec["graph"], n)
-        if "graph" in spec
-        else graphs.from_edges(_edge_list(spec["edges"]), n)
-    )
+    weights = spec.get("edge_weights")
+    if "graph" in spec:
+        edges = _build_graph(spec["graph"], n)
+        if isinstance(weights, list) and (isinstance(edges, list) or _random_family(spec["graph"])):
+            raise ValueError(
+                "edge_weights as a list needs a known edge order, which a random graph family "
+                "(or graph.realizations) does not have: give explicit 'edges' with one weight "
+                'each, or a weight family such as {"family": "power_law", "alpha": 2.0}'
+            )
+    else:
+        raw_edges = _edge_list(spec["edges"])
+        edges = graphs.from_edges(raw_edges, n)
+        if isinstance(weights, list):
+            weights = _weights_in_normalised_order(raw_edges, weights)
     kwargs["edges"] = edges
-    if spec.get("edge_weights") is not None:
+    if weights is not None:
         kwargs["edge_weights"] = (
-            [_build_weights(spec["edge_weights"], g, n) for g in edges]
+            [_build_weights(weights, g, n) for g in edges]
             if isinstance(edges, list)
-            else _build_weights(spec["edge_weights"], edges, n)
+            else _build_weights(weights, edges, n)
         )
     if "gate_set" in spec:
         kwargs["gate_set"] = _gate_set(spec["gate_set"])
@@ -1312,8 +1365,36 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         kwargs["probes"] = [_build_probe(p, i) for i, p in enumerate(spec["probes"])]
     try:
         return mipt.MonitoredCircuit(**kwargs)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"invalid spec: {exc}") from None
+
+
+def _random_family(graph: Any) -> bool:
+    fn = _graph_families().get(graph.get("family")) if isinstance(graph, dict) else None
+    return fn is not None and "seed" in _params(fn)
+
+
+def _weights_in_normalised_order(raw_edges: np.ndarray, weights: list) -> list:
+    """Reorder per-edge weights given for ``raw_edges`` to match the normalised edge list.
+
+    The engine stores edges as ``graphs.from_edges`` returns them (each pair
+    oriented ``a < b``, the pairs sorted), so a weight list in the caller's
+    order must move with its edges or it would weight other edges.
+    """
+    if len(weights) != len(raw_edges):
+        raise ValueError(
+            f"edge_weights has {len(weights)} entries for {len(raw_edges)} edges; give one "
+            "weight per edge, in the order of 'edges'"
+        )
+    oriented = np.sort(raw_edges, axis=1)
+    order = np.lexsort((oriented[:, 1], oriented[:, 0]))
+    ranked = oriented[order]
+    if len(ranked) > 1 and np.any(np.all(ranked[1:] == ranked[:-1], axis=1)):
+        raise ValueError(
+            "edges lists a pair more than once; with a list of edge_weights every edge must "
+            "appear exactly once"
+        )
+    return [weights[i] for i in order]
 
 
 # Spec keys converted by dedicated code in _build_spec rather than by annotation.
@@ -1357,8 +1438,8 @@ def _checkpoints(value: Any) -> str | int | list[int]:
 def _edge_list(value: Any) -> np.ndarray:
     try:
         arr = np.asarray(value, dtype=np.int64)
-    except (TypeError, ValueError):
-        raise ValueError("edges must be a list of [a, b] integer pairs") from None
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("edges must be a list of [a, b] integer pairs (qubit indices)") from None
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise ValueError("edges must be a list of [a, b] integer pairs")
     return arr
@@ -1420,25 +1501,50 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
 _CALL_OVERHEAD_SECONDS = 0.05
 
 
+def _setup_us(spec: dict, mc: mipt.MonitoredCircuit) -> float:
+    """Pessimistic one-thread microseconds to build ``mc`` from ``spec`` and preprocess its graphs.
+
+    Graph generation, validation and (for the matching schedule) edge
+    colouring run in Python, once per graph, so a large graph bank
+    (``realizations``) costs seconds before the first trajectory starts.
+    Fitted to measured runs (WS graphs, n = 32..128) and rounded up.
+    """
+    edges = sum(len(g) for g in mc.graphs)
+    us = 50.0 * mc.num_graphs + 0.5 * edges  # normalising and validating every graph
+    if "graph" in spec:
+        us += 300.0 * mc.num_graphs + 1.0 * edges  # generating the graphs
+    if mc.schedule == "matching":
+        us += 2.5 * edges  # edge colouring
+    return us
+
+
+def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) -> float:
+    import numba
+
+    # Trajectories are the unit of parallelism: fewer trajectories than threads
+    # leave threads idle.
+    parallel = min(numba.get_num_threads(), trajectories)
+    kernel = trajectories * _trajectory_us(mc) * 1e-6 / parallel
+    return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
+
+
 def estimate_ensemble(spec: dict[str, Any], trajectories: int) -> dict[str, Any]:
     """A rough (deliberately pessimistic) runtime estimate for :func:`run_ensemble`.
 
-    Returns ``estimated_seconds``, the thread count it assumes, and whether a
-    synchronous run fits within :data:`SYNC_ENSEMBLE_MAX_SECONDS`. Trajectories
-    that stop early (``stop_when_purified``) make real runs faster.
+    Returns ``estimated_seconds`` (building the spec, generating and
+    preprocessing its graphs, and the trajectories), the thread count it
+    assumes, and whether a synchronous run fits within
+    :data:`SYNC_ENSEMBLE_MAX_SECONDS`. Trajectories that stop early
+    (``stop_when_purified``) make real runs faster.
     """
     import numba
 
     mc = _build_spec(spec)
     trajectories = _require_int(trajectories, "trajectories", minimum=1)
-    # Trajectories are the unit of parallelism: fewer trajectories than threads
-    # leave threads idle.
-    threads = numba.get_num_threads()
-    parallel = min(threads, trajectories)
-    seconds = _CALL_OVERHEAD_SECONDS + trajectories * _trajectory_us(mc) * 1e-6 / parallel
+    seconds = _estimate_seconds(spec, mc, trajectories)
     return {
         "estimated_seconds": _num(seconds),
-        "threads": threads,
+        "threads": numba.get_num_threads(),
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
     }
@@ -1540,10 +1646,45 @@ def _vector_summary(
     return entry
 
 
-def _summarize_ensemble(result: mipt.EnsembleResult) -> dict[str, Any]:
+def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict[str, Any]:
+    """The summary of ``result`` plus ``extra``, within the size limit.
+
+    When it is too long, fewer checkpoints are shown (evenly spaced, always
+    the first and last, the same ones for every probe and the survival curve)
+    before the generic cut of :func:`_bounded` is used as a last resort.
+    """
+    total = len(result.checkpoint_layers)
+    long_extras = [
+        key
+        for key, value in extra.items()
+        if key not in ("files", "path")
+        and len(json.dumps(_jsonable(value))) > MAX_OUTPUT_CHARS // 4
+    ]
+    if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
+        extra = {**extra, **{key: "too long to show; see the saved files" for key in long_extras}}
+    out: dict[str, Any] = {}
+    for shown in (MAX_CHECKPOINTS_SHOWN, 32, 16, 8, 4, 2):
+        out = {**_summarize_ensemble(result, shown), **extra}
+        if long_extras:
+            _mark_truncated(out, f"not shown: {', '.join(long_extras)} (too long)")
+        if len(json.dumps(_jsonable(out))) <= MAX_OUTPUT_CHARS:
+            if shown < min(MAX_CHECKPOINTS_SHOWN, total):
+                _mark_truncated(
+                    out,
+                    f"only {shown} of {total} checkpoints are shown (evenly spaced, first and "
+                    "last included) to fit the size limit; pass output_dir or read the saved "
+                    "files for all of them",
+                )
+            return _bounded(out)
+    return _bounded(out)
+
+
+def _summarize_ensemble(
+    result: mipt.EnsembleResult, shown: int = MAX_CHECKPOINTS_SHOWN
+) -> dict[str, Any]:
     spec = result.spec
     layers = np.asarray(result.checkpoint_layers)
-    idx = _subsample(len(layers), MAX_CHECKPOINTS_SHOWN)
+    idx = _subsample(len(layers), shown)
     out: dict[str, Any] = {
         "num_trajectories": result.num_trajectories,
         "num_system": spec.num_system,
@@ -1571,6 +1712,9 @@ def _summarize_ensemble(result: mipt.EnsembleResult) -> dict[str, Any]:
         )
     num_vectors = sum(np.ndim(v) == 3 for v in result.values.values())
     sizes_shown = MAX_PROFILE_SHOWN if num_vectors <= 2 else 33
+    if shown < MAX_CHECKPOINTS_SHOWN:  # a tighter budget: coarser profiles too
+        sizes_shown = min(sizes_shown, max(shown, 4) + 1)
+    kinds = {p.name: p.kind for p in spec.probes}
     for name, values in result.values.items():
         values = np.asarray(values, dtype=np.float64)
         if values.ndim == 2:
@@ -1578,11 +1722,16 @@ def _summarize_ensemble(result: mipt.EnsembleResult) -> dict[str, Any]:
             entry: dict[str, Any] = {"mean": mean[idx], "stderr": err[idx]}
             if np.isnan(values).any():
                 entry["count"] = np.sum(~np.isnan(values), axis=0)[idx]
+                if kinds.get(name) == "contiguous_distance":
+                    notes.append(
+                        f"{keys[name]}: the distance is undefined without a code, so it averages "
+                        "only trajectories whose code dimension is above 0 (see 'count')"
+                    )
         else:
-            entry = _vector_summary(values, layers, sizes_shown, MAX_VECTOR_DEPTHS)
+            entry = _vector_summary(values, layers, sizes_shown, min(MAX_VECTOR_DEPTHS, shown))
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
-        out["purification"] = _purification_summary(result.purification_layer, layers)
+        out["purification"] = _purification_summary(result.purification_layer, layers, shown)
     out["final_layer_mean"] = (
         float(np.mean(result.final_layer)) if result.num_trajectories else None
     )
@@ -1599,7 +1748,9 @@ def _summarize_ensemble(result: mipt.EnsembleResult) -> dict[str, Any]:
     return out
 
 
-def _purification_summary(tau: np.ndarray, layers: np.ndarray) -> dict[str, Any]:
+def _purification_summary(
+    tau: np.ndarray, layers: np.ndarray, shown: int = MAX_CHECKPOINTS_SHOWN
+) -> dict[str, Any]:
     tau = np.asarray(tau)
     total = tau.size
     purified = tau[tau >= 0]
@@ -1620,7 +1771,7 @@ def _purification_summary(tau: np.ndarray, layers: np.ndarray) -> dict[str, Any]
             tau_quantiles_purified={"p10": q[0], "p25": q[1], "p75": q[3], "p90": q[4]},
         )
     if total and layers.size:
-        idx = _subsample(len(layers), MAX_CHECKPOINTS_SHOWN)
+        idx = _subsample(len(layers), shown)
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
         surviving = alive.mean(axis=1)
         # The median of tau over all trajectories is well defined despite
@@ -1699,19 +1850,44 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _write_run_metadata(
-    out: Path, spec: dict, trajectories: int, seed: int, command: str
+    out: Path,
+    spec: dict,
+    trajectories: int,
+    seed: int,
+    command: str,
+    *,
+    resumed_from: int | None = None,
 ) -> dict[str, str]:
+    """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
+
+    For a resumed job (``resumed_from`` set) the original provenance is kept and
+    this process's record is appended under ``"resumes"``.
+    """
     try:
         spec_text = json.dumps(
-            {"spec": _jsonable(spec), "trajectories": trajectories, "seed": seed}, indent=2
+            {"spec": _jsonable(spec, exact=True), "trajectories": trajectories, "seed": seed},
+            indent=2,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"spec must be JSON-serializable to be saved: {exc}") from None
     spec_path = out / _SPEC_FILE
     _atomic_write_text(spec_path, spec_text)
     prov_path = out / _PROVENANCE_FILE
-    _atomic_write_text(prov_path, json.dumps(_provenance(seed, command), indent=2))
+    record = _provenance(seed, command)
+    stored = _read_provenance(out) if resumed_from is not None else None
+    if stored is not None:
+        resume = {**record, "resumed_from": resumed_from}
+        record = {**stored, "resumes": [*stored.get("resumes", []), resume]}
+    _atomic_write_text(prov_path, json.dumps(record, indent=2))
     return {"spec": str(spec_path), "provenance": str(prov_path)}
+
+
+def _read_provenance(out: Path) -> dict | None:
+    try:
+        stored = json.loads((out / _PROVENANCE_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return stored if isinstance(stored, dict) else None
 
 
 def _result_parts(out: Path) -> list[Path]:
@@ -1801,6 +1977,7 @@ def run_ensemble(
     output_dir: str | None = None,
     num_threads: int | None = None,
     command: str | None = None,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run ``trajectories`` random monitored circuits and summarize them.
 
@@ -1810,14 +1987,29 @@ def run_ensemble(
     ``[{"kind": "code_dimension"}, ...]``. The result is exactly
     ``MonitoredCircuit(...).run(trajectories, seed=seed)``, summarized: probe
     means and standard errors at (at most 50) checkpoints, purification
-    statistics with censoring, and throughput. With ``output_dir`` the full
+    statistics with censoring, and throughput. ``elapsed_seconds`` and
+    ``trajectories_per_second`` are wall-clock figures for the whole call,
+    building the spec and its graphs included. With ``output_dir`` the full
     :class:`~sparsegf2_v3.mipt.EnsembleResult` is saved to
     ``output_dir/result.npz`` with ``spec.json`` and ``provenance.json``.
+    With ``max_seconds``, a run whose :func:`estimate_ensemble` exceeds it is
+    refused before anything runs (the MCP tool's guard).
     """
+    start = time.perf_counter()
     mc = _build_spec(spec)
     trajectories = _require_int(trajectories, "trajectories", minimum=1)
     if trajectories > MAX_TRAJECTORIES:
         raise ValueError(f"at most {MAX_TRAJECTORIES:,} trajectories per call")
+    if max_seconds is not None:
+        max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
+        estimate = _estimate_seconds(spec, mc, trajectories)
+        if estimate > max_seconds:
+            raise ValueError(
+                f"this run is estimated at about {estimate:.0f} s, above "
+                f"max_seconds={max_seconds:g}. Use start_ensemble_job with an output_dir and "
+                "poll job_status, or reduce trajectories/layers/num_system (or raise "
+                "max_seconds if you are willing to wait)."
+            )
     seed = _resolve_seed(seed)
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
@@ -1827,17 +2019,21 @@ def run_ensemble(
             f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
             "(or use start_ensemble_job to resume or extend it)"
         )
+    setup = time.perf_counter() - start
     with _COMPUTE_LOCK:
         result = mc.run(trajectories, seed=seed, num_threads=num_threads)
-    summary = _summarize_ensemble(result)
+    # the run's own timer covers graph preprocessing and the kernel; add the
+    # spec construction (graph generation, validation) before it
+    result.elapsed_seconds += setup
+    extra: dict[str, Any] = {}
     if out_path is not None:
         _atomic_save_result(result, out_path / _RESULT_FILE)
         files = {"result": str(out_path / _RESULT_FILE)}
         files.update(
             _write_run_metadata(out_path, spec, trajectories, seed, command or "run_ensemble")
         )
-        summary["files"] = files
-    return _bounded(summary)
+        extra["files"] = files
+    return _bounded_summary(result, extra)
 
 
 def load_results(path: str) -> dict[str, Any]:
@@ -1862,12 +2058,11 @@ def load_results(path: str) -> dict[str, Any]:
             result, meta = _load_result_file(p), None
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read results from {str(p)!r}: {exc}") from None
-    summary = _summarize_ensemble(result)
-    summary["path"] = str(p)
+    extra: dict[str, Any] = {"path": str(p)}
     if meta is not None:
-        summary["spec"] = meta.get("spec")
-        summary["trajectories_requested"] = meta.get("trajectories")
-    return _bounded(summary)
+        extra["spec"] = meta.get("spec")
+        extra["trajectories_requested"] = meta.get("trajectories")
+    return _bounded_summary(result, extra)
 
 
 # ---------------------------------------------------------------------------
@@ -1974,6 +2169,7 @@ def start_ensemble_job(
         )
     out = _output_dir(output_dir)
     existing, meta = _load_directory(out)
+    notes: list[str] = []
     if meta is not None:
         if _canonical(meta.get("spec")) != _canonical(spec):
             raise ValueError(
@@ -1985,6 +2181,20 @@ def start_ensemble_job(
                 "resume it, or use a new directory"
             )
         seed = meta["seed"]
+        stored = _read_provenance(out)
+        made_with = None if stored is None else stored.get("sparsegf2_v3")
+        if made_with is not None and made_with != __version__:
+            raise ValueError(
+                f"output_dir {str(out)!r} holds a run started with sparsegf2_v3 {made_with}, "
+                f"but this is {__version__}; trajectories from different versions need not "
+                "agree, so finish the run with that version or start a new directory"
+            )
+        started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
+        if started_at and now_at and started_at != now_at:
+            notes.append(
+                f"this resume runs git commit {now_at[:12]}, the run started at {started_at[:12]}; "
+                "both are recorded in provenance.json"
+            )
     elif existing is not None:
         raise ValueError(
             f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
@@ -2015,7 +2225,14 @@ def start_ensemble_job(
         )
         _JOBS[job.job_id] = job
     try:
-        _write_run_metadata(out, spec, job.trajectories, seed, command or "start_ensemble_job")
+        _write_run_metadata(
+            out,
+            spec,
+            job.trajectories,
+            seed,
+            command or "start_ensemble_job",
+            resumed_from=done if meta is not None else None,
+        )
     except BaseException:
         with _JOBS_LOCK:  # never leave a job that would block this output_dir
             del _JOBS[job.job_id]
@@ -2024,11 +2241,15 @@ def start_ensemble_job(
         target=_run_job, args=(job, mc), name=f"sparsegf2-job-{job.job_id}", daemon=True
     )
     job.thread.start()
-    return _bounded(job.snapshot())
+    status = job.snapshot()
+    if notes:
+        status["notes"] = notes
+    return _bounded(status)
 
 
 def _canonical(obj: Any) -> str:
-    return json.dumps(_jsonable(obj), sort_keys=True)
+    """Exact JSON text of a spec, for comparing a stored run with a new request."""
+    return json.dumps(_jsonable(obj, exact=True), sort_keys=True)
 
 
 def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:

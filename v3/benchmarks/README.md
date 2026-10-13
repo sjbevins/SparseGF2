@@ -8,7 +8,7 @@ them directly).
 | script | what it measures | output |
 |---|---|---|
 | [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 v3 (both modes), Stim, Qiskit Aer, Cirq and SparseGF2 v2 on identical circuits; v3's ensemble throughput | `results/simulators.json` |
-| [`crosscheck_v2_production.py`](crosscheck_v2_production.py) | the PRL single-reference protocol through the v2 production engine and v3 on identical graph banks: purification-time distributions (KS test) and trajectories per second | `results/crosscheck_v2.json` |
+| [`crosscheck_v2_production.py`](crosscheck_v2_production.py) | the PRL single-reference protocol through the v2 production engine and v3 on identical graph banks: purification-time distributions (KS test) and trajectories per second, both engines timed from the prebuilt bank to the purification times (for v3: building the spec, preparing every graph, running), compilation excluded | `results/crosscheck_v2.json` |
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `v3/docs/figures/` | PNGs |
 | [`prototypes/`](prototypes/) | the layout experiments that chose the kernel's data layout (see DESIGN.md §5.1) | printed tables |

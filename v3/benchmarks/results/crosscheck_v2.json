@@ -11,9 +11,11 @@
   "v3_median_tau": 13.0,
   "ks_statistic": 0.036000000000000004,
   "ks_pvalue": 0.1466759618379129,
-  "v2_traj_per_s_1thread": 275.5815551466961,
-  "v3_traj_per_s_1thread": 11963.014522172496,
-  "v3_traj_per_s_all_threads": 48317.10788472883,
+  "v2_traj_per_s_1thread": 286.36341290770093,
+  "v3_traj_per_s_1thread": 10712.229176670406,
+  "v3_traj_per_s_all_threads": 22348.190280009436,
+  "v3_kernel_traj_per_s_1thread": 14632.629687445278,
+  "v3_kernel_traj_per_s_all_threads": 42481.87977806103,
   "threads": 4
  },
  {
@@ -28,9 +30,11 @@
   "v3_median_tau": 18.0,
   "ks_statistic": 0.06000000000000005,
   "ks_pvalue": 0.31981164376059096,
-  "v2_traj_per_s_1thread": 163.2745456224115,
-  "v3_traj_per_s_1thread": 5509.5905718562435,
-  "v3_traj_per_s_all_threads": 15144.544072083849,
+  "v2_traj_per_s_1thread": 174.9414887111232,
+  "v3_traj_per_s_1thread": 4966.110467617517,
+  "v3_traj_per_s_all_threads": 11333.905468465928,
+  "v3_kernel_traj_per_s_1thread": 5321.307405643598,
+  "v3_kernel_traj_per_s_all_threads": 15108.266593212611,
   "threads": 4
  },
  {
@@ -45,9 +49,11 @@
   "v3_median_tau": 22.0,
   "ks_statistic": 0.05500000000000005,
   "ks_pvalue": 0.915398151349006,
-  "v2_traj_per_s_1thread": 52.40959614442661,
-  "v3_traj_per_s_1thread": 1779.4541501254876,
-  "v3_traj_per_s_all_threads": 5185.805196189763,
+  "v2_traj_per_s_1thread": 49.1508488012209,
+  "v3_traj_per_s_1thread": 1797.9830639512788,
+  "v3_traj_per_s_all_threads": 4615.653175677675,
+  "v3_kernel_traj_per_s_1thread": 1852.0651823097262,
+  "v3_kernel_traj_per_s_all_threads": 5468.58261056599,
   "threads": 4
  },
  {
@@ -62,9 +68,11 @@
   "v3_median_tau": 28.5,
   "ks_statistic": 0.1,
   "ks_pvalue": 0.6766201497002458,
-  "v2_traj_per_s_1thread": 11.909436270594284,
-  "v3_traj_per_s_1thread": 525.4110040738025,
-  "v3_traj_per_s_all_threads": 1750.1615968093718,
+  "v2_traj_per_s_1thread": 12.615045121073841,
+  "v3_traj_per_s_1thread": 520.1906702749518,
+  "v3_traj_per_s_all_threads": 1597.3168400265572,
+  "v3_kernel_traj_per_s_1thread": 444.4675251487074,
+  "v3_kernel_traj_per_s_all_threads": 1781.167696168472,
   "threads": 4
  },
  {
@@ -79,9 +87,11 @@
   "v3_median_tau": 17.5,
   "ks_statistic": 0.019500000000000073,
   "ks_pvalue": 0.8380959749410776,
-  "v2_traj_per_s_1thread": 248.76465555454175,
-  "v3_traj_per_s_1thread": 14820.448671004364,
-  "v3_traj_per_s_all_threads": 53127.143350636514,
+  "v2_traj_per_s_1thread": 234.23499553811305,
+  "v3_traj_per_s_1thread": 11002.785085610916,
+  "v3_traj_per_s_all_threads": 26989.777486155108,
+  "v3_kernel_traj_per_s_1thread": 12753.044067277415,
+  "v3_kernel_traj_per_s_all_threads": 49510.64176576982,
   "threads": 4
  },
  {
@@ -96,9 +106,11 @@
   "v3_median_tau": 24.0,
   "ks_statistic": 0.03600000000000003,
   "ks_pvalue": 0.8969819972425298,
-  "v2_traj_per_s_1thread": 123.13299925417846,
-  "v3_traj_per_s_1thread": 4534.902034520768,
-  "v3_traj_per_s_all_threads": 13217.031911568072,
+  "v2_traj_per_s_1thread": 143.4070986733018,
+  "v3_traj_per_s_1thread": 3986.825201189331,
+  "v3_traj_per_s_all_threads": 10736.066892937697,
+  "v3_kernel_traj_per_s_1thread": 4083.0314829383587,
+  "v3_kernel_traj_per_s_all_threads": 13527.809849222966,
   "threads": 4
  },
  {
@@ -113,9 +125,11 @@
   "v3_median_tau": 34.0,
   "ks_statistic": 0.09000000000000002,
   "ks_pvalue": 0.37665913494839603,
-  "v2_traj_per_s_1thread": 45.903596490002606,
-  "v3_traj_per_s_1thread": 1232.556095787162,
-  "v3_traj_per_s_all_threads": 4798.277533585603,
+  "v2_traj_per_s_1thread": 42.284356770602336,
+  "v3_traj_per_s_1thread": 1150.299726691939,
+  "v3_traj_per_s_all_threads": 3386.118461729379,
+  "v3_kernel_traj_per_s_1thread": 1138.0037648896941,
+  "v3_kernel_traj_per_s_all_threads": 3863.4378268575706,
   "threads": 4
  },
  {
@@ -130,9 +144,11 @@
   "v3_median_tau": 48.0,
   "ks_statistic": 0.10999999999999999,
   "ks_pvalue": 0.556017166229757,
-  "v2_traj_per_s_1thread": 9.873667109628354,
-  "v3_traj_per_s_1thread": 355.2264762735241,
-  "v3_traj_per_s_all_threads": 1155.5170937880396,
+  "v2_traj_per_s_1thread": 9.720589009899609,
+  "v3_traj_per_s_1thread": 365.70299648568863,
+  "v3_traj_per_s_all_threads": 1244.2016625119331,
+  "v3_kernel_traj_per_s_1thread": 364.045253971455,
+  "v3_kernel_traj_per_s_all_threads": 1388.3427109875845,
   "threads": 4
  }
 ]

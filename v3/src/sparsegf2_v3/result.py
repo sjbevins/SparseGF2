@@ -51,7 +51,10 @@ class RunResult:
 
         Each DETECTOR's parity XOR its value in the noiseless reference sample
         (every collapse biased to +1), so a noiseless run gives all zeros for
-        properly defined detectors, exactly like Stim's samplers.
+        properly defined detectors, exactly like Stim's samplers. For a
+        detector whose parity is random even without noise, the reference can
+        differ from Stim's (see ``Program.reference_record``): same
+        distribution, possibly different per-shot values.
         """
         if not self._phases:
             raise _phase_free_error("RunResult.detectors")

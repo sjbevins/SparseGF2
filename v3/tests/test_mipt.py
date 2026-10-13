@@ -8,7 +8,7 @@ values to match exactly at every checkpoint.
 import numpy as np
 import pytest
 
-from sparsegf2_v3 import Simulator, graphs, mipt
+from sparsegf2_v3 import Simulator, gate, graphs, mipt
 from sparsegf2_v3 import observables as ob
 
 
@@ -28,6 +28,9 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
         if p.kind == "code_dimension":
             return sim.entropy(refs)
         if p.kind == "contiguous_distance":
+            # the engine records NaN, not the observable's sentinel 0, without a code
+            if sim.entropy(refs) == 0:
+                return np.nan
             return ob.contiguous_code_distance(sim, order, refs, periodic=spec.periodic)
         if p.kind == "lost_information":
             return ob.lost_logical_information(sim, p.regions[0], refs)
@@ -448,3 +451,258 @@ def test_graph_bank_save_load_round_trip(tmp_path):
         np.testing.assert_array_equal(g, h)
     rerun = back.spec.run(5, seed=2)
     np.testing.assert_array_equal(rerun.values["code_dimension"], res.values["code_dimension"])
+
+
+# -- regressions from the review ------------------------------------------------------------
+
+
+def test_checkpoint_arrays_are_sorted_and_deduplicated():
+    # np.geomspace(...).astype(int) has repeats; an int64 array used to skip the
+    # sorting, so every checkpoint after the repeat was never evaluated.
+    ck = np.geomspace(1, 60, 12).astype(np.int64)
+    base = dict(
+        num_system=8,
+        edges=graphs.cycle(8),
+        layers=60,
+        measurement_rate=0.3,
+        reference="single",
+        reference_partner=0,
+        probes=[mipt.code_dimension()],
+    )
+    from_array = mipt.MonitoredCircuit(**base, checkpoints=ck).run(100, seed=1)
+    from_list = mipt.MonitoredCircuit(**base, checkpoints=ck.tolist()).run(100, seed=1)
+    np.testing.assert_array_equal(from_array.checkpoint_layers, np.unique(ck))
+    np.testing.assert_array_equal(from_array.purification_layer, from_list.purification_layer)
+    assert not np.isnan(from_array.values["code_dimension"]).any()
+    unsorted = mipt.MonitoredCircuit(**base, checkpoints=np.array([30, 0, 10], dtype=np.int64))
+    np.testing.assert_array_equal(unsorted.checkpoint_layers, [0, 10, 30])
+    assert not np.isnan(unsorted.run(5, seed=2).values["code_dimension"]).any()
+    with pytest.raises(ValueError, match="integers"):
+        mipt.MonitoredCircuit(**base, checkpoints=[2.5])
+
+
+def test_dataclasses_replace_gives_an_independent_spec():
+    import dataclasses
+
+    base = mipt.MonitoredCircuit(
+        num_system=12,
+        edges=graphs.cycle(12),
+        layers=8,
+        measurement_rate=0.1,
+        reference="purification",
+        checkpoints="final",
+        probes=[mipt.code_dimension(), mipt.half_cut_entropy()],
+    )
+    base.run(3, seed=1)  # fills base's compiled cache
+    fields = dict(
+        num_system=12, layers=8, measurement_rate=0.1, reference="purification", checkpoints="final"
+    )
+    for edges in (graphs.complete(12), graphs.path(12)):
+        derived = dataclasses.replace(base, edges=edges, probes=[mipt.half_cut_entropy()])
+        fresh = mipt.MonitoredCircuit(**fields, edges=edges, probes=[mipt.half_cut_entropy()])
+        assert derived._compiled is not base._compiled
+        np.testing.assert_array_equal(
+            derived.run(20, seed=3).values["half_cut_entropy"],
+            fresh.run(20, seed=3).values["half_cut_entropy"],
+        )
+        assert str(derived.circuit(0, seed=3)) == str(fresh.circuit(0, seed=3))
+    single = mipt.MonitoredCircuit(
+        num_system=12, edges=graphs.cycle(12), layers=2, measurement_rate=0.1,
+        reference="single", reference_partner=0,
+    )  # fmt: skip
+    single.circuit(0, seed=1)
+    assert "CX 9 12" in str(dataclasses.replace(single, reference_partner=9).circuit(0, seed=1))
+    # symbolic checkpoints follow a new depth; explicit ones are kept
+    deeper = dataclasses.replace(base, layers=20)
+    np.testing.assert_array_equal(deeper.checkpoint_layers, [20])
+    assert deeper.run(2, seed=1).final_layer.tolist() == [20, 20]
+    every = mipt.MonitoredCircuit(
+        **{**fields, "checkpoints": "every_layer"}, edges=graphs.cycle(12)
+    )
+    np.testing.assert_array_equal(dataclasses.replace(every, layers=3).checkpoint_layers, range(4))
+    strided = mipt.MonitoredCircuit(**{**fields, "checkpoints": 4}, edges=graphs.cycle(12))
+    np.testing.assert_array_equal(
+        dataclasses.replace(strided, layers=10).checkpoint_layers, [0, 4, 8, 10]
+    )
+    listed = mipt.MonitoredCircuit(**{**fields, "checkpoints": [0, 8]}, edges=graphs.cycle(12))
+    np.testing.assert_array_equal(dataclasses.replace(listed, layers=9).checkpoint_layers, [0, 8])
+
+
+def test_numpy_scalar_fields_and_seeds_save(tmp_path):
+    for n in np.array([8]):  # sizes from a numpy array
+        spec = mipt.MonitoredCircuit(
+            num_system=n,
+            edges=graphs.cycle(int(n)),
+            layers=4 * n,
+            measurement_rate=np.float32(0.25),
+            reference="single",
+            reference_partner=n - 1,
+            scramble_gates=np.int64(4),
+            random_orientation=np.True_,
+            checkpoints=np.int64(8),
+            probes=[mipt.code_dimension()],
+            stop_when_purified=np.True_,
+        )
+        result = spec.run(6, seed=np.int64(5))
+        result.save(tmp_path / "r.npz")
+        back = mipt.EnsembleResult.load(tmp_path / "r.npz")
+        assert type(back.spec.layers) is int and back.spec.layers == 32
+        assert back.spec.checkpoints == 8 and back.seed_entropy == 5
+        np.testing.assert_array_equal(back.purification_layer, result.purification_layer)
+        again = back.spec.run(6, seed=back.seed_sequence)
+        np.testing.assert_array_equal(again.purification_layer, result.purification_layer)
+
+
+def test_seed_record_identifies_the_seed_used(tmp_path):
+    spec = mipt.MonitoredCircuit(
+        num_system=12, edges=graphs.cycle(12), layers=20, measurement_rate=0.15,
+        reference="single", checkpoints="every_layer", probes=[mipt.code_dimension()],
+    )  # fmt: skip
+    fresh = spec.run(30, seed=None)
+    np.testing.assert_array_equal(
+        spec.run(30, seed=fresh.seed_entropy).purification_layer, fresh.purification_layer
+    )
+    children = np.random.SeedSequence(42).spawn(2)
+    a, b = spec.run(30, seed=children[0]), spec.run(30, seed=children[1])
+    assert a.seed_spawn_key == (0,) and b.seed_spawn_key == (1,)
+    np.testing.assert_array_equal(
+        spec.run(30, seed=b.seed_sequence).purification_layer, b.purification_layer
+    )
+    with pytest.raises(ValueError, match="seeds differ"):
+        mipt.EnsembleResult.concatenate([a, spec.run(30, seed=children[1], first_trajectory=30)])
+    # tuple seeds: a chunk reloaded from disk still merges with an in-memory chunk
+    first = spec.run(10, seed=(7, 3))
+    first.save(tmp_path / "first.npz")
+    second = spec.run(10, seed=(7, 3), first_trajectory=10)
+    merged = mipt.EnsembleResult.concatenate(
+        [mipt.EnsembleResult.load(tmp_path / "first.npz"), second]
+    )
+    np.testing.assert_array_equal(merged.trajectories, np.arange(20))
+    np.testing.assert_array_equal(
+        merged.purification_layer, spec.run(20, seed=(7, 3)).purification_layer
+    )
+
+
+def test_concatenate_refuses_other_protocols_and_repeated_trajectories():
+    base = dict(
+        num_system=12, edges=graphs.cycle(12), layers=10, reference="single",
+        checkpoints="every_layer", probes=[mipt.code_dimension()],
+    )  # fmt: skip
+    lo = mipt.MonitoredCircuit(**base, measurement_rate=0.05).run(20, seed=1)
+    hi = mipt.MonitoredCircuit(**base, measurement_rate=0.4).run(20, seed=1, first_trajectory=20)
+    with pytest.raises(ValueError, match="measurement_rate"):
+        mipt.EnsembleResult.concatenate([lo, hi])
+    ring_bank = mipt.MonitoredCircuit(
+        **{**base, "edges": graphs.complete(12)}, measurement_rate=0.05
+    )
+    with pytest.raises(ValueError, match="edges"):
+        mipt.EnsembleResult.concatenate([lo, ring_bank.run(20, seed=1, first_trajectory=20)])
+    purif = mipt.MonitoredCircuit(**{**base, "reference": "purification"}, measurement_rate=0.05)
+    with pytest.raises(ValueError, match="reference"):
+        mipt.EnsembleResult.concatenate([lo, purif.run(20, seed=1, first_trajectory=20)])
+    with pytest.raises(ValueError, match="share trajectories"):
+        mipt.EnsembleResult.concatenate([lo, lo])
+    other_version = mipt.MonitoredCircuit(**base, measurement_rate=0.05).run(
+        5, seed=1, first_trajectory=20
+    )
+    other_version.version = "0.0.0"
+    with pytest.raises(ValueError, match="versions"):
+        mipt.EnsembleResult.concatenate([lo, other_version])
+
+
+def test_save_records_the_package_version(tmp_path):
+    import json
+
+    import sparsegf2_v3
+
+    spec = mipt.MonitoredCircuit(
+        num_system=8, edges=graphs.cycle(8), layers=2, measurement_rate=0.1
+    )
+    result = spec.run(2, seed=1)
+    assert result.version == sparsegf2_v3.__version__
+    result.save(tmp_path / "r.npz")
+    with np.load(tmp_path / "r.npz") as z:
+        assert json.loads(str(z["__meta__"]))["version"] == sparsegf2_v3.__version__
+    assert mipt.EnsembleResult.load(tmp_path / "r.npz").version == sparsegf2_v3.__version__
+
+
+def test_scramble_layers_continue_the_colour_cycle():
+    # Restarting the cycle repeated the last scramble matching in the first
+    # dynamics layer, so scramble_layers=1 on a brickwork was absorbed.
+    def blocks(scramble_layers):
+        spec = mipt.MonitoredCircuit(
+            num_system=8, edges=graphs.cycle(8), layers=3, measurement_rate=0.0,
+            scramble_layers=scramble_layers, gate_set=[gate("CX").clifford.index()],
+        )  # fmt: skip
+        return [
+            sorted(zip(*[iter(t.value for t in ins.targets)] * 2, strict=True))
+            for ins in spec.circuit(0, seed=1)
+            if ins.name == "CLIFFORD_2Q"
+        ]
+
+    even, odd = [(0, 1), (2, 3), (4, 5), (6, 7)], [(0, 7), (1, 2), (3, 4), (5, 6)]
+    assert blocks(0) == [even, odd, even]
+    assert blocks(1) == [even, odd, even, odd]
+    assert blocks(2) == [even, odd, even, odd, even]
+    # with CX gates on the reference's partner, one scramble layer is no longer undone
+    spec = mipt.MonitoredCircuit(
+        num_system=8, edges=graphs.cycle(8), layers=1, measurement_rate=0.0,
+        reference="single", reference_partner=0, scramble_layers=1,
+        gate_set=[gate("CX").clifford.index()], checkpoints="every_layer",
+        probes=[mipt.entropy([1])],
+    )  # fmt: skip
+    assert spec.run(1, seed=0).values["entropy[1]"].tolist() == [[1.0, 1.0]]
+
+
+def test_spec_owns_read_only_copies_of_its_arrays():
+    n = 12
+    order = np.arange(n)
+    rng = np.random.default_rng(0)
+    specs = []
+    for _ in range(2):
+        rng.shuffle(order)  # one buffer reused for several orderings
+        specs.append(
+            mipt.MonitoredCircuit(
+                num_system=n,
+                edges=graphs.cycle(n),
+                layers=4,
+                measurement_rate=0.1,
+                system_order=order,
+                probes=[mipt.half_cut_entropy(), mipt.entropy_profile()],
+            )  # fmt: skip
+        )
+    spec = specs[0]
+    assert spec.system_order is not order
+    assert spec.probes[0].regions[0] == tuple(spec.system_order[: n // 2].tolist())
+    r = spec.run(50, seed=1)
+    np.testing.assert_array_equal(
+        r.values["half_cut_entropy"], r.values["entropy_profile"][:, :, n // 2]
+    )
+    gs = np.array([0, 1, 2])
+    weights = np.ones(n)
+    other = mipt.MonitoredCircuit(
+        num_system=n, edges=graphs.cycle(n), layers=2, measurement_rate=0.1,
+        schedule="random_edges", edge_weights=weights, gate_set=gs,
+    )  # fmt: skip
+    gs[:] = 11519
+    weights[:] = 0
+    np.testing.assert_array_equal(other.gate_set, [0, 1, 2])
+    np.testing.assert_array_equal(other.edge_weights, np.ones(n))
+    for arr in (other.gate_set, other.system_order, other.edge_weights, other.edges,
+                other.checkpoint_layers):  # fmt: skip
+        with pytest.raises(ValueError, match="read-only"):
+            arr[0] = 1
+
+
+def test_contiguous_distance_is_nan_without_a_code():
+    spec = mipt.MonitoredCircuit(
+        num_system=16, edges=graphs.cycle(16), layers=40, measurement_rate=0.25,
+        reference="purification", checkpoints=[10, 20, 40],
+        probes=[mipt.code_dimension(), mipt.contiguous_distance()],
+    )  # fmt: skip
+    r = spec.run(200, seed=1)
+    k, d = r.values["code_dimension"], r.values["contiguous_distance"]
+    assert (k == 0).any() and (k > 0).any()
+    assert np.isnan(d[k == 0]).all() and (d[k > 0] >= 1).all()
+    with_code = np.where(k > 0, d, 0).sum(axis=0) / np.maximum((k > 0).sum(axis=0), 1)
+    np.testing.assert_allclose(r.mean("contiguous_distance"), with_code)

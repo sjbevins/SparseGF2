@@ -16,7 +16,8 @@ The API functions take plain JSON values and return dicts of plain JSON values.
 arrays are summarized:
 
 * means and standard errors;
-* at most 50 checkpoints, evenly subsampled and always including the first and last;
+* at most 50 checkpoints, evenly subsampled and always including the first and last
+  (fewer when the result would otherwise exceed the size cap, chosen the same way);
 * vector probes subsampled to 65 entries, plus a coarse grid of at most 8 checkpoints by
   17 region sizes;
 * probe names longer than 64 characters abbreviated (regions written as `start:stop`
@@ -92,7 +93,7 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2_v3.mcp_server`.
 | qubit lists | `[0, 1, 2]` or `"0:3"` / `"0:16:2"` (Python slices) |
 | phases | `true` (default): signs tracked, outcomes match Stim. `false`: about 2x faster, no outcomes (only `random` flags), same entanglement |
 | errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change |
-| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command |
+| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2_v3` version is refused |
 
 ---
 
@@ -144,7 +145,7 @@ For a valid circuit it returns `num_qubits`, `num_measurements`, `num_detectors`
 | `observe_ticks` | `false` | also evaluate the observables after every `TICK`, giving a time series (circuits with up to 1,000,000 ticks) |
 | `tick_stride` | auto | with `observe_ticks`, evaluate after ticks `0, k, 2k, ...` and the last one; the default is every tick, or the smallest stride that keeps at most 10,000 evaluations |
 | `num_qubits` | circuit's | simulate extra idle qubits |
-| `output_dir` | none | save `circuit_run.npz` (records, random flags, detectors, observable flips), `circuit.stim`, `observables.json` (every tick) and `provenance.json` |
+| `output_dir` | none | save `circuit_run.npz` (records, random flags, detectors, observable flips), `circuit.stim`, `observables.json` (every evaluated tick, every profile entry, full precision) and `provenance.json` |
 
 The result always has `num_qubits`, `num_measurements`, `num_detectors`,
 `num_observables`, `num_ticks`, `shots`, `phases`, `seed`, `elapsed_seconds` and
@@ -170,10 +171,10 @@ The result always has `num_qubits`, `num_measurements`, `num_detectors`,
 | `recovery_probability` | `erased`, `reference` | 2^-I(R:E) |
 | `random_erasure_statistics` | `system`, `reference`, `sizes`, `samples`?, `seed`? | per size: correctable fraction, mean lost bits, mean recovery probability |
 | `erasure_profile` | `system`, `reference`, `samples`?, `seed`? | the same for every size 0..\|system\| |
-| `contiguous_code_distance` | `system`, `reference`, `periodic`? | shortest uncorrectable contiguous erasure |
+| `contiguous_code_distance` | `system`, `reference`, `periodic`? | shortest uncorrectable contiguous erasure (0 if there is none) |
 | `stabilizer_weights` | | mean, min and max generator weight |
 | `stabilizer_length_distribution` | `order`? | clipped-gauge length histogram |
-| `stabilizers` | | canonical generators (32 qubits or fewer) |
+| `stabilizers` | | canonical generators (32 qubits or fewer); signed with `phases=true`, unsigned (`"XZ_"`) with `phases=false`, where signs are not tracked |
 | `expectation` | `pauli` | <P> = +1, -1 or 0; needs phases |
 | `is_deterministic` | `pauli` | bool |
 
@@ -205,7 +206,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `num_system`, `layers`, `measurement_rate` | required numbers |
 | `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` for graph disorder: `G` independent graphs (graph `i` from seed `[seed, i]`), trajectory `t` runs on graph `t mod G` |
 | `edges` | instead of `graph`: `[[a, b], ...]` |
-| `edge_weights` | list (one per edge) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"` |
+| `edge_weights` | list (one per edge, in the order of `edges`; each weight stays with its edge when the edge list is normalised) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"`. A list needs explicit `edges` or a deterministic family (whose edges come sorted, `a < b`); random families and `realizations` take a weight family |
 | `schedule` | `matching` (default), `random_edges`, `all_edges`; `gates_per_layer` for `random_edges` |
 | `reference`, `reference_partner` | `none`/`purification`/`single`; an int or `"random"` |
 | `scramble_gates`, `scramble_matchings`, `scramble_layers` | ints: random all-to-all gates, layers on random perfect matchings, then gate-only layers on the graph |
@@ -217,11 +218,13 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 
 The result contains:
 
-* `num_trajectories`, `seed`, `elapsed_seconds`, `trajectories_per_second`;
+* `num_trajectories`, `seed`, `elapsed_seconds` and `trajectories_per_second` (wall clock
+  for the whole call, including building the spec and generating its graphs);
 * `checkpoints`: the layers shown, the total count, and whether they were subsampled;
 * `probes`:
   * scalar probes: `mean` and `stderr` per checkpoint, and `count` when trajectories
-    stopped early;
+    stopped early or, for `contiguous_distance`, had no code (code dimension 0: the
+    distance is undefined there and left out of the mean);
   * vector probes: `vector: true`; `at_layer` (the last checkpoint that has data; with
     `stop_when_purified` later ones may be empty), `count` (trajectories there), `mean`
     and `stderr` per region size, and `index` when subsampled; and `vs_depth`, the mean
@@ -305,7 +308,9 @@ summary and exits with code 130; rerunning the same command resumes it.
   dict) plus the same JSON as compact text, so the text stays within the 8000-character
   budget.
 * `run_ensemble` refuses runs estimated above `max_seconds` (default 60, must be positive)
-  and points to `start_ensemble_job`.
+  and points to `start_ensemble_job`. The estimate counts graph generation and
+  preprocessing (large `realizations` banks), and the spec is built once for the estimate
+  and the run.
 * Errors: invalid input becomes an MCP tool error (`isError: true`) whose text is the
   API's message, so the model can correct the call. Argument-type errors are reported by
   the SDK's schema validation in the same way.

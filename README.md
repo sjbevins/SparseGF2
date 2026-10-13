@@ -37,9 +37,9 @@ identical circuits, final states cross-checked):
 * Its ensemble engine generates and simulates fresh random circuits in
   parallel: about **128,000 circuits per second at n = 16** and 1,700 at
   n = 128 on four cores.
-* On the PRL purification-time protocol it runs **27–60× more trajectories per
-  second per thread than the v2 production engine**, with statistically
-  identical results.
+* On the PRL purification-time protocol it runs **27–47× more trajectories per
+  second per thread than the v2 production engine** (timed end to end), with
+  statistically identical results.
 
 Method, caveats and every number:
 [v3 README, Performance](v3/README.md#performance) and

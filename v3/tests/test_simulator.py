@@ -231,6 +231,23 @@ def test_measure_pauli_parsing_and_inversion():
         sim.measure_pauli("Z7")
 
 
+def test_pauli_products_accept_inverted_factors_like_stim_mpp():
+    sim = Simulator(2, seed=0)
+    assert sim.peek_pauli("Z0*!Z1") == -1 and sim.is_deterministic("X0*!X1") is False
+    assert sim.measure_pauli("Z0*!Z1") == 1
+    assert sim.measure_pauli("!Z0*!Z1") == 0
+    sim.h(0)
+    sim.cx(0, 1)
+    outcome = sim.measure_pauli("X0*!X1")
+    assert outcome == 1  # X0 X1 = +1 on the Bell pair, inverted once
+    ref = stim.TableauSimulator()
+    ref.do_circuit(stim.Circuit("H 0\nCX 0 1\nMPP X0*!X1 !Z0*!Z1"))
+    assert ref.current_measurement_record() == [True, False]
+    assert sim.measure_pauli("!Z0*!Z1") == 0
+    with pytest.raises(ValueError, match="bad Pauli term"):
+        sim.measure_pauli("X0*!!Z1")
+
+
 def test_argument_validation():
     with pytest.raises(ValueError):
         Simulator(0)

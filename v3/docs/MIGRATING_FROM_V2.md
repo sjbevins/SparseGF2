@@ -19,7 +19,7 @@ reproducibility.
 | pictures `pure_state` / `purification` / `single_ref` | `reference="none"` / `"purification"` / `"single"` | the single reference's partner is configurable: `reference_partner=n - 1` reproduces v2, `"random"` draws it per trajectory |
 | gating `brickwork` / `round_robin` | `schedule="matching"` | an edge colouring of any graph; on an even ring it is the brickwork |
 | gating `random_edge` | `schedule="random_edges"`, `gates_per_layer=...` (default `n // 2`) | **no depth rescaling**: a layer is always one round of gates plus one round of measurements (v2 rescaled the depth by n/(2m) in random gating modes) |
-| warmup layers | `scramble_layers` (gate-only layers of the dynamics), `scramble_gates` (random pairs), `scramble_matchings` (random all-to-all perfect matchings) | applied in the order gates, matchings, layers |
+| warmup layers | `scramble_layers` (gate-only layers of the dynamics), `scramble_gates` (random pairs), `scramble_matchings` (random all-to-all perfect matchings) | applied in the order gates, matchings, layers. Unlike v2's warmup, the brickwork does not restart after `scramble_layers`: the colour cycle runs on into the measured layers, so no scramble layer is undone by a repeat of the same matching |
 | `base_seed` (graph and circuit together) | graph seeds in `graphs.*(seed=...)`, circuit seed in `run(seed=...)` | graph disorder and circuit disorder are independent axes |
 | one graph per trajectory (production engines) | `edges=[g_0, g_1, ...]` | trajectory `t` runs on graph `t mod len(edges)` |
 | `Study`, `sweep` | a loop over parameters, `EnsembleResult.save` / `load` / `concatenate` | or the agent interface's background jobs (`sparsegf2_v3.api.start_ensemble_job`), which save chunks and resume |
@@ -87,7 +87,9 @@ gates the order does not matter at all.
 * v3's random streams differ from v2's, so v3 reproduces v2's **statistics**,
   not its individual trajectories. Keep each `(n, beta, p)` point within one
   engine, and record the engine (`sparsegf2_v3.__version__` and the spec,
-  both stored by `EnsembleResult.save`) with the data.
+  both stored by `EnsembleResult.save`; `EnsembleResult.load(path).version`
+  reads the version back, and `EnsembleResult.concatenate` refuses to merge
+  results of different versions) with the data.
 * In v3, trajectory `t` of `run(seed=s)` depends only on `(spec, s, t)`: it
   does not depend on the thread count or on how the run is split into chunks
   (`first_trajectory=`).
@@ -107,8 +109,9 @@ gates the order does not matter at all.
 
 ## Performance
 
-On this protocol v3 runs 27–60× more trajectories per second than the v2
-production engine on one thread, and all cores are used by default (see the
+On this protocol v3 runs 27–47× more trajectories per second than the v2
+production engine on one thread (timed end to end, graph preparation
+included), and all cores are used by default (see the
 [README](../README.md#performance)). Rough single-thread budgets for planning:
 `api.estimate_ensemble(spec_dict, trajectories)` gives a deliberately
 pessimistic estimate, and a short run (`spec.run(200, seed=0)`) reports

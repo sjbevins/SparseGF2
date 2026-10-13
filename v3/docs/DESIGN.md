@@ -1,6 +1,6 @@
 # SparseGF2 v3: design
 
-Status: **living design document**, updated at 3.0.0.dev7. It was first
+Status: **living design document**, updated at 3.0.0.dev8. It was first
 written at milestone 1 as a proposal; section 12 records the decisions you
 made, and the text below describes what is built (with the reasons) and what
 is planned (section 14). The audit this design responds to is in
@@ -312,8 +312,16 @@ Extensions Stim does not have, needed for monitored circuits:
   (checkpoints and probes, section 8). No observation instructions were added
   to the language.
 
-Internally a circuit is stored as arrays, not one Python object per gate, so
-building a 300,000-gate random circuit costs milliseconds.
+Internally a circuit is a Python list of immutable `Instruction` objects (one
+per line, each holding a tuple of `Target`s) and `RepeatBlock`s. Building one
+therefore runs at Python speed: on the benchmark machine 300,000 random
+two-qubit gates take about 3 s appended one per instruction, about 1.5 s with
+one 32-gate `CLIFFORD_2Q` instruction per layer, and about 1.4 s to parse from
+text. `run()` and `sample()` then compile the circuit once into flat arrays
+(about 0.3 s for those 300,000 gates; cached until the circuit or a `REPEAT`
+body in it changes), so simulation never runs Python per gate. For random
+monitored circuits at scale, `mipt.MonitoredCircuit` generates each circuit
+inside the compiled engine instead (section 8).
 
 ### 6.2 Randomness and the measurement record
 
@@ -331,6 +339,14 @@ building a 300,000-gate random circuit costs milliseconds.
   mechanism serves post-selection studies, replaying a recorded experiment, and
   exact comparison with Stim (for a noiseless circuit, feed Stim's
   measurement record in and every outcome must come back identical).
+  One restriction: `coins` covers measurement results only. A reset (`R`,
+  `RX`, `RY`) collapses its qubit with a bit from the simulator's own stream,
+  so a reset of a qubit that is not already in an eigenstate of the reset
+  basis (one entangled with others, say) is an unrecorded random event, and
+  later outcomes can differ from the recorded ones. Replay is exact when every
+  reset acts on such an eigenstate: resets at the start of a circuit, or right
+  after a measurement in the same basis, as in QEC circuits. `MR`, `MRX` and
+  `MRY` are always fine (their result is recorded).
 * `RunResult.random[k]` says whether measurement k was random. It is available
   in both modes; it is a genuine physical property of the trajectory.
   `RunResult.measurements` needs `phases=True` and otherwise raises.
@@ -399,7 +415,14 @@ noise sampled, detectors and observables computed from the record; `sample()`
 runs many shots in parallel. Example:
 `Circuit.from_stim(stim.Circuit.generated("surface_code:rotated_memory_z", ...))`.
 Detection-event statistics are tested against Stim's own sampler. Detection
-events follow Stim's convention (XOR with a noiseless reference sample).
+events follow Stim's convention (XOR with a noiseless reference sample, every
+random collapse biased to +1). For deterministic detectors and observables
+(the ones a noiseless circuit fixes) they equal Stim's exactly. The reference
+record itself can differ from Stim's `reference_sample()` when one
+instruction measures or resets several entangled qubits in the X or Y basis
+(Stim collapses those in ascending qubit order, v3 in target order; in the Z
+basis both use target order), so per-shot values of non-deterministic
+detectors can differ from Stim's while having the same distribution.
 
 What v3 adds over Stim here is access to the state *during* the circuit
 (stabilizers, entanglement, code properties) and custom monitored dynamics. For
@@ -438,7 +461,7 @@ tool; a frame sampler in v3 could be a later milestone if you want one.
 |---|---|---|
 | **M1** | Foundations: Pauli strings, Cliffords, the gate library | done |
 | **M2** | Kernel + `Simulator`, both modes | done (lock-step fuzzing vs Stim with exact signs and outcomes) |
-| **M3** | `Circuit` + compiled `run()` / `sample()` | done (whole-circuit replay identical to Stim; noise statistics match) |
+| **M3** | `Circuit` + compiled `run()` / `sample()` | done (whole-circuit replay identical to Stim when resets act on unentangled qubits, section 6.2; noise statistics match) |
 | **M4** | Observables incl. erasure protection | done (state-vector and brute-force checks) |
 | **M5** | Performance | benchmarks published (`benchmarks/`, README); row cache planned (section 5.3) |
 | **M6** | Monitored circuits | done: ensemble engine, graph banks, pictures, scrambles, probes, survival analysis |

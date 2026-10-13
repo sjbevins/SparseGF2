@@ -315,3 +315,101 @@ def test_sample_phase_free_and_zero_shots():
     with pytest.raises(PhaseFreeError):
         _ = free.measurements
     assert sample(circuit, 0).measurements.shape == (0, 1)
+
+
+# -- regressions from the review ------------------------------------------------------------
+
+
+def test_editing_a_repeat_body_recompiles():
+    base = Circuit("REPEAT 3 {\n    M 0\n}")
+    assert sample(base, 50, seed=1).measurements.sum() == 0  # compiled and cached
+    base[0].body.append("X_ERROR", [0], [1.0])  # the 3 rounds now read 0, 1, 0
+    np.testing.assert_array_equal(sample(base, 50, seed=1).measurements, [[0, 1, 0]] * 50)
+    c = Circuit("REPEAT 3 {\n    H 0\n    M 0\n}")
+    Simulator(1).run(c)
+    c[0].body.append("X", [0])
+    c[0].body.append("M", [0])
+    assert c.num_measurements == 6 == stim.Circuit(str(c)).num_measurements
+    assert Simulator(1, seed=1).run(c).measurements.shape == (6,)
+    assert sample(c, 2, seed=1).measurements.shape == (2, 6)
+    nested = Circuit("REPEAT 2 {\n    REPEAT 2 {\n        M 0\n    }\n}")
+    Simulator(1).run(nested)
+    nested[0].body[0].body.append("M", [0])
+    assert Simulator(1).run(nested).measurements.shape == (8,)
+
+
+def test_stim_circuits_and_text_are_refused_with_a_hint():
+    st = stim.Circuit("H 0\nM 0")
+    with pytest.raises(TypeError, match=r"stim\.Circuit.*Circuit\.from_stim"):
+        Simulator(1).run(st)
+    with pytest.raises(TypeError, match=r"from_stim"):
+        sample(st, 3)
+    with pytest.raises(TypeError, match=r"Circuit\(text\)"):
+        Simulator(1).run("H 0\nM 0")
+    with pytest.raises(TypeError, match=r"Circuit\(text\)"):
+        sample("H 0\nM 0", 3)
+
+
+def test_bad_lookback_names_the_instruction():
+    with pytest.raises(ValueError, match=r"rec\[-2\] in 'DETECTOR rec\[-2\]'.*only 1 recorded"):
+        Simulator(2).run(Circuit("H 0\nCX 0 1\nM 0\nDETECTOR rec[-2]"))
+
+
+def test_max_ops_can_be_raised():
+    c = Circuit("REPEAT 20 {\n    H 0\n    M 0\n}")
+    with pytest.raises(ValueError, match=r"more than 10 operations.*max_ops="):
+        Simulator(1).run(c, max_ops=10)
+    with pytest.raises(ValueError, match="max_ops="):
+        sample(c, 2, max_ops=10)
+    assert Simulator(1).run(c, max_ops=40).measurements.shape == (20,)
+    assert sample(c, 2, max_ops=40).measurements.shape == (2, 20)
+    with pytest.raises(ValueError, match="max_ops"):  # a cached program is reused only if it fits
+        Simulator(1).run(c, max_ops=39)
+
+
+def test_replay_limits_are_the_documented_ones():
+    # DESIGN.md 6.2: coins force measurement results only. A reset of an
+    # entangled qubit collapses it with the simulator's own stream, so a
+    # recorded run is reproduced only when resets act on unentangled qubits.
+    def mismatches(text: str) -> int:
+        circuit, bad = Circuit(text), 0
+        for seed in range(40):
+            ref = stim.TableauSimulator(seed=seed)
+            ref.do_circuit(stim.Circuit(text))
+            record = np.array(ref.current_measurement_record(), dtype=np.uint8)
+            run = Simulator(2, seed=1000 + seed).run(circuit, coins=record)
+            bad += not np.array_equal(run.measurements, record)
+        return bad
+
+    assert mismatches("H 0\nCX 0 1\nMR 0\nM 1") == 0  # the measured reset is recorded
+    assert mismatches("H 0\nCX 0 1\nM 0\nR 0\nM 1") == 0  # reset after a measurement
+    assert mismatches("H 0\nCX 0 1\nR 0\nM 1") > 0  # reset of an entangled qubit
+
+
+def test_reference_record_differences_from_stim_are_the_documented_ones():
+    from sparsegf2_v3._compile import compile_circuit
+
+    # X/Y-basis targets of one instruction: Stim collapses them in ascending
+    # qubit order, v3 in target order (documented on Program.reference_record).
+    text = "H 0\nCX 0 1\nMY 1 0\nDETECTOR rec[-1]\nDETECTOR rec[-1] rec[-2]"
+    program = compile_circuit(Circuit(text))
+    ours = program.reference_record()
+    theirs = stim.Circuit(text).reference_sample().astype(np.uint8)
+    assert ours.tolist() == [0, 1] and theirs.tolist() == [1, 0]
+    assert "ascending qubit order" in " ".join(program.reference_record.__doc__.split())
+    # the deterministic detector (rec[-1] xor rec[-2]) agrees with Stim's events
+    for seed in range(10):
+        result = Simulator(2, seed=seed).run(Circuit(text))
+        dets = (
+            stim.Circuit(text)
+            .compile_m2d_converter()
+            .convert(
+                measurements=result.measurements[None].astype(bool), separate_observables=True
+            )[0][0]
+        )
+        assert result.detectors[1] == dets[1]
+    # the Z basis collapses in target order in both
+    z = "X 1\nH 0\nCX 0 1\nM 1 0"
+    np.testing.assert_array_equal(
+        compile_circuit(Circuit(z)).reference_record(), stim.Circuit(z).reference_sample()
+    )

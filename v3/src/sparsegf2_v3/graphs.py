@@ -37,15 +37,26 @@ __all__ = [
 
 def from_edges(edges: Iterable[tuple[int, int]], num_nodes: int | None = None) -> np.ndarray:
     """Normalise any edge list: orient ``a < b``, drop duplicates, sort; reject self-loops."""
-    arr = np.asarray(list(edges), dtype=np.int64).reshape(-1, 2)
+    raw = edges if isinstance(edges, np.ndarray) else list(edges)
+    arr = np.asarray(raw, dtype=np.int64).reshape(-1, 2)
     if arr.size and arr.min() < 0:
         raise ValueError("node indices must be non-negative")
     if num_nodes is not None and arr.size and arr.max() >= num_nodes:
         raise ValueError(f"edge endpoint {int(arr.max())} out of range for {num_nodes} nodes")
     if np.any(arr[:, 0] == arr[:, 1]):
         raise ValueError("self-loops are not allowed")
+    if _is_normalised(arr):  # e.g. a graph from this module: skip the (slow) row-wise unique
+        return arr.copy()
     arr = np.sort(arr, axis=1)
     return np.unique(arr, axis=0) if arr.size else arr
+
+
+def _is_normalised(arr: np.ndarray) -> bool:
+    """Every pair oriented ``a < b``, and the pairs strictly increasing (sorted, no repeats)."""
+    a, b = arr[:, 0], arr[:, 1]
+    if not np.all(a < b):
+        return False
+    return bool(np.all((a[1:] > a[:-1]) | ((a[1:] == a[:-1]) & (b[1:] > b[:-1]))))
 
 
 def cycle(n: int) -> np.ndarray:

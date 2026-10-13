@@ -293,7 +293,7 @@ def fig_throughput(sim: dict, theme: dict, mode: str, p: float = 0.16) -> None:
         ),
     ]
     n_v, t_v = runs_table(sim, "sparsegf2_v3_phase_free", p)
-    series.append((n_v, 1.0 / t_v, "SparseGF2 v3 Simulator.run, 1 thread", 1, "-"))
+    series.append((n_v, 1.0 / t_v, "SparseGF2 v3 Simulator.run (phase-free), 1 thread", 1, "-"))
     n_s, t_s = runs_table(sim, "stim", p)
     series.append((n_s, 1.0 / t_s, "Stim, 1 thread", 2, "-"))
     series.append((n_s, threads / t_s, f"Stim, ideal {threads}-process scaling", 2, (0, (4, 3))))
@@ -357,7 +357,7 @@ def fig_production(cross: list, theme: dict, mode: str) -> None:
         ax.set_title(f"p = {p:.3f} (median tau ~ {median_tau} layers)", fontsize=10)
         ax.set_xlabel("system qubits n")
     axes[0][0].set_ylabel("trajectories per second")
-    legend(axes[0][-1], loc="upper right")
+    legend(axes[0][-1], loc="lower left")
     fig.suptitle(
         "Your production workload: single-reference purification time",
         x=0.0,
@@ -370,7 +370,8 @@ def fig_production(cross: list, theme: dict, mode: str) -> None:
     caption(
         fig,
         f"Watts-Strogatz C(n,2), beta = {cross[0]['beta']}, one graph per trajectory, 32 matching "
-        "layers of scramble, S(R) every layer, T_max = 8n; the same graph banks for both engines.",
+        "layers of scramble, S(R) every layer, T_max = 8n; the same graph banks for both engines.\n"
+        "v3 is timed end to end, from building the spec on the bank to the purification times.",
         theme,
     )
     save(fig, "production", mode)
@@ -648,7 +649,10 @@ def tables(sim: dict | None, cross: list | None) -> str:
                 out.append(f"| {p} | " + " | ".join(f"{row[n]:,.0f}" for n in sizes) + " |")
             out.append("")
     if cross:
-        out.append("**PRL production protocol**, trajectories per second (same graph banks)\n")
+        out.append(
+            "**PRL production protocol**, trajectories per second (same graph banks; v3 timed "
+            "end to end, from building the spec on the bank, one graph per trajectory)\n"
+        )
         out.append(
             "| p | n | median tau | v2 production engine, 1 thread | v3, 1 thread | "
             "v3, all threads | speed-up per thread | KS p-value |"
@@ -672,11 +676,18 @@ def main() -> None:
     ap.add_argument("--simulators", default=str(HERE / "results" / "simulators.json"))
     ap.add_argument("--physics", default=str(HERE / "results" / "physics.json"))
     ap.add_argument("--crosscheck", default=str(HERE / "results" / "crosscheck_v2.json"))
-    ap.add_argument("--outdir", default=None, help="default: v3/docs/figures")
+    ap.add_argument(
+        "--outdir",
+        default=None,
+        help="where to write figures and tables.md (default: v3/docs/figures and "
+        "v3/benchmarks/results/tables.md, the copies the READMEs use)",
+    )
     args = ap.parse_args()
+    tables_path = HERE / "results" / "tables.md"
     if args.outdir:
         global FIGURES
         FIGURES = Path(args.outdir)
+        tables_path = FIGURES / "tables.md"  # never overwrite the committed tables from a test run
     sim = json.loads(Path(args.simulators).read_text()) if Path(args.simulators).exists() else None
     phys = json.loads(Path(args.physics).read_text()) if Path(args.physics).exists() else None
     cross = (
@@ -695,8 +706,9 @@ def main() -> None:
             fig_transition(phys, theme, mode)
             fig_purification(phys, theme, mode)
             fig_erasure(phys, theme, mode)
-    (HERE / "results" / "tables.md").write_text(tables(sim, cross))
-    print(f"wrote figures to {FIGURES} and tables to {HERE / 'results' / 'tables.md'}")
+    FIGURES.mkdir(parents=True, exist_ok=True)
+    tables_path.write_text(tables(sim, cross))
+    print(f"wrote figures to {FIGURES} and tables to {tables_path}")
 
 
 if __name__ == "__main__":

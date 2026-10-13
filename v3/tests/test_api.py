@@ -792,3 +792,192 @@ def test_graph_realizations_give_one_graph_per_trajectory():
         api._build_spec({**spec, "graph": {"family": "cycle", "realizations": 2}})
     with pytest.raises(ValueError, match="at least 1"):
         api._build_spec({**spec, "graph": {**spec["graph"], "realizations": 0}})
+
+
+# ---------------------------------------------------------------------------
+# regressions from the review
+# ---------------------------------------------------------------------------
+
+
+def _gate_pairs(circuit) -> set[tuple[int, int]]:
+    return {
+        (ins.targets[2 * j].value, ins.targets[2 * j + 1].value)
+        for ins in circuit
+        if ins.name == "CLIFFORD_2Q"
+        for j in range(len(ins.targets) // 2)
+    }
+
+
+def test_explicit_edge_weights_stay_with_their_edges():
+    # weight only on (2, 3), listed before (0, 1): the weights must follow the edges
+    spec = {
+        "num_system": 4, "edges": [[2, 3], [0, 1]], "layers": 20, "measurement_rate": 0.0,
+        "schedule": "random_edges", "edge_weights": [1.0, 0.0], "checkpoints": "final",
+        "probes": [{"kind": "entropy", "region": [0], "name": "S0"},
+                   {"kind": "entropy", "region": [2], "name": "S2"}],
+    }  # fmt: skip
+    out = api.run_ensemble(spec, 200, seed=1)
+    assert out["probes"]["S0"]["mean"] == [0.0] and out["probes"]["S2"]["mean"][0] > 0
+    assert _gate_pairs(api._build_spec(spec).circuit(0, seed=1)) == {(2, 3)}
+    # reversed pairs and a ring listed nearest neighbours first, then next-nearest
+    n = 8
+    edges = [[(i + 1) % n, i] for i in range(n)] + [[i, (i + 2) % n] for i in range(n)]
+    ring = {**spec, "num_system": n, "edges": edges, "edge_weights": [1.0] * n + [0.0] * n}
+    used = _gate_pairs(api._build_spec(ring).circuit(0, seed=2))
+    assert used == {tuple(sorted((i, (i + 1) % n))) for i in range(n)}
+    with pytest.raises(ValueError, match="more than once"):
+        api._build_spec({**spec, "edges": [[0, 1], [1, 0]]})
+    with pytest.raises(ValueError, match="one weight per edge"):
+        api._build_spec({**spec, "edge_weights": [1.0]})
+
+
+def test_list_edge_weights_need_a_known_edge_order():
+    base = {"num_system": 8, "layers": 4, "measurement_rate": 0.1, "schedule": "random_edges"}
+    ws = {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 1}
+    with pytest.raises(ValueError, match="known edge order"):
+        api._build_spec({**base, "graph": ws, "edge_weights": [1.0] * 16})
+    with pytest.raises(ValueError, match="known edge order"):
+        api._build_spec({**base, "graph": {**ws, "realizations": 3}, "edge_weights": [1.0] * 16})
+    # deterministic families have the documented sorted order: weights apply as given
+    mc = api._build_spec({**base, "graph": {"family": "cycle"}, "edge_weights": [1.0] * 8})
+    np.testing.assert_array_equal(mc.edges, graphs.cycle(8))
+    # and weight families work with random graphs and banks
+    api._build_spec(
+        {**base, "graph": {**ws, "realizations": 2}, "edge_weights": {"family": "power_law",
+                                                                   "alpha": 2.0}}
+    )  # fmt: skip
+
+
+def test_saved_spec_is_exact_and_resume_compares_exactly(tmp_path):
+    spec = dict(SMALL_SPEC, measurement_rate=1 / 3)
+    api.run_ensemble(spec, 20, seed=5, output_dir=str(tmp_path / "a"))
+    stored = json.loads((tmp_path / "a" / "spec.json").read_text())
+    assert stored["spec"]["measurement_rate"] == 1 / 3
+    api.run_ensemble(
+        stored["spec"], stored["trajectories"], seed=stored["seed"], output_dir=str(tmp_path / "b")
+    )
+    a = mipt.EnsembleResult.load(tmp_path / "a" / "result.npz")
+    b = mipt.EnsembleResult.load(tmp_path / "b" / "result.npz")
+    assert b.spec.measurement_rate == 1 / 3
+    np.testing.assert_array_equal(a.num_measurements, b.num_measurements)
+    job = api.start_ensemble_job(
+        dict(SMALL_SPEC, measurement_rate=0.12345649), 20, output_dir=str(tmp_path / "j"), seed=3
+    )
+    api.job_status(job["job_id"], wait_seconds=60)
+    with pytest.raises(ValueError, match="different spec"):
+        api.start_ensemble_job(
+            dict(SMALL_SPEC, measurement_rate=0.12345551), 40, output_dir=str(tmp_path / "j")
+        )
+
+
+def test_resume_keeps_provenance_and_refuses_another_version(tmp_path, monkeypatch):
+    out = str(tmp_path / "prov")
+    first = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=out, seed=4, command="first")
+    api.job_status(first["job_id"], wait_seconds=60)
+    more = api.start_ensemble_job(SMALL_SPEC, 40, output_dir=out, command="second")
+    api.job_status(more["job_id"], wait_seconds=60)
+    prov = json.loads((tmp_path / "prov" / "provenance.json").read_text())
+    assert prov["command"] == "first" and prov["sparsegf2_v3"] == sg.__version__
+    assert [(r["command"], r["resumed_from"]) for r in prov["resumes"]] == [("second", 20)]
+    monkeypatch.setattr(api, "__version__", "0.0.0.other")
+    with pytest.raises(ValueError, match=r"started with sparsegf2_v3 .*need not agree"):
+        api.start_ensemble_job(SMALL_SPEC, 60, output_dir=out)
+
+
+def test_estimate_includes_graph_generation_and_times_are_wall_clock():
+    one = dict(SMALL_SPEC, schedule="random_edges", checkpoints="final")
+    bank = dict(one, graph={**SMALL_SPEC["graph"], "realizations": 2000})
+    small, large = api.estimate_ensemble(one, 10), api.estimate_ensemble(bank, 10)
+    assert large["estimated_seconds"] > small["estimated_seconds"] + 0.5  # 2000 graphs
+    start = time.perf_counter()
+    out = api.run_ensemble(bank, 200, seed=1)
+    wall = time.perf_counter() - start
+    assert wall * 0.8 <= out["elapsed_seconds"] <= wall
+    assert out["elapsed_seconds"] <= large["estimated_seconds"] * 1.1 + 0.5
+    with pytest.raises(ValueError, match="start_ensemble_job"):
+        api.run_ensemble(bank, 10**8, seed=1, max_seconds=1.0)
+
+
+def test_phase_free_stabilizers_carry_no_signs():
+    free = api.run_circuit(
+        "X 0\nH 1\nCX 1 2\nZ 1", phases=False, observables=[{"kind": "stabilizers"}]
+    )
+    assert free["observables"]["stabilizers"] == ["Z__", "_XX", "_ZZ"]
+    assert any("without signs" in note for note in free["notes"])
+    signed = api.run_circuit("X 0\nH 1\nCX 1 2\nZ 1", observables=[{"kind": "stabilizers"}])
+    assert signed["observables"]["stabilizers"] == ["-Z__", "-_XX", "+_ZZ"]
+
+
+def test_long_profiles_are_flagged_and_saved_in_full(tmp_path):
+    rng = np.random.default_rng(1)
+    n = 120
+    text = "\n".join(
+        f"CLIFFORD_2Q({rng.integers(11520)}) {a} {a + 1}"
+        for layer in range(12)
+        for a in range(layer % 2, n - 1, 2)
+    )
+    obs = [{"kind": "entropy_profile"}, {"kind": "stabilizer_length_distribution"},
+           {"kind": "erasure_profile", "system": "0:60", "reference": "60:120", "samples": 2}]  # fmt: skip
+    out = api.run_circuit(text, seed=1, observables=obs, output_dir=str(tmp_path / "run"))
+    assert out["truncated"] and any("profile entries" in note for note in out["notes"])
+    shown = out["observables"]["entropy_profile"]
+    assert len(shown["values"]) == api.MAX_PROFILE_SHOWN and shown["subsampled"]
+    saved = json.loads((tmp_path / "run" / "observables.json").read_text())["final"]
+    sim = sg.Simulator(n, seed=1)
+    sim.run(sg.Circuit(text))
+    assert saved["entropy_profile"] == ob.entropy_profile(sim).tolist()
+    assert len(saved["stabilizer_length_distribution"]) == n + 1
+    assert len(saved["erasure_profile"]["correctable_fraction"]) == 61
+    short = api.run_circuit("H 0\nCX 0 1", observables=[{"kind": "entropy_profile"}])
+    assert short["observables"]["entropy_profile"] == {"values": [0, 1, 0]}
+    assert "truncated" not in short
+
+
+def test_out_of_range_integers_are_input_errors():
+    base = {"num_system": 8, "edges": [[0, 1], [1, 2]], "layers": 8, "measurement_rate": 0.2}
+    for bad in ({"edges": [[0, 2**70]]}, {"gate_set": [2**70]}, {"checkpoints": [2**70]},
+                {"layers": 2**70}, {"scramble_gates": 2**70}):  # fmt: skip
+        with pytest.raises(ValueError):
+            api.run_ensemble({**base, **bad}, 2, seed=1)
+    out = api.run_ensemble(base, 2, seed=2**70)  # seeds may be any size
+    assert out["seed"] == 2**70
+
+
+def test_inspect_reports_anti_hermitian_mpp_with_its_line():
+    out = api.inspect_circuit("H 0\nMPP X0*Z0\n")
+    assert out["valid"] is False
+    assert out["errors"][0]["line"] == 2 and "anti-Hermitian" in out["errors"][0]["message"]
+    with pytest.raises(ValueError, match="line 2"):
+        api.run_circuit("H 0\nMPP X0*Z0\n", seed=1)
+
+
+def test_size_cap_keeps_checkpoints_evenly_spaced():
+    spec = {
+        "num_system": 32, "graph": {"family": "cycle"}, "layers": 100, "measurement_rate": 0.2,
+        "reference": "single", "checkpoints": "every_layer", "stop_when_purified": True,
+        "probes": [{"kind": "entropy", "region": [i, i + 1], "name": f"S{i}"} for i in range(13)],
+    }  # fmt: skip
+    out = api.run_ensemble(spec, 100, seed=1)
+    assert out["truncated"] and _size(out) <= api.MAX_OUTPUT_CHARS
+    layers = out["checkpoints"]["layers"]
+    assert layers[0] == 0 and layers[-1] == 100 and len(layers) < 101
+    survival = out["purification"]["survival"]
+    assert survival["layers"] == layers
+    assert all(len(p["mean"]) == len(layers) for p in out["probes"].values())
+    result = api._build_spec(spec).run(100, seed=1)
+    all_layers, surviving = result.survival()
+    np.testing.assert_allclose(
+        survival["fraction_unpurified"], surviving[np.searchsorted(all_layers, layers)], atol=1e-6
+    )
+
+
+def test_contiguous_distance_summary_leaves_out_trajectories_without_a_code():
+    spec = {
+        "num_system": 16, "graph": {"family": "cycle"}, "layers": 40, "measurement_rate": 0.25,
+        "reference": "purification", "checkpoints": [10, 20, 40],
+        "probes": [{"kind": "code_dimension"}, {"kind": "contiguous_distance"}],
+    }  # fmt: skip
+    out = api.run_ensemble(spec, 200, seed=1)
+    entry = out["probes"]["contiguous_distance"]
+    assert min(entry["mean"]) >= 1 and "count" in entry
+    assert any("contiguous_distance" in note for note in out["notes"])

@@ -152,7 +152,7 @@ with S_ABC = S_D and S_AC = S_BD for pure states. I3 → 0 in the area law, ≈ 
 - Steady state is reached after 2L–4L layers.
 - In the mixed phase, τ and the purification time grow as exp(cL). Fidkowski–Haah–Hastings show that the maximally mixed state does purify, but only on a timescale set by the Hilbert-space dimension, i.e. exponential in system size. So "mixed phase" is a statement about times poly(n), and k(t) must be recorded on a depth grid, with censoring.
 - **[added]** Expected τ scaling for the single reference, for choosing T_max and checking censoring:
-  - p > p_c (pure phase): an L-independent distribution, τ = O(1);
+  - p > p_c (pure phase): τ = O(1), an L-independent distribution, only for a reference entangled *locally* into an unscrambled (or steady) state. After a global scramble (all-to-all random gates or matchings, or ~2L gate-only layers, as in the user's protocol below, `examples/purification_time.py` and the README figure) the reference's information is spread over the whole system first, and τ grows as O(log L). **[corrected]** Measured with SparseGF2 v3 (ring, p = 0.3, random partner, median τ for L = 8, 16, 32, 64): 3, 3, 3, 3 without a scramble; 6, 9, 13, 16 after 2L scramble layers. Seeing τ grow logarithmically after a scramble is therefore not a sign of being at or below p_c;
   - p = p_c: τ ∝ L^z with z = 1, so S_R(t) collapses against t/L;
   - p < p_c: exp(cL).
   

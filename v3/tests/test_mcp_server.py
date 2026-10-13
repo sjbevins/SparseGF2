@@ -133,6 +133,23 @@ def test_run_ensemble_matches_api_and_guard():
     assert "max_seconds must be positive" in text
 
 
+def test_run_ensemble_builds_the_spec_once(monkeypatch):
+    # The guard used to call estimate_ensemble and then run_ensemble, generating
+    # a graph bank twice; with realizations=G that doubled the wall time.
+    calls = []
+    real = api._build_spec
+
+    def counting(spec):
+        calls.append(spec)
+        return real(spec)
+
+    monkeypatch.setattr(api, "_build_spec", counting)
+    bank = dict(SPEC, graph={"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 1,
+                             "realizations": 5})  # fmt: skip
+    out = ok(call("run_ensemble", {"spec": bank, "trajectories": 10, "seed": 2}))
+    assert out["num_trajectories"] == 10 and len(calls) == 1
+
+
 def test_estimate_tool():
     est = ok(call("estimate_ensemble", {"spec": SPEC, "trajectories": 10}))
     assert est["fits_sync_limit"]

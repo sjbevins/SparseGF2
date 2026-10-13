@@ -28,6 +28,23 @@ def test_purification_time(tmp_path, monkeypatch):
     assert res.spec.reference_partner == 11 and res.purification_layer.shape == (20,)
 
 
+def test_purification_time_mostly_censored_point(tmp_path, monkeypatch, capsys):
+    # In the mixed phase fewer than half the trajectories purify within T_max:
+    # the Kaplan-Meier median does not exist, and the run must still be saved.
+    out = tmp_path / "mixed.npz"
+    _run(
+        "purification_time.py",
+        ["--n", "12", "--p", "0.06", "--trajectories", "40", "--out", str(out)],
+        monkeypatch,
+    )
+    printed = capsys.readouterr().out
+    res = mipt.EnsembleResult.load(out)
+    purified = int((res.purification_layer >= 0).sum())
+    assert 0 < purified < 20
+    assert f"observed purifications: {purified} / 40" in printed
+    assert "> 96 layers (more than half censored)" in printed
+
+
 def test_transition_scan(tmp_path, monkeypatch):
     out = tmp_path / "scan.json"
     args = [

@@ -200,14 +200,77 @@ class Instruction:
 
 @dataclass(frozen=True)
 class RepeatBlock:
-    """``REPEAT count { body }``."""
+    """``REPEAT count { body }`` (``REPEAT[tag] count { body }`` with a tag).
+
+    ``body`` belongs to the block: editing it changes the circuit that holds
+    the block, and the circuit recompiles before it next runs.
+    """
 
     count: int
     body: Circuit = field(compare=True)
+    tag: str = ""
 
     def __str__(self) -> str:
         inner = "\n".join("    " + line for line in str(self.body).splitlines())
-        return f"REPEAT {self.count} {{\n{inner}\n}}"
+        return f"{self._header()} {{\n{inner}\n}}"
+
+    def _header(self) -> str:
+        return f"REPEAT[{self.tag}] {self.count}" if self.tag else f"REPEAT {self.count}"
+
+
+def _split_products(targets: tuple[Target, ...]) -> list[list[Target]]:
+    """MPP targets as products: factors joined by '*'; a factor not after '*' starts a new one."""
+    products: list[list[Target]] = []
+    current: list[Target] = []
+    expect_factor = True
+    for t in targets:
+        if t.kind == "combiner":
+            expect_factor = True
+            continue
+        if not expect_factor:
+            products.append(current)
+            current = []
+        current.append(t)
+        expect_factor = False
+    if current:
+        products.append(current)
+    return products
+
+
+_PAULI_CODE = {"X": 1, "Z": 2, "Y": 3}
+
+
+def _combine_product(factors: list[Target]) -> tuple[dict[int, tuple[int, int]], int]:
+    """Multiply out one MPP product exactly: ``({qubit: (x, z)}, invert)``.
+
+    Repeated qubits are combined (``X0*Z0`` is ``-iY0``); a product that comes
+    out anti-Hermitian (a factor of +-i) raises ``ValueError``, as in Stim.
+    """
+    acc: dict[int, tuple[int, int]] = {}
+    phase = 0
+    invert = 0
+    for f in factors:
+        invert ^= int(f.inverted)
+        code = _PAULI_CODE[f.pauli]
+        x2, z2 = code & 1, code >> 1
+        x1, z1 = acc.get(f.value, (0, 0))
+        # power of i from multiplying single-qubit Paulis (x1,z1)*(x2,z2)
+        if x1 and z1:
+            phase += z2 - x2
+        elif x1:
+            phase += z2 * (2 * x2 - 1)
+        elif z1:
+            phase += x2 * (1 - 2 * z2)
+        acc[f.value] = (x1 ^ x2, z1 ^ z2)
+    if phase % 2:
+        text = "*".join(str(f) for f in factors)
+        raise ValueError(f"MPP product {text} is anti-Hermitian (repeated qubits multiply to +-i)")
+    return acc, invert ^ ((phase % 4) // 2)
+
+
+def _probabilities_ok(args: tuple[float, ...]) -> bool:
+    """Every argument is a probability; written so that NaN fails (NaN compares False)."""
+    return all(0.0 <= a <= 1.0 for a in args)
 
 
 def _validate(name: str, targets: tuple[Target, ...], args: tuple[float, ...]) -> GateInfo:
@@ -245,8 +308,10 @@ def _validate(name: str, targets: tuple[Target, ...], args: tuple[float, ...]) -
             prev = t.kind
         if targets and prev == "combiner":
             raise ValueError("MPP target list ends with '*'")
-        if any(a < 0 or a > 1 for a in args):
-            raise ValueError("measurement flip probabilities must be in [0, 1]")
+        if not _probabilities_ok(args):
+            raise ValueError(f"measurement flip probabilities must be in [0, 1], got {args}")
+        for factors in _split_products(targets):
+            _combine_product(factors)  # raises for an anti-Hermitian product
         return info
 
     # Remaining kinds take plain qubit targets (plus rec controls for feedback).
@@ -279,11 +344,12 @@ def _validate(name: str, targets: tuple[Target, ...], args: tuple[float, ...]) -
                     f"{info.name} targets in a pair must differ, got ({a.value}, {b.value})"
                 )
     if kind == "noise":
-        total = sum(args)
-        if any(a < 0 for a in args) or total > 1 + 1e-12:
+        if not _probabilities_ok(args):
+            raise ValueError(f"{info.name} probabilities must be numbers in [0, 1], got {args}")
+        if sum(args) > 1 + 1e-12:
             raise ValueError(f"{info.name} probabilities must be non-negative and sum to at most 1")
-    if kind in ("measure", "measure_reset", "measure_pair") and any(a < 0 or a > 1 for a in args):
-        raise ValueError("measurement flip probabilities must be in [0, 1]")
+    if kind in ("measure", "measure_reset", "measure_pair") and not _probabilities_ok(args):
+        raise ValueError(f"measurement flip probabilities must be in [0, 1], got {args}")
     if kind == "clifford_index":
         count = len(targets) // k
         if len(args) != count:
@@ -321,6 +387,8 @@ class Circuit:
     def __init__(self, text: str = ""):
         self._items: list[Instruction | RepeatBlock] = []
         self._version = 0
+        self._blocks: list[RepeatBlock] = []
+        self._blocks_version = -1
         if text:
             self._items = _parse(text)
 
@@ -344,17 +412,17 @@ class Circuit:
         self._items.extend(_parse(text))
         self._version += 1
 
-    def append_repeat(self, count: int, body: Circuit) -> None:
+    def append_repeat(self, count: int, body: Circuit, tag: str = "") -> None:
         """Append ``REPEAT count { body }`` (``body`` is copied)."""
         if int(count) < 1:
             raise ValueError(f"REPEAT count must be positive, got {count}")
-        self._items.append(RepeatBlock(int(count), body.copy()))
+        self._items.append(RepeatBlock(int(count), body.copy(), tag))
         self._version += 1
 
     def __iadd__(self, other: Circuit) -> Circuit:
         if not isinstance(other, Circuit):
             return NotImplemented
-        self._items.extend(other._items)
+        self._items.extend(other.copy()._items)  # REPEAT bodies are copied, never shared
         self._version += 1
         return self
 
@@ -375,9 +443,22 @@ class Circuit:
         return out
 
     def copy(self) -> Circuit:
+        """An independent copy: REPEAT bodies are copied too, so editing one never edits the other."""
         out = Circuit()
-        out._items = list(self._items)
+        out._items = [
+            RepeatBlock(item.count, item.body.copy(), item.tag)
+            if isinstance(item, RepeatBlock)
+            else item  # instructions are immutable
+            for item in self._items
+        ]
         return out
+
+    def _state_key(self) -> tuple:
+        """Changes whenever this circuit or any REPEAT body inside it is edited (compile cache key)."""
+        if self._blocks_version != self._version:
+            self._blocks = [item for item in self._items if isinstance(item, RepeatBlock)]
+            self._blocks_version = self._version
+        return (self._version, *(block.body._state_key() for block in self._blocks))
 
     # -- reading --------------------------------------------------------------------------
 
@@ -472,7 +553,7 @@ class Circuit:
         for item in self._items:
             if isinstance(item, RepeatBlock):
                 inner = "\n".join("    " + ln for ln in item.body._stim_text().splitlines())
-                lines.append(f"REPEAT {item.count} {{\n{inner}\n}}")
+                lines.append(f"{item._header()} {{\n{inner}\n}}")
             elif item.name in ("CLIFFORD_1Q", "CLIFFORD_2Q"):
                 lines.extend(_expand_clifford_index(item))
             else:
@@ -481,8 +562,17 @@ class Circuit:
 
     @classmethod
     def from_stim(cls, stim_circuit) -> Circuit:
-        """Convert from a ``stim.Circuit``. Unsupported instructions raise ``ValueError``."""
-        return cls(str(stim_circuit))
+        """Convert from a ``stim.Circuit``, exactly. Unsupported instructions raise ``ValueError``.
+
+        The conversion reads Stim's instruction objects, not its text (which
+        prints arguments with 6 significant digits), so noise probabilities and
+        coordinates keep their full precision and ``from_stim(c).to_stim() == c``.
+        """
+        if isinstance(stim_circuit, str):
+            return cls(stim_circuit)
+        out = cls()
+        out._items = _items_from_stim(stim_circuit)
+        return out
 
 
 def _measurements_of(ins: Instruction) -> int:
@@ -510,21 +600,66 @@ def _expand_clifford_index(ins: Instruction) -> list[str]:
     return lines
 
 
+def _target_from_stim(t) -> Target:
+    """A ``stim.GateTarget`` as a :class:`Target`."""
+    if t.is_combiner:
+        return target_combiner()
+    if t.is_measurement_record_target:
+        return target_rec(t.value)
+    if t.is_x_target or t.is_y_target or t.is_z_target:
+        pauli = "X" if t.is_x_target else "Y" if t.is_y_target else "Z"
+        return Target("pauli", t.value, pauli, t.is_inverted_result_target)
+    if t.is_qubit_target:
+        return Target("qubit", t.value, inverted=t.is_inverted_result_target)
+    if t.is_sweep_bit_target:
+        raise ValueError("sweep[] targets are not supported")
+    raise ValueError(f"unsupported target {t!r}")
+
+
+def _items_from_stim(stim_circuit) -> list[Instruction | RepeatBlock]:
+    items: list[Instruction | RepeatBlock] = []
+    for k, op in enumerate(stim_circuit):
+        if hasattr(op, "body_copy"):  # stim.CircuitRepeatBlock
+            body = Circuit()
+            body._items = _items_from_stim(op.body_copy())
+            items.append(RepeatBlock(int(op.repeat_count), body, getattr(op, "tag", "")))
+            continue
+        try:
+            targets = tuple(_target_from_stim(t) for t in op.targets_copy())
+            args = tuple(float(a) for a in op.gate_args_copy())
+            info = _validate(op.name, targets, args)
+        except (ValueError, KeyError) as exc:
+            msg = exc.args[0] if exc.args else str(exc)
+            raise ValueError(f"instruction {k} ({op}): {msg}") from None
+        items.append(Instruction(info.name, targets, args, getattr(op, "tag", "")))
+    return items
+
+
+_TAGGED_NAME_RE = re.compile(r"\s*[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]")
+
+
+def _strip_comment(raw: str) -> str:
+    """A line without its comment: '#' starts one, except inside the instruction's ``[tag]``."""
+    m = _TAGGED_NAME_RE.match(raw)
+    cut = raw.find("#", m.end() if m else 0)
+    return (raw if cut < 0 else raw[:cut]).strip()
+
+
 def _parse(text: str) -> list[Instruction | RepeatBlock]:
     """Parse Stim circuit text into items (raises ValueError with a line number)."""
-    stack: list[tuple[list, int]] = [([], 0)]
+    stack: list[tuple[list, int, str]] = [([], 0, "")]
     for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
+        line = _strip_comment(raw)
         if not line:
             continue
         try:
             if line == "}":
                 if len(stack) == 1:
                     raise ValueError("unmatched '}'")
-                items, count = stack.pop()
+                items, count, tag = stack.pop()
                 body = Circuit()
                 body._items = items
-                stack[-1][0].append(RepeatBlock(count, body))
+                stack[-1][0].append(RepeatBlock(count, body, tag))
                 continue
             m = _LINE_RE.match(line)
             if not m:
@@ -537,7 +672,7 @@ def _parse(text: str) -> list[Instruction | RepeatBlock]:
                 count = int(rest[:-1].strip())
                 if count < 1:
                     raise ValueError(f"REPEAT count must be positive, got {count}")
-                stack.append(([], count))
+                stack.append(([], count, m.group("tag") or ""))
                 continue
             args_text = m.group("args")
             args = (

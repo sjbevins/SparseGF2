@@ -302,3 +302,88 @@ def test_mean_and_error_ignores_nan():
     np.testing.assert_allclose(
         err, [np.std([1, 3, 5], ddof=1) / np.sqrt(3), np.std([2, 4], ddof=1) / np.sqrt(2)]
     )
+
+
+# -- regressions from the review ------------------------------------------------------------
+
+
+def test_erasure_docstrings_give_the_failure_probability_correctly():
+    from sparsegf2_v3 import analysis, mipt
+
+    n, p = 10, 0.1
+    sim = Simulator(2 * n, phases=False)
+    for i in range(n):  # every system qubit Bell-paired: any non-empty erasure fails
+        sim.h(i)
+        sim.cx(i, n + i)
+    profile = ob.erasure_profile(sim, range(n), range(n, 2 * n), samples=5, seed=1)
+    failure = analysis.bernoulli_erasure_curve(1 - profile["correctable_fraction"], p)
+    assert failure == pytest.approx(1 - (1 - p) ** n)
+    for fn in (ob.erasure_profile, mipt.erasure_correctable_profile):
+        doc = " ".join(fn.__doc__.split())
+        assert "1 - " in doc and "success probability" in doc, fn.__name__
+
+
+def test_kaplan_meier_refuses_the_censoring_marker():
+    from sparsegf2_v3 import analysis, graphs, mipt
+
+    spec = mipt.MonitoredCircuit(
+        num_system=12, edges=graphs.cycle(12), layers=24, measurement_rate=0.05,
+        reference="single", reference_partner=0, scramble_layers=12,
+        checkpoints="every_layer", stop_when_purified=True,
+    )  # fmt: skip
+    r = spec.run(300, seed=5)
+    tau = r.purification_layer
+    assert (tau < 0).any() and (tau >= 0).any()
+    with pytest.raises(ValueError, match=r"np\.where\(tau >= 0, tau, result\.final_layer\)"):
+        analysis.kaplan_meier(tau, tau >= 0)
+    km = analysis.kaplan_meier(np.where(tau >= 0, tau, r.final_layer), tau >= 0)
+    layers, surviving = r.survival()
+    assert km["survival"][-1] == pytest.approx(surviving[-1])
+    with pytest.raises(ValueError, match="non-negative"):
+        analysis.kaplan_meier(np.array([1.0, np.nan]), np.array([True, False]))
+
+
+def test_contiguous_distance_when_the_reference_is_held_elsewhere():
+    # qubits 0, 1 (the system) hold their own Bell pair; the reference 2 is
+    # paired with qubit 3, outside system and reference: nothing is uncorrectable
+    sim = Simulator(4, phases=False)
+    sim.h(2)
+    sim.cx(2, 3)
+    sim.h(0)
+    sim.cx(0, 1)
+    assert ob.code_dimension(sim, [2]) == 1
+    assert ob.lost_logical_information(sim, [0, 1], [2]) == 0
+    for periodic in (True, False):
+        assert ob.contiguous_code_distance(sim, [0, 1], [2], periodic=periodic) == 0
+    # GHZ system, reference paired outside: still no uncorrectable run
+    ghz = Simulator(5, phases=False)
+    ghz.h(0)
+    ghz.cx(0, 1, 1, 2)
+    ghz.h(3)
+    ghz.cx(3, 4)
+    assert ob.contiguous_code_distance(ghz, [0, 1, 2], [3]) == 0
+    # when the whole system is the shortest uncorrectable run, it is still reported
+    bell = Simulator(3, phases=False)
+    bell.h(0)
+    bell.cx(0, 1)
+    assert ob.contiguous_code_distance(bell, [0], [1]) == 1
+    assert ob.contiguous_code_distance(bell, [0, 2], [1], periodic=False) == 1
+
+
+def test_fractional_qubit_indices_are_refused():
+    from sparsegf2_v3 import mipt
+
+    sim = Simulator(4, phases=False)
+    sim.h(0)
+    sim.cx(0, 1)
+    for call in (
+        lambda: ob.mutual_information(sim, [0.7], [1.9]),
+        lambda: ob.entropy_profile(sim, [1.9]),
+        lambda: ob.code_dimension(sim, [1.5]),
+        lambda: ob.lost_logical_information(sim, [0.2], [1.2]),
+        lambda: mipt.entropy([0.7, 1.9]),
+        lambda: mipt.lost_information([0.5]),
+    ):
+        with pytest.raises(TypeError):
+            call()
+    assert ob.mutual_information(sim, np.array([0]), [np.int64(1)]) == 2  # numpy ints are fine

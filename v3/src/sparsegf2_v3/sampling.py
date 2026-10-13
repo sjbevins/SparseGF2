@@ -6,7 +6,7 @@ import operator
 
 import numpy as np
 
-from sparsegf2_v3._compile import compile_circuit
+from sparsegf2_v3._compile import DEFAULT_MAX_OPS, compile_circuit
 from sparsegf2_v3._kernel.program import run_many
 from sparsegf2_v3._kernel.rng import stream_key
 from sparsegf2_v3._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
@@ -24,12 +24,14 @@ def sample(
     seed=None,
     phases: bool = True,
     num_threads: int | None = None,
+    max_ops: int = DEFAULT_MAX_OPS,
 ) -> SampleResult:
     """Run ``circuit`` ``shots`` times from |0...0> and collect the results.
 
     Shots run in parallel across CPU cores (``num_threads`` limits that). Shot
     ``s`` uses its own random stream derived from ``(seed, s)``, so the result
-    is identical whatever the thread count.
+    is identical whatever the thread count. ``max_ops`` is the unrolled-size
+    guard of :meth:`Simulator.run <sparsegf2_v3.Simulator.run>`.
 
     Returns a :class:`~sparsegf2_v3.result.SampleResult` with one row per shot:
     ``measurements``, ``detectors``, ``observables`` (phases mode) and
@@ -38,7 +40,7 @@ def sample(
     shots = operator.index(shots)
     if shots < 0:
         raise ValueError(f"shots must be non-negative, got {shots}")
-    program = compile_circuit(circuit)
+    program = compile_circuit(circuit, max_ops=max_ops)
     n = max(program.num_qubits, 1)
     ws = (n + 63) // 64
     width = 2 * ws if phases else ws

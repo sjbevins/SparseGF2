@@ -24,7 +24,7 @@ There are three ways in, from interactive to industrial:
 
 …and a [CLI and an MCP server](#for-ai-agents) so that AI agents can run all of it.
 
-> **Status:** `3.0.0.dev7`, in development beside the v2 package (import name
+> **Status:** `3.0.0.dev8`, in development beside the v2 package (import name
 > `sparsegf2_v3`). It will take over the `sparsegf2` name as 3.0. See
 > [Status and roadmap](#status-and-roadmap).
 
@@ -240,7 +240,7 @@ machine (4-core Xeon, 2.1 GHz):
 
 * **Phase-free mode** (entanglement, codes, purification): **3–15× faster than
   Stim for n ≥ 64**, and the margin grows with `n`: about 9× at n = 256 and
-  11–15× at n = 512–1024 (2–7× at n = 16–32).
+  9–15× at n = 512–1024 (2–7× at n = 16–32).
 * **With signs tracked** (the default; outcomes, detectors): about **3× faster
   than Stim** (1.5–6× across all points).
 * In either mode, **300–1800× faster than Qiskit Aer** (stabilizer method)
@@ -259,7 +259,7 @@ trajectory inside one compiled, parallel kernel.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/throughput-dark.png">
-  <img alt="Circuits per second versus n: the SparseGF2 v3 ensemble engine on 4 threads, SparseGF2 v3 Simulator.run on one thread, Stim on one thread and Stim with ideal 4-process scaling" src="docs/figures/throughput-light.png">
+  <img alt="Circuits per second versus n: the SparseGF2 v3 ensemble engine on 4 threads, SparseGF2 v3 Simulator.run (phase-free) on one thread, Stim on one thread and Stim with ideal 4-process scaling" src="docs/figures/throughput-light.png">
 </picture>
 
 At p = 0.16 that is about **128,000 circuits per second at n = 16, 7,000 at
@@ -268,9 +268,11 @@ second on one core, or about 210 if run as four perfectly parallel processes.
 
 **Your production workload.** On the PRL single-reference protocol
 ([`examples/purification_time.py`](examples/purification_time.py)), with the
-same Watts–Strogatz graph banks fed to both engines, v3 runs **27–60× more
+same Watts–Strogatz graph banks fed to both engines, v3 runs **27–47× more
 trajectories per second than the v2 production engine on one thread**
-(90–210× on all 4 cores). The purification-time distributions are
+(65–128× on all 4 cores). v3 is timed end to end, from building the spec on
+the bank (one graph per trajectory, each one validated and prepared for the
+engine) to the purification times. The purification-time distributions are
 statistically indistinguishable (Kolmogorov–Smirnov p = 0.15–0.92), at the
 grid centre and at p_center − 0.04.
 
@@ -326,18 +328,18 @@ grid centre and at p_center − 0.04.
 | 0.16 | 127,998 | 35,072 | 7,035 | 1,658 | 294 | 37 |
 | 0.3 | 96,749 | 27,296 | 6,390 | 1,312 | 225 | 38 |
 
-**PRL production protocol**, trajectories per second (same graph banks)
+**PRL production protocol**, trajectories per second (same graph banks; v3 timed end to end, from building the spec on the bank, one graph per trajectory)
 
 | p | n | median tau | v2 production engine, 1 thread | v3, 1 thread | v3, all threads | speed-up per thread | KS p-value |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.293 | 32 | 13 | 275.6 | 11,963 | 48,317 | 43× | 0.15 |
-| 0.293 | 64 | 18 | 163.3 | 5,510 | 15,145 | 34× | 0.32 |
-| 0.293 | 128 | 22 | 52.4 | 1,779 | 5,186 | 34× | 0.92 |
-| 0.293 | 256 | 28.5 | 11.9 | 525 | 1,750 | 44× | 0.68 |
-| 0.253 | 32 | 17.5 | 248.8 | 14,820 | 53,127 | 60× | 0.84 |
-| 0.253 | 64 | 24 | 123.1 | 4,535 | 13,217 | 37× | 0.90 |
-| 0.253 | 128 | 34 | 45.9 | 1,233 | 4,798 | 27× | 0.38 |
-| 0.253 | 256 | 48 | 9.9 | 355 | 1,156 | 36× | 0.56 |
+| 0.293 | 32 | 13 | 286.4 | 10,712 | 22,348 | 37× | 0.15 |
+| 0.293 | 64 | 18 | 174.9 | 4,966 | 11,334 | 28× | 0.32 |
+| 0.293 | 128 | 22 | 49.2 | 1,798 | 4,616 | 37× | 0.92 |
+| 0.293 | 256 | 28.5 | 12.6 | 520 | 1,597 | 41× | 0.68 |
+| 0.253 | 32 | 17.5 | 234.2 | 11,003 | 26,990 | 47× | 0.84 |
+| 0.253 | 64 | 24 | 143.4 | 3,987 | 10,736 | 28× | 0.90 |
+| 0.253 | 128 | 34 | 42.3 | 1,150 | 3,386 | 27× | 0.38 |
+| 0.253 | 256 | 48 | 9.7 | 366 | 1,244 | 38× | 0.56 |
 
 </details>
 
@@ -355,7 +357,9 @@ grid centre and at p_center − 0.04.
   is used.
 * One thread each, median of repeated runs after a warm-up; SparseGF2's
   one-off compilation is excluded, Qiskit Aer's per-run circuit conversion is
-  included (it is part of its API).
+  included (it is part of its API). On the production protocol, v3's
+  per-graph preparation of the graph bank is included: there every trajectory
+  has its own graph.
 
 **Where other tools are better.** For sampling millions of shots of a
 quantum error-correction circuit, use Stim's detector sampler: Pauli-frame
@@ -369,8 +373,9 @@ exactly that case.
 ## Phases: tracked or not
 
 `Simulator(n, phases=True)` (the default) tracks stabilizer signs and
-destabilizers, so measurement outcomes, detectors and observables are exact
-and identical to Stim's. `phases=False` stores only the stabilizers' X/Z bits:
+destabilizers, so measurement outcomes, detectors and observables are exact:
+replaying Stim's measurement record reproduces every outcome, and
+deterministic detectors and observables give exactly Stim's detection events. `phases=False` stores only the stabilizers' X/Z bits:
 entanglement, code dimension, distances and erasure quantities are all exactly
 the same (they never depend on signs), it is faster, and asking for an outcome
 says why there is none (`measure()` returns `None`; `result.measurements`

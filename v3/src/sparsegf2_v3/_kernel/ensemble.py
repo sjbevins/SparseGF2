@@ -27,7 +27,10 @@ Random draws per trajectory, in order:
 4. scramble layers, then dynamics layers, each via :func:`gen_layer`: per gate,
    [edge: one integer draw, or one uniform draw if edges are weighted, if edges
    are sampled], [orientation bit if enabled], gate index; then (dynamics only)
-   one uniform per system qubit for the measurement mask.
+   one uniform per system qubit for the measurement mask. Scramble layers and
+   dynamics layers share one layer count, so the matching schedule's colour
+   cycle runs on from the scramble into the dynamics (dynamics layer ``l``,
+   counted from 1, uses colour ``(scramble_layers + l - 1) mod C``).
 
 Reference qubits
 ----------------
@@ -235,7 +238,10 @@ def eval_probes(
         elif k == PROBE_CODE_DIMENSION:
             out_row[j] = s_ref
         elif k == PROBE_CONTIGUOUS_DISTANCE:
-            out_row[j] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
+            if s_ref == 0:
+                out_row[j] = np.nan  # no code, no distance (never averaged as 0)
+            else:
+                out_row[j] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
         elif k == PROBE_LOST_INFORMATION:
             for t in range(lens[0]):
                 region_buf[t] = idx[starts[0] + t]
@@ -404,9 +410,10 @@ def run_ensemble(
         stopped = False
         for layer in range(layers + 1):
             if layer > 0:
+                # the matching schedule's colour cycle continues from the scramble layers
                 ng, nm = gen_layer(
-                    rng, layer - 1, schedule_kind, g_edges, g_cum, g_cptr, g_cidx,
-                    gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,
+                    rng, scramble_layers + layer - 1, schedule_kind, g_edges, g_cum, g_cptr,
+                    g_cidx, gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,
                 )  # fmt: skip
                 for j in range(ng):
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
@@ -511,8 +518,8 @@ def generate_ops(
     meas_ptr[0] = 0
     for layer in range(layers):
         ng, nm = gen_layer(
-            rng, layer, schedule_kind, g_edges, g_cum, g_cptr, g_cidx, gates_per_layer,
-            pool, n_sys, p, True, orient, ga, gb, gg, mq,
+            rng, scramble_layers + layer, schedule_kind, g_edges, g_cum, g_cptr, g_cidx,
+            gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,
         )  # fmt: skip
         for j in range(ng):
             out_ga[g_pos] = ga[j]

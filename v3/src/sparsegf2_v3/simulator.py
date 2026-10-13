@@ -40,7 +40,7 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from sparsegf2_v3._compile import compile_circuit
+from sparsegf2_v3._compile import DEFAULT_MAX_OPS, compile_circuit
 from sparsegf2_v3._kernel import tableau as _k
 from sparsegf2_v3._kernel.program import run_program
 from sparsegf2_v3._kernel.rng import next_bit, seed_state
@@ -231,17 +231,16 @@ class Simulator:
             return support.astype(np.int64), codes, pauli.phase // 2
         if not isinstance(pauli, str):
             raise TypeError(f"expected a PauliString or a string like 'X0*Z3', got {pauli!r}")
-        text = pauli.strip()
         invert = 0
-        if text.startswith("!"):
-            invert = 1
-            text = text[1:]
         acc: dict[int, tuple[int, int]] = {}
         phase = 0
-        for token in filter(None, (t.strip() for t in text.split("*"))):
-            letter, index = token[0].upper(), token[1:]
+        for token in filter(None, (t.strip() for t in pauli.strip().split("*"))):
+            if token.startswith("!"):  # any factor may be inverted, as in Stim's MPP
+                invert ^= 1
+                token = token[1:]
+            letter, index = token[:1].upper(), token[1:]
             if letter not in _CODE_OF or not index.isdigit():
-                raise ValueError(f"bad Pauli term {token!r} in {pauli!r}; expected e.g. 'X0*Z3'")
+                raise ValueError(f"bad Pauli term {token!r} in {pauli!r}; expected e.g. 'X0*!Z3'")
             q = self._qubit(int(index))
             code = _CODE_OF[letter]
             x2, z2 = code & 1, code >> 1
@@ -351,7 +350,7 @@ class Simulator:
         return out if self._phases else None
 
     def measure_pauli(self, pauli, *, coin: int | None = None) -> int | None:
-        """Measure a Pauli product, e.g. ``"X0*Z3*Y5"`` or ``"!Z0*Z1"`` (Stim ``MPP`` syntax).
+        """Measure a Pauli product, e.g. ``"X0*Z3*Y5"``, ``"!Z0*Z1"`` or ``"X0*!Z1"`` (Stim ``MPP`` syntax).
 
         ``pauli`` may also be a :class:`PauliString` on all qubits (sign +1 or
         -1). The return value and ``coin`` refer to the operator as written,
@@ -463,13 +462,17 @@ class Simulator:
 
     # -- circuits --------------------------------------------------------------------------
 
-    def run(self, circuit: Circuit, *, coins=None, observe=None) -> RunResult:
+    def run(
+        self, circuit: Circuit, *, coins=None, observe=None, max_ops: int = DEFAULT_MAX_OPS
+    ) -> RunResult:
         """Execute a :class:`~sparsegf2_v3.Circuit` on this state, in one compiled call.
 
         Parameters
         ----------
         circuit
             The circuit. It may use fewer qubits than the simulator, not more.
+            A ``stim.Circuit`` must be converted once with
+            :meth:`Circuit.from_stim <sparsegf2_v3.Circuit.from_stim>`.
         coins
             Optional 0/1 array with one entry per measurement result: the
             *recorded* value to produce if that measurement is random
@@ -482,6 +485,11 @@ class Simulator:
             ``(tick, value)`` pairs. This is how to measure stabilizer-tableau
             properties as a circuit evolves. The callback should only read the
             state.
+        max_ops
+            Refuse circuits that unroll (``REPEAT`` blocks expanded) to more
+            operations than this, a guard against accidentally huge repeat
+            counts. Raise it for genuinely larger circuits (each operation
+            takes 40 bytes).
 
         Returns
         -------
@@ -489,7 +497,7 @@ class Simulator:
             ``measurements`` (phases mode), ``random``, ``detectors``,
             ``observables`` and ``observations``.
         """
-        program = compile_circuit(circuit)
+        program = compile_circuit(circuit, max_ops=max_ops)
         if program.num_qubits > self._n:
             raise ValueError(
                 f"circuit uses {program.num_qubits} qubits but the simulator has {self._n}"

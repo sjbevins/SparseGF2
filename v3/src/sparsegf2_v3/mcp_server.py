@@ -272,14 +272,8 @@ def build_server() -> Any:
     ) -> Result:
         if not max_seconds > 0:
             raise ToolError(f"max_seconds must be positive, got {max_seconds:g}")
-        estimate = call(api.estimate_ensemble, spec, trajectories).structured_content
-        if estimate["estimated_seconds"] > max_seconds:
-            raise ToolError(
-                f"this run is estimated at about {estimate['estimated_seconds']:.0f} s, above "
-                f"max_seconds={max_seconds:g}. Use start_ensemble_job with an output_dir and "
-                "poll job_status, or reduce trajectories/layers/num_system (or raise "
-                "max_seconds if you are willing to wait)."
-            )
+        # One call: the spec (and its graph bank) is built once, for the
+        # estimate and for the run.
         return call(
             api.run_ensemble,
             spec,
@@ -287,6 +281,7 @@ def build_server() -> Any:
             seed=seed,
             output_dir=output_dir,
             command="mcp:run_ensemble",
+            max_seconds=max_seconds,
         )
 
     @server.tool(description=_ESTIMATE, annotations=read_only)

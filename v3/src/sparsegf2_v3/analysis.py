@@ -34,11 +34,21 @@ def kaplan_meier(times: np.ndarray, observed: np.ndarray) -> dict[str, np.ndarra
     each), ``stderr`` (Greenwood's formula) and ``at_risk``. Use it to combine
     runs with different maximum depths; for a single run with one horizon,
     :meth:`EnsembleResult.survival` gives the same curve directly.
+
+    ``EnsembleResult.purification_layer`` marks censored trajectories with -1,
+    which is not a time: pass ``times=np.where(tau >= 0, tau, result.final_layer)``
+    and ``observed=tau >= 0``. Negative or non-finite times raise ``ValueError``.
     """
     t = np.asarray(times, dtype=np.float64)
     e = np.asarray(observed, dtype=bool)
     if t.shape != e.shape:
         raise ValueError("times and observed must have the same shape")
+    if not np.all(np.isfinite(t) & (t >= 0)):
+        raise ValueError(
+            "times must be finite and non-negative; censored entries need their censoring "
+            "time, not a sentinel such as purification_layer = -1 (pass "
+            "np.where(tau >= 0, tau, result.final_layer) with observed=tau >= 0)"
+        )
     event_times = np.unique(t[e])
     survival = np.empty(event_times.size)
     stderr = np.empty(event_times.size)

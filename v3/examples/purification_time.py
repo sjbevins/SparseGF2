@@ -72,21 +72,29 @@ def main() -> None:
     spec = production_spec(args.n, args.beta, args.p, bank)
     result = spec.run(args.trajectories, seed=args.seed)
 
+    out = args.out or f"purification_n{args.n}_b{args.beta}_p{args.p}.npz"
+    result.save(out)  # first, so that the run is never lost to the summary below
+    print(result)
+    print(f"saved {out}")
+
     tau = result.purification_layer
     observed = tau >= 0
-    times = np.where(observed, tau, result.final_layer)
-    km = analysis.kaplan_meier(times, observed)
-    print(result)
     print(
         f"observed purifications: {observed.sum()} / {tau.size}  (censored at T_max = {spec.layers})"
     )
-    if observed.any():
-        print(
-            f"median tau (Kaplan-Meier): {km['times'][np.searchsorted(-km['survival'], -0.5)]:.0f} layers"
-        )
-    out = args.out or f"purification_n{args.n}_b{args.beta}_p{args.p}.npz"
-    result.save(out)
-    print(f"saved {out}")
+    print(f"median tau (Kaplan-Meier): {median_tau(tau, result.final_layer)}")
+
+
+def median_tau(tau: np.ndarray, final_layer: np.ndarray) -> str:
+    """The Kaplan-Meier median of tau, or why there is none (censored entries are tau = -1)."""
+    observed = tau >= 0
+    if not observed.any():
+        return "undefined (no trajectory purified)"
+    km = analysis.kaplan_meier(np.where(observed, tau, final_layer), observed)
+    below = np.flatnonzero(km["survival"] <= 0.5)
+    if not below.size:  # the survival curve never reaches 1/2 within T_max
+        return f"> {int(final_layer.max())} layers (more than half censored)"
+    return f"{km['times'][below[0]]:.0f} layers"
 
 
 if __name__ == "__main__":

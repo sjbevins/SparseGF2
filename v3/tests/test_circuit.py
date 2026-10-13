@@ -178,3 +178,90 @@ def test_float_arguments_survive_round_trip():
     c = Circuit(text)
     assert stim.Circuit(str(c)) == stim.Circuit(text)
     np.testing.assert_allclose(c[1].args, [1e-05])
+
+
+# -- regressions from the review ------------------------------------------------------------
+
+
+def test_from_stim_keeps_full_precision():
+    # Stim's text prints 6 significant digits; from_stim must not go through it.
+    st = stim.Circuit()
+    st.append("DEPOLARIZE1", [0], 0.0012345678901234)
+    st.append("X_ERROR", [0], 1 / 3)
+    st.append("DETECTOR", [], [0.1234567891, 2])
+    c = Circuit.from_stim(st)
+    assert c[0].args == (0.0012345678901234,) and c[1].args == (1 / 3,)
+    assert c.to_stim() == st
+    assert Circuit(str(c)) == c
+    # a channel whose 6-digit rounding sums above 1 converts and runs, as in Stim
+    uniform = stim.Circuit()
+    uniform.append("PAULI_CHANNEL_2", [0, 1], [1 / 15] * 15)
+    uniform.append("M", [0, 1])
+    assert Circuit.from_stim(uniform).to_stim() == uniform
+    p = float(10 ** np.linspace(-3, -2, 7)[1])
+    gen = stim.Circuit.generated(
+        "surface_code:rotated_memory_z", distance=3, rounds=2, after_clifford_depolarization=p
+    )
+    ours = Circuit.from_stim(gen)
+    assert {a for i in ours.flattened() if i.name == "DEPOLARIZE2" for a in i.args} == {p}
+    assert ours.to_stim() == gen
+
+
+def test_from_stim_targets_tags_and_errors():
+    st = stim.Circuit(
+        "H[note#1] 0\nMPP !X0*Z1 Y2\nCX rec[-1] 3\nM !4\nREPEAT[round] 2 {\n    M 0\n}"
+    )
+    c = Circuit.from_stim(st)
+    assert str(c) == str(st)
+    assert c.to_stim() == st
+    assert c[4].tag == "round"
+    with pytest.raises(ValueError, match="instruction 0"):
+        Circuit.from_stim(stim.Circuit("MPAD 0"))
+
+
+def test_hash_inside_a_tag_is_not_a_comment():
+    c = Circuit("H[a#b] 0  # a real comment\nREPEAT[r#1] 2 {\n    M 0 # another\n}")
+    assert str(c) == "H[a#b] 0\nREPEAT[r#1] 2 {\n    M 0\n}"
+    assert stim.Circuit(str(c)) == stim.Circuit(str(c).replace("[r#1]", ""))
+    assert Circuit(str(c)) == c and c.num_measurements == 2
+
+
+def test_nan_probabilities_are_rejected():
+    for text in [
+        "X_ERROR(nan) 0",
+        "DEPOLARIZE1(nan) 0",
+        "DEPOLARIZE2(nan) 0 1",
+        "PAULI_CHANNEL_1(nan, 0.1, 0.1) 0",
+        "M(nan) 0",
+        "MR(nan) 0",
+        "MXX(nan) 0 1",
+        "MPP(nan) Z0",
+        "X_ERROR(inf) 0",
+    ]:
+        with pytest.raises(ValueError, match=r"probabilities"):
+            Circuit(text)
+    with pytest.raises(ValueError, match="probabilities"):
+        Circuit().append("X_ERROR", [0], [float("nan")])
+
+
+def test_anti_hermitian_mpp_is_rejected_when_parsed():
+    with pytest.raises(ValueError, match=r"line 3: MPP product X0\*Y0 is anti-Hermitian"):
+        Circuit("H 0\nM 0 1\nMPP X0*Y0")
+    with pytest.raises(ValueError, match="anti-Hermitian"):
+        Circuit().append("MPP", [target_x(0), target_combiner(), target_z(0)])
+    assert Circuit("MPP X0*Z1*X0").num_measurements == 1  # = Z1: repeats can be Hermitian
+
+
+def test_copies_and_sums_do_not_share_repeat_bodies():
+    base = Circuit("REPEAT 3 {\n    M 0\n}")
+    for derived in (base.copy(), base + Circuit("H 1"), base * 1):
+        derived[0].body.append("X_ERROR", [0], [1.0])
+        assert str(base) == "REPEAT 3 {\n    M 0\n}"
+    target = Circuit("H 0")
+    target += base
+    target[1].body.append("X", [0])
+    assert str(base) == "REPEAT 3 {\n    M 0\n}"
+    outer = Circuit()
+    outer.append_repeat(2, base * 2)
+    outer[0].body[0].body.append("X", [0])
+    assert str(base) == "REPEAT 3 {\n    M 0\n}"

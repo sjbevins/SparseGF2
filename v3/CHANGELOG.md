@@ -1,5 +1,86 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev8: fixes from the review
+
+Behaviour changes (results of some existing seeds change):
+
+* **`scramble_layers` with `schedule="matching"`**: the colour cycle now runs on
+  from the scramble layers into the measured layers. It used to restart, so
+  when `scramble_layers` was 1 more than a multiple of the number of colours
+  the first measured layer repeated the last scramble matching and absorbed it
+  (`scramble_layers=1` on a brickwork did nothing). Unchanged when
+  `scramble_layers` is a multiple of the number of colours (e.g. `2n` on an
+  even ring) and for the other schedules.
+* The `contiguous_distance` probe records NaN, not 0, where the code
+  dimension is 0, so `EnsembleResult.mean` and the API summaries average only
+  trajectories that still hold a code (the summary's `count` says how many).
+
+Fixes:
+
+* Checkpoints given as an int64 array are sorted and deduplicated like any
+  list (a repeated or out-of-order entry silently skipped every later
+  checkpoint and censored purification times).
+* `dataclasses.replace(spec, ...)` gives an independent spec: the compiled
+  cache is per instance (a derived spec ran the original's graph, partner or
+  probes, and could write past its result buffers), and `"final"`,
+  `"every_layer"` and strides follow a new `layers`.
+* `MonitoredCircuit` normalises numpy scalars (sizes from numpy arrays, numpy
+  seeds), so `EnsembleResult.save` no longer fails after the run; it copies
+  `system_order`, `gate_set` and `edge_weights` and keeps them read-only.
+* `EnsembleResult` records the `SeedSequence` actually used
+  (`seed_entropy`, `seed_spawn_key`, `seed_pool_size`; `result.seed_sequence`
+  repeats the run, also for `seed=None` and spawned sequences) and the package
+  `version`. `save` stores both. `concatenate` refuses results whose spec,
+  seed or version differ, or that share trajectories.
+* `Circuit.from_stim` reads Stim's instruction objects instead of its 6-digit
+  text, so arguments keep full precision (`from_stim(c).to_stim() == c`).
+* `Circuit.copy()`, `+`, `+=` and `*` copy `REPEAT` bodies, and editing a
+  `REPEAT` body recompiles the circuit before it next runs.
+* NaN probabilities are rejected; anti-Hermitian MPP products are rejected
+  when the circuit is built, with the line number; `#` inside an
+  instruction tag is not a comment, and `REPEAT` tags are kept.
+* `Simulator.run` and `sample` raise a `TypeError` that names
+  `Circuit.from_stim` for a `stim.Circuit` (and `Circuit(text)` for text),
+  take `max_ops`, and name the instruction of a bad `rec[-k]` lookback.
+  `measure_pauli`, `peek_pauli` and `is_deterministic` accept `!` on any
+  factor, as Stim's MPP does.
+* `observables.contiguous_code_distance` returns 0 when no contiguous run is
+  uncorrectable (system plus reference need not be pure); observables refuse
+  fractional qubit indices; `analysis.kaplan_meier` refuses negative times
+  (the `-1` censoring marker) with a message saying what to pass.
+* `examples/purification_time.py` saves the result before printing, and
+  reports the median as "> T_max" when more than half the trajectories are
+  censored (it crashed and lost the run).
+* Graph banks: the engine colours graphs only for `schedule="matching"`, and
+  `graphs.from_edges` skips re-sorting an already normalised edge array, so
+  preparing a Watts-Strogatz bank for `schedule="random_edges"` costs about
+  13 us per graph at n = 32 and 20 us at n = 256 (it was 190 us and 970 us).
+  `EnsembleResult.elapsed_seconds` now includes that preparation.
+* API: list `edge_weights` follow their edges when an explicit edge list is
+  normalised (they were applied in the user's order to the sorted edges), and
+  are refused with random graph families; `spec.json` stores the spec
+  exactly and resumes compare it exactly; resuming keeps the original
+  provenance, records each resume, and refuses another package version;
+  `estimate_ensemble` counts graph generation and preprocessing, and
+  `run_ensemble` reports wall-clock time; the MCP `run_ensemble` builds the
+  spec once; phase-free `stabilizers` are unsigned; full profiles are saved
+  with `output_dir` and cuts are flagged; oversized summaries show fewer,
+  evenly spaced checkpoints (first and last kept); out-of-range integers are
+  input errors.
+* Documentation: replay with `coins` is exact only when resets act on
+  unentangled qubits; the reference record can differ from Stim's for
+  multi-target X/Y-basis instructions (deterministic detectors are
+  unaffected); circuits are lists of Python objects (DESIGN.md); the
+  single-reference tau is O(log L) after a scramble (LITERATURE.md);
+  `bernoulli_erasure_curve` needs `1 - correctable_fraction` for the failure
+  probability; the PRL production speed-ups over v2 are measured end to end
+  (spec construction and graph preparation included): 26–49× per thread,
+  69–122× on 4 cores (the README said 27–60× and 90–210×, engine time only);
+  the throughput figure labels its phase-free curve; the phase-free margin
+  over Stim at n = 512–1024 is 9–15× (not 11–15×).
+* `benchmarks/make_figures.py --outdir` writes `tables.md` there too, never
+  over the committed copy.
+
 ## 3.0.0.dev7: production protocol, cheap code observables, agent interface
 
 * **Graph disorder in the engine.** `MonitoredCircuit(edges=[g0, g1, ...])`

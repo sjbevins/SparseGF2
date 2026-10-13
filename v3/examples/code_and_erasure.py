@@ -6,7 +6,8 @@ Measurements purify it; at each checkpoint this records
 
 * the code dimension k (logical qubits left),
 * the contiguous code distance (shortest run of qubits whose erasure leaks
-  logical information),
+  logical information; averaged over the trajectories that still hold a code,
+  with the fraction that do not shown next to it),
 * the probability that a uniformly random erasure of each size m is
   correctable, from which the failure probability under i.i.d. erasure with
   rate e follows exactly (``analysis.bernoulli_erasure_curve``).
@@ -62,13 +63,20 @@ def main() -> None:
     res = spec.run(args.trajectories, seed=args.seed)
     print(res)
     k = res.mean("code_dimension")
-    d = res.mean("contiguous_distance")
+    d = res.mean("contiguous_distance")  # NaN (left out) where k = 0: no code, no distance
+    no_code = (res.values["code_dimension"] == 0).mean(axis=0)
     profile = res.mean("erasure_correctable_profile")  # (checkpoints, n + 1)
     rates = np.array([0.01, 0.02, 0.05, 0.1])
-    print(" layer      k/n    d    P_fail(e) for e = " + " ".join(f"{e:5.2f}" for e in rates))
+    print(
+        " layer      k/n  P(k=0)  d|k>0    P_fail(e) for e = "
+        + " ".join(f"{e:5.2f}" for e in rates)
+    )
     for i, layer in enumerate(res.checkpoint_layers):
         fail = analysis.bernoulli_erasure_curve(1.0 - profile[i], rates)
-        print(f"{layer:6d}  {k[i] / n:7.3f} {d[i]:5.1f}    " + " ".join(f"{f:5.3f}" for f in fail))
+        print(
+            f"{layer:6d}  {k[i] / n:7.3f}  {no_code[i]:6.3f}  {d[i]:5.1f}    "
+            + " ".join(f"{f:5.3f}" for f in fail)
+        )
     res.save(args.out)
     print(f"saved {args.out}")
 

@@ -27,6 +27,7 @@ which are the reference. :mod:`sparsegf2_v3.mipt` builds the standard setups.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Iterable
 
 import numpy as np
@@ -54,7 +55,8 @@ __all__ = [
 
 
 def _qubits(sim: Simulator, qubits: Iterable[int], what: str = "qubits") -> np.ndarray:
-    arr = np.fromiter((int(q) for q in qubits), dtype=np.int64)
+    # operator.index, as in Simulator: a fractional index is an error, never truncated
+    arr = np.fromiter((operator.index(q) for q in qubits), dtype=np.int64)
     if arr.size and (arr.min() < 0 or arr.max() >= sim.num_qubits):
         raise IndexError(f"{what} out of range for a {sim.num_qubits}-qubit simulator")
     if np.unique(arr).size != arr.size:
@@ -209,15 +211,23 @@ def contiguous_code_distance(
 ) -> int:
     """Shortest contiguous run of ``system`` (in the order given) whose erasure is not correctable.
 
-    Runs wrap around the end when ``periodic`` (a ring). Returns 0 when the
-    reference holds no logical information (code dimension 0).
+    Runs wrap around the end when ``periodic`` (a ring). Returns 0 when no
+    such run exists, i.e. when erasing the whole system loses no logical
+    information: in particular when the code dimension is 0, and when the
+    reference's information sits outside ``system`` (system plus reference
+    need not be a pure state here).
     """
     sys_arr = _qubits(sim, system, "system")
     r_arr = _qubits(sim, reference, "reference")
     if np.intersect1d(sys_arr, r_arr).size:
         raise ValueError("system and reference qubits must be disjoint")
     tab, n, ws = sim._state()
-    return int(_e.contiguous_distance(tab, n, ws, sys_arr, r_arr, bool(periodic)))
+    d = int(_e.contiguous_distance(tab, n, ws, sys_arr, r_arr, bool(periodic)))
+    # The kernel never tests the full run (it is uncorrectable whenever S u R is
+    # pure and the code is non-trivial); check it when nothing shorter was found.
+    if d == sys_arr.size and lost_logical_information(sim, sys_arr, r_arr) == 0:
+        return 0
+    return d
 
 
 def stabilizer_weights(sim: Simulator) -> np.ndarray:
@@ -249,8 +259,9 @@ def erasure_profile(
     * ``"mean_lost"``: average over samples;
     * ``"correctable_fraction"``: fraction of samples with I(R:E) = 0, per size.
 
-    :func:`sparsegf2_v3.analysis.bernoulli_erasure_curve` turns the last into
-    the failure probability under independent erasure with probability p.
+    ``analysis.bernoulli_erasure_curve(1 - correctable_fraction, p)`` is the
+    failure probability under independent erasure with probability p (passing
+    the fraction itself gives the success probability).
     """
     sys_arr = _qubits(sim, system, "system")
     r_arr = _qubits(sim, reference, "reference")

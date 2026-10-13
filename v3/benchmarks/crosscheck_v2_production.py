@@ -7,6 +7,14 @@ statistical: the purification-time distributions must agree (two-sample
 Kolmogorov-Smirnov test, censored times placed at T_max + 1). It also reports
 trajectories per second for each engine on one thread, and for v3 on all cores.
 
+Both engines are timed as a user runs them, from the prebuilt graph bank to the
+purification times: v2 over ``simulate_trajectory`` for every graph, v3 from
+building ``production_spec`` on the bank (validating every graph and preparing
+it for the engine, work that grows with the number of graphs, here one per
+trajectory) to the end of ``run``. Only the one-off Numba compilation is
+excluded, by a warm-up on a separate two-graph spec. ``v3_kernel_*`` rows give
+the engine alone (graph preparation excluded) for reference.
+
 Usage::
 
     python v3/benchmarks/crosscheck_v2_production.py --n 32 --beta 0.1 --graphs 2000
@@ -75,12 +83,24 @@ def compare(n: int, beta: float, p: float, num_graphs: int) -> dict:
     v2_seconds = time.perf_counter() - t0
     v2_tau = np.array([r.tau_p if r.event_observed else cap + 1 for r in v2])
 
-    spec = production_spec(n, beta, p, bank)
-    spec.run(2, seed=0)
-    numba.set_num_threads(1)
-    one = spec.run(num_graphs, seed=1)
+    production_spec(n, beta, p, bank[:2]).run(2, seed=0)  # JIT warm-up only
+
+    def v3_run(threads: int, repeats: int = 3):
+        """Build the spec on the bank and run it, timed end to end (median of fresh specs)."""
+        numba.set_num_threads(threads)
+        totals, kernels = [], []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            spec = production_spec(n, beta, p, bank)
+            result = spec.run(num_graphs, seed=1)
+            totals.append(time.perf_counter() - t0)
+            # graph preparation is now cached on the spec: the engine alone
+            kernels.append(spec.run(num_graphs, seed=1).elapsed_seconds)
+        return result, float(np.median(totals)), float(np.median(kernels))
+
+    one, one_seconds, one_kernel = v3_run(1)
+    allc, all_seconds, all_kernel = v3_run(numba.config.NUMBA_NUM_THREADS)
     numba.set_num_threads(numba.config.NUMBA_NUM_THREADS)
-    allc = spec.run(num_graphs, seed=1)
     assert np.array_equal(one.purification_layer, allc.purification_layer)
     v3_tau = np.where(one.purification_layer >= 0, one.purification_layer, cap + 1)
 
@@ -98,8 +118,10 @@ def compare(n: int, beta: float, p: float, num_graphs: int) -> dict:
         "ks_statistic": d,
         "ks_pvalue": pval,
         "v2_traj_per_s_1thread": num_graphs / v2_seconds,
-        "v3_traj_per_s_1thread": one.trajectories_per_second,
-        "v3_traj_per_s_all_threads": allc.trajectories_per_second,
+        "v3_traj_per_s_1thread": num_graphs / one_seconds,
+        "v3_traj_per_s_all_threads": num_graphs / all_seconds,
+        "v3_kernel_traj_per_s_1thread": num_graphs / one_kernel,
+        "v3_kernel_traj_per_s_all_threads": num_graphs / all_kernel,
         "threads": numba.config.NUMBA_NUM_THREADS,
     }
 
