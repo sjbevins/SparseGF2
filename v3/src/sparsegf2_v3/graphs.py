@@ -29,6 +29,7 @@ __all__ = [
     "lattice_2d",
     "newman_watts",
     "path",
+    "power_law_weights",
     "random_regular",
     "watts_strogatz",
 ]
@@ -192,6 +193,25 @@ def from_networkx(graph) -> np.ndarray:
             "networkx graph nodes must be exactly 0..n-1 (use nx.convert_node_labels_to_integers)"
         )
     return from_edges(graph.edges(), len(nodes))
+
+
+def power_law_weights(
+    edges: np.ndarray, n: int, alpha: float, *, periodic: bool = True
+) -> np.ndarray:
+    """Weights ``r**-alpha`` for each edge, with ``r`` the distance along a ring (or chain).
+
+    Combine with ``graphs.complete(n)`` and ``schedule="random_edges"`` to get
+    the long-range monitored circuits of Block et al. (PRL 128, 010604), where a
+    gate acts on a pair at distance ``r`` with probability proportional to
+    ``r**-alpha``. ``periodic`` uses the ring distance ``min(|i-j|, n-|i-j|)``.
+    """
+    edges = np.asarray(edges, dtype=np.int64)
+    d = np.abs(edges[:, 1] - edges[:, 0]).astype(np.float64)
+    if periodic:
+        d = np.minimum(d, n - d)
+    if np.any(d <= 0):
+        raise ValueError("edges must join distinct nodes")
+    return d ** (-float(alpha))
 
 
 def degrees(edges: np.ndarray, n: int) -> np.ndarray:

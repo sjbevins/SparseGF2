@@ -204,3 +204,101 @@ def test_argument_validation():
         ob.lost_logical_information(sim, [0, 1], [1])
     with pytest.raises(ValueError, match="sizes"):
         ob.random_erasure_statistics(sim, [0, 1], [2], [5], 3)
+
+
+# -- clipped gauge -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n", [1, 2, 6, 31, 64, 65, 100])
+def test_clipped_gauge_reproduces_every_bipartition(n, rng):
+    sim = _random_state(n, rng)
+    order = [int(q) for q in rng.permutation(n)]
+    left, right = ob.clipped_gauge(sim, order)
+    assert np.all((left >= 0) & (left <= right) & (right < n))
+    profile = ob.entropy_profile(sim, order)
+    crossing = np.array([np.sum((left < k) & (k <= right)) for k in range(n + 1)])
+    np.testing.assert_array_equal(crossing, 2 * profile)
+    # clipped gauge: at most two left endpoints and two right endpoints per site
+    assert np.bincount(left, minlength=n).max() <= 2
+    assert np.bincount(right, minlength=n).max() <= 2
+
+
+def test_clipped_gauge_of_known_states():
+    sim = Simulator(4)
+    left, right = ob.clipped_gauge(sim)
+    np.testing.assert_array_equal(left, right)  # product state: every stabilizer has length 1
+    np.testing.assert_array_equal(ob.stabilizer_length_distribution(sim), [0, 4, 0, 0, 0])
+    ghz = Simulator(4)
+    ghz.h(0)
+    ghz.cx(0, 1, 1, 2, 2, 3)
+    lengths = ob.stabilizer_length_distribution(ghz)
+    assert lengths[2] == 3 and lengths[4] == 1  # ZZ pairs and the XXXX string
+    with pytest.raises(ValueError, match="all qubits"):
+        ob.clipped_gauge(ghz, [0, 1])
+
+
+# -- erasure profile -----------------------------------------------------------------------
+
+
+def test_erasure_profile_matches_definition(rng):
+    n = 14
+    sim = _purification(n, rng, steps=5 * n, p=0.07)
+    system, reference = list(range(n)), list(range(n, 2 * n))
+    out = ob.erasure_profile(sim, system, reference, samples=8, seed=3)
+    lost = out["lost"]
+    k = ob.code_dimension(sim, reference)
+    assert lost.shape == (8, n + 1)
+    np.testing.assert_array_equal(lost[:, 0], 0)
+    np.testing.assert_array_equal(lost[:, n], 2 * k)
+    assert np.all(np.diff(lost, axis=1) >= 0)  # I(R:E) grows with E
+    np.testing.assert_allclose(out["correctable_fraction"], (lost == 0).mean(axis=0))
+    again = ob.erasure_profile(sim, system, reference, samples=8, seed=3)
+    np.testing.assert_array_equal(again["lost"], lost)
+    # every value is I(R:E) of some m-subset, so it lies within the min/max over all subsets
+    for m in (1, 2):
+        from itertools import combinations
+
+        values = [
+            ob.lost_logical_information(sim, list(c), reference) for c in combinations(system, m)
+        ]
+        assert min(values) <= lost[:, m].min() and lost[:, m].max() <= max(values)
+
+
+# -- analysis ------------------------------------------------------------------------------
+
+
+def test_kaplan_meier_known_answer():
+    from sparsegf2_v3 import analysis
+
+    # events at 1, 2, 2; censored at 3 and 3
+    km = analysis.kaplan_meier(np.array([1, 2, 2, 3, 3]), np.array([1, 1, 1, 0, 0], dtype=bool))
+    np.testing.assert_array_equal(km["times"], [1, 2])
+    np.testing.assert_allclose(km["survival"], [4 / 5, 4 / 5 * (1 - 2 / 4)])
+    np.testing.assert_array_equal(km["at_risk"], [5, 4])
+    no_censoring = analysis.kaplan_meier(np.array([3, 1, 2]), np.ones(3, dtype=bool))
+    np.testing.assert_allclose(no_censoring["survival"], [2 / 3, 1 / 3, 0])
+
+
+def test_bernoulli_erasure_curve():
+    from sparsegf2_v3 import analysis
+
+    n = 20
+    linear = np.arange(n + 1) / n  # per-size quantity m/n has mean p under Binomial(n, p)
+    np.testing.assert_allclose(
+        analysis.bernoulli_erasure_curve(linear, [0.0, 0.3, 1.0]), [0.0, 0.3, 1.0]
+    )
+    const = np.full(n + 1, 0.7)
+    assert analysis.bernoulli_erasure_curve(const, 0.42) == pytest.approx(0.7)
+    with pytest.raises(ValueError):
+        analysis.bernoulli_erasure_curve(const, 1.5)
+
+
+def test_mean_and_error_ignores_nan():
+    from sparsegf2_v3 import analysis
+
+    v = np.array([[1.0, 2.0], [3.0, np.nan], [5.0, 4.0]])
+    mean, err = analysis.mean_and_error(v)
+    np.testing.assert_allclose(mean, [3.0, 3.0])
+    np.testing.assert_allclose(
+        err, [np.std([1, 3, 5], ddof=1) / np.sqrt(3), np.std([2, 4], ddof=1) / np.sqrt(2)]
+    )

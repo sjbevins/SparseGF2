@@ -36,15 +36,18 @@ from sparsegf2_v3._kernel.rng import stream_key
 from sparsegf2_v3.simulator import Simulator
 
 __all__ = [
+    "clipped_gauge",
     "code_dimension",
     "contiguous_code_distance",
     "entropy",
     "entropy_profile",
     "erasure_is_correctable",
+    "erasure_profile",
     "lost_logical_information",
     "mutual_information",
     "random_erasure_statistics",
     "recovery_probability",
+    "stabilizer_length_distribution",
     "stabilizer_weights",
     "tripartite_information",
 ]
@@ -226,3 +229,75 @@ def stabilizer_weights(sim: Simulator) -> np.ndarray:
     """
     xs, zs, _ = sim.stabilizer_arrays()
     return (xs | zs).sum(axis=1).astype(np.int64)
+
+
+def erasure_profile(
+    sim: Simulator,
+    system: Iterable[int],
+    reference: Iterable[int],
+    samples: int = 10,
+    *,
+    seed=None,
+) -> dict[str, np.ndarray]:
+    """Logical information lost to random erasures of every size, in one pass per sample.
+
+    Each sample draws a uniformly random ordering of the system and erases its
+    prefixes, so ``lost[j, m]`` is I(R:E) for a uniformly random erasure of
+    ``m`` system qubits (``m = 0..len(system)``). Returns:
+
+    * ``"lost"``: shape ``(samples, len(system) + 1)``;
+    * ``"mean_lost"``: average over samples;
+    * ``"correctable_fraction"``: fraction of samples with I(R:E) = 0, per size.
+
+    :func:`sparsegf2_v3.analysis.bernoulli_erasure_curve` turns the last into
+    the failure probability under independent erasure with probability p.
+    """
+    sys_arr = _qubits(sim, system, "system")
+    r_arr = _qubits(sim, reference, "reference")
+    if np.intersect1d(sys_arr, r_arr).size:
+        raise ValueError("system and reference qubits must be disjoint")
+    if samples < 1:
+        raise ValueError("samples must be positive")
+    tab, n, ws = sim._state()
+    lost = np.zeros((int(samples), sys_arr.size + 1), dtype=np.int64)
+    _e.erasure_profiles(tab, n, ws, sys_arr, r_arr, int(samples), stream_key(seed), lost)
+    return {
+        "lost": lost,
+        "mean_lost": lost.mean(axis=0),
+        "correctable_fraction": (lost == 0).mean(axis=0),
+    }
+
+
+def clipped_gauge(
+    sim: Simulator, order: Iterable[int] | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Left and right endpoints of every stabilizer in the clipped gauge along a 1D order.
+
+    ``order`` must list all qubits (default ``0..n-1``); endpoints are positions
+    in that order. The clipped gauge is the generating set in which every
+    stabilizer is as short as possible from both ends; in it the entropy of the
+    first ``k`` qubits is half the number of stabilizers straddling the cut, and
+    the stabilizer lengths ``right - left + 1`` have a state-dependent (not
+    basis-dependent) distribution, a standard MIPT diagnostic (Li, Chen and
+    Fisher, PRB 98, 205136).
+    """
+    n = sim.num_qubits
+    arr = np.arange(n, dtype=np.int64) if order is None else _qubits(sim, order, "order")
+    if arr.size != n:
+        raise ValueError("the clipped gauge needs an ordering of all qubits")
+    tab, n, ws = sim._state()
+    left = np.zeros(n, dtype=np.int64)
+    right = np.zeros(n, dtype=np.int64)
+    _e.clipped_gauge(tab, n, ws, arr, left, right)
+    return left, right
+
+
+def stabilizer_length_distribution(
+    sim: Simulator, order: Iterable[int] | None = None
+) -> np.ndarray:
+    """Histogram of clipped-gauge stabilizer lengths: ``out[l]`` = number of length-``l`` generators.
+
+    ``out`` has length ``n + 1`` (index 0 is always 0).
+    """
+    left, right = clipped_gauge(sim, order)
+    return np.bincount(right - left + 1, minlength=sim.num_qubits + 1)

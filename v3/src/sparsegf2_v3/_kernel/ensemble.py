@@ -17,8 +17,16 @@ Random draws per trajectory, in order:
 1. single-reference partner (one draw, only if chosen at random);
 2. scramble pairs: per gate, ``a``, then ``b``, then the gate index;
 3. scramble layers, then dynamics layers, each via :func:`gen_layer`: per gate,
-   [edge index if edges are sampled], [orientation bit if enabled], gate index;
-   then (dynamics only) one uniform per system qubit for the measurement mask.
+   [edge: one integer draw, or one uniform draw if edges are weighted, if edges
+   are sampled], [orientation bit if enabled], gate index; then (dynamics only)
+   one uniform per system qubit for the measurement mask.
+
+Probes
+------
+Scalar probes write one number per checkpoint. Their qubit sets are stored
+flat in ``idx``: probe ``j``'s block starts at ``ptr[j]`` and holds up to three
+consecutive regions of lengths ``region_len[j, 0..2]``. Vector probes write
+``n_sys + 1`` numbers per checkpoint (entanglement profile, erasure profiles).
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from numba import njit, prange
 from sparsegf2_v3._kernel.bits import popcount
 from sparsegf2_v3._kernel.entropy import (
     contiguous_distance,
+    erasure_profile,
     mutual_information_with,
     prefix_entropies,
     region_entropy,
@@ -51,16 +60,37 @@ PROBE_LOST_INFORMATION = 3
 PROBE_ERASURE_MEAN_LOST = 4
 PROBE_ERASURE_CORRECTABLE = 5
 PROBE_MEAN_WEIGHT = 6
+PROBE_MUTUAL_INFORMATION = 7
+PROBE_TRIPARTITE = 8
+
+VPROBE_ENTROPY_PROFILE = 0
+VPROBE_ERASURE_LOST = 1
+VPROBE_ERASURE_CORRECTABLE = 2
+
+
+@njit(cache=True, inline="always")
+def _pick_weighted(cum, u):
+    """Smallest index e with u < cum[e] (binary search on a cumulative distribution)."""
+    lo = 0
+    hi = cum.shape[0] - 1
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if u < cum[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
 
 
 @njit(cache=True)
 def gen_layer(
-    rng, layer, schedule_kind, edges, color_ptr, color_idx, gates_per_layer, pool, n_sys, p,
-    with_measurements, orient, ga, gb, gg, mq,
+    rng, layer, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer, pool, n_sys,
+    p, with_measurements, orient, ga, gb, gg, mq,
 ):  # fmt: skip
     """Draw one layer: gates into (ga, gb, gg), measured qubits into mq. Returns (gates, meas)."""
     ng = 0
     num_edges = edges.shape[0]
+    weighted = edge_cum.shape[0] > 0
     base = 0
     if schedule_kind == SCHED_MATCHING:
         c = layer % (color_ptr.shape[0] - 1)
@@ -74,7 +104,10 @@ def gen_layer(
         if schedule_kind == SCHED_MATCHING:
             e = color_idx[base + j]
         elif schedule_kind == SCHED_RANDOM_EDGES:
-            e = next_below(rng, num_edges)
+            if weighted:
+                e = _pick_weighted(edge_cum, next_double(rng))
+            else:
+                e = next_below(rng, num_edges)
         else:
             e = j
         a = edges[e, 0]
@@ -120,25 +153,60 @@ def mean_weight(tab, n, ws):
 
 
 @njit(cache=True)
+def _entropy_of_union(tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, scratch, union_buf):
+    """S of the union of the regions selected by the bit mask ``which`` (bit r = region r)."""
+    m = 0
+    for r in range(3):
+        if (which >> r) & 1:
+            for t in range(lens[r]):
+                union_buf[m] = idx[starts[r] + t]
+                m += 1
+    return region_entropy(tab, n, ws, union_buf[:m], mask_buf, comp_buf, scratch)
+
+
+@njit(cache=True)
 def eval_probes(
-    tab, n, ws, n_sys, refs, kinds, ptr, idx, size_param, sample_param, order, periodic,
-    prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
+    tab, n, ws, n_sys, refs, kinds, ptr, region_len, idx, size_param, sample_param, order,
+    periodic, prng, out_row, mask_buf, comp_buf, scratch, union_buf, perm,
 ):  # fmt: skip
-    """Evaluate every probe on the current state into ``out_row``."""
+    """Evaluate every scalar probe on the current state into ``out_row``."""
+    starts = np.zeros(3, dtype=np.int64)
+    lens = np.zeros(3, dtype=np.int64)
+    region_buf = np.zeros(n, dtype=np.int64)
     for j in range(kinds.shape[0]):
         k = kinds[j]
+        s0 = ptr[j]
+        for r in range(3):
+            starts[r] = s0
+            lens[r] = region_len[j, r]
+            s0 += region_len[j, r]
         if k == PROBE_ENTROPY:
-            out_row[j] = region_entropy(
-                tab, n, ws, idx[ptr[j] : ptr[j + 1]], mask_buf, comp_buf, scratch
+            out_row[j] = _entropy_of_union(
+                tab, n, ws, idx, starts, lens, 1, mask_buf, comp_buf, scratch, union_buf
             )
         elif k == PROBE_CODE_DIMENSION:
             out_row[j] = region_entropy(tab, n, ws, refs, mask_buf, comp_buf, scratch)
         elif k == PROBE_CONTIGUOUS_DISTANCE:
             out_row[j] = contiguous_distance(tab, n, ws, order, refs, periodic)
         elif k == PROBE_LOST_INFORMATION:
+            for t in range(lens[0]):
+                region_buf[t] = idx[starts[0] + t]
             out_row[j] = mutual_information_with(
-                tab, n, ws, refs, idx[ptr[j] : ptr[j + 1]], mask_buf, comp_buf, scratch, union_buf
+                tab, n, ws, refs, region_buf[: lens[0]], mask_buf, comp_buf, scratch, union_buf
             )
+        elif k == PROBE_MUTUAL_INFORMATION or k == PROBE_TRIPARTITE:
+            # sum over nonempty subsets T of the regions of (-1)^(|T|+1) S(T)
+            num_regions = 2 if k == PROBE_MUTUAL_INFORMATION else 3
+            total = 0
+            for which in range(1, 1 << num_regions):
+                bits = 0
+                for r in range(num_regions):
+                    bits += (which >> r) & 1
+                s = _entropy_of_union(
+                    tab, n, ws, idx, starts, lens, which, mask_buf, comp_buf, scratch, union_buf
+                )
+                total += s if bits % 2 == 1 else -s
+            out_row[j] = total
         elif k == PROBE_ERASURE_MEAN_LOST or k == PROBE_ERASURE_CORRECTABLE:
             m = size_param[j]
             samples = sample_param[j]
@@ -162,6 +230,37 @@ def eval_probes(
 
 
 @njit(cache=True)
+def eval_vector_probes(
+    tab, n, ws, n_sys, refs, vkinds, vsamples, order, prng, out_block, perm, work
+):
+    """Evaluate every vector probe into ``out_block[v, :]`` (length n_sys + 1 each)."""
+    for v in range(vkinds.shape[0]):
+        k = vkinds[v]
+        if k == VPROBE_ENTROPY_PROFILE:
+            prefix_entropies(tab, n, ws, order, work)
+            for i in range(n_sys + 1):
+                out_block[v, i] = work[i]
+        else:
+            samples = vsamples[v]
+            for i in range(n_sys + 1):
+                out_block[v, i] = 0.0
+            for _ in range(samples):
+                for t in range(n_sys - 1):  # full Fisher-Yates shuffle of the system
+                    r = t + next_below(prng, n_sys - t)
+                    tmp = perm[t]
+                    perm[t] = perm[r]
+                    perm[r] = tmp
+                erasure_profile(tab, n, ws, perm, refs, work)
+                for i in range(n_sys + 1):
+                    if k == VPROBE_ERASURE_LOST:
+                        out_block[v, i] += work[i]
+                    elif work[i] == 0:
+                        out_block[v, i] += 1.0
+            for i in range(n_sys + 1):
+                out_block[v, i] /= samples
+
+
+@njit(cache=True)
 def _setup(
     tab, n_sys, ref_mode, partner, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2, ws
 ):
@@ -176,10 +275,10 @@ def _setup(
 
 @njit(parallel=True, cache=True)
 def run_ensemble(
-    n_sys, n_ref, ref_mode, fixed_partner, edges, color_ptr, color_idx, schedule_kind, gates_per_layer,
-    pool, p, layers, scramble_gates, scramble_layers, orient, checkpoints, stop_purified,
-    kinds, ptr, idx, size_param, sample_param, order, periodic, want_profile,
-    key_struct, key_probe, first, out_values, out_profile, out_tau, out_final, out_meas,
+    n_sys, n_ref, ref_mode, fixed_partner, edges, edge_cum, color_ptr, color_idx, schedule_kind,
+    gates_per_layer, pool, p, layers, scramble_gates, scramble_layers, orient, checkpoints,
+    stop_purified, kinds, ptr, region_len, idx, size_param, sample_param, vkinds, vsamples, order,
+    periodic, key_struct, key_probe, first, out_values, out_vectors, out_tau, out_final, out_meas,
     h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
 ):  # fmt: skip
     """Simulate ``out_values.shape[0]`` trajectories; see the module docstring."""
@@ -211,7 +310,7 @@ def run_ensemble(
         union_buf = np.zeros(n, dtype=np.int64)
         perm = np.arange(n_sys).astype(np.int64)
         refs = np.arange(n_sys, n).astype(np.int64)
-        profile = np.zeros(order.shape[0] + 1, dtype=np.int64)
+        work = np.zeros(n_sys + 1, dtype=np.int64)
 
         partner = fixed_partner
         if ref_mode == REF_SINGLE and fixed_partner < 0:
@@ -237,8 +336,8 @@ def run_ensemble(
             apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
         for s in range(scramble_layers):
             ng, _ = gen_layer(
-                rng, s, schedule_kind, edges, color_ptr, color_idx, gates_per_layer, pool, n_sys, p,
-                False, orient, ga, gb, gg, mq,
+                rng, s, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer,
+                pool, n_sys, p, False, orient, ga, gb, gg, mq,
             )  # fmt: skip
             for j in range(ng):
                 apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
@@ -251,8 +350,8 @@ def run_ensemble(
         for layer in range(layers + 1):
             if layer > 0:
                 ng, nm = gen_layer(
-                    rng, layer - 1, schedule_kind, edges, color_ptr, color_idx, gates_per_layer, pool,
-                    n_sys, p, True, orient, ga, gb, gg, mq,
+                    rng, layer - 1, schedule_kind, edges, edge_cum, color_ptr, color_idx,
+                    gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,
                 )  # fmt: skip
                 for j in range(ng):
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
@@ -262,13 +361,14 @@ def run_ensemble(
                 final = layer
             if ci < num_ck and checkpoints[ci] == layer:
                 eval_probes(
-                    tab, n, ws, n_sys, refs, kinds, ptr, idx, size_param, sample_param, order,
-                    periodic, prng, out_values[t, ci], mask_buf, comp_buf, scratch, union_buf, perm,
+                    tab, n, ws, n_sys, refs, kinds, ptr, region_len, idx, size_param,
+                    sample_param, order, periodic, prng, out_values[t, ci], mask_buf, comp_buf,
+                    scratch, union_buf, perm,
                 )  # fmt: skip
-                if want_profile:
-                    prefix_entropies(tab, n, ws, order, profile)
-                    for k in range(profile.shape[0]):
-                        out_profile[t, ci, k] = profile[k]
+                eval_vector_probes(
+                    tab, n, ws, n_sys, refs, vkinds, vsamples, order, prng, out_vectors[t, ci],
+                    perm, work,
+                )  # fmt: skip
                 if (
                     ref_mode != REF_NONE
                     and tau < 0
@@ -282,9 +382,9 @@ def run_ensemble(
         for c in range(ci, num_ck):
             for j in range(out_values.shape[2]):
                 out_values[t, c, j] = np.nan
-            if want_profile:
-                for k in range(out_profile.shape[2]):
-                    out_profile[t, c, k] = -1
+            for v in range(out_vectors.shape[2]):
+                for i in range(out_vectors.shape[3]):
+                    out_vectors[t, c, v, i] = np.nan
         out_tau[t] = tau
         out_final[t] = final
         out_meas[t] = num_meas
@@ -292,9 +392,9 @@ def run_ensemble(
 
 @njit(cache=True)
 def generate_ops(
-    n_sys, ref_mode, fixed_partner, edges, color_ptr, color_idx, schedule_kind, gates_per_layer, pool, p,
-    layers, scramble_gates, scramble_layers, orient, key_struct, trajectory,
-    out_ga, out_gb, out_gg, gate_ptr, out_mq, meas_ptr,
+    n_sys, ref_mode, fixed_partner, edges, edge_cum, color_ptr, color_idx, schedule_kind,
+    gates_per_layer, pool, p, layers, scramble_gates, scramble_layers, orient, key_struct,
+    trajectory, out_ga, out_gb, out_gg, gate_ptr, out_mq, meas_ptr,
 ):  # fmt: skip
     """Record trajectory ``trajectory``'s circuit (same draws as :func:`run_ensemble`).
 
@@ -326,8 +426,8 @@ def generate_ops(
     gate_ptr[block] = g_pos
     for s in range(scramble_layers):
         ng, _ = gen_layer(
-            rng, s, schedule_kind, edges, color_ptr, color_idx, gates_per_layer, pool, n_sys, p,
-            False, orient, ga, gb, gg, mq,
+            rng, s, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer, pool,
+            n_sys, p, False, orient, ga, gb, gg, mq,
         )  # fmt: skip
         for j in range(ng):
             out_ga[g_pos] = ga[j]
@@ -340,8 +440,8 @@ def generate_ops(
     meas_ptr[0] = 0
     for layer in range(layers):
         ng, nm = gen_layer(
-            rng, layer, schedule_kind, edges, color_ptr, color_idx, gates_per_layer, pool, n_sys, p,
-            True, orient, ga, gb, gg, mq,
+            rng, layer, schedule_kind, edges, edge_cum, color_ptr, color_idx, gates_per_layer,
+            pool, n_sys, p, True, orient, ga, gb, gg, mq,
         )  # fmt: skip
         for j in range(ng):
             out_ga[g_pos] = ga[j]

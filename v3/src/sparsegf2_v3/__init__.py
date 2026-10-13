@@ -13,7 +13,7 @@ Milestone 1 (this version) provides the foundations every later layer uses:
   Stim's names.
 """
 
-from sparsegf2_v3 import graphs, mipt, observables
+from sparsegf2_v3 import analysis, graphs, mipt, observables
 from sparsegf2_v3._version import __version__
 from sparsegf2_v3.circuit import (
     Circuit,
@@ -54,6 +54,7 @@ __all__ = [
     "Target",
     "__version__",
     "all_gates",
+    "analysis",
     "gate",
     "graphs",
     "mipt",

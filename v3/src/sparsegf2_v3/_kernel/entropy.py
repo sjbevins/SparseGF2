@@ -214,3 +214,133 @@ def random_erasure_stats(tab, n, ws, system, reference, sizes, samples, key, los
             lost[i, j] = mutual_information_with(
                 tab, n, ws, reference, perm[:m], mask_buf, comp_buf, scratch, union_buf
             )
+
+
+@njit(cache=True)
+def erasure_profile(tab, n, ws, order, reference, out):
+    """``out[m] = I(R : order[:m])`` for m = 0..len(order), in one incremental pass.
+
+    Uses I(R:E) = S(R) + rank(E) - rank(R u E) + |R| with both ranks grown one
+    qubit at a time; erasing a uniformly random ordering's prefixes gives
+    uniformly random erasures of every size at once.
+    """
+    cap = 64 * ws + 1
+    vec = np.zeros(ws, dtype=np.uint64)
+    e_basis = np.zeros((cap, ws), dtype=np.uint64)
+    e_owner = np.full(64 * ws, -1, dtype=np.int64)
+    e_num = np.zeros(1, dtype=np.int64)
+    re_basis = np.zeros((cap, ws), dtype=np.uint64)
+    re_owner = np.full(64 * ws, -1, dtype=np.int64)
+    re_num = np.zeros(1, dtype=np.int64)
+    num_ref = reference.shape[0]
+    rank_re = 0
+    for j in range(num_ref):
+        rank_re += basis_add_qubit(tab, reference[j], ws, re_basis, re_owner, re_num, vec)
+    s_r = rank_re - num_ref
+    rank_e = 0
+    out[0] = 0
+    for m in range(order.shape[0]):
+        q = order[m]
+        rank_e += basis_add_qubit(tab, q, ws, e_basis, e_owner, e_num, vec)
+        rank_re += basis_add_qubit(tab, q, ws, re_basis, re_owner, re_num, vec)
+        out[m + 1] = s_r + rank_e - rank_re + num_ref
+
+
+# -- clipped gauge ----------------------------------------------------------------------
+
+
+@njit(cache=True)
+def _rightmost_bit(row, words):
+    for w in range(words - 1, -1, -1):
+        if row[w] != ZERO:
+            x = row[w]
+            b = 63
+            while ((x >> np.uint64(b)) & np.uint64(1)) == ZERO:
+                b -= 1
+            return (w << 6) + b
+    return -1
+
+
+@njit(cache=True)
+def clipped_gauge(tab, n, ws, order, left, right):
+    """Endpoints of the stabilizers in the clipped gauge along ``order`` (all n qubits).
+
+    Rows are packed site-major (column ``2 s`` = x, ``2 s + 1`` = z at site
+    ``s`` of ``order``). Pass 1 (left gauge): eliminate column by column from
+    the left so every generator has a distinct leftmost column. Pass 2 (right
+    gauge): from the right, among generators sharing a rightmost column keep the
+    one with the largest leftmost column and add it to the others, which never
+    moves anyone's left endpoint. ``left[i]``/``right[i]`` receive the site
+    indices (positions in ``order``) of generator i's endpoints. In this gauge
+    ``S(order[:k]) = #{i : left[i] < k <= right[i]} / 2`` (Nahum et al.,
+    PRX 7, 031016; Li, Chen and Fisher, PRB 98, 205136).
+    """
+    num_cols = 2 * n
+    words = (num_cols + 63) // 64
+    rows = np.zeros((n, words), dtype=np.uint64)
+    for s in range(n):
+        q = order[s]
+        for col in range(2):
+            c = 2 * s + col
+            cw = c >> 6
+            cbit = np.uint64(1) << np.uint64(c & 63)
+            for r in range(n):
+                if (tab[2 * q + col, r >> 6] >> np.uint64(r & 63)) & np.uint64(1):
+                    rows[r, cw] |= cbit
+    left_col = np.full(n, -1, dtype=np.int64)
+    for c in range(num_cols):
+        cw = c >> 6
+        cbit = np.uint64(1) << np.uint64(c & 63)
+        pivot = -1
+        for r in range(n):
+            if left_col[r] < 0 and (rows[r, cw] & cbit) != ZERO:
+                pivot = r
+                break
+        if pivot < 0:
+            continue
+        left_col[pivot] = c
+        for r in range(n):
+            if r != pivot and left_col[r] < 0 and (rows[r, cw] & cbit) != ZERO:
+                for w in range(cw, words):
+                    rows[r, w] ^= rows[pivot, w]
+    rightmost = np.zeros(n, dtype=np.int64)
+    for r in range(n):
+        rightmost[r] = _rightmost_bit(rows[r], words)
+    right_col = np.full(n, -1, dtype=np.int64)
+    for c in range(num_cols - 1, -1, -1):
+        best = -1
+        for r in range(n):
+            if (
+                right_col[r] < 0
+                and rightmost[r] == c
+                and (best < 0 or left_col[r] > left_col[best])
+            ):
+                best = r
+        if best < 0:
+            continue
+        right_col[best] = c
+        top = (c >> 6) + 1
+        for r in range(n):
+            if r != best and right_col[r] < 0 and rightmost[r] == c:
+                for w in range(top):
+                    rows[r, w] ^= rows[best, w]
+                rightmost[r] = _rightmost_bit(rows[r], top)
+    for r in range(n):
+        left[r] = left_col[r] >> 1
+        right[r] = right_col[r] >> 1
+
+
+@njit(cache=True)
+def erasure_profiles(tab, n, ws, system, reference, samples, key, out):
+    """``out[j, m] = I(R : first m qubits of random ordering j of the system)``."""
+    rng = np.empty(4, dtype=np.uint64)
+    stream_state(key, 0, rng)
+    num_sys = system.shape[0]
+    perm = system.copy()
+    for j in range(samples):
+        for t in range(num_sys - 1):
+            r = t + next_below(rng, num_sys - t)
+            tmp = perm[t]
+            perm[t] = perm[r]
+            perm[r] = tmp
+        erasure_profile(tab, n, ws, perm, reference, out[j])

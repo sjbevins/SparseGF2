@@ -1,5 +1,22 @@
 # Changelog (SparseGF2 v3)
 
+## 3.0.0.dev6: literature-driven observables
+
+* New probes: `mutual_information`, `tripartite_information` (default: the
+  first three quarters of the system), and vector probes `entropy_profile`,
+  `erasure_lost_profile`, `erasure_correctable_profile` (I(R:E_m) for every
+  erasure size m in one incremental pass). `record_profile` is replaced by the
+  `entropy_profile()` probe; vector probes have shape
+  `(trajectories, checkpoints, n + 1)`.
+* Long-range circuits: `edge_weights` for `schedule="random_edges"` and
+  `graphs.power_law_weights` (P(r) ~ r^-alpha, Block et al.).
+* `EnsembleResult.survival()`: P(tau > layer) at every checkpoint.
+* Observables: `clipped_gauge`, `stabilizer_length_distribution`,
+  `erasure_profile`.
+* `sparsegf2_v3.analysis`: `kaplan_meier` (Greenwood errors),
+  `bernoulli_erasure_curve` (erasure threshold curves from per-size data),
+  `mean_and_error`.
+
 ## 3.0.0.dev5: the monitored-circuit ensemble engine
 
 * `sparsegf2_v3.graphs`: edge-array graphs (`cycle`, `path`, `complete`,

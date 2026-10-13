@@ -13,32 +13,34 @@ from sparsegf2_v3 import observables as ob
 
 
 def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
-    """Probe values, profiles and purification layer from running the exported circuit."""
+    """Probe values and purity at every tick, from running the exported circuit."""
     circuit = spec.circuit(trajectory, seed=seed)
     refs = spec.reference_qubits
     order = spec.system_order.tolist()
-    n = spec.num_system
 
     def probe(sim, p):
-        if p.kind == "entropy":
-            return sim.entropy(p.region)
-        if p.kind == "half_cut":
-            return sim.entropy(order[: n // 2])
+        if p.kind in ("entropy", "half_cut"):
+            return sim.entropy(p.regions[0])
+        if p.kind == "mutual_information":
+            return ob.mutual_information(sim, *p.regions)
+        if p.kind == "tripartite":
+            return ob.tripartite_information(sim, *p.regions)
         if p.kind == "code_dimension":
             return sim.entropy(refs)
         if p.kind == "contiguous_distance":
             return ob.contiguous_code_distance(sim, order, refs, periodic=spec.periodic)
         if p.kind == "lost_information":
-            return ob.lost_logical_information(sim, p.region, refs)
+            return ob.lost_logical_information(sim, p.regions[0], refs)
         if p.kind == "mean_weight":
             return ob.stabilizer_weights(sim).mean()
+        if p.kind == "entropy_profile":
+            return ob.entropy_profile(sim, order)
         raise AssertionError(p.kind)
 
     def observe(sim, tick):
-        values = [probe(sim, p) for p in spec.probes if not p.kind.startswith("erasure")]
-        profile = ob.entropy_profile(sim, order) if spec.record_profile else None
+        values = {p.name: probe(sim, p) for p in spec.probes if not p.kind.startswith("erasure")}
         pure = sim.entropy(refs) == 0 if refs else False
-        return values, profile, pure
+        return values, pure
 
     sim = Simulator(spec.num_qubits, phases=False, seed=0)
     observations = dict(sim.run(circuit, observe=observe).observations)
@@ -60,8 +62,10 @@ SPECS = {
             mipt.lost_information([0, 1, 5]),
             mipt.mean_stabilizer_weight(),
             mipt.entropy([2, 3, 13]),
+            mipt.entropy_profile(),
+            mipt.mutual_information([0, 1, 2], [6, 7, 8]),
+            mipt.tripartite_information(),
         ],
-        record_profile=True,
     ),
     "random_edges_ws_single_random_partner": dict(
         num_system=20,
@@ -72,7 +76,22 @@ SPECS = {
         reference="single",
         scramble_gates=30,
         checkpoints=3,
-        probes=[mipt.code_dimension(), mipt.half_cut_entropy()],
+        probes=[
+            mipt.code_dimension(),
+            mipt.half_cut_entropy(),
+            mipt.tripartite_information([0, 1], [5, 6], [10, 11, 12]),
+        ],
+    ),
+    "long_range_power_law": dict(
+        num_system=16,
+        edges=graphs.complete(16),
+        layers=10,
+        measurement_rate=0.15,
+        schedule="random_edges",
+        edge_weights=graphs.power_law_weights(graphs.complete(16), 16, 2.0),
+        reference="purification",
+        checkpoints="every_layer",
+        probes=[mipt.code_dimension(), mipt.entropy_profile()],
     ),
     "all_edges_complete_with_stop": dict(
         num_system=9,
@@ -96,10 +115,9 @@ SPECS = {
         gate_set=[0, 5, 77, 1000, 9999],
         random_orientation=True,
         checkpoints=[0, 1, 7, 15],
-        probes=[mipt.code_dimension(), mipt.contiguous_distance()],
+        probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.entropy_profile()],
         system_order=list(range(15, -1, -1)),
         periodic=False,
-        record_profile=True,
     ),
     "no_reference_word_boundary": dict(
         num_system=65,
@@ -119,21 +137,19 @@ def test_engine_matches_exported_circuits_exactly(name):
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
     result = spec.run(6, seed=seed)
-    exact = [j for j, p in enumerate(spec.probes) if not p.kind.startswith("erasure")]
     for t in range(6):
         obs = _replay(spec, t, seed)
         tau_expected = -1
         stopped = False
         for ci, layer in enumerate(spec.checkpoint_layers):
-            values, profile, pure = obs[int(layer)]
+            values, pure = obs[int(layer)]
             if stopped:
-                assert np.all(np.isnan(result.values[spec.probes[0].name][t, ci]))
+                for p in spec.probes:
+                    assert np.all(np.isnan(result.values[p.name][t, ci]))
                 continue
-            for j_out, j in enumerate(exact):
-                got = result.values[spec.probes[j].name][t, ci]
-                assert got == pytest.approx(values[j_out]), (spec.probes[j].name, t, int(layer))
-            if spec.record_profile:
-                np.testing.assert_array_equal(result.profiles[t, ci], profile)
+            for name, expected in values.items():
+                got = result.values[name][t, ci]
+                np.testing.assert_allclose(got, expected, err_msg=f"{name} t={t} layer={layer}")
             if pure and tau_expected < 0 and spec.reference != "none":
                 tau_expected = int(layer)
                 stopped = spec.stop_when_purified
@@ -176,6 +192,80 @@ def test_measurement_draws_give_common_random_numbers_across_rates():
 
     for a, b in zip(measured(lo), measured(hi), strict=True):
         assert a <= b
+
+
+def test_erasure_profile_probes():
+    n = 12
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=8,
+        measurement_rate=0.1,
+        reference="purification",
+        checkpoints=[0, 8],
+        probes=[
+            mipt.code_dimension(),
+            mipt.erasure_lost_profile(samples=6),
+            mipt.erasure_correctable_profile(samples=6),
+        ],
+    )
+    r = spec.run(10, seed=4)
+    lost = r.values["erasure_lost_profile"]
+    frac = r.values["erasure_correctable_profile"]
+    k = r.values["code_dimension"]
+    assert lost.shape == (10, 2, n + 1)
+    np.testing.assert_array_equal(lost[:, :, 0], 0)
+    np.testing.assert_allclose(lost[:, :, n], 2 * k)
+    np.testing.assert_array_equal(frac[:, :, 0], 1)
+    assert np.all(np.diff(lost, axis=2) >= -1e-12)  # mean of monotone curves is monotone
+    assert np.all(lost[:, 0, 1:] == 2 * np.arange(1, n + 1))  # fresh Bell pairs: 2 bits per qubit
+
+
+def test_long_range_weights_follow_power_law():
+    n = 32
+    edges = graphs.complete(n)
+    w = graphs.power_law_weights(edges, n, 2.0)
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=edges,
+        layers=400,
+        measurement_rate=0.0,
+        schedule="random_edges",
+        edge_weights=w,
+    )
+    c = spec.circuit(0, seed=1)
+    dists = []
+    for ins in c:
+        if ins.name == "CLIFFORD_2Q":
+            for a, b in zip(ins.targets[::2], ins.targets[1::2], strict=True):
+                d = abs(a.value - b.value)
+                dists.append(min(d, n - d))
+    dists = np.array(dists)
+    expected = np.zeros(n // 2 + 1)
+    for (a, b), wi in zip(edges, w, strict=True):
+        d = min(b - a, n - (b - a))
+        expected[d] += wi
+    expected /= expected.sum()
+    observed = np.bincount(dists, minlength=n // 2 + 1) / len(dists)
+    assert np.abs(observed - expected).max() < 0.02
+
+
+def test_survival_function():
+    spec = mipt.MonitoredCircuit(
+        num_system=8,
+        edges=graphs.cycle(8),
+        layers=40,
+        measurement_rate=0.3,
+        reference="single",
+        checkpoints="every_layer",
+        probes=[mipt.code_dimension()],
+    )
+    r = spec.run(200, seed=2)
+    layers, surv = r.survival()
+    np.testing.assert_array_equal(layers, np.arange(41))
+    assert surv[0] == 1.0 and np.all(np.diff(surv) <= 0)
+    # without stopping, S(t) equals the mean reference entropy (it is 0 or 1)
+    np.testing.assert_allclose(surv, r.mean("code_dimension"))
 
 
 def test_erasure_probes_are_consistent():
@@ -223,7 +313,6 @@ def test_save_and_load_round_trip(tmp_path):
     back = mipt.EnsembleResult.load(path)
     for name in r.values:
         np.testing.assert_array_equal(back.values[name], r.values[name])
-    np.testing.assert_array_equal(back.profiles, r.profiles)
     np.testing.assert_array_equal(back.purification_layer, r.purification_layer)
     assert back.seed_entropy == r.seed_entropy
     # the reloaded spec reproduces the run

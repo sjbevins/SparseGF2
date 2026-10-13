@@ -20,6 +20,7 @@ with probes, and run as many trajectories as you need::
     )
     result = spec.run(trajectories=100_000, seed=7)   # parallel over all cores
     result.purification_layer                          # tau per trajectory (-1 = censored)
+    layers, surviving = result.survival()              # P(tau > layer)
     spec.circuit(trajectory=3, seed=7)                 # the exact circuit of trajectory 3
 
 The protocol, step by step (qubits ``0..n-1`` are the system; references
@@ -37,8 +38,9 @@ follow):
 
    * ``"matching"``: cycle through an edge colouring of the graph (on an even
      ring this is the standard brickwork, alternating even and odd bonds);
-   * ``"random_edges"``: ``gates_per_layer`` edges drawn uniformly with
-     replacement;
+   * ``"random_edges"``: ``gates_per_layer`` edges drawn with replacement,
+     uniformly or with probabilities ``edge_weights`` (long-range circuits:
+     ``graphs.complete(n)`` with ``graphs.power_law_weights``);
    * ``"all_edges"``: every edge, in order.
 
    Each gate is a uniformly random two-qubit Clifford (or uniform over
@@ -56,13 +58,17 @@ Randomness: trajectory ``t`` of ``run(..., seed=s)`` is a deterministic function
 of ``(spec, s, t)``, independent of the thread count and of the other
 trajectories, so ensembles can be split into chunks (``first_trajectory``) and
 merged without changing any result. Graph disorder is separate: build the
-``edges`` with their own seed.
+``edges`` with their own seed. The measurement mask uses one uniform draw per
+qubit per layer whatever the rate, so runs at different ``measurement_rate``
+with the same seed share their random numbers (the measured set at a lower rate
+is a subset of that at a higher rate).
 """
 
 from __future__ import annotations
 
 import json
 import time
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -84,11 +90,16 @@ __all__ = [
     "code_dimension",
     "contiguous_distance",
     "entropy",
+    "entropy_profile",
     "erasure_correctable_fraction",
+    "erasure_correctable_profile",
     "erasure_lost_information",
+    "erasure_lost_profile",
     "half_cut_entropy",
     "lost_information",
     "mean_stabilizer_weight",
+    "mutual_information",
+    "tripartite_information",
 ]
 
 _SCHEDULES = {
@@ -112,24 +123,65 @@ _CX_INDEX = gate("CX").clifford.index()
 
 @dataclass(frozen=True)
 class Probe:
-    """Something to record at every checkpoint. Build one with the functions below."""
+    """Something to record at every checkpoint. Build one with the functions below.
+
+    Scalar probes record one number per checkpoint; vector probes (profiles)
+    record ``num_system + 1`` numbers, indexed by region size.
+    """
 
     kind: str
     name: str
-    region: tuple[int, ...] = ()
+    regions: tuple[tuple[int, ...], ...] = ()
     size: int = 0
     samples: int = 0
+
+    @property
+    def is_vector(self) -> bool:
+        return self.kind in _VECTOR_KINDS
+
+
+def _region(qubits: Sequence[int]) -> tuple[int, ...]:
+    return tuple(int(q) for q in qubits)
 
 
 def entropy(region: Sequence[int], name: str | None = None) -> Probe:
     """Entanglement entropy S(A) of the given qubits (system and/or reference)."""
-    region = tuple(int(q) for q in region)
-    return Probe("entropy", name or f"entropy{list(region)}", region)
+    r = _region(region)
+    return Probe("entropy", name or f"entropy{list(r)}", (r,))
 
 
 def half_cut_entropy() -> Probe:
     """S of the first half of the system (in ``system_order``), the usual MIPT order parameter."""
     return Probe("half_cut", "half_cut_entropy")
+
+
+def mutual_information(a: Sequence[int], b: Sequence[int], name: str | None = None) -> Probe:
+    """I(A:B) = S(A) + S(B) - S(AB) for disjoint regions."""
+    ra, rb = _region(a), _region(b)
+    return Probe(
+        "mutual_information", name or f"mutual_information{[list(ra), list(rb)]}", (ra, rb)
+    )
+
+
+def tripartite_information(
+    a: Sequence[int] | None = None,
+    b: Sequence[int] | None = None,
+    c: Sequence[int] | None = None,
+    name: str | None = None,
+) -> Probe:
+    """I3(A:B:C) for disjoint regions; the standard critical-point locator.
+
+    Without arguments, A, B, C are the first three quarters of the system in
+    ``system_order`` (the usual choice for a ring split into four arcs).
+    """
+    if a is None and b is None and c is None:
+        return Probe("tripartite", name or "tripartite_information")
+    if a is None or b is None or c is None:
+        raise ValueError("give all three regions, or none for the default quarters")
+    regions = (_region(a), _region(b), _region(c))
+    return Probe(
+        "tripartite", name or f"tripartite_information{[list(r) for r in regions]}", regions
+    )
 
 
 def code_dimension() -> Probe:
@@ -144,8 +196,8 @@ def contiguous_distance() -> Probe:
 
 def lost_information(region: Sequence[int], name: str | None = None) -> Probe:
     """I(R:E) for a fixed set E of system qubits: logical information lost by erasing E."""
-    region = tuple(int(q) for q in region)
-    return Probe("lost_information", name or f"lost_information{list(region)}", region)
+    r = _region(region)
+    return Probe("lost_information", name or f"lost_information{list(r)}", (r,))
 
 
 def erasure_lost_information(size: int, samples: int = 100, name: str | None = None) -> Probe:
@@ -160,7 +212,7 @@ def erasure_lost_information(size: int, samples: int = 100, name: str | None = N
 
 
 def erasure_correctable_fraction(size: int, samples: int = 100, name: str | None = None) -> Probe:
-    """Fraction of ``samples`` random erasures of ``size`` system qubits that are correctable (I(R:E) = 0)."""
+    """Fraction of ``samples`` random erasures of ``size`` system qubits that are correctable."""
     return Probe(
         "erasure_correctable",
         name or f"erasure_correctable_fraction[{size}]",
@@ -175,22 +227,58 @@ def mean_stabilizer_weight() -> Probe:
     return Probe("mean_weight", "mean_stabilizer_weight")
 
 
-_NEEDS_REFERENCE = {
-    "code_dimension",
-    "contiguous_distance",
-    "lost_information",
-    "erasure_mean_lost",
-    "erasure_correctable",
+def entropy_profile() -> Probe:
+    """Vector: ``S(system_order[:k])`` for every k = 0..n (entanglement of every bipartition)."""
+    return Probe("entropy_profile", "entropy_profile")
+
+
+def erasure_lost_profile(samples: int = 10, name: str | None = None) -> Probe:
+    """Vector: mean I(R:E_m) over random erasures E_m of every size m = 0..n.
+
+    Each sample erases the prefixes of one uniformly random ordering of the
+    system, which gives a uniformly random erasure of every size in a single
+    incremental pass.
+    """
+    return Probe("erasure_lost_profile", name or "erasure_lost_profile", (), 0, int(samples))
+
+
+def erasure_correctable_profile(samples: int = 10, name: str | None = None) -> Probe:
+    """Vector: fraction of random erasures of each size m = 0..n that are correctable.
+
+    Feed it to :func:`sparsegf2_v3.analysis.bernoulli_erasure_curve` to get the
+    failure probability when each qubit is erased independently with
+    probability p.
+    """
+    return Probe(
+        "erasure_correctable_profile", name or "erasure_correctable_profile", (), 0, int(samples)
+    )
+
+
+_VECTOR_KINDS = {
+    "entropy_profile": _ens.VPROBE_ENTROPY_PROFILE,
+    "erasure_lost_profile": _ens.VPROBE_ERASURE_LOST,
+    "erasure_correctable_profile": _ens.VPROBE_ERASURE_CORRECTABLE,
 }
-_PROBE_CODE = {
+_SCALAR_KINDS = {
     "entropy": _ens.PROBE_ENTROPY,
     "half_cut": _ens.PROBE_ENTROPY,
+    "mutual_information": _ens.PROBE_MUTUAL_INFORMATION,
+    "tripartite": _ens.PROBE_TRIPARTITE,
     "code_dimension": _ens.PROBE_CODE_DIMENSION,
     "contiguous_distance": _ens.PROBE_CONTIGUOUS_DISTANCE,
     "lost_information": _ens.PROBE_LOST_INFORMATION,
     "erasure_mean_lost": _ens.PROBE_ERASURE_MEAN_LOST,
     "erasure_correctable": _ens.PROBE_ERASURE_CORRECTABLE,
     "mean_weight": _ens.PROBE_MEAN_WEIGHT,
+}
+_NEEDS_REFERENCE = {
+    "code_dimension",
+    "contiguous_distance",
+    "lost_information",
+    "erasure_mean_lost",
+    "erasure_correctable",
+    "erasure_lost_profile",
+    "erasure_correctable_profile",
 }
 
 
@@ -214,10 +302,11 @@ class MonitoredCircuit:
         Number of dynamics layers.
     measurement_rate
         Probability that each system qubit is measured (Z basis) in each layer.
-    schedule, gates_per_layer
+    schedule, gates_per_layer, edge_weights
         How gates are placed in a layer: ``"matching"`` (default),
-        ``"random_edges"`` (``gates_per_layer`` edges with replacement; default
-        ``n // 2``) or ``"all_edges"``.
+        ``"random_edges"`` (``gates_per_layer`` edges with replacement, default
+        ``n // 2``, uniform or proportional to ``edge_weights``) or
+        ``"all_edges"``.
     reference, reference_partner
         ``"none"`` (default), ``"purification"`` or ``"single"``; for
         ``"single"``, the Bell partner is a system qubit index or ``"random"``
@@ -239,12 +328,9 @@ class MonitoredCircuit:
     stop_when_purified
         End each trajectory at the first checkpoint where the reference is pure.
     system_order, periodic
-        Qubit ordering used by the half-cut entropy, the entanglement profile
-        and the contiguous distance (default ``0..n-1``), and whether contiguous
-        runs wrap around.
-    record_profile
-        Also record the entanglement profile ``S(system_order[:k])`` for every
-        ``k`` at each checkpoint.
+        Qubit ordering used by the half-cut entropy, default tripartite regions,
+        entanglement profile and contiguous distance (default ``0..n-1``), and
+        whether contiguous runs wrap around.
     """
 
     num_system: int
@@ -253,6 +339,7 @@ class MonitoredCircuit:
     measurement_rate: float
     schedule: str = "matching"
     gates_per_layer: int | None = None
+    edge_weights: np.ndarray | None = None
     reference: str = "none"
     reference_partner: int | str = "random"
     scramble_gates: int = 0
@@ -264,18 +351,17 @@ class MonitoredCircuit:
     stop_when_purified: bool = False
     system_order: Sequence[int] | None = None
     periodic: bool = True
-    record_profile: bool = False
     _compiled: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         n = int(self.num_system)
         if n < 2:
             raise ValueError("num_system must be at least 2")
-        edges = from_edges(self.edges, n)
+        raw_edges = np.asarray(self.edges, dtype=np.int64).reshape(-1, 2)
+        edges = from_edges(raw_edges, n)
         if len(edges) == 0:
             raise ValueError("the graph has no edges")
         object.__setattr__(self, "num_system", n)
-        object.__setattr__(self, "edges", edges)
         if self.layers < 0:
             raise ValueError("layers must be non-negative")
         if not 0.0 <= self.measurement_rate <= 1.0:
@@ -284,6 +370,21 @@ class MonitoredCircuit:
             raise ValueError(f"schedule must be one of {list(_SCHEDULES)}, got {self.schedule!r}")
         if self.gates_per_layer is not None and self.schedule != "random_edges":
             raise ValueError("gates_per_layer only applies to schedule='random_edges'")
+        if self.edge_weights is not None:
+            if self.schedule != "random_edges":
+                raise ValueError("edge_weights only applies to schedule='random_edges'")
+            weights = np.asarray(self.edge_weights, dtype=np.float64).ravel()
+            if weights.shape != (len(raw_edges),) or len(raw_edges) != len(edges):
+                raise ValueError(
+                    "edge_weights needs one weight per edge of an already normalised edge "
+                    "list (pass edges from sparsegf2_v3.graphs)"
+                )
+            if np.any(weights < 0) or not np.isfinite(weights).all() or weights.sum() <= 0:
+                raise ValueError("edge_weights must be finite, non-negative and not all zero")
+            if not np.array_equal(raw_edges, edges):
+                raise ValueError("edge_weights requires edges in normalised order (sorted, a < b)")
+            object.__setattr__(self, "edge_weights", weights)
+        object.__setattr__(self, "edges", edges)
         if self.schedule == "random_edges":
             gpl = n // 2 if self.gates_per_layer is None else int(self.gates_per_layer)
             if gpl < 0:
@@ -317,38 +418,64 @@ class MonitoredCircuit:
             raise ValueError("system_order must be a permutation of the system qubits")
         object.__setattr__(self, "system_order", order)
         object.__setattr__(self, "checkpoints", self._resolve_checkpoints(self.checkpoints))
-        probes = tuple(self.probes)
-        names = [p.name for p in probes]
+        object.__setattr__(self, "probes", tuple(self._resolve_probe(p) for p in self.probes))
+        names = [p.name for p in self.probes]
         if len(set(names)) != len(names):
             raise ValueError(f"probe names must be unique, got {names}")
-        for p in probes:
-            if not isinstance(p, Probe):
-                raise TypeError("probes must be created with the mipt probe functions")
-            if p.kind in _NEEDS_REFERENCE and self.reference == "none":
-                raise ValueError(
-                    f"probe {p.name!r} needs a reference (reference='purification' or 'single')"
-                )
-            if p.kind in ("lost_information",) and any(not 0 <= q < n for q in p.region):
-                raise ValueError(f"probe {p.name!r}: erased qubits must be system qubits")
-            if p.kind == "entropy" and any(not 0 <= q < self.num_qubits for q in p.region):
-                raise ValueError(f"probe {p.name!r}: region out of range")
-            if p.kind == "entropy" and len(set(p.region)) != len(p.region):
-                raise ValueError(f"probe {p.name!r}: region has duplicates")
-            if p.kind in ("erasure_mean_lost", "erasure_correctable") and not (
-                0 <= p.size <= n and p.samples >= 1
-            ):
-                raise ValueError(f"probe {p.name!r}: need 0 <= size <= {n} and samples >= 1")
-        object.__setattr__(self, "probes", probes)
         if self.stop_when_purified and self.reference == "none":
             raise ValueError("stop_when_purified needs a reference")
+
+    def _resolve_probe(self, p: Probe) -> Probe:
+        """Validate a probe and fill in default regions."""
+        if not isinstance(p, Probe):
+            raise TypeError("probes must be created with the mipt probe functions")
+        n = self.num_system
+        order = self.system_order.tolist()
+        if p.kind in _NEEDS_REFERENCE and self.reference == "none":
+            raise ValueError(
+                f"probe {p.name!r} needs a reference (reference='purification' or 'single')"
+            )
+        if p.kind == "half_cut":
+            return replace(p, regions=(tuple(order[: n // 2]),))
+        if p.kind == "tripartite" and not p.regions:
+            if n < 4:
+                raise ValueError("default tripartite regions need at least 4 system qubits")
+            q = n // 4
+            return replace(
+                p, regions=(tuple(order[:q]), tuple(order[q : 2 * q]), tuple(order[2 * q : 3 * q]))
+            )
+        if p.regions:
+            flat = [q for r in p.regions for q in r]
+            limit = n if p.kind == "lost_information" else self.num_qubits
+            if any(not 0 <= q < limit for q in flat):
+                what = "system qubits" if p.kind == "lost_information" else "valid qubit indices"
+                raise ValueError(f"probe {p.name!r}: regions must contain {what}")
+            if len(set(flat)) != len(flat):
+                raise ValueError(
+                    f"probe {p.name!r}: regions must be disjoint and without duplicates"
+                )
+        if p.kind in ("erasure_mean_lost", "erasure_correctable") and not (
+            0 <= p.size <= n and p.samples >= 1
+        ):
+            raise ValueError(f"probe {p.name!r}: need 0 <= size <= {n} and samples >= 1")
+        if p.kind in ("erasure_lost_profile", "erasure_correctable_profile") and p.samples < 1:
+            raise ValueError(f"probe {p.name!r}: samples must be at least 1")
+        if p.kind not in _SCALAR_KINDS and p.kind not in _VECTOR_KINDS:
+            raise ValueError(f"unknown probe kind {p.kind!r}")
+        return p
 
     def _resolve_checkpoints(self, spec) -> np.ndarray:
         if isinstance(spec, np.ndarray) and spec.dtype == np.int64 and spec.ndim == 1:
             layers = spec
-        elif spec == "final":
-            layers = np.array([self.layers], dtype=np.int64)
-        elif spec == "every_layer":
-            layers = np.arange(self.layers + 1, dtype=np.int64)
+        elif isinstance(spec, str):
+            if spec == "final":
+                layers = np.array([self.layers], dtype=np.int64)
+            elif spec == "every_layer":
+                layers = np.arange(self.layers + 1, dtype=np.int64)
+            else:
+                raise ValueError(
+                    f"checkpoints must be 'final', 'every_layer', a stride or a list, got {spec!r}"
+                )
         elif isinstance(spec, (int, np.integer)):
             if spec < 1:
                 raise ValueError("a checkpoint stride must be positive")
@@ -382,9 +509,19 @@ class MonitoredCircuit:
     def checkpoint_layers(self) -> np.ndarray:
         return self.checkpoints
 
-    def with_edges(self, edges: np.ndarray) -> MonitoredCircuit:
+    @property
+    def scalar_probes(self) -> list[Probe]:
+        return [p for p in self.probes if not p.is_vector]
+
+    @property
+    def vector_probes(self) -> list[Probe]:
+        return [p for p in self.probes if p.is_vector]
+
+    def with_edges(
+        self, edges: np.ndarray, edge_weights: np.ndarray | None = None
+    ) -> MonitoredCircuit:
         """The same protocol on another graph (e.g. a new graph-disorder realization)."""
-        return replace(self, edges=edges, _compiled={})
+        return replace(self, edges=edges, edge_weights=edge_weights, _compiled={})
 
     def _arrays(self) -> dict:
         if not self._compiled:
@@ -392,22 +529,32 @@ class MonitoredCircuit:
             color_ptr = np.zeros(len(colors) + 1, dtype=np.int64)
             color_ptr[1:] = np.cumsum([len(c) for c in colors])
             color_idx = np.concatenate(colors).astype(np.int64) if colors else np.zeros(0, np.int64)
-            ptr = [0]
-            idx: list[int] = []
-            n = self.num_system
-            half = self.system_order[: n // 2].tolist()
-            for p in self.probes:
-                region = half if p.kind == "half_cut" else list(p.region)
-                idx.extend(region)
+            scalars = self.scalar_probes
+            ptr, idx = [], []
+            region_len = np.zeros((len(scalars), 3), dtype=np.int64)
+            for j, p in enumerate(scalars):
                 ptr.append(len(idx))
+                for r, region in enumerate(p.regions[:3]):
+                    idx.extend(region)
+                    region_len[j, r] = len(region)
+            vectors = self.vector_probes
+            if self.edge_weights is None:
+                edge_cum = np.zeros(0, dtype=np.float64)
+            else:
+                edge_cum = np.cumsum(self.edge_weights / self.edge_weights.sum())
+                edge_cum[-1] = 1.0
             self._compiled.update(
                 color_ptr=color_ptr,
                 color_idx=color_idx,
-                kinds=np.array([_PROBE_CODE[p.kind] for p in self.probes], dtype=np.int64),
+                edge_cum=edge_cum,
+                kinds=np.array([_SCALAR_KINDS[p.kind] for p in scalars], dtype=np.int64),
                 ptr=np.array(ptr, dtype=np.int64),
+                region_len=region_len,
                 idx=np.array(idx, dtype=np.int64),
-                size=np.array([p.size for p in self.probes], dtype=np.int64),
-                samples=np.array([p.samples for p in self.probes], dtype=np.int64),
+                size=np.array([p.size for p in scalars], dtype=np.int64),
+                samples=np.array([p.samples for p in scalars], dtype=np.int64),
+                vkinds=np.array([_VECTOR_KINDS[p.kind] for p in vectors], dtype=np.int64),
+                vsamples=np.array([p.samples for p in vectors], dtype=np.int64),
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
             )
@@ -431,13 +578,12 @@ class MonitoredCircuit:
         if trajectories < 0:
             raise ValueError("trajectories must be non-negative")
         a = self._arrays()
-        keys = _keys(seed)
+        key_struct, key_probe = _keys(seed)
         num_ck = len(self.checkpoints)
-        values = np.zeros((trajectories, num_ck, len(self.probes)), dtype=np.float64)
-        prof_len = self.num_system + 1
-        profiles = np.zeros(
-            (trajectories, num_ck, prof_len) if self.record_profile else (trajectories, 0, 0),
-            dtype=np.int64,
+        scalars, vectors = self.scalar_probes, self.vector_probes
+        values = np.zeros((trajectories, num_ck, len(scalars)), dtype=np.float64)
+        vec_values = np.zeros(
+            (trajectories, num_ck, len(vectors), self.num_system + 1), dtype=np.float64
         )
         tau = np.zeros(trajectories, dtype=np.int64)
         final = np.zeros(trajectories, dtype=np.int64)
@@ -447,16 +593,19 @@ class MonitoredCircuit:
             with threads(num_threads):
                 _ens.run_ensemble(
                     self.num_system, self.num_reference, _REFERENCES[self.reference], a["partner"],
-                    self.edges, a["color_ptr"], a["color_idx"], _SCHEDULES[self.schedule], a["gpl"],
-                    self.gate_set, float(self.measurement_rate), int(self.layers),
-                    int(self.scramble_gates), int(self.scramble_layers), bool(self.random_orientation),
-                    self.checkpoints, bool(self.stop_when_purified), a["kinds"], a["ptr"], a["idx"],
-                    a["size"], a["samples"], self.system_order, bool(self.periodic),
-                    bool(self.record_profile), keys[0], keys[1], int(first_trajectory),
-                    values, profiles, tau, final, meas,
+                    self.edges, a["edge_cum"], a["color_ptr"], a["color_idx"],
+                    _SCHEDULES[self.schedule], a["gpl"], self.gate_set,
+                    float(self.measurement_rate), int(self.layers), int(self.scramble_gates),
+                    int(self.scramble_layers), bool(self.random_orientation), self.checkpoints,
+                    bool(self.stop_when_purified), a["kinds"], a["ptr"], a["region_len"], a["idx"],
+                    a["size"], a["samples"], a["vkinds"], a["vsamples"], self.system_order,
+                    bool(self.periodic), key_struct, key_probe, int(first_trajectory),
+                    values, vec_values, tau, final, meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
+        out = {p.name: values[:, :, j] for j, p in enumerate(scalars)}
+        out.update({p.name: vec_values[:, :, v, :] for v, p in enumerate(vectors)})
         return EnsembleResult(
             spec=self,
             seed_entropy=_entropy_of(seed),
@@ -464,8 +613,7 @@ class MonitoredCircuit:
                 first_trajectory, first_trajectory + trajectories, dtype=np.int64
             ),
             checkpoint_layers=self.checkpoints.copy(),
-            values={p.name: values[:, :, j] for j, p in enumerate(self.probes)},
-            profiles=profiles if self.record_profile else None,
+            values={p.name: out[p.name] for p in self.probes},
             purification_layer=tau if self.reference != "none" else None,
             final_layer=final,
             num_measurements=meas,
@@ -481,7 +629,7 @@ class MonitoredCircuit:
         sees the state after layer ``t``.
         """
         a = self._arrays()
-        keys = _keys(seed)
+        key_struct, _ = _keys(seed)
         n = self.num_system
         max_gates = max(a["gpl"], len(self.edges), self.scramble_gates, 1)
         total_gate_blocks = 1 + self.scramble_layers + self.layers
@@ -494,10 +642,11 @@ class MonitoredCircuit:
         mq = np.zeros(self.layers * n, dtype=np.int64)
         meas_ptr = np.zeros(self.layers + 1, dtype=np.int64)
         partner = _ens.generate_ops(
-            n, _REFERENCES[self.reference], a["partner"], self.edges, a["color_ptr"], a["color_idx"],
-            _SCHEDULES[self.schedule], a["gpl"], self.gate_set, float(self.measurement_rate),
-            int(self.layers), int(self.scramble_gates), int(self.scramble_layers),
-            bool(self.random_orientation), keys[0], int(trajectory), ga, gb, gg, gate_ptr, mq, meas_ptr,
+            n, _REFERENCES[self.reference], a["partner"], self.edges, a["edge_cum"], a["color_ptr"],
+            a["color_idx"], _SCHEDULES[self.schedule], a["gpl"], self.gate_set,
+            float(self.measurement_rate), int(self.layers), int(self.scramble_gates),
+            int(self.scramble_layers), bool(self.random_orientation), key_struct, int(trajectory),
+            ga, gb, gg, gate_ptr, mq, meas_ptr,
         )  # fmt: skip
         c = Circuit()
         if self.reference == "purification":
@@ -542,6 +691,22 @@ def _entropy_of(seed):
 # ---------------------------------------------------------------------------
 
 
+_SPEC_FIELDS = (
+    "num_system",
+    "layers",
+    "measurement_rate",
+    "schedule",
+    "gates_per_layer",
+    "reference",
+    "reference_partner",
+    "scramble_gates",
+    "scramble_layers",
+    "random_orientation",
+    "stop_when_purified",
+    "periodic",
+)
+
+
 @dataclass
 class EnsembleResult:
     """Everything an ensemble run produced. Arrays have one row per trajectory.
@@ -549,11 +714,10 @@ class EnsembleResult:
     Attributes
     ----------
     values
-        ``values[probe_name]`` has shape ``(trajectories, checkpoints)``.
-        Entries after a trajectory stopped (``stop_when_purified``) are NaN.
-    profiles
-        ``(trajectories, checkpoints, n + 1)`` entanglement profiles if
-        ``record_profile`` was set (-1 after a stop), else ``None``.
+        ``values[probe_name]`` has shape ``(trajectories, checkpoints)`` for
+        scalar probes and ``(trajectories, checkpoints, num_system + 1)`` for
+        vector probes. Entries after a trajectory stopped
+        (``stop_when_purified``) are NaN.
     purification_layer
         First checkpoint layer at which the reference was pure, or -1 if it
         never was (right-censored at the last checkpoint). ``None`` without a
@@ -569,7 +733,6 @@ class EnsembleResult:
     trajectories: np.ndarray
     checkpoint_layers: np.ndarray
     values: dict[str, np.ndarray]
-    profiles: np.ndarray | None
     purification_layer: np.ndarray | None
     final_layer: np.ndarray
     num_measurements: np.ndarray
@@ -595,8 +758,27 @@ class EnsembleResult:
     def mean(self, name: str) -> np.ndarray:
         """Average of a probe over trajectories at each checkpoint (ignoring stopped ones)."""
         v = self.values[name]
-        with np.errstate(invalid="ignore"):
-            return np.nanmean(v, axis=0) if v.size else np.full(v.shape[1], np.nan)
+        if v.shape[0] == 0:
+            return np.full(v.shape[1:], np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns after stops
+            return np.nanmean(v, axis=0)
+
+    def survival(self) -> tuple[np.ndarray, np.ndarray]:
+        """Survival function of the purification time at the checkpoints.
+
+        Returns ``(layers, S)`` with ``S[i] = P(tau > layers[i])``, the fraction
+        of trajectories whose reference is still mixed after that layer. Every
+        trajectory is observed up to the last checkpoint, so this is exact
+        (censoring only affects layers beyond the last checkpoint); with a
+        reference-qubit picture ``S(t)`` equals the mean reference entropy.
+        """
+        if self.purification_layer is None:
+            raise ValueError("survival needs a reference (purification or single)")
+        tau = self.purification_layer
+        layers = self.checkpoint_layers
+        alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
+        return layers.copy(), alive.mean(axis=1)
 
     def __repr__(self) -> str:
         return (
@@ -610,24 +792,20 @@ class EnsembleResult:
         """Write the arrays and run metadata to a compressed ``.npz`` file."""
         spec = self.spec
         meta = {
+            "format": "sparsegf2_v3.EnsembleResult/1",
             "seed_entropy": self.seed_entropy,
             "elapsed_seconds": self.elapsed_seconds,
-            "probes": [p.__dict__ for p in spec.probes],
-            "spec": {
-                "num_system": spec.num_system,
-                "layers": spec.layers,
-                "measurement_rate": spec.measurement_rate,
-                "schedule": spec.schedule,
-                "gates_per_layer": spec.gates_per_layer,
-                "reference": spec.reference,
-                "reference_partner": spec.reference_partner,
-                "scramble_gates": spec.scramble_gates,
-                "scramble_layers": spec.scramble_layers,
-                "random_orientation": spec.random_orientation,
-                "stop_when_purified": spec.stop_when_purified,
-                "periodic": spec.periodic,
-                "record_profile": spec.record_profile,
-            },
+            "probes": [
+                {
+                    "kind": p.kind,
+                    "name": p.name,
+                    "regions": [list(r) for r in p.regions],
+                    "size": p.size,
+                    "samples": p.samples,
+                }
+                for p in spec.probes
+            ],
+            "spec": {k: getattr(spec, k) for k in _SPEC_FIELDS},
         }
         arrays = {
             "edges": spec.edges,
@@ -638,10 +816,10 @@ class EnsembleResult:
             "final_layer": self.final_layer,
             "num_measurements": self.num_measurements,
         }
+        if spec.edge_weights is not None:
+            arrays["edge_weights"] = spec.edge_weights
         for name, v in self.values.items():
             arrays[f"value::{name}"] = v
-        if self.profiles is not None:
-            arrays["profiles"] = self.profiles
         if self.purification_layer is not None:
             arrays["purification_layer"] = self.purification_layer
         np.savez_compressed(path, __meta__=np.array(json.dumps(meta)), **arrays)
@@ -653,37 +831,34 @@ class EnsembleResult:
             meta = json.loads(str(z["__meta__"]))
             s = meta["spec"]
             probes = [
-                Probe(p["kind"], p["name"], tuple(p["region"]), p["size"], p["samples"])
+                Probe(
+                    p["kind"],
+                    p["name"],
+                    tuple(tuple(r) for r in p["regions"]),
+                    p["size"],
+                    p["samples"],
+                )
                 for p in meta["probes"]
             ]
             spec = MonitoredCircuit(
-                num_system=s["num_system"],
                 edges=z["edges"],
-                layers=s["layers"],
-                measurement_rate=s["measurement_rate"],
-                schedule=s["schedule"],
-                gates_per_layer=s["gates_per_layer"] if s["schedule"] == "random_edges" else None,
-                reference=s["reference"],
-                reference_partner=s["reference_partner"],
-                scramble_gates=s["scramble_gates"],
-                scramble_layers=s["scramble_layers"],
                 gate_set=z["gate_set"],
-                random_orientation=s["random_orientation"],
+                system_order=z["system_order"],
+                edge_weights=z["edge_weights"] if "edge_weights" in z.files else None,
                 checkpoints=z["checkpoint_layers"].astype(np.int64),
                 probes=probes,
-                stop_when_purified=s["stop_when_purified"],
-                system_order=z["system_order"],
-                periodic=s["periodic"],
-                record_profile=s["record_profile"],
+                **{
+                    k: s[k]
+                    for k in _SPEC_FIELDS
+                    if not (k == "gates_per_layer" and s["schedule"] != "random_edges")
+                },
             )
-            values = {p.name: z[f"value::{p.name}"] for p in probes}
             return cls(
                 spec=spec,
                 seed_entropy=meta["seed_entropy"],
                 trajectories=z["trajectories"],
                 checkpoint_layers=z["checkpoint_layers"],
-                values=values,
-                profiles=z["profiles"] if "profiles" in z.files else None,
+                values={p.name: z[f"value::{p.name}"] for p in probes},
                 purification_layer=z["purification_layer"]
                 if "purification_layer" in z.files
                 else None,
@@ -714,7 +889,6 @@ class EnsembleResult:
             trajectories=cat(lambda r: r.trajectories),
             checkpoint_layers=first.checkpoint_layers,
             values={k: np.concatenate([r.values[k] for r in results]) for k in first.values},
-            profiles=cat(lambda r: r.profiles),
             purification_layer=cat(lambda r: r.purification_layer),
             final_layer=cat(lambda r: r.final_layer),
             num_measurements=cat(lambda r: r.num_measurements),
