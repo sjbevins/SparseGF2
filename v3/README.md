@@ -424,6 +424,7 @@ the sign tracking, the randomness contract and the validation strategy.
 | [`docs/DESIGN.md`](docs/DESIGN.md) | architecture, kernel, decisions, roadmap |
 | [`docs/LITERATURE.md`](docs/LITERATURE.md) | the literature review behind the feature set (protocols, observables, codes, erasure, graphs) |
 | [`docs/AUDIT.md`](docs/AUDIT.md) | the audit of v2 this version responds to |
+| [`docs/MIGRATING_FROM_V2.md`](docs/MIGRATING_FROM_V2.md) | moving scripts and the production protocols from v2, gate-index conversion, reproducibility |
 | [`AGENTS.md`](AGENTS.md), [`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md) | running SparseGF2 from AI agents (MCP, CLI, JSON API) |
 | [`examples/`](examples/) | complete study scripts |
 | [`benchmarks/`](benchmarks/) | the speed comparison, the v2 cross-check and the figure data |
