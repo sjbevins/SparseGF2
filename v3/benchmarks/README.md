@@ -24,11 +24,14 @@ python v3/benchmarks/make_figures.py
 
 ## How the simulator comparison is kept fair
 
-* **Same circuits.** Every simulator runs identical gates (each random
-  two-qubit Clifford is expanded with Stim's `Tableau.to_circuit("elimination")`
-  into H, S and CX for the simulators that take gate lists) and identical
-  measurement locations. SparseGF2 applies each Clifford as one fused gate,
-  which is part of what it offers.
+* **Same circuits.** Every simulator runs identical two-qubit Cliffords and
+  identical measurement locations. SparseGF2 applies each random Clifford as
+  one fused gate (`CLIFFORD_2Q`), which is part of what it offers. Stim gets
+  each Clifford in its tightest form, at most four of its named single-qubit
+  Cliffords plus one of CX / ISWAP / SWAP (4.9 gates on average, against 12.7
+  for `Tableau.to_circuit("elimination")`), with each layer's gates batched
+  into a few instructions; all 11,520 decompositions are checked against the
+  Clifford's tableau. Qiskit Aer and Cirq get the H/S/CX elimination form.
 * **Each simulator's fastest documented path.** Stim runs one prebuilt
   `stim.Circuit` through `TableauSimulator.do_circuit`, measurements batched
   per layer. Qiskit Aer runs a prebuilt `QuantumCircuit` with
