@@ -17,10 +17,12 @@ RANDOM_KINDS = ("erasure_first_failure", "erasure_lost_profile")  # checked sepa
 
 
 def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
-    """Probe values and purity at every tick, from running the exported circuit."""
+    """Purity at every tick and each probe's value at its own layers, from running the
+    exported circuit."""
     circuit = spec.circuit(trajectory, seed=seed)
     refs = spec.reference_qubits
     order = spec.system_order.tolist()
+    probe_layers = {p.name: set(spec.probe_layers(p.name).tolist()) for p in spec.probes}
 
     def probe(sim, p):
         if p.kind in ("entropy", "half_cut"):
@@ -51,13 +53,28 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
         raise AssertionError(p.kind)
 
     def observe(sim, tick):
-        values = {p.name: probe(sim, p) for p in spec.probes if p.kind not in RANDOM_KINDS}
+        values = {
+            p.name: probe(sim, p)
+            for p in spec.probes
+            if p.kind not in RANDOM_KINDS and tick in probe_layers[p.name]
+        }
         pure = sim.entropy(refs) == 0 if refs else False
         return values, pure
 
     sim = Simulator(spec.num_qubits, phases=False, seed=0)
     observations = dict(sim.run(circuit, observe=observe).observations)
     return observations
+
+
+def _code_probes(region: list[int], layers: int) -> list[mipt.Probe]:
+    """The code probes of the specs with references above 64 qubits."""
+    return [
+        mipt.code_dimension(),
+        mipt.lost_information(region),
+        mipt.uncorrectable_region_counts(2, checkpoints=[0, layers // 2, layers]),
+        mipt.contiguous_distance(),
+        mipt.code_snapshot(checkpoints=[0, layers]),
+    ]
 
 
 SPECS = {
@@ -197,7 +214,96 @@ SPECS = {
         checkpoints="every_layer",
         probes=[mipt.half_cut_entropy(), mipt.entropy([0, 64])],
     ),
+    # References above 64 qubits and at the 64-bit word boundaries. The lost_information
+    # region crosses qubit 64 wherever the system has one (n > 64); for n <= 64 the
+    # references (qubits n .. 2n - 1) cross it instead. At rate 0.03 some single-reference
+    # trajectories purify (k = 0) and some keep their code.
+    "purification_n40_80_qubits": dict(
+        num_system=40,
+        edges=graphs.watts_strogatz(40, 4, 0.2, seed=40),
+        layers=8,
+        measurement_rate=0.2,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 20, 39], 8),
+    ),
+    "single_n70_partner_64": dict(
+        num_system=70,
+        edges=graphs.watts_strogatz(70, 4, 0.2, seed=70),
+        layers=8,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        reference_partner=64,
+        checkpoints="every_layer",
+        probes=_code_probes(list(range(60, 68)), 8),
+    ),
+    "purification_n63": dict(
+        num_system=63,
+        edges=graphs.watts_strogatz(63, 4, 0.2, seed=63),
+        layers=6,
+        measurement_rate=0.2,
+        schedule="random_edges",
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 31, 62], 6),
+    ),
+    "purification_n64": dict(
+        num_system=64,
+        edges=graphs.cycle(64),
+        layers=6,
+        measurement_rate=0.2,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 62, 63], 6),
+    ),
+    "purification_n65": dict(
+        num_system=65,
+        edges=graphs.cycle(65),
+        layers=6,
+        measurement_rate=0.2,
+        schedule="all_edges",
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64], 6),
+    ),
+    "single_n127_partner_63": dict(
+        num_system=127,
+        edges=graphs.cycle(127),
+        layers=4,
+        measurement_rate=0.03,
+        reference="single",
+        reference_partner=63,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 126], 4),
+    ),
+    "single_n128_partner_64": dict(
+        num_system=128,
+        edges=graphs.cycle(128),
+        layers=4,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        reference_partner=64,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 127], 4),
+    ),
+    "single_n129_random_partner": dict(
+        num_system=129,
+        edges=graphs.watts_strogatz(129, 4, 0.2, seed=129),
+        layers=4,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        scramble_gates=16,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 127, 128], 4),
+    ),
 }
+
+# Trajectories replayed per spec: 6, or fewer for the specs above 64 qubits, whose
+# replays count every 1- and 2-qubit erasure in Python.
+REPLAYED = {name: 3 for name in SPECS if name.startswith(("purification_n", "single_n"))}
 
 
 @pytest.mark.parametrize("name", list(SPECS))
@@ -210,8 +316,9 @@ def test_engine_matches_exported_circuits_exactly(name):
     """
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
-    result = spec.run(6, seed=seed)
-    for t in range(6):
+    trajectories = REPLAYED.get(name, 6)
+    result = spec.run(trajectories, seed=seed)
+    for t in range(trajectories):
         obs = _replay(spec, t, seed)
         tau_expected = -1
         for layer in spec.checkpoint_layers:
