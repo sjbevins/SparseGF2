@@ -5,7 +5,7 @@ import json
 import pytest
 
 from sparsegf2.agent import stacks
-from sparsegf2.agent.registry import REGISTRY, Param, ToolDef
+from sparsegf2.agent.registry import Param, ToolDef
 
 
 def _t(name, stack, long_running=False, params=(), requires=()):
@@ -138,9 +138,6 @@ def test_presets_file_is_well_formed():
     )
 
 
-@pytest.mark.skipif(
-    not {"job_status", "help_topic"} <= set(REGISTRY), reason="tools land in Tasks 14-15"
-)
 def test_cli_save_show_delete(tmp_path, capsys):
     from sparsegf2 import cli
 
