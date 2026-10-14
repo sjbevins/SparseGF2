@@ -5,6 +5,7 @@ suite fails at collection time instead of silently skipping comparisons (the v2
 suite lost half its coverage that way).
 """
 
+import os
 import zlib
 
 import numpy as np
@@ -25,3 +26,35 @@ def rng(request) -> np.random.Generator:
     and different tests draw different numbers."""
     # crc32, not hash(): str hashes are salted per process and would not repeat.
     return np.random.default_rng(zlib.crc32(request.node.nodeid.encode()))
+
+
+# ---------------------------------------------------------------------------
+# No silent skips. With SPARSEGF2_NO_SKIPS=1 (set in CI) any skipped test fails
+# the session, except the docs test on a machine without bash.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_SKIP_REASONS = {"no working bash"}
+_skips: list[tuple[str, str]] = []
+
+
+def _skip_reason(report) -> str:
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple):  # (path, line, "Skipped: reason")
+        return str(longrepr[2]).removeprefix("Skipped: ")
+    return str(longrepr)
+
+
+def pytest_runtest_logreport(report):
+    if report.skipped and not hasattr(report, "wasxfail"):
+        _skips.append((report.nodeid, _skip_reason(report)))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if os.environ.get("SPARSEGF2_NO_SKIPS") != "1":
+        return
+    bad = [(n, r) for n, r in _skips if r not in _ALLOWED_SKIP_REASONS]
+    if bad:
+        print("\nSPARSEGF2_NO_SKIPS=1 and these tests were skipped:")
+        for nodeid, reason in bad:
+            print(f"  {nodeid}: {reason}")
+        session.exitstatus = 1
