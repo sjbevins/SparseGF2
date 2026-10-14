@@ -83,7 +83,6 @@ Use the virtual environment from section 1 of [`GETTING_STARTED.md`](GETTING_STA
 ```sh
 git clone https://github.com/sjbevins/SparseGF2
 cd SparseGF2
-git checkout v3                                 # until the 3.0 promotion is merged into main
 python -m venv .venv                            # Python 3.11 or newer
 source .venv/bin/activate                       # Windows: .venv\Scripts\activate
 pip install -e ".[mcp]"                         # the simulator plus the MCP server
