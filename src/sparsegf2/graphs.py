@@ -12,7 +12,9 @@ every platform and every version of numpy or networkx.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
 
@@ -26,11 +28,16 @@ __all__ = [
     "erdos_renyi",
     "from_edges",
     "from_networkx",
+    "MAX_STATS_NODES",
     "lattice_2d",
+    "load",
     "newman_watts",
     "path",
     "power_law_weights",
     "random_regular",
+    "save",
+    "shortcut_fraction",
+    "stats",
     "watts_strogatz",
 ]
 
@@ -251,3 +258,189 @@ def edge_coloring(edges: np.ndarray, n: int) -> list[np.ndarray]:
         colours_at[b].add(c)
     num = int(colour_of.max()) + 1 if len(edges) else 0
     return [np.flatnonzero(colour_of == c) for c in range(num)]
+
+
+MAX_STATS_NODES = 4096
+
+
+def _adjacency(edges: np.ndarray, n: int) -> np.ndarray:
+    adj = np.zeros((n, n))
+    adj[edges[:, 0], edges[:, 1]] = 1.0
+    adj[edges[:, 1], edges[:, 0]] = 1.0
+    return adj
+
+
+def _csr(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    a = np.concatenate([edges[:, 0], edges[:, 1]])
+    b = np.concatenate([edges[:, 1], edges[:, 0]])
+    order = np.argsort(a, kind="stable")
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    indptr[1:] = np.cumsum(np.bincount(a, minlength=n))
+    return indptr, b[order].astype(np.int64)
+
+
+def stats(edges: np.ndarray, n: int) -> dict:
+    """Spectral, distance and clustering statistics of one graph on ``n`` nodes.
+
+    ``lambda2``: the algebraic connectivity, i.e. the second-smallest
+    eigenvalue of the Laplacian (0 when disconnected). ``connected``.
+    ``mean_path_length``: the mean shortest-path length over ordered pairs of
+    distinct nodes (NaN when disconnected). ``clustering``: the average local
+    clustering coefficient, with nodes of degree < 2 counting 0. Then
+    ``degree_min``, ``degree_mean`` and ``degree_max``. Dense linear algebra,
+    so ``n <= MAX_STATS_NODES``.
+    """
+    from sparsegf2._kernel.graphstats import path_length_sum
+
+    n = int(n)
+    if n > MAX_STATS_NODES:
+        raise ValueError(
+            f"graph statistics take at most {MAX_STATS_NODES} nodes (dense linear algebra), got n = {n}"
+        )
+    e = from_edges(np.asarray(edges, dtype=np.int64).reshape(-1, 2), n)
+    deg = degrees(e, n)
+    adj = _adjacency(e, n)
+    lam = np.linalg.eigvalsh(np.diag(adj.sum(axis=1)) - adj)
+    lambda2 = float(max(lam[1], 0.0)) if n > 1 else 0.0
+    triangles = ((adj @ adj) * adj).sum(axis=1) / 2.0
+    k = adj.sum(axis=1)
+    possible = k * (k - 1) / 2.0
+    local = np.divide(triangles, possible, out=np.zeros(n), where=possible > 0)
+    indptr, indices = _csr(e, n)
+    total, pairs = path_length_sum(indptr, indices, n)
+    connected = bool(pairs == n * (n - 1))
+    return {
+        "lambda2": lambda2,
+        "connected": connected,
+        "mean_path_length": float(total / pairs) if connected and pairs else float("nan"),
+        "clustering": float(local.mean()) if n else 0.0,
+        "degree_min": int(deg.min()) if n else 0,
+        "degree_mean": float(deg.mean()) if n else 0.0,
+        "degree_max": int(deg.max()) if n else 0,
+    }
+
+
+def shortcut_fraction(edges: np.ndarray, n: int, k: int) -> float:
+    """Fraction of edges whose ring distance exceeds k/2: the shortcuts of a ring-based graph.
+
+    ``k`` is the ring lattice's total degree (``watts_strogatz`` /
+    ``newman_watts``), so its own edges reach k/2 sites each way.
+    """
+    if k % 2:
+        raise ValueError(f"k must be even (k/2 neighbours per side), got {k}")
+    e = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    if not len(e):
+        return 0.0
+    r = np.abs(e[:, 0] - e[:, 1])
+    r = np.minimum(r, n - r)
+    return float(np.mean(r > k // 2))
+
+
+def _checked(edges, n: int, where: str) -> np.ndarray:
+    arr = np.asarray(edges, dtype=np.int64)
+    if arr.size == 0:
+        return np.zeros((0, 2), dtype=np.int64)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError(f"{where}: edges must be [a, b] pairs")
+    bad = arr[(arr < 0) | (arr >= n)]
+    if bad.size:
+        raise ValueError(f"{where}: node {int(bad[0])} outside [0, {n})")
+    loops = np.flatnonzero(arr[:, 0] == arr[:, 1])
+    if loops.size:
+        raise ValueError(f"{where}: self-loop at node {int(arr[loops[0], 0])}")
+    return arr
+
+
+def _normalised(arr: np.ndarray, weights, where: str):
+    oriented = np.sort(arr, axis=1)
+    order = np.lexsort((oriented[:, 1], oriented[:, 0]))
+    ranked = oriented[order]
+    if len(ranked) > 1:
+        same = np.flatnonzero(np.all(ranked[1:] == ranked[:-1], axis=1))
+        if same.size:
+            a, b = ranked[same[0]]
+            raise ValueError(f"{where}: repeated edge ({int(a)}, {int(b)})")
+    if weights is None:
+        return ranked, None
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if w.shape != (len(arr),):
+        raise ValueError(f"{where}: {w.size} weights for {len(arr)} edges")
+    return ranked, w[order]
+
+
+def save(path, graphs_, num_nodes: int, weights=None) -> Path:
+    """Save a graph collection to ``.json`` or ``.npz`` (the format follows the suffix).
+
+    ``graphs_`` is one edge array or a list of them; ``weights`` (optional)
+    is one array per graph, one weight per edge, in the order of its edges.
+    """
+    path = Path(path)
+    gs = [graphs_] if isinstance(graphs_, np.ndarray) and np.ndim(graphs_) == 2 else list(graphs_)
+    ws = None if weights is None else list(weights)
+    n = int(num_nodes)
+    pairs = [
+        _normalised(_checked(g, n, f"graph {i}"), None if ws is None else ws[i], f"graph {i}")
+        for i, g in enumerate(gs)
+    ]
+    if path.suffix == ".json":
+        doc = {"num_nodes": n, "graphs": [e.tolist() for e, _ in pairs]}
+        if ws is not None:
+            doc["weights"] = [w.tolist() for _, w in pairs]
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    elif path.suffix == ".npz":
+        edges = np.concatenate([e for e, _ in pairs]) if pairs else np.zeros((0, 2), np.int64)
+        ptr = np.cumsum([0] + [len(e) for e, _ in pairs]).astype(np.int64)
+        arrays = {"num_nodes": np.int64(n), "edges": edges, "ptr": ptr}
+        if ws is not None:
+            arrays["weights"] = np.concatenate([w for _, w in pairs])
+        with path.open("wb") as fh:
+            np.savez(fh, **arrays)
+    else:
+        raise ValueError(f"graph files end in .json or .npz, got {path.name!r}")
+    return path
+
+
+def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
+    """Load a collection saved by :func:`save` (or written by hand in the same format).
+
+    JSON: ``{"num_nodes": n, "graphs": [[[a, b], ...], ...], "weights": [[w, ...], ...]}``,
+    or ``"edges"`` for a single graph. NPZ: ``num_nodes``, ``edges`` (E x 2), ``ptr``
+    (G + 1 offsets; optional for one graph), optionally ``weights`` (E). Returns
+    ``(num_nodes, graphs, weights or None)`` with edges normalised as by
+    :func:`from_edges` and the weights permuted with them.
+    """
+    path = Path(path)
+    if path.suffix == ".json":
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if "num_nodes" not in doc:
+            raise ValueError(f"{path.name}: missing num_nodes")
+        raw = doc.get("graphs") or ([doc["edges"]] if "edges" in doc else None)
+        if raw is None:
+            raise ValueError(f"{path.name}: give 'graphs' (a list of edge lists) or 'edges'")
+        weights = doc.get("weights")
+        if weights is not None and "edges" in doc and "graphs" not in doc:
+            weights = [weights]
+    elif path.suffix == ".npz":
+        with np.load(path, allow_pickle=False) as z:
+            if "num_nodes" not in z or "edges" not in z:
+                raise ValueError(f"{path.name}: needs arrays num_nodes and edges")
+            doc = {"num_nodes": int(z["num_nodes"])}
+            edges = z["edges"]
+            ptr = z["ptr"] if "ptr" in z else np.array([0, len(edges)])
+            raw = [edges[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
+            flat_w = z.get("weights")
+            weights = (
+                None
+                if flat_w is None
+                else [flat_w[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
+            )
+    else:
+        raise ValueError(f"graph files end in .json or .npz, got {path.name!r}")
+    n = int(doc["num_nodes"])
+    out_g, out_w = [], []
+    for i, g in enumerate(raw):
+        where = f"{path.name}, graph {i}"
+        e, w = _normalised(_checked(g, n, where), None if weights is None else weights[i], where)
+        out_g.append(e)
+        out_w.append(w)
+    return n, out_g, (out_w if weights is not None else None)

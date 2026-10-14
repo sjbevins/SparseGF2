@@ -276,3 +276,90 @@ def test_erasure_tolerance_edge_cases():
         analysis.erasure_tolerance(np.full((4, 20), 3), 9, 0.1, exact_counts=np.zeros((2, 2)))
     with pytest.raises(ValueError, match=r"\[0, C\(n, m\)\]"):
         analysis.exact_failure_by_size([-1, 0], 9)
+
+
+def test_contiguous_distance_matches_the_engine_probe():
+    from sparsegf2 import graphs, mipt
+
+    n = 16
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=40,
+        measurement_rate=0.1,
+        reference="single",
+        reference_partner=0,
+        scramble_gates=128,
+        probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.code_snapshot()],
+    )
+    res = spec.run(40, seed=3)
+    k = res.values["code_dimension"][:, -1]
+    engine = res.values["contiguous_distance"][:, -1]
+    for t in range(res.num_trajectories):
+        code = res.code(t, 0)
+        if k[t] > 0:
+            assert code.contiguous_distance() == engine[t]
+        else:
+            assert code.contiguous_distance() == 0
+    # Guard against a vacuous test: the engine must produce distances above 1.
+    assert np.nanmax(engine[k > 0]) > 1
+
+
+def test_contiguous_distance_respects_order_and_periodic():
+    code = StabilizerCode(["XXXX", "ZZZZ"])  # any pair is uncorrectable
+    assert code.contiguous_distance() == 2
+    assert code.contiguous_distance([3, 2, 1, 0], periodic=False) == 2
+    with pytest.raises(ValueError, match="permutation"):
+        code.contiguous_distance([0, 0, 1, 2])
+
+
+def _rref(m):
+    m = (np.asarray(m) % 2).astype(np.uint8)
+    r = 0
+    for c in range(m.shape[1]):
+        nz = np.flatnonzero(m[r:, c])
+        if not nz.size:
+            continue
+        p = r + nz[0]
+        m[[r, p]] = m[[p, r]]
+        others = np.flatnonzero(m[:, c])
+        m[others[others != r]] ^= m[r]
+        r += 1
+        if r == m.shape[0]:
+            break
+    return m[:r]
+
+
+def test_from_simulator_equals_the_engine_code_snapshot():
+    import sparsegf2 as sg
+
+    n = 12
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=10,
+        measurement_rate=0.2,
+        reference="purification",
+        probes=[mipt.code_snapshot()],
+    )
+    res = spec.run(6, seed=5)
+    for t in range(6):
+        sim = sg.Simulator(spec.num_qubits, phases=False, seed=0)
+        sim.run(spec.circuit(t, seed=5))
+        mine = StabilizerCode.from_simulator(sim, reference=range(n, 2 * n))
+        engine = res.code(t, 0)
+        assert mine.num_qubits == n and mine.num_logical == engine.num_logical
+        np.testing.assert_array_equal(
+            _rref(mine.stabilizer_matrix()), _rref(engine.stabilizer_matrix())
+        )
+
+
+def test_from_simulator_fresh_purification_state_has_no_stabilizers():
+    import sparsegf2 as sg
+
+    sim = sg.Simulator(4, phases=False)
+    for q in (0, 1):
+        sim.h(q)
+        sim.cx(q, q + 2)
+    code = StabilizerCode.from_simulator(sim, reference=[2, 3])
+    assert (code.num_qubits, code.num_logical, code.num_stabilizers) == (2, 2, 0)

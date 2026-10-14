@@ -110,6 +110,7 @@ from sparsegf2.graphs import edge_coloring, from_edges
 
 __all__ = [
     "EnsembleResult",
+    "RANDOMNESS_CONTRACT",
     "MonitoredCircuit",
     "Probe",
     "code_dimension",
@@ -138,6 +139,12 @@ _REFERENCES = {
 }
 _H_INDEX = gate("H").clifford.index()
 _CX_INDEX = gate("CX").clifford.index()
+
+#: Version of the engine's random streams. Trajectory t of run(seed=s) is a
+#: function of (protocol, s, t) only; bump this whenever a change to the
+#: engine changes which circuit or which random numbers a trajectory gets, so
+#: saved trajectory records refuse to replay across the change.
+RANDOMNESS_CONTRACT = 1
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +915,23 @@ class MonitoredCircuit:
             elapsed_seconds=elapsed,
             snapshots=snapshots,
         )
+
+    def replay(self, trajectory: int, *, seed, probes=None, checkpoints=None) -> EnsembleResult:
+        """Trajectory ``trajectory`` of ``run(seed=seed)`` again, with other probes or checkpoints.
+
+        Probes and checkpoints never change a trajectory's circuit or random
+        numbers, so this is exactly that trajectory, observed differently: a
+        one-row :class:`EnsembleResult`. This is how a trajectory is probed at
+        new depths after the fact.
+        """
+        trajectory = _integer(trajectory, "trajectory")
+        self._check_trajectories(trajectory, 1)
+        spec = replace(
+            self,
+            probes=self.probes if probes is None else tuple(probes),
+            checkpoints=self.checkpoints if checkpoints is None else checkpoints,
+        )
+        return spec.run(1, seed=seed, first_trajectory=trajectory)
 
     def circuit(self, trajectory: int, *, seed) -> Circuit:
         """The exact circuit that trajectory ``trajectory`` of ``run(seed=seed)`` simulates.

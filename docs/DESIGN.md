@@ -804,6 +804,12 @@ the benchmarks, in rough priority order:
   measurement right after each gate, space-time modulated rates.
 * **Graph disorder redrawn every layer** (annealed disorder); quenched
   collections, with several circuits per graph, are done (section 8.1).
+* **Reverse log** (after the simulator is complete and tested): keep a
+  trajectory's final tableau plus a compact log of its gates and of what each
+  random measurement overwrote, and walk backward to any depth. A
+  self-contained, version-independent record of the whole history; depth
+  probing uses replay until then. Design:
+  [`specs/2026-10-13-reverse-log-design.md`](specs/2026-10-13-reverse-log-design.md).
 * **Multi-reference correlators** and participation entropy.
 * **Uniform n-qubit Clifford sampler** for global scramblers and random-code
   baselines.

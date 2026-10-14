@@ -70,6 +70,43 @@ class StabilizerCode:
         code._init_packed(np.ascontiguousarray(rows, dtype=np.uint64), int(num_qubits))
         return code
 
+    @classmethod
+    def from_simulator(cls, sim, reference) -> StabilizerCode:
+        """The code a simulator's system holds, the system being every qubit not in ``reference``.
+
+        Gaussian elimination on the reference columns of the stabilizer
+        generators leaves generators of the subgroup acting trivially on the
+        reference; restricted to the system (renumbered 0..n_sys-1 in
+        increasing order) they are the code's stabilizers, so ``num_logical``
+        is S(reference). This is the same group the ensemble engine's
+        ``code_snapshot`` saves.
+        """
+        n = sim.num_qubits
+        ref = sorted({int(q) for q in reference})
+        if not ref or ref[0] < 0 or ref[-1] >= n:
+            raise ValueError(f"reference must be a non-empty set of qubits in [0, {n})")
+        refset = set(ref)
+        system = [q for q in range(n) if q not in refset]
+        if not system:
+            raise ValueError("the reference covers every qubit; there is no system")
+        xs, zs, _ = sim.stabilizer_arrays()
+        m = np.concatenate([xs[:, ref], zs[:, ref], xs[:, system], zs[:, system]], axis=1)
+        m = (m % 2).astype(np.uint8)
+        r, rows = 2 * len(ref), m.shape[0]
+        pivot = 0
+        for col in range(r):
+            nz = np.flatnonzero(m[pivot:, col])
+            if not nz.size:
+                continue
+            p = pivot + int(nz[0])
+            m[[pivot, p]] = m[[p, pivot]]
+            others = np.flatnonzero(m[:, col])
+            m[others[others != pivot]] ^= m[pivot]
+            pivot += 1
+            if pivot == rows:
+                break
+        return cls(m[pivot:, r:], num_qubits=len(system))
+
     def _init_packed(self, packed: np.ndarray, n: int) -> None:
         if n < 1:
             raise ValueError("a code needs at least one qubit")
@@ -168,6 +205,41 @@ class StabilizerCode:
         if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**53:
             return out.astype(np.int64)
         return out
+
+    def contiguous_distance(self, order=None, *, periodic: bool = True) -> int:
+        """Length of the shortest contiguous window of ``order`` whose erasure is uncorrectable.
+
+        ``order`` is a permutation of the qubits (default ``0..n-1``); windows
+        wrap around its end when ``periodic``. Returns 0 when no window is
+        uncorrectable (in particular when the code has no logical qubits).
+        Uncorrectability is monotone in the window length, so the length is
+        found by bisection, with all windows of a length checked.
+        """
+        n = self._n
+        seq = np.arange(n) if order is None else np.asarray(list(order), dtype=np.int64)
+        if seq.shape != (n,) or not np.array_equal(np.sort(seq), np.arange(n)):
+            raise ValueError(f"order must be a permutation of 0..{n - 1}")
+        if self.num_logical == 0:
+            return 0
+
+        def some_window_fails(length: int) -> bool:
+            starts = range(n) if periodic and length < n else range(n - length + 1)
+            for s in starts:
+                window = seq[np.arange(s, s + length) % n]
+                if self.lost_information(window) > 0:
+                    return True
+            return False
+
+        if not some_window_fails(n):
+            return 0
+        lo, hi = 1, n  # some window of length hi fails
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if some_window_fails(mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
 
     def _qubits(self, qubits: Iterable[int]) -> np.ndarray:
         a = np.array([int(q) for q in qubits], dtype=np.int64)

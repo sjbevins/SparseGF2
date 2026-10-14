@@ -35,8 +35,10 @@ way regardless, forcing one outcome never shifts the randomness of later ones.
 
 from __future__ import annotations
 
+import json
 import operator
 from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
 
@@ -52,6 +54,7 @@ from sparsegf2._kernel.tables import (
     LIN1,
     LIN2,
 )
+from sparsegf2._version import __version__
 from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import Clifford
 from sparsegf2.errors import PhaseFreeError
@@ -186,6 +189,57 @@ class Simulator:
         other._rng = self._rng.copy()
         other._alloc_scratch()
         return other
+
+    _STATE_FORMAT = 1
+
+    def save(self, path) -> Path:
+        """Save the exact state (tableau, signs, random-stream position) to an ``.npz`` file.
+
+        :meth:`load` restores it; the restored simulator continues the same
+        random stream, so it behaves exactly as this one would.
+        """
+        path = Path(path)
+        entropy = self._seed.entropy
+        if isinstance(entropy, (int, np.integer)):
+            entropy_json = str(int(entropy))  # a string: seeds may exceed 64 bits
+        else:
+            entropy_json = [int(v) for v in entropy]  # a sequence seed, e.g. [seed, i]
+        meta = {
+            "format": self._STATE_FORMAT,
+            "num_qubits": self._n,
+            "phases": self._phases,
+            "seed_entropy": entropy_json,
+            "seed_spawn_key": [int(k) for k in self._seed.spawn_key],
+            "version": __version__,
+        }
+        with path.open("wb") as fh:
+            np.savez(fh, tab=self._tab, rng=self._rng, meta=np.array(json.dumps(meta)))
+        return path
+
+    @classmethod
+    def load(cls, path) -> Simulator:
+        """A simulator restored from a file written by :meth:`save`."""
+        with np.load(Path(path), allow_pickle=False) as z:
+            if not {"tab", "rng", "meta"} <= set(z.files):
+                raise ValueError(f"{Path(path).name} is not a saved Simulator (use Simulator.save)")
+            meta = json.loads(str(z["meta"]))
+            tab, rng = z["tab"], z["rng"]
+        if meta.get("format") != cls._STATE_FORMAT:
+            raise ValueError(f"unsupported state format {meta.get('format')!r}")
+        n = int(meta["num_qubits"])
+        phases = bool(meta["phases"])
+        ws = (n + 63) // 64
+        if tab.dtype != np.uint64 or tab.shape != (2 * n + 1, 2 * ws if phases else ws):
+            raise ValueError("the saved tableau does not match its num_qubits / phases")
+        sim = object.__new__(cls)
+        sim._n, sim._phases, sim._ws = n, phases, ws
+        sim._tab = tab.copy()
+        stored = meta["seed_entropy"]
+        entropy = [int(v) for v in stored] if isinstance(stored, list) else int(stored)
+        sim._seed = np.random.SeedSequence(entropy, spawn_key=tuple(meta["seed_spawn_key"]))
+        sim._rng = rng.astype(np.uint64).copy()
+        sim._alloc_scratch()
+        return sim
 
     def __repr__(self) -> str:
         return f"Simulator(num_qubits={self._n}, phases={self._phases})"
