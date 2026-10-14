@@ -55,13 +55,12 @@ def call(ctx, bound: Bound, raw_args: dict[str, Any] | None) -> Outcome:
         full = data.get("output_dir") if isinstance(data, dict) else None
         return Outcome(cap(text, ctx.max_output_chars, full=full), jsonable(data), False)
     except (ValueError, ImportError) as exc:
-        return Outcome(f"{tool.name}: {exc}", None, True)
+        return Outcome(cap(f"{tool.name}: {exc}", ctx.max_output_chars), None, True)
     except Exception as exc:  # a bug: report it plainly, never crash the server
         if not ctx.quiet:
             traceback.print_exc(file=sys.stderr)
-        return Outcome(
+        text = (
             f"{tool.name}: internal error ({type(exc).__name__}): {exc}. This is a bug in "
-            "SparseGF2; report it with the arguments used.",
-            None,
-            True,
+            "SparseGF2; report it with the arguments used."
         )
+        return Outcome(cap(text, ctx.max_output_chars), None, True)
