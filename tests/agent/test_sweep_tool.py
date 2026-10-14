@@ -78,3 +78,57 @@ def test_bad_grid_is_an_immediate_error_not_a_job(run_tool, ctx):
     assert out.is_error and "cannot be swept" in out.text
     assert not out.text.startswith("job ")
     assert ctx.jobs.list() == before
+
+
+def test_rerun_does_not_recompute_finished_points(run_tool, ctx):
+    kw = dict(**BASE, grid="measurement_rate=[0.1, 0.2]", background="never", output_dir="sw")
+    assert not run_tool("ensemble_sweep", **kw).is_error
+    files = sorted((ctx.root / "sw").glob("*/result.npz"))
+    assert len(files) == 2
+    before = [f.stat().st_mtime_ns for f in files]
+    assert not run_tool("ensemble_sweep", **kw).is_error
+    assert [f.stat().st_mtime_ns for f in files] == before
+
+
+def test_reused_directory_with_other_seed_or_base_is_refused(run_tool, ctx):
+    kw = dict(grid="measurement_rate=[0.1]", background="never", output_dir="sw")
+    assert not run_tool("ensemble_sweep", **BASE, **kw).is_error
+    manifest = ctx.root / "sw" / "sweep.json"
+    text = manifest.read_text(encoding="utf-8")
+    other_seed = run_tool("ensemble_sweep", **{**BASE, "seed": 4}, **kw)
+    assert other_seed.is_error and "holds a different sweep" in other_seed.text
+    other_base = run_tool("ensemble_sweep", **{**BASE, "layers": 7}, **kw)
+    assert other_base.is_error and "holds a different sweep" in other_base.text
+    other_grid = run_tool("ensemble_sweep", **BASE, **{**kw, "grid": "measurement_rate=[0.1, 0.2]"})
+    assert other_grid.is_error and "holds a different sweep" in other_grid.text
+    assert manifest.read_text(encoding="utf-8") == text
+    no_seed = {k: v for k, v in BASE.items() if k != "seed"}
+    assert not run_tool("ensemble_sweep", **no_seed, **kw).is_error  # stored seed is reused
+
+
+def test_close_float_values_get_distinct_directories(run_tool, ctx):
+    from sparsegf2.agent.tools.ensemble import _point_name
+
+    a, b = (
+        _point_name({"measurement_rate": 0.1234567}),
+        _point_name({"measurement_rate": 0.1234568}),
+    )
+    assert a != b and _point_name({"measurement_rate": 0.05}) == "measurement_rate=0.05"
+    out = run_tool(
+        "ensemble_sweep", **BASE, grid="measurement_rate=[0.1234567, 0.1234568]", background="never"
+    )
+    assert not out.is_error, out.text
+    dirs = [
+        p["dir"]
+        for p in json.loads(
+            (ctx.root / out.data["output_dir"] / "sweep.json").read_text(encoding="utf-8")
+        )["points"]
+    ]
+    assert len(set(dirs)) == 2
+
+
+def test_duplicate_grid_values_are_refused_before_anything_runs(run_tool, ctx):
+    before = ctx.jobs.list()
+    out = run_tool("ensemble_sweep", **BASE, grid="measurement_rate=[0.1, 0.1]")
+    assert out.is_error and "duplicate" in out.text
+    assert ctx.jobs.list() == before and not (ctx.root / "runs").exists()

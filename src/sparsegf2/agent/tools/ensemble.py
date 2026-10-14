@@ -323,7 +323,10 @@ SWEEP_PARAMS = tuple(
 
 
 def _point_name(point: dict[str, Any]) -> str:
-    return ",".join(f"{k}={fmt(v, 6)}" for k, v in point.items())
+    def text(v):
+        return repr(float(v)) if isinstance(v, float) else str(v)
+
+    return ",".join(f"{k}={text(v)}" for k, v in point.items())
 
 
 def _grid_points(args: dict[str, Any]) -> list[dict[str, Any]]:
@@ -339,6 +342,11 @@ def _grid_points(args: dict[str, Any]) -> list[dict[str, Any]]:
     if missing:
         raise ValueError(f"give {', '.join(missing)} as arguments or in grid")
     keys = list(grid)
+    for key, values in grid.items():
+        names = [_point_name({key: v}) for v in values]
+        dup = sorted({n.split("=", 1)[1] for n in names if names.count(n) > 1})
+        if dup:
+            raise ValueError(f"grid: duplicate value(s) for {key}: {', '.join(dup)}")
     return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*grid.values())]
 
 
@@ -352,11 +360,26 @@ def _sweep(ctx, args):
     root = ctx.output_dir("ensemble_sweep", args)
     root.mkdir(parents=True, exist_ok=True)
     meta_path = root / "sweep.json"
+    skip = ("grid", "output_dir", "seed", "background")
+    base = json.loads(json.dumps({k: v for k, v in args.items() if k not in skip}, default=str))
+    seed = args["seed"] if args.get("seed") is not None else None
     if meta_path.exists():
-        seed = json.loads(meta_path.read_text(encoding="utf-8"))["seed"]
-    else:
-        seed = args["seed"] if args.get("seed") is not None else api._resolve_seed(None)
-    base = {k: v for k, v in args.items() if k not in ("grid", "output_dir")}
+        old = json.loads(meta_path.read_text(encoding="utf-8"))
+        differs = []
+        if seed is not None and seed != old["seed"]:
+            differs.append(f"seed {old['seed']}")
+        if old["grid"] != args["grid"]:
+            differs.append(f"grid {old['grid']!r}")
+        if old["base"] != base:
+            differs.append("other parameters")
+        if differs:
+            raise ValueError(
+                f"{ctx.show(root)} holds a different sweep ({', '.join(differs)}); "
+                "give another output_dir"
+            )
+        seed = old["seed"]
+    elif seed is None:
+        seed = api._resolve_seed(None)
     meta = {
         "version": 1,
         "grid": args["grid"],
