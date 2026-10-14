@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
+
+* **mu_C and distance bounds** from the saved erasure arrays:
+  `analysis.mean_first_failure` (mu_D = E[D] = sum_m (1 - P_C(m)) per code),
+  `analysis.distance_bounds` (exact d where the exhaustive counts fix it,
+  otherwise `w + 1 <= d <= min_j D_j`), `analysis.hybrid_failure_by_size` (the
+  exact-plus-sampled P_C(m) curve) and `analysis.junction_dip` (flags sampling
+  noise at the junction of that curve).
+* **Graph statistics:** `graphs.stats` (algebraic connectivity, mean path
+  length, clustering, degrees; up to 4096 nodes) and `graphs.shortcut_fraction`.
+* **Graph files:** `graphs.save` and `graphs.load` write and read graph
+  collections as `.json` or `.npz`, and `{"family": "file", "path": ...}` runs an
+  ensemble on any saved geometry (a file with several graphs is a collection).
+* **Codes:** `StabilizerCode.contiguous_distance` and
+  `StabilizerCode.from_simulator`, both checked against the engine's probes.
+* **Exact states:** `Simulator.save` and `Simulator.load` restore the tableau,
+  the signs and the random-stream position, so a restored simulator continues
+  bit for bit.
+* **Replay:** `MonitoredCircuit.replay(t, seed=...)` reruns trajectory `t` with
+  other probes or checkpoints and matches the original run exactly
+  (`mipt.RANDOMNESS_CONTRACT = 1`).
+* **Stim cross-check:** `crosscheck.compare_stabilizers` and
+  `crosscheck.compare_measurements` compare any circuit with Stim after every
+  `TICK`.
+* **Planned work, specified but not built:** the general agent interface (tool
+  stacks) in `docs/specs/2026-10-13-agent-tool-stacks-design.md` and the reverse
+  log in `docs/specs/2026-10-13-reverse-log-design.md` (issue #2).
+
 ## 3.0.0.dev10: v3 becomes the `sparsegf2` package
 
 SparseGF2 v3 is promoted to the repository root and is now the only

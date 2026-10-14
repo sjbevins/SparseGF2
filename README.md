@@ -28,7 +28,7 @@ There are three ways in, from interactive to industrial:
 and points to the step-by-step guides; [Why SparseGF2](#why-sparsegf2) shows
 what it is for, with measurements.
 
-> **Status:** `3.0.0.dev10`, in development toward 3.0. This is the only
+> **Status:** `3.0.0.dev11`, in development toward 3.0. This is the only
 > maintained version. The old v2 package is deprecated and no longer in this
 > tree: it is preserved at the tag [`v2.0.0`](https://github.com/sjbevins/SparseGF2/tree/v2.0.0)
 > and the branch [`v2-legacy`](https://github.com/sjbevins/SparseGF2/tree/v2-legacy)

@@ -259,6 +259,51 @@ select `k > 0` to condition on a code. `[:, -1]` is each probe's last evaluation
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole analysis
 versus depth.
 
+## Distances, graphs, saved states and cross-checks
+
+```python
+from sparsegf2 import Simulator, StabilizerCode, analysis, crosscheck, graphs, mipt
+
+# mu_C = E[D] and distance bounds from the same saved arrays (first, counts, n as above)
+mu = analysis.mean_first_failure(first, n, exact_counts=counts)       # per trajectory
+low, high = analysis.distance_bounds(first, n, exact_counts=counts)   # d exact where low == high
+p_m = analysis.hybrid_failure_by_size(first, n, exact_counts=counts)  # P_C(m), m = 0..n
+dip = analysis.junction_dip(first, n, counts)   # True: sampled P_C(w+1) < exact P_C(w)
+
+# graph statistics and graph files (any geometry, not only the built-in families)
+edges = graphs.watts_strogatz(64, 4, 0.1, seed=1)
+graphs.stats(edges, 64)          # lambda2, connected, mean_path_length, clustering, degree_*
+graphs.shortcut_fraction(edges, 64, 4)
+graphs.save("ws.npz", [edges, graphs.watts_strogatz(64, 4, 0.1, seed=2)], 64)
+n_nodes, collection, weights = graphs.load("ws.npz")
+# in a spec: "graph": {"family": "file", "path": "ws.npz"} (a file with several graphs is a
+# collection: trajectory t runs on graph t // circuits_per_graph)
+
+# codes from a live simulator; contiguous distance along an order (default 0..n-1, periodic)
+code = StabilizerCode.from_simulator(sim, reference=range(64, 65))
+code.contiguous_distance()
+
+# exact states and trajectories
+sim.save("state.npz"); same = Simulator.load("state.npz")   # tableau, signs, random stream
+mc = mipt.MonitoredCircuit(...)                              # the spec of a saved run
+again = mc.replay(17, seed=7, probes=[...], checkpoints=[...])  # trajectory 17 of run(seed=7)
+
+# Stim comparison of any circuit, tick by tick
+crosscheck.compare_stabilizers(circuit, seed=0)
+crosscheck.compare_measurements(circuit, seed=0)
+```
+
+* `distance_bounds` uses `high = min_j D_j` from the orderings. With counts for m = 1..w,
+  the smallest m with an uncorrectable m-subset is d exactly; with none, `low = w + 1`.
+  A code with k = 0 gets `(n + 1, n + 1)`: it has no distance, so exclude it.
+* `replay` reruns one trajectory with other probes or checkpoints. Probes and checkpoints
+  never change the trajectory, so a replay matches the original run exactly
+  (`mipt.RANDOMNESS_CONTRACT` versions this guarantee). This is how to probe one
+  trajectory at new depths after a run.
+* `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
+  (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
+  per side).
+
 ## Where things are
 
 | Path | What |
@@ -267,8 +312,10 @@ versus depth.
 | `src/sparsegf2/cli.py` | `sparsegf2` command line |
 | `src/sparsegf2/mcp_server.py` | `sparsegf2-mcp` MCP server: tools, `docs://` resources, prompts |
 | `src/sparsegf2/mipt.py` | `MonitoredCircuit`, probes, `EnsembleResult` |
-| `src/sparsegf2/codes.py` | `StabilizerCode`: erasure analysis of a saved code |
-| `src/sparsegf2/analysis.py` | P_C(m), Phi(e), e_delta, Kaplan-Meier, means with errors |
+| `src/sparsegf2/codes.py` | `StabilizerCode`: erasure analysis of a saved code, contiguous distance |
+| `src/sparsegf2/analysis.py` | P_C(m), Phi(e), e_delta, mu_D, distance bounds, Kaplan-Meier, means with errors |
+| `src/sparsegf2/graphs.py` | graph families, statistics, graph files (`.json`, `.npz`) |
+| `src/sparsegf2/crosscheck.py` | tick-by-tick comparison of any circuit with Stim |
 | `src/sparsegf2/observables.py` | entanglement, code and erasure observables of one state |
 | `docs/LLM_INTERFACE.md` | full CLI and MCP reference |
 | `docs/LITERATURE.md` | which observables the literature uses, and why |
