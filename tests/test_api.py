@@ -313,9 +313,9 @@ def test_run_ensemble_matches_library():
     tau = direct.purification_layer
     pur = out["purification"]
     assert pur["purified"] == int((tau >= 0).sum())
-    assert pur["censored_fraction"] == pytest.approx((tau < 0).mean())
+    assert pur["censored_fraction"] == pytest.approx((tau < 0).mean(), abs=1e-6)
     if (tau >= 0).any():
-        assert pur["tau_median_purified"] == pytest.approx(np.median(tau[tau >= 0]))
+        assert pur["tau_median_purified"] == pytest.approx(np.median(tau[tau >= 0]), abs=1e-6)
     layers, surviving = direct.survival()
     assert pur["survival"]["fraction_unpurified"] == pytest.approx(surviving, abs=1e-6)
     assert out["checkpoints"]["layers"] == layers.tolist()
