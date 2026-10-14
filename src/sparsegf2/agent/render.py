@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["cap", "curve", "fmt", "jsonable", "lines", "pm", "table"]
+__all__ = ["cap", "curve", "fmt", "jsonable", "kv", "lines", "pm", "table"]
 
 
 def jsonable(obj: Any) -> Any:
@@ -33,6 +33,25 @@ def fmt(x: Any, digits: int = 4) -> str:
             return "inf" if x > 0 else "-inf"
         return f"{x:.{digits}g}"
     return str(x)
+
+
+def kv(data: dict, keys: Sequence[str] | None = None, *, max_list: int = 16) -> str:
+    """``key: value`` lines for scalars and short lists (longer lists are summarised)."""
+    out = []
+    for key in keys if keys is not None else data:
+        if key not in data or data[key] is None:
+            continue
+        v = data[key]
+        if isinstance(v, dict):
+            continue
+        if isinstance(v, (list, tuple, np.ndarray)):
+            items = list(v)
+            shown = " ".join(fmt(x) for x in items[:max_list])
+            more = f" ... ({len(items)} values)" if len(items) > max_list else ""
+            out.append(f"{key}: {shown}{more}")
+        else:
+            out.append(f"{key}: {fmt(v)}")
+    return "\n".join(out)
 
 
 def pm(mean: Any, err: Any) -> str:
