@@ -16,6 +16,7 @@ def test_every_topic_renders(run_tool, topic):
     "what, expect",
     [
         ("probes", "erasure_first_failure(samples)"),
+        ("code_properties", "first_failure(samples, seed)"),
         ("observables", "entropy(region)"),
         ("graph_families", "watts_strogatz(graph_k, graph_beta)"),
         ("gates", "CX"),
