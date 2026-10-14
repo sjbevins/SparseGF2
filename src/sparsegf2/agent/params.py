@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
+from sparsegf2 import api
 from sparsegf2.agent import vocab
 from sparsegf2.agent.grammar import (
     bind,
@@ -21,15 +22,6 @@ from sparsegf2.agent.grammar import (
 from sparsegf2.agent.registry import Param
 
 _FAMILY_DEFAULTS = {"watts_strogatz": {"k": 4, "beta": 0.1}, "newman_watts": {"k": 4}}
-_GRAPH_KEYS = (
-    "graph_k",
-    "graph_beta",
-    "graph_p",
-    "graph_d",
-    "graph_rows",
-    "graph_cols",
-    "graph_periodic",
-)
 
 
 def _graph_enum() -> tuple[str, ...]:
@@ -85,6 +77,12 @@ GRAPH_PARAMS: tuple[Param, ...] = (
     ),
 )
 
+_GRAPH_KEYS = tuple(
+    p.name
+    for p in GRAPH_PARAMS
+    if p.name not in ("graph", "graph_file", "graph_count", "graph_seed")
+)
+
 PROTOCOL_PARAMS: tuple[Param, ...] = (
     Param(
         "num_system",
@@ -114,7 +112,7 @@ PROTOCOL_PARAMS: tuple[Param, ...] = (
         "Gate placement: matching (edge colouring; brickwork on an even ring), random_edges "
         "(gates_per_layer edges with replacement), all_edges.",
         default="matching",
-        enum=("matching", "random_edges", "all_edges"),
+        enum=tuple(api.SCHEDULES),
     ),
     Param("gates_per_layer", "integer", "random_edges: gates per layer (default n/2).", minimum=0),
     Param(
@@ -130,7 +128,7 @@ PROTOCOL_PARAMS: tuple[Param, ...] = (
         "none: start in |0..0>; purification: each system qubit Bell-paired with its own "
         "reference (a code with n logical qubits); single: one reference qubit.",
         default="none",
-        enum=("none", "purification", "single"),
+        enum=tuple(api.REFERENCES),
     ),
     Param(
         "reference_partner",
@@ -238,6 +236,13 @@ def graph_dict(args: dict[str, Any], n: int, ctx) -> dict[str, Any]:
         raise ValueError(f"graph_file needs graph=file (graph is {family})")
     takes = families[family]
     out: dict[str, Any] = {"family": family, **_FAMILY_DEFAULTS.get(family, {})}
+    missing = [
+        f"graph_{r}"
+        for r in vocab.graph_required(family)
+        if r not in out and f"graph_{r}" not in args
+    ]
+    if missing:
+        raise ValueError(f"graph={family} needs {' and '.join(missing)}")
     for key in given:
         name = key.removeprefix("graph_")
         if name not in takes:

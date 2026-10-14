@@ -9,6 +9,7 @@ from functools import cache
 __all__ = [
     "gate_names",
     "graph_families",
+    "graph_required",
     "observable_descriptions",
     "observable_signatures",
     "probe_descriptions",
@@ -65,6 +66,18 @@ def graph_families() -> dict[str, tuple[str, ...]]:
         name: tuple(p for p in inspect.signature(fn).parameters if p not in skip)
         for name, fn in api._graph_families().items()
     }
+
+
+def graph_required(family: str) -> tuple[str, ...]:
+    """Parameters of ``family`` (besides ``n`` and ``seed``) that have no default."""
+    from sparsegf2 import api
+
+    skip = {"n", "seed"}
+    return tuple(
+        name
+        for name, p in inspect.signature(api._graph_families()[family]).parameters.items()
+        if name not in skip and p.default is inspect.Parameter.empty
+    )
 
 
 @cache

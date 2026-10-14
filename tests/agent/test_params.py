@@ -106,3 +106,23 @@ def test_edge_weights_gate_set_and_system_order(ctx):
     assert spec["gate_set"] == ["CX", 3]
     assert spec["system_order"] == [7, 6, 5, 4, 3, 2, 1, 0]
     api._build_spec(spec)  # valid for the JSON API
+
+
+@pytest.mark.parametrize(
+    ("family", "message"),
+    [
+        ("random_regular", "graph=random_regular needs graph_d"),
+        ("erdos_renyi", "graph=erdos_renyi needs graph_p"),
+        ("lattice_2d", "graph=lattice_2d needs graph_rows and graph_cols"),
+    ],
+)
+def test_missing_graph_parameters_are_named_by_tool_parameter(ctx, family, message):
+    with pytest.raises(ValueError, match=message):
+        params.graph_dict({"graph": family, "graph_count": 1, "graph_seed": 0}, 8, ctx)
+
+
+def test_every_graph_generator_parameter_has_a_tool_parameter():
+    names = {p.name for p in params.GRAPH_PARAMS}
+    for family, takes in vocab.graph_families().items():
+        for t in takes:
+            assert f"graph_{t}" in names, (family, t)
