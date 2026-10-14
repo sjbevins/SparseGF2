@@ -285,19 +285,24 @@ def test_contiguous_distance_matches_the_engine_probe():
     spec = mipt.MonitoredCircuit(
         num_system=n,
         edges=graphs.cycle(n),
-        layers=12,
+        layers=40,
         measurement_rate=0.1,
-        reference="purification",
+        reference="single",
+        reference_partner=0,
+        scramble_gates=128,
         probes=[mipt.code_dimension(), mipt.contiguous_distance(), mipt.code_snapshot()],
     )
     res = spec.run(40, seed=3)
     k = res.values["code_dimension"][:, -1]
+    engine = res.values["contiguous_distance"][:, -1]
     for t in range(res.num_trajectories):
         code = res.code(t, 0)
         if k[t] > 0:
-            assert code.contiguous_distance() == res.values["contiguous_distance"][t, -1]
+            assert code.contiguous_distance() == engine[t]
         else:
             assert code.contiguous_distance() == 0
+    # Guard against a vacuous test: the engine must produce distances above 1.
+    assert np.nanmax(engine[k > 0]) > 1
 
 
 def test_contiguous_distance_respects_order_and_periodic():
