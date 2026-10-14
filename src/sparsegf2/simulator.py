@@ -199,11 +199,16 @@ class Simulator:
         random stream, so it behaves exactly as this one would.
         """
         path = Path(path)
+        entropy = self._seed.entropy
+        if isinstance(entropy, (int, np.integer)):
+            entropy_json = str(int(entropy))  # a string: seeds may exceed 64 bits
+        else:
+            entropy_json = [int(v) for v in entropy]  # a sequence seed, e.g. [seed, i]
         meta = {
             "format": self._STATE_FORMAT,
             "num_qubits": self._n,
             "phases": self._phases,
-            "seed_entropy": str(self._seed.entropy),
+            "seed_entropy": entropy_json,
             "seed_spawn_key": [int(k) for k in self._seed.spawn_key],
             "version": __version__,
         }
@@ -229,9 +234,9 @@ class Simulator:
         sim = object.__new__(cls)
         sim._n, sim._phases, sim._ws = n, phases, ws
         sim._tab = tab.copy()
-        sim._seed = np.random.SeedSequence(
-            int(meta["seed_entropy"]), spawn_key=tuple(meta["seed_spawn_key"])
-        )
+        stored = meta["seed_entropy"]
+        entropy = [int(v) for v in stored] if isinstance(stored, list) else int(stored)
+        sim._seed = np.random.SeedSequence(entropy, spawn_key=tuple(meta["seed_spawn_key"]))
         sim._rng = rng.astype(np.uint64).copy()
         sim._alloc_scratch()
         return sim

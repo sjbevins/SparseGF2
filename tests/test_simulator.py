@@ -360,3 +360,17 @@ def test_load_rejects_foreign_files(tmp_path):
         np.savez(fh, a=np.zeros(3))
     with pytest.raises(ValueError, match="not a saved Simulator"):
         sg.Simulator.load(path)
+
+
+def test_save_load_round_trip_with_a_sequence_seed(tmp_path):
+    import sparsegf2 as sg
+
+    sim = sg.Simulator(4, seed=[1, 2])
+    sim.h(0)
+    sim.cx(0, 1)
+    back = sg.Simulator.load(sim.save(tmp_path / "seq.state.npz"))
+    assert [int(v) for v in back.seed.entropy] == [int(v) for v in sim.seed.entropy]
+    for q in (2, 3, 2):
+        sim.h(q)
+        back.h(q)
+        assert sim.measure(q) == back.measure(q)
