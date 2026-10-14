@@ -334,3 +334,268 @@ register(
         render=_render_probe,
     )
 )
+
+
+DEFAULT_RATES = [0.01, 0.02, 0.05, 0.1]
+
+
+def erasure_at(res, layer: int, *, rates, delta: float, mask=None) -> dict[str, Any]:
+    """Erasure statistics at one depth over the selected rows (all circuits and those with k>0)."""
+    n = res.spec.num_system
+    ff = probe_by_kind(res, "erasure_first_failure")
+    if ff is None:
+        raise ValueError(
+            "this run has no erasure_first_failure probe; add "
+            "erasure_first_failure(samples=512) to its probes"
+        )
+    c = at_layer(res, ff, layer)
+    rows = np.ones(res.num_trajectories, bool) if mask is None else mask
+    first = np.asarray(res.values[ff])[rows, c]
+    cn = probe_by_kind(res, "uncorrectable_counts")
+    cc = at_layer(res, cn, layer) if cn else None
+    counts = np.asarray(res.values[cn])[rows, cc] if cc is not None else None
+    kn = probe_by_kind(res, "code_dimension")
+    kc = at_layer(res, kn, layer) if kn else None
+    k = np.asarray(res.values[kn])[rows, kc] if kc is not None else None
+    code = (k > 0) if k is not None else (first.min(axis=-1) <= n)
+    out: dict[str, Any] = {
+        "layer": int(layer),
+        "count": int(rows.sum()),
+        "q_plus": float(code.mean()) if code.size else None,
+        "k_over_n": analysis.mean_and_error(k / n) if k is not None and k.size else None,
+    }
+    if first.shape[0]:
+        phi = analysis.erasure_failure_probability(first, n, rates, exact_counts=counts)
+        out["phi_all"] = [analysis.mean_and_error(phi[:, i]) for i in range(len(rates))]
+    if not code.any():
+        out["note"] = f"no selected trajectory holds a code at layer {int(layer)}"
+        return out
+    cnt = counts[code] if counts is not None else None
+    out["phi_code"] = [analysis.mean_and_error(phi[code, i]) for i in range(len(rates))]
+    out["e_delta"] = analysis.erasure_tolerance(first[code], n, delta, exact_counts=cnt)
+    out["mu_D"] = analysis.mean_and_error(
+        analysis.mean_first_failure(first[code], n, exact_counts=cnt)
+    )
+    low, high = analysis.distance_bounds(first[code], n, exact_counts=cnt)
+    exact = low == high
+    dist: dict[str, Any] = {
+        "exact_fraction": float(exact.mean()),
+        "upper_median": float(np.median(high)),
+    }
+    if counts is not None:
+        dist["w"] = int(counts.shape[-1])
+        dist["d_values"] = {int(d): int((low[exact] == d).sum()) for d in np.unique(low[exact])}
+    out["distance"] = dist
+    out["p_c_code"] = analysis.hybrid_failure_by_size(first[code], n, exact_counts=cnt).mean(axis=0)
+    out["dips"] = int(analysis.junction_dip(first[code], n, cnt).sum()) if cnt is not None else 0
+    return out
+
+
+def _erasure(ctx, a):
+    res, _, path = load_result(ctx, a["source"])
+    ff = probe_by_kind(res, "erasure_first_failure")
+    if ff is None:
+        erasure_at(res, 0, rates=[0.1], delta=0.01)  # raises the explanatory error
+    rates = a.get("rates") or DEFAULT_RATES
+    layers = np.asarray(res.layers(ff))
+    rows = []
+    for layer in _wanted_layers(layers, a.get("depths")):
+        mask = select(
+            res,
+            layer=layer,
+            where=a.get("where"),
+            trajectories=a.get("trajectory_range"),
+            graphs=a.get("graph_range"),
+        )
+        rows.append(erasure_at(res, layer, rates=rates, delta=a["delta"], mask=mask))
+    return {
+        "source": ctx.show(path),
+        "n": res.spec.num_system,
+        "rates": rates,
+        "delta": a["delta"],
+        "rows": rows,
+    }
+
+
+def _render_erasure(d, ctx):
+    rates, n = d["rates"], d["n"]
+    cols = [
+        "layer",
+        "count",
+        "k/n",
+        "q+",
+        "mu_D(k>0)",
+        *[f"Phi({fmt(e)})" for e in rates],
+        f"Phi({fmt(rates[-1])})|k>0",
+        f"e_{fmt(d['delta'])}|k>0",
+    ]
+    rows = []
+    for r in d["rows"]:
+        phi_all = r.get("phi_all") or [None] * len(rates)
+        rows.append(
+            [
+                r["layer"],
+                r["count"],
+                pm(*r["k_over_n"]) if r.get("k_over_n") else "-",
+                r.get("q_plus"),
+                pm(*r["mu_D"]) if r.get("mu_D") else "-",
+                *[pm(*p) if p else "-" for p in phi_all],
+                pm(*r["phi_code"][-1]) if r.get("phi_code") else "-",
+                r.get("e_delta"),
+            ]
+        )
+    parts = [f"analysis_erasure: n={n}, {d['source']}", table(cols, rows)]
+    parts += [r["note"] for r in d["rows"] if "note" in r]
+    last = d["rows"][-1] if d["rows"] else None
+    if last and last.get("distance"):
+        dist = last["distance"]
+        line = (
+            f"distance at layer {last['layer']} (k>0): exact for {dist['exact_fraction']:.3g} of "
+            "codes"
+        )
+        if "d_values" in dist:
+            line += f" (d <= {dist['w']}: {dist['d_values']}); others d > {dist['w']}"
+        line += f"; median upper bound min_j D_j = {fmt(dist['upper_median'])}"
+        parts.append(line)
+        parts.append(f"P_C(m) at layer {last['layer']} (k>0, hybrid): " + curve(last["p_c_code"]))
+        if last.get("dips"):
+            parts.append(
+                f"note: {last['dips']} code(s) have sampled P_C(w+1) < exact P_C(w) "
+                "(sampling noise): use more orderings (erasure_first_failure(samples=...))"
+            )
+    return lines(*parts)
+
+
+def km_curve(res) -> dict[str, np.ndarray]:
+    tau = res.purification_layer
+    if tau is None:
+        raise ValueError("this run has no reference, so no purification times")
+    tau = np.asarray(tau)
+    final = np.asarray(res.final_layer)
+    return analysis.kaplan_meier(np.where(tau >= 0, tau, final), tau >= 0)
+
+
+def tau_median_all(km: dict[str, np.ndarray]) -> float | None:
+    below = np.flatnonzero(km["survival"] <= 0.5)
+    return float(km["times"][below[0]]) if below.size else None
+
+
+def _purification(ctx, a):
+    res, _, path = load_result(ctx, a["source"])
+    km = km_curve(res)
+    tau = np.asarray(res.purification_layer)
+    purified = tau[tau >= 0]
+    out: dict[str, Any] = {
+        "source": ctx.show(path),
+        "trajectories": int(tau.size),
+        "censored_fraction": float(np.mean(tau < 0)),
+        "purified": int(purified.size),
+        "tau_median_all": tau_median_all(km),
+    }
+    if purified.size:
+        out["tau_mean_purified"] = analysis.mean_and_error(purified)
+        out["tau_quantiles_purified"] = {
+            f"q{round(q * 100)}": float(np.quantile(purified, q)) for q in a["quantiles"]
+        }
+    surv = {}
+    for layer in a.get("at_layers") or []:
+        i = np.searchsorted(km["times"], layer, side="right") - 1
+        surv[int(layer)] = float(km["survival"][i]) if i >= 0 else 1.0
+    out["survival_at"] = surv
+    out["km_times"], out["km_survival"] = km["times"], km["survival"]
+    return out
+
+
+def _render_purification(d, ctx):
+    parts = [
+        f"analysis_purification: {d['trajectories']} trajectories in {d['source']}",
+        f"censored {d['censored_fraction']:.3g}, purified {d['purified']}, tau median overall "
+        f"{fmt(d['tau_median_all'])} (Kaplan-Meier; '-' if under half purified)",
+    ]
+    if "tau_mean_purified" in d:
+        parts.append(
+            "among purified: mean "
+            + pm(*d["tau_mean_purified"])
+            + ", quantiles "
+            + ", ".join(f"{k}={fmt(v)}" for k, v in d["tau_quantiles_purified"].items())
+        )
+    for layer, s in d["survival_at"].items():
+        parts.append(f"survival at layer {layer}: {fmt(s)}")
+    if len(d["km_times"]):
+        n_t = len(d["km_times"])
+        idx = np.unique(np.linspace(0, n_t - 1, min(9, n_t)).round().astype(int))
+        parts.append(
+            "survival curve (layer: fraction unpurified): "
+            + ", ".join(f"{fmt(d['km_times'][i])}: {fmt(d['km_survival'][i], 3)}" for i in idx)
+        )
+    return lines(*parts)
+
+
+register(
+    ToolDef(
+        name="analysis_erasure",
+        stack="analysis",
+        summary="Phi(e), e_delta, mu_D, distance, P_C(m).",
+        description=(
+            "Erasure protection of the codes in a saved run with erasure_first_failure (and "
+            "optionally uncorrectable_region_counts for exact small sizes): per depth, the code "
+            "rate k/n, q+ (fraction with k>0), mu_D, Phi(e) = probability that erasing each qubit "
+            "with probability e is uncorrectable (all circuits, and k>0), e_delta = sup{e : Phi(e) "
+            '<= delta} for k>0, distance bounds and P_C(m). Example: {"source": '
+            '"runs/ensemble_run-3f2a9c1b7d", "rates": [0.01, 0.05, 0.1], "delta": 0.01}'
+        ),
+        params=(
+            SOURCE,
+            Param(
+                "rates",
+                "array",
+                "Erasure rates e (default 0.01, 0.02, 0.05, 0.1).",
+                items="number",
+                minimum=0,
+                maximum=1,
+            ),
+            Param(
+                "delta",
+                "number",
+                "Failure probability for e_delta.",
+                default=0.01,
+                minimum=0,
+                maximum=1,
+            ),
+            Param("depths", "string", "Layers, e.g. [128,256] (default: up to 12)."),
+            *SELECTION_PARAMS,
+        ),
+        handler=_erasure,
+        render=_render_erasure,
+        long_running=True,
+    )
+)
+
+register(
+    ToolDef(
+        name="analysis_purification",
+        stack="analysis",
+        summary="Purification times with censoring.",
+        description=(
+            "Purification of the reference in a saved run: censored fraction, tau among purified "
+            "trajectories, the median over all (Kaplan-Meier, defined when over half purified), "
+            "survival at chosen layers and the survival curve. Never averages censored times. "
+            'Example: {"source": "runs/ensemble_run-3f2a9c1b7d", "at_layers": [64, 256]}'
+        ),
+        params=(
+            SOURCE,
+            Param(
+                "quantiles",
+                "array",
+                "Quantiles of tau among purified.",
+                items="number",
+                default=[0.1, 0.25, 0.5, 0.75, 0.9],
+                minimum=0,
+                maximum=1,
+            ),
+            Param("at_layers", "array", "Layers at which to report survival.", items="integer"),
+        ),
+        handler=_purification,
+        render=_render_purification,
+    )
+)
