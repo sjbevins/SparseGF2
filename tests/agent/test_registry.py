@@ -119,3 +119,29 @@ def test_tool_names_carry_their_stack():
 
 def test_missing_sentinel_is_not_none():
     assert MISSING is not None and repr(MISSING) == "MISSING"
+
+
+def test_array_bounds_apply_to_items_not_the_array():
+    p = Param("rates", "array", "Rates.", items="number", minimum=0, maximum=1)
+    s = p.schema()
+    assert "minimum" not in s and "maximum" not in s
+    assert s["items"] == {"type": "number", "minimum": 0, "maximum": 1}
+    assert p.check([0.5, "0.25"], "tool") == [0.5, 0.25]
+    with pytest.raises(ValueError, match="tool: rates must be at most 1"):
+        p.check([1.5], "tool")
+
+
+def test_array_enum_goes_inside_items():
+    p = Param("schedules", "array", "Schedules.", items="string", enum=("matching", "random_edges"))
+    s = p.schema()
+    assert "enum" not in s
+    assert s["items"] == {"type": "string", "enum": ["matching", "random_edges"]}
+    assert check_flat({"type": "object", "properties": {"schedules": s}}) == []
+
+
+def test_check_flat_finds_forbidden_keys_inside_items():
+    bad = {
+        "type": "object",
+        "properties": {"x": {"type": "array", "items": {"type": "string", "anyOf": []}}},
+    }
+    assert any("items use anyOf" in msg for msg in check_flat(bad))

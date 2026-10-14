@@ -91,14 +91,17 @@ class Param:
 
     def schema(self, default: Any = MISSING) -> dict[str, Any]:
         s: dict[str, Any] = {"type": self.type, "description": self.description}
+        # For arrays the constraints apply to each element, so they belong in "items".
+        target = s
         if self.items is not None:
-            s["items"] = {"type": self.items}
+            target = {"type": self.items}
+            s["items"] = target
         if self.enum is not None:
-            s["enum"] = list(self.enum)
+            target["enum"] = list(self.enum)
         if self.minimum is not None:
-            s["minimum"] = self.minimum
+            target["minimum"] = self.minimum
         if self.maximum is not None:
-            s["maximum"] = self.maximum
+            target["maximum"] = self.maximum
         d = self.default if default is MISSING else default
         if d is not MISSING and d is not None:
             s["default"] = d
@@ -273,6 +276,11 @@ def check_flat(schema: Mapping[str, Any]) -> list[str]:
         kind = prop.get("type")
         if kind not in TYPES:
             problems.append(f"{name} has type {kind!r}")
-        if kind == "array" and prop.get("items", {}).get("type") not in ITEM_TYPES:
-            problems.append(f"{name} is an array of non-scalars")
+        if kind == "array":
+            items = prop.get("items", {})
+            if items.get("type") not in ITEM_TYPES:
+                problems.append(f"{name} is an array of non-scalars")
+            for key in _FORBIDDEN:
+                if key in items:
+                    problems.append(f"{name} items use {key}")
     return problems
