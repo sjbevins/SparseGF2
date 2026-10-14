@@ -124,7 +124,10 @@ agent/tools/*.py   handlers by area: help, state, circuit, ensemble, traj, code,
   * A `ToolDef` is `(name, stack, summary, description, params, handler,
     examples, read_only, long_running)`.
   * Shared parameter groups (section 5.3) are defined once and reused, so
-    they are identical everywhere.
+    they are identical everywhere. A parameter name has one meaning and one type across
+    the whole interface (a test enforces both), so `reference` is always the picture,
+    `trajectories` always a count, and qubit or row selections carry their own names
+    (`reference_qubits`, `trajectory_range`, `graph_range`, `evaluation_range`).
 * **One implementation.** Handlers build on the library and on `sparsegf2.api`
   (whose spec, probe and observable builders already validate everything)
   rather than duplicating them. The grammar layer turns strings into the
@@ -289,7 +292,7 @@ states, each up to `api.MAX_QUBITS` qubits. They can be saved to files.
 |---|---|---|
 | `state_new` | `num_qubits` or `source` (a state file or a trajectory record with a stored state), `phases` (default true), `seed` | `state_id`, n, phases |
 | `state_apply` | `state_id`, `circuit` (Stim-language text: gates, measurements, resets, MPP, noise, REPEAT; TICKs ignored) | outcomes of the new measurements (with phases), which were random, counts |
-| `state_query` | `state_id`, `observables` (array of call strings: every function in `observables`, plus `stabilizers`, `destabilizers`, `peek(pauli)`) | each value; stabilizer lists only up to 32 qubits |
+| `state_query` | `state_id`, `observables` (array of call strings: every observable of the JSON API, `expectation(pauli)` included, plus `destabilizers`) | each value; stabilizer lists only up to 32 qubits |
 | `state_save` | `state_id`, `path` | the file (`*.state.npz`: the tableau, phases, signs, seed) |
 | `state_close` | `state_id` | ok |
 | `state_list` | none | open states: id, n, phases, measurements so far |
@@ -328,7 +331,7 @@ the stored code.
 
 | tool | parameters | returns |
 |---|---|---|
-| `code_analyze` | the code: `stabilizers` (array of Pauli strings), or `source` (a trajectory record, an ensemble run with `code_snapshot`, or a `*.code.npz`) with `trajectory` and `evaluation`, or `state_id` with `reference`. `properties` (call strings; default `summary`): `summary` (n, k, generators), `lost_information(region)`, `is_correctable(region)`, `first_failure(samples, seed)`, `failure_by_size(samples)`, `exhaustive_counts(max_size)`, `distance_bounds(samples, max_size)`, `mean_first_failure(samples, max_size)`, `failure_probability(rates, delta, samples, max_size)`, `stabilizer_weights`, `stabilizers`, `contiguous_distance(order)`. `save_to` (optional `*.code.npz`) | each property |
+| `code_analyze` | the code: `stabilizers` (array of Pauli strings), or `source` (a trajectory record, an ensemble run with `code_snapshot`, a `*.code.npz`, or a `*.state.npz` with `reference_qubits`) with `trajectory` (the trajectory number) and `evaluation`, or `state_id` with `reference_qubits`. `properties` (call strings; default `summary`): `summary` (n, k, generators), `lost_information(region)`, `is_correctable(region)`, `first_failure(samples, seed)`, `failure_by_size(samples)`, `exhaustive_counts(max_size)`, `distance_bounds(samples, max_size)`, `mean_first_failure(samples, max_size)`, `failure_probability(rates, delta, samples, max_size)`, `stabilizer_weights`, `stabilizers`, `contiguous_distance(order)`. `save_to` (optional `*.code.npz`) | each property |
 
 ### 6.7 `graph`: interaction graphs
 
@@ -342,7 +345,7 @@ the stored code.
 Every tool takes `source`. Selections, where they apply:
 * `where`: `code` (k > 0 at that evaluation), `purified`, `unpurified`, or
   `<scalar probe> <op> <number>`;
-* `trajectories` and `graphs`: ranges.
+* `trajectory_range` and `graph_range`: ranges.
 
 | tool | parameters | returns |
 |---|---|---|
@@ -357,7 +360,7 @@ Every tool takes `source`. Selections, where they apply:
 | tool | parameters | returns |
 |---|---|---|
 | `result_list` | `path` (default `.`), `recursive` | the artifacts under it: kind, one-line description, size |
-| `result_get` | `source`, `name` (an array in it), `trajectories`, `evaluations`, `max_values` (default 200) | raw values, bounded, with shape and dtype |
+| `result_get` | `source`, `name` (an array in it), `trajectory_range`, `evaluation_range`, `max_values` (default 200) | raw values, bounded, with shape and dtype |
 | `result_merge` | `sources` (ensemble runs of one spec), `output_dir` | the merged run (`EnsembleResult.concatenate`, e.g. chunks run on a cluster) |
 
 ### 6.10 `job`: background work
