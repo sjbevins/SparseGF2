@@ -62,6 +62,11 @@ def _estimate(ctx, args):
     return float(api.estimate_ensemble(spec, args.get("trajectories"))["estimated_seconds"] or 0.0)
 
 
+def _stored_meta(out: Path) -> dict:
+    f = out / "spec.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
 def _run(ctx, args):
     spec, mc, out = prepare(ctx, args, "ensemble_run")
     if args.get("estimate_only"):
@@ -72,7 +77,25 @@ def _run(ctx, args):
     if (out / "result.npz").exists() and not (out / "chunks").exists():
         if api._canonical(_stored_spec(out)) != api._canonical(spec):
             raise ValueError(f"{ctx.show(out)} holds a different run; give another output_dir")
-        return {"summary": api.load_results(str(out)), "output_dir": ctx.show(out), "reused": True}
+        meta = _stored_meta(out)
+        want_traj = args.get("trajectories")
+        want_seed = args.get("seed")
+        if want_traj is None:
+            want_traj = mc.num_trajectories
+        if (want_traj is not None and meta.get("trajectories") != want_traj) or (
+            want_seed is not None and meta.get("seed") != want_seed
+        ):
+            raise ValueError(
+                f"{ctx.show(out)} holds a different run (seed {meta.get('seed')} / "
+                f"{meta.get('trajectories')} trajectories); give another output_dir"
+            )
+        return {
+            "summary": api.load_results(str(out)),
+            "output_dir": ctx.show(out),
+            "reused": True,
+            "seed_from_store": want_seed is None,
+            "stored_seed": meta.get("seed"),
+        }
     if (out / "chunks").exists():
         raise ValueError(
             f"{ctx.show(out)} holds an unfinished background run of this request; run it again "
@@ -126,16 +149,27 @@ def _rows(n: int) -> np.ndarray:
 def render_summary(
     title: str, s: dict[str, Any], *, output_dir: str | None = None, extra: tuple[str, ...] = ()
 ) -> str:
+    def g(key, digits=None):
+        v = s.get(key)
+        if v is None:
+            return "?"
+        return fmt(v, digits) if digits else (fmt(v) if isinstance(v, float) else str(v))
+
     head = (
-        f"{title}: n={s['num_system']}, layers={s['layers']}, p={fmt(s['measurement_rate'])}, "
-        f"{s['num_trajectories']} trajectories, seed={s['seed']}, "
-        f"{fmt(s['elapsed_seconds'], 3)} s"
+        f"{title}: n={g('num_system')}, layers={g('layers')}, p={g('measurement_rate')}, "
+        f"{g('num_trajectories')} trajectories, seed={g('seed')}, {g('elapsed_seconds', 3)} s"
     )
-    layers = s["checkpoints"]["layers"]
-    scalar = {k: v for k, v in s["probes"].items() if not v.get("vector") and "layers" not in v}
-    own = {k: v for k, v in s["probes"].items() if not v.get("vector") and "layers" in v}
-    vector = {k: v for k, v in s["probes"].items() if v.get("vector")}
+    complete = "probes" in s and "checkpoints" in s
+    probes = s.get("probes") or {}
+    layers = (s.get("checkpoints") or {}).get("layers", [])
+    scalar = {k: v for k, v in probes.items() if not v.get("vector") and "layers" not in v}
+    own = {k: v for k, v in probes.items() if not v.get("vector") and "layers" in v}
+    vector = {k: v for k, v in probes.items() if v.get("vector")}
     parts = [head, *extra]
+    if not complete:
+        parts.append(
+            "summary truncated by the API; see the saved files (result_get, analysis_probe)"
+        )
     if scalar:
         idx = _rows(len(layers))
         rows = [
@@ -174,7 +208,7 @@ def render_summary(
     if output_dir:
         parts.append(f"saved: {output_dir}")
         nxt = [f'analysis_summary(source="{output_dir}")']
-        kinds = " ".join(s["probes"])
+        kinds = " ".join(probes)
         if "erasure_first_failure" in kinds:
             nxt.append(f'analysis_erasure(source="{output_dir}")')
         if pur:
@@ -192,7 +226,14 @@ def _render(d, ctx):
             f"(pessimistic); result_megabytes: {fmt(e['result_megabytes'])}",
             f"output_dir would be: {d['output_dir']}",
         )
-    extra = ("reused the saved run of this exact request",) if d.get("reused") else ()
+    extra = ()
+    if d.get("reused"):
+        extra = ("reused the saved run of this exact request",)
+        if d.get("seed_from_store"):
+            extra = (
+                f"reused the saved run of this exact request, same seed {d.get('stored_seed')}; "
+                "pass a different seed or output_dir for fresh samples",
+            )
     return render_summary("ensemble_run", d["summary"], output_dir=d["output_dir"], extra=extra)
 
 
