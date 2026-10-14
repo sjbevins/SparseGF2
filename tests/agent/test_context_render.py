@@ -40,7 +40,7 @@ def test_must_exist(ctx):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows path forms")
 def test_windows_backslashes_and_drive_letter_case(ctx, tmp_path):
-    assert ctx.path("runs\c") == (tmp_path / "runs" / "c").resolve()
+    assert ctx.path("runs\\c") == (tmp_path / "runs" / "c").resolve()
     other_case = str(tmp_path).upper() if str(tmp_path).islower() else str(tmp_path).lower()
     assert ctx.path(os.path.join(other_case, "runs")).name.lower() == "runs"
 
@@ -85,3 +85,11 @@ def test_curve_subsamples():
     assert curve([0.0, 0.5, 1.0]) == "m=0..2: 0 0.5 1"
     long = curve(np.linspace(0, 1, 101))
     assert long.startswith("m=0..100 (every ") and len(long.split(": ")[1].split()) <= 17
+
+
+def test_cap_never_exceeds_a_tiny_limit():
+    for limit in (20, 3, 0, -1):
+        out = cap("x" * 500, limit, full="runs/x")
+        assert len(out) <= max(limit, 0)
+    assert cap("x" * 500, 20) == "x" * 20
+    assert cap("x" * 500, 0) == ""

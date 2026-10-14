@@ -58,7 +58,9 @@ def cap(text: str, limit: int, *, full: str | None = None) -> str:
         return text
     where = full or "the saved files (pass output_dir, then result_get)"
     note = f"(cut to {limit} characters; full data in {where})"
-    room = max(0, limit - len(note) - 1)
+    if limit <= len(note):
+        return text[: max(limit, 0)]
+    room = limit - len(note) - 1
     cut = text.rfind("\n", 0, room)
     head = text[: cut if cut > 0 else room]
     return f"{head}\n{note}"
