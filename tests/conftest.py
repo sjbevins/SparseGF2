@@ -57,4 +57,5 @@ def pytest_sessionfinish(session, exitstatus):
         print("\nSPARSEGF2_NO_SKIPS=1 and these tests were skipped:")
         for nodeid, reason in bad:
             print(f"  {nodeid}: {reason}")
-        session.exitstatus = 1
+        if session.exitstatus == 0:  # keep codes such as 2 (interrupted) and 5 (no tests)
+            session.exitstatus = 1
