@@ -49,20 +49,43 @@ def load_result(ctx, source: str):
         if (
             path / "trajectory.json"
         ).exists():  # a traj_run record: one row, global trajectory number
-            meta = json.loads((path / "trajectory.json").read_text(encoding="utf-8"))
-            return api._load_result_file(path / "result.npz"), meta, path
-        res, meta = api._load_directory(path)
+            return _read(ctx, path, lambda: _load_record(path))
+        res, meta = _read(ctx, path, lambda: api._load_directory(path))
         if res is None:
             raise ValueError(f"no saved results in {ctx.show(path)}")
         return res, meta, path
-    return api._load_result_file(path), None, path
+    return _read(ctx, path, lambda: api._load_result_file(path)), None, path
+
+
+def _load_record(path):
+    meta = json.loads((path / "trajectory.json").read_text(encoding="utf-8"))
+    return api._load_result_file(path / "result.npz"), meta, path
+
+
+def _read(ctx, path, load):
+    try:
+        return load()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"could not read {ctx.show(path)}: {exc}; is it a SparseGF2 result?"
+        ) from None
 
 
 def indices(value: Any, what: str) -> np.ndarray:
+    if isinstance(value, str) and re.fullmatch(r"\s*\[?\s*-?\d*\s*:.*", value):
+        parts = value.strip().split(":")
+        if not parts[0].strip() or not parts[1].strip():
+            raise ValueError(
+                f"{what}: start and stop must be explicit (like 0:10 or 0:10:2), got {value!r}"
+            )
     q = parse_qubits(value, what=what)
     if isinstance(q, str):
-        parts = [int(x) for x in q.split(":")]
-        return np.arange(*parts)
+        parts = q.split(":")
+        if not parts[0] or not parts[1]:
+            raise ValueError(
+                f"{what}: start and stop must be explicit (like 0:10 or 0:10:2), got {q!r}"
+            )
+        return np.arange(*[int(x) for x in parts if x])
     return np.asarray(q, dtype=np.int64)
 
 
@@ -78,14 +101,40 @@ def at_layer(res, name: str, layer: int) -> int | None:
     return int(hits[0]) if hits.size else None
 
 
+def _text(value: Any) -> str:
+    return str(value).replace(" ", "") if isinstance(value, str) else str(value)
+
+
+def _span(values: np.ndarray) -> str:
+    u = np.unique(values)
+    if u.size > 1 and u[-1] - u[0] + 1 == u.size:
+        return f"{u[0]}..{u[-1]}"
+    return str(u.tolist())
+
+
 def select(
     res, *, layer: int, where: str | None = None, trajectories: Any = None, graphs: Any = None
 ) -> np.ndarray:
     mask = np.ones(res.num_trajectories, dtype=bool)
     if trajectories is not None:
-        mask &= np.isin(np.asarray(res.trajectories), indices(trajectories, "trajectories"))
+        have = np.asarray(res.trajectories)
+        asked = indices(trajectories, "trajectory_range")
+        keep = np.isin(have, asked)
+        if not keep.any():
+            raise ValueError(
+                f"trajectory_range {_text(trajectories)} matches none of the saved "
+                f"trajectories {_span(have)}"
+            )
+        mask &= keep
     if graphs is not None:
-        mask &= np.isin(np.asarray(res.graph_index), indices(graphs, "graphs"))
+        have = np.asarray(res.graph_index)
+        asked = indices(graphs, "graph_range")
+        keep = np.isin(have, asked)
+        if not keep.any():
+            raise ValueError(
+                f"graph_range {_text(graphs)} matches none of the saved graphs {_span(have)}"
+            )
+        mask &= keep
     if not where or where == "all":
         return mask
     w = where.strip()
@@ -173,10 +222,15 @@ def _probe(ctx, a):
         if values.ndim == 3:  # vector probe: per index
             v = v[~np.isnan(v).any(axis=-1)] if v.size else v
             mean = v.mean(axis=0) if len(v) else np.full(values.shape[-1], np.nan)
-            rows.append({"layer": layer, "count": int(len(v)), "curve": mean.tolist()})
+            vrow: dict[str, Any] = {"layer": layer, "count": int(len(v)), "curve": mean.tolist()}
+            if not mask.any():
+                vrow["note"] = f"no trajectories match where={a.get('where')}"
+            rows.append(vrow)
             continue
         v = v[~np.isnan(v)]
         row: dict[str, Any] = {"layer": layer, "count": int(v.size)}
+        if not mask.any():
+            row["note"] = f"no trajectories match where={a.get('where')}"
         if not v.size:
             rows.append(row)
             continue
@@ -204,22 +258,31 @@ def _probe(ctx, a):
     }
 
 
+_STAT_KEYS = {
+    "median": ["median"],
+    "quantiles": [f"q{q}" for q in (10, 25, 50, 75, 90)],
+    "fraction_positive": ["fraction_positive"],
+}
+
+
 def _render_probe(d, ctx):
     head = f"analysis_probe: {d['probe']} ({d['statistic']}) in {d['source']}"
+    notes = [f"layer {r['layer']}: {r['note']}" for r in d["rows"] if "note" in r]
     if d["vector"]:
         body = [
             f"layer {r['layer']} ({r['count']} trajectories): " + curve(r["curve"])
             for r in d["rows"]
         ]
-        return lines(head, *body)
-    keys = [k for k in d["rows"][0] if k not in ("layer", "count")] if d["rows"] else []
+        return lines(head, *body, *notes)
     if d["statistic"] == "mean":
         rows = [[r["layer"], r["count"], pm(r.get("mean"), r.get("stderr"))] for r in d["rows"]]
-        return lines(head, table(["layer", "count", "mean"], rows))
+        return lines(head, table(["layer", "count", "mean"], rows), *notes)
     if d["statistic"] == "histogram":
-        return lines(head, *[f"layer {r['layer']}: {r.get('histogram')}" for r in d["rows"]])
+        body = [f"layer {r['layer']}: {r.get('histogram')}" for r in d["rows"]]
+        return lines(head, *body, *notes)
+    keys = _STAT_KEYS[d["statistic"]]
     rows = [[r["layer"], r["count"], *[r.get(k) for k in keys]] for r in d["rows"]]
-    return lines(head, table(["layer", "count", *keys], rows))
+    return lines(head, table(["layer", "count", *keys], rows), *notes)
 
 
 register(
@@ -260,7 +323,7 @@ register(
             Param(
                 "statistic",
                 "string",
-                "Which statistic.",
+                "Which statistic (a vector probe always gives its mean curve).",
                 default="mean",
                 enum=("mean", "median", "quantiles", "histogram", "fraction_positive"),
             ),
