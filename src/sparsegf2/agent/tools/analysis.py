@@ -802,35 +802,121 @@ METRICS: dict[str, tuple[tuple[str, ...], str, Callable]] = {
 }
 
 
+_REQUIRED = {"mean": "probe", "stderr": "probe", "fraction": "probe", "phi": "e", "survival": "at"}
+_NUMBERS: dict[str, dict[str, type]] = {
+    "fraction": {"above": float},
+    "phi": {"e": float},
+    "e_delta": {"delta": float},
+    "survival": {"at": int},
+}
+
+
+def _signature(name: str) -> str:
+    return f"{name}({', '.join(METRICS[name][0])})"
+
+
+def bound_args(call, index: int | None = None) -> dict[str, Any]:
+    """Validated, converted keyword arguments of a metric call, or a teaching ValueError."""
+    where = f"metrics[{index}] " if index is not None else ""
+    names = METRICS[call.name][0]
+    try:
+        args = plain(bind(call, names, what="metrics"))
+    except ValueError as exc:
+        raise ValueError(f"{where}{exc}; usage: {_signature(call.name)}") from None
+    need = _REQUIRED.get(call.name)
+    if need and need not in args:
+        raise ValueError(
+            f'{where}"{call.text}": {call.name} needs {need}; usage: {_signature(call.name)}'
+        )
+    for key, kind in _NUMBERS.get(call.name, {}).items():
+        if key in args:
+            try:
+                value = float(args[key])
+                if kind is int and value != int(value):
+                    raise ValueError
+                args[key] = kind(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f'{where}"{call.text}": {key} must be a number; usage: {_signature(call.name)}'
+                ) from None
+    if call.name == "phi" and args.get("where", "all") not in ("all", "code"):
+        raise ValueError(
+            f'{where}"{call.text}": where must be all or code, got {args["where"]!r}; usage: '
+            f"{_signature('phi')}"
+        )
+    return args
+
+
 def metric_value(res, call, layer: int, notes: list[str] | None = None):
     """(value, error) of one metric call; (None, None) with a note where it is undefined."""
-    names, _, fn = METRICS[call.name]
+    fn = METRICS[call.name][2]
     try:
-        return fn(res, layer, **plain(bind(call, names, what="metrics")))
+        return fn(res, layer, **bound_args(call))
     except _Unknown as exc:
         if notes is not None:
             notes.append(f"{call.text}: {exc}")
         return None, None
 
 
-def sources_of(ctx, a) -> list[Path]:
+def _sweep_points(ctx, root: Path) -> tuple[list[Path], list[str], int]:
+    try:
+        meta = json.loads((root / "sweep.json").read_text(encoding="utf-8"))
+        points = [(p["dir"], p.get("params")) for p in meta["points"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(
+            f"bad sweep.json in {ctx.show(root)}: {type(exc).__name__} {exc}; "
+            "it should hold a 'points' list of {params, dir}"
+        ) from None
+    paths, skipped = [], []
+    for name, params in points:
+        d = root / name
+        label = f"{name} ({json.dumps(params, sort_keys=True)})" if params else str(name)
+        if (d / "result.npz").exists():
+            paths.append(d)
+        elif (d / "chunks").exists():
+            skipped.append(f"{label}: incomplete (chunks only; rerun the sweep to finish it)")
+        else:
+            skipped.append(f"{label}: not run")
+    return paths, skipped, len(points)
+
+
+def sources_and_skipped(ctx, a) -> tuple[list[Path], list[str], int]:
+    """Runs to compare, the sweep points left out (with the reason) and the sweep's size."""
     if ("sources" in a) == ("source" in a):
         raise ValueError("give sources (a list of runs) or source (a sweep folder), not both")
     if "source" in a:
         root = ctx.path(a["source"], what="source", must_exist=True)
-        meta = root / "sweep.json"
-        if not meta.exists():
-            return [root]
-        points = json.loads(meta.read_text(encoding="utf-8"))["points"]
-        return [root / p["dir"] for p in points if (root / p["dir"] / "result.npz").exists()]
-    return [ctx.path(s, what="sources", must_exist=True) for s in a["sources"]]
+        if (root / "sweep.json").exists():
+            paths, skipped, total = _sweep_points(ctx, root)
+            if not paths:
+                raise ValueError(
+                    f"none of the {total} points of sweep {ctx.show(root)} has results yet: "
+                    "run ensemble_sweep again with the same arguments to finish it "
+                    f"({'; '.join(skipped[:3])})"
+                )
+            return paths, skipped, total
+        return [root], [], 1
+    paths = [ctx.path(s, what="sources", must_exist=True) for s in a["sources"]]
+    return paths, [], len(paths)
+
+
+def sources_of(ctx, a) -> list[Path]:
+    return sources_and_skipped(ctx, a)[0]
+
+
+def _probe_names(probes: Any) -> str:
+    names = []
+    for p in probes if isinstance(probes, list) else []:
+        names.append(str(p.get("name") or p.get("kind")) if isinstance(p, dict) else str(p))
+    return "+".join(names) or "none"
 
 
 def _flat(d: Any, prefix: str = "") -> dict[str, Any]:
     if isinstance(d, dict):
         out: dict[str, Any] = {}
         for k, v in d.items():
-            if k == "probes":
+            if k == "probes" and not prefix:
+                out["probes"] = json.dumps(_probe_names(v))
                 continue
             out.update(_flat(v, f"{prefix}{k}."))
         return out
@@ -852,7 +938,9 @@ def _compare(ctx, a):
             raise ValueError(
                 f"metrics[{i}]: unknown metric {call.name!r}{hint} (help_list(what=metrics))"
             )
-    paths = sources_of(ctx, a)
+    for i, call in enumerate(calls):
+        bound_args(call, i)
+    paths, skipped, total = sources_and_skipped(ctx, a)
     if not paths:
         raise ValueError("no finished runs to compare")
     loaded = [load_result(ctx, str(p)) for p in paths]
@@ -876,7 +964,21 @@ def _compare(ctx, a):
                 row["values"].append((None, None))
                 row["notes"].append(f"{call.text}: {exc}")
         rows.append(row)
-    return {"metrics": [c.text for c in calls], "differing": diff, "rows": rows}
+    notes = []
+    layers = sorted({r["layer"] for r in rows})
+    if a.get("depth") is None and len(layers) > 1:
+        notes.append(
+            "rows read at their own last checkpoint: layers differ "
+            f"({', '.join(map(str, layers))}); pass depth=... to align"
+        )
+    return {
+        "metrics": [c.text for c in calls],
+        "differing": diff,
+        "rows": rows,
+        "skipped": skipped,
+        "points": total,
+        "notes": notes,
+    }
 
 
 def _render_compare(d, ctx):
@@ -885,7 +987,7 @@ def _render_compare(d, ctx):
     for r in d["rows"]:
         first = [r["params"][k] for k in d["differing"]] if d["differing"] else [r["run"]]
         rows.append([*[fmt(v) for v in first], r["layer"], *[pm(m, e) for m, e in r["values"]]])
-    notes, seen = [], set()
+    notes, seen = [*d["notes"], *(f"skipped {s}" for s in d["skipped"])], set()
     for r in d["rows"]:
         label = r["run"] if len(d["rows"]) > 1 else None
         for n in r["notes"]:
@@ -893,14 +995,15 @@ def _render_compare(d, ctx):
             if text not in seen:
                 seen.add(text)
                 notes.append(text)
-    shown = notes[:4]
+    shown = notes[:8]
     if len(notes) > len(shown):
         shown.append(f"... and {len(notes) - len(shown)} more notes")
-    return lines(
-        f"analysis_compare: {len(d['rows'])} runs",
-        table(cols, rows),
-        *[f"note ('-' = no value): {n}" for n in shown],
+    head = (
+        f"analysis_compare: {len(d['rows'])} of {d['points']} sweep points"
+        if d["skipped"]
+        else f"analysis_compare: {len(d['rows'])} runs"
     )
+    return lines(head, table(cols, rows), *[f"note ('-' = no value): {n}" for n in shown])
 
 
 register(
@@ -924,7 +1027,8 @@ register(
             Param(
                 "depth",
                 "integer",
-                "Layer to evaluate at (default each run's last).",
+                "Layer to evaluate at (default each run's last). Not used by tau_median, "
+                "censored_fraction and survival, which are whole-run quantities.",
                 minimum=0,
             ),
         ),

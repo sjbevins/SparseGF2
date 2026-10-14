@@ -104,6 +104,89 @@ def test_survival_beyond_the_horizon_is_unknown(run_tool, ctx):
 
 
 def test_differing_flattens_nested_keys():
-    a = {"measurement_rate": 0.1, "graph": {"family": "cycle", "seed": 1}, "probes": [1]}
-    b = {"measurement_rate": 0.2, "graph": {"family": "cycle", "seed": 2}, "probes": [2]}
+    a = {"measurement_rate": 0.1, "graph": {"family": "cycle", "seed": 1}, "probes": []}
+    b = {"measurement_rate": 0.2, "graph": {"family": "cycle", "seed": 2}, "probes": []}
     assert differing([a, b]) == ["graph.seed", "measurement_rate"]
+
+
+def test_bad_metric_arguments_are_tool_errors(run_tool, ctx):
+    api.run_ensemble({**BASE, "measurement_rate": 0.1}, 4, seed=1, output_dir=str(ctx.root / "v"))
+    for bad, word in (
+        ("survival(layer=1)", "survival(at)"),
+        ("phi(where=foo)", "phi(e, where)"),
+        ("phi()", "needs e"),
+        ("phi(e=x)", "number"),
+        ("mean()", "needs probe"),
+    ):
+        out = run_tool("analysis_compare", sources=["v"], metrics=["q_plus", bad])
+        assert out.is_error and word in out.text, (bad, out.text)
+        assert "metrics[1]" in out.text
+
+
+def _sweep(run_tool):
+    return run_tool(
+        "ensemble_sweep",
+        num_system=8,
+        layers=4,
+        trajectories=6,
+        reference="purification",
+        probes=["code_dimension"],
+        seed=2,
+        grid="measurement_rate=[0.1, 0.2, 0.3, 0.4]",
+        background="never",
+    )
+
+
+def test_missing_sweep_points_are_reported(run_tool, ctx):
+    import json
+    import shutil
+
+    out_dir = _sweep(run_tool).data["output_dir"]
+    root = ctx.root / out_dir
+    points = json.loads((root / "sweep.json").read_text(encoding="utf-8"))["points"]
+    shutil.rmtree(root / points[1]["dir"])
+    (root / points[2]["dir"] / "result.npz").unlink()
+    (root / points[2]["dir"] / "chunks").mkdir(exist_ok=True)
+    out = run_tool("analysis_compare", source=out_dir, metrics=["mean(code_dimension)"])
+    assert not out.is_error, out.text
+    assert "2 of 4 sweep points" in out.text
+    assert "not run" in out.text and "incomplete (chunks only" in out.text
+
+
+def test_sweep_with_no_results_is_a_teaching_error(run_tool, ctx):
+    import json
+    import shutil
+
+    out_dir = _sweep(run_tool).data["output_dir"]
+    root = ctx.root / out_dir
+    for p in json.loads((root / "sweep.json").read_text(encoding="utf-8"))["points"]:
+        shutil.rmtree(root / p["dir"])
+    out = run_tool("analysis_compare", source=out_dir, metrics=["q_plus"])
+    assert out.is_error and "none of the 4 points" in out.text
+
+
+def test_malformed_sweep_json(run_tool, ctx):
+    (ctx.root / "bad").mkdir()
+    (ctx.root / "bad" / "sweep.json").write_text('{"points": [{"params": {}}]}', encoding="utf-8")
+    out = run_tool("analysis_compare", source="bad", metrics=["q_plus"])
+    assert out.is_error and "bad sweep.json in bad" in out.text
+
+
+def test_layer_note_when_horizons_differ(run_tool, ctx):
+    for name, layers in (("h1", 8), ("h2", 16)):
+        spec = {**BASE, "measurement_rate": 0.2, "layers": layers, "checkpoints": [0, layers]}
+        api.run_ensemble(spec, 6, seed=1, output_dir=str(ctx.root / name))
+    out = run_tool("analysis_compare", sources=["h1", "h2"], metrics=["mean(code_dimension)"])
+    assert not out.is_error, out.text
+    assert "layers differ (8, 16)" in out.text and "depth=" in out.text
+    out = run_tool(
+        "analysis_compare", sources=["h1", "h2"], depth=8, metrics=["mean(code_dimension)"]
+    )
+    assert "layers differ" not in out.text
+
+
+def test_differing_key_in_one_spec_and_probes():
+    a = {"measurement_rate": 0.1, "extra": 1, "probes": [{"kind": "code_dimension"}]}
+    b = {"measurement_rate": 0.1, "probes": [{"kind": "code_dimension"}, {"kind": "entropy"}]}
+    assert differing([a, b]) == ["extra", "probes"]
+    assert differing([a, a]) == []
