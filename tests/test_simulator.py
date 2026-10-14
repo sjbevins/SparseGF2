@@ -328,3 +328,35 @@ def test_entropy_edge_cases():
     assert sim.entropy([0, 2]) == 1
     assert sim.entropy([0, 1]) == 0
     assert sim.entropy([1, 2, 3]) == 1  # uses the complement
+
+
+def test_save_load_round_trip_continues_the_same_random_stream(tmp_path):
+    import sparsegf2 as sg
+
+    for phases in (True, False):
+        sim = sg.Simulator(5, phases=phases, seed=11)
+        sim.h(0)
+        sim.cx(0, 1)
+        sim.h(2)
+        sim.measure(2)
+        path = sim.save(tmp_path / f"s{phases}.state.npz")
+        back = sg.Simulator.load(path)
+        assert back.phases == phases and back.num_qubits == 5
+        assert [str(p) for p in back.stabilizers()] == [str(p) for p in sim.stabilizers()]
+        sim.h(3)
+        back.h(3)
+        assert sim.measure(3) == back.measure(3)  # same position in the stream
+        assert back.seed.entropy == sim.seed.entropy
+
+
+def test_load_rejects_foreign_files(tmp_path):
+    import numpy as np
+    import pytest
+
+    import sparsegf2 as sg
+
+    path = tmp_path / "x.npz"
+    with path.open("wb") as fh:
+        np.savez(fh, a=np.zeros(3))
+    with pytest.raises(ValueError, match="not a saved Simulator"):
+        sg.Simulator.load(path)
