@@ -13,6 +13,8 @@ from sparsegf2.agent.render import lines, pm, table
 
 NUM_NODES = Param("num_nodes", "integer", "Number of nodes (qubits).", required=True, minimum=2)
 MAX_GRAPHS = 1000
+MAX_BUILD_CELLS = {".npz": 20_000_000, ".json": 2_000_000}
+SECONDS_PER_N3 = 1e-10
 
 
 def collection(ctx, a: dict[str, Any], n: int) -> list[np.ndarray]:
@@ -20,7 +22,10 @@ def collection(ctx, a: dict[str, Any], n: int) -> list[np.ndarray]:
     if g["family"] == "file":
         num, gs, _ = graphs.load(g["path"])
         if num != n:
-            raise ValueError(f"graph_file has num_nodes {num}, not {n}")
+            raise ValueError(
+                f"graph_file {a['graph_file']!r} holds graphs on {num} nodes; "
+                f"call again with num_nodes={num}"
+            )
         return gs
     built = api._build_graph(g, n)
     return built if isinstance(built, list) else [built]
@@ -28,8 +33,18 @@ def collection(ctx, a: dict[str, Any], n: int) -> list[np.ndarray]:
 
 def _build(ctx, a):
     n = a["num_nodes"]
-    gs = collection(ctx, a, n)
     path = ctx.path(a["output_file"], what="output_file")
+    suffix = path.suffix
+    if suffix not in MAX_BUILD_CELLS:
+        raise ValueError(f"output_file must end in .json or .npz, got {path.name!r}")
+    count = 1 if a.get("graph") == "file" else a.get("graph_count", 1)
+    if count * n > MAX_BUILD_CELLS[suffix]:
+        hint = "; write .npz instead (it holds ten times more)" if suffix == ".json" else ""
+        raise ValueError(
+            f"graph_count x num_nodes = {count} x {n} exceeds the {suffix} limit of "
+            f"{MAX_BUILD_CELLS[suffix]:,}; lower graph_count or num_nodes{hint}"
+        )
+    gs = collection(ctx, a, n)
     path.parent.mkdir(parents=True, exist_ok=True)
     graphs.save(path, gs, n)
     deg = np.concatenate([graphs.degrees(g, n) for g in gs])
@@ -67,13 +82,14 @@ def _render_build(d, ctx):
 def _stats(ctx, a):
     n = a["num_nodes"]
     gs = collection(ctx, a, n)
-    if len(gs) > MAX_GRAPHS:
-        gs = gs[:MAX_GRAPHS]
+    total = len(gs)
+    gs = gs[:MAX_GRAPHS]
     rows = [graphs.stats(g, n) for g in gs]
     keys = ("lambda2", "mean_path_length", "clustering", "degree_mean")
     out: dict[str, Any] = {
         "num_nodes": n,
         "graphs": len(gs),
+        "graphs_total": total,
         "connected_fraction": float(np.mean([r["connected"] for r in rows])),
     }
     for key in keys:
@@ -82,7 +98,9 @@ def _stats(ctx, a):
         if vals.size:
             m, e = analysis.mean_and_error(vals)
             out[key] = (float(m), float(e))
-    family = a.get("graph", "cycle")
+    out["degree_min"] = min(r["degree_min"] for r in rows)
+    out["degree_max"] = max(r["degree_max"] for r in rows)
+    family = graph_dict(a, n, ctx)["family"]
     if family in ("watts_strogatz", "newman_watts"):
         k = graph_dict(a, n, ctx)["k"]
         sf = np.array([graphs.shortcut_fraction(g, n, k) for g in gs])
@@ -91,16 +109,31 @@ def _stats(ctx, a):
     return out
 
 
+def _estimate(ctx, a):
+    n = a["num_nodes"]
+    if a.get("graph") == "file":
+        count = len(graphs.load(ctx.path(a["graph_file"], what="graph_file", must_exist=True))[1])
+    else:
+        count = a.get("graph_count", 1)
+    return min(count, MAX_GRAPHS) * SECONDS_PER_N3 * n**3
+
+
 def _render_stats(d, ctx):
     rows = [
         [k, pm(*d[k])]
         for k in ("lambda2", "mean_path_length", "clustering", "degree_mean", "shortcut_fraction")
         if k in d
     ]
+    if d["graphs_total"] > d["graphs"]:
+        which = f"statistics over the first {d['graphs']} of {d['graphs_total']} graphs"
+    else:
+        which = f"{d['graphs']} graphs"
+    degrees_line = f"degree range over all graphs: {d['degree_min']}..{d['degree_max']}"
     return lines(
-        f"graph_stats: {d['graphs']} graphs on {d['num_nodes']} nodes, "
+        f"graph_stats: {which} on {d['num_nodes']} nodes, "
         f"{d['connected_fraction']:.3g} connected (mean +- stderr over graphs)",
         table(["statistic", "value"], rows),
+        degrees_line,
     )
 
 
@@ -151,6 +184,7 @@ register(
         handler=_stats,
         render=_render_stats,
         long_running=True,
+        estimate=_estimate,
         examples=({"num_nodes": 16, "graph": "watts_strogatz", "graph_count": 3},),
     )
 )

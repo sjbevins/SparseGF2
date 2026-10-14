@@ -67,6 +67,7 @@ GRAPH_PARAMS: tuple[Param, ...] = (
         "Random families: number of graphs G; graph i comes from seed (graph_seed, i).",
         default=1,
         minimum=1,
+        maximum=api.MAX_GRAPH_REALIZATIONS,
     ),
     Param(
         "graph_seed",
