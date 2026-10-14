@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from sparsegf2 import api
+from sparsegf2.agent import sessions
+from sparsegf2.agent.grammar import parse_grid
 from sparsegf2.agent.params import (
     CHECKPOINTS,
     GRAPH_PARAMS,
@@ -278,6 +283,154 @@ register(
                 "graph_count": 2,
                 "reference": "purification",
                 "probes": ["code_dimension"],
+                "seed": 1,
+            },
+        ),
+    )
+)
+
+
+SWEEPABLE = frozenset(
+    {
+        "num_system",
+        "layers",
+        "measurement_rate",
+        "gates_per_layer",
+        "circuits_per_graph",
+        "scramble_gates",
+        "scramble_matchings",
+        "scramble_layers",
+        "graph_k",
+        "graph_beta",
+        "graph_p",
+        "graph_d",
+        "graph_count",
+        "trajectories",
+    }
+)
+_REQUIRED = ("num_system", "layers", "measurement_rate")
+SWEEP_PARAMS = tuple(
+    dataclasses.replace(p, required=False) if p.name in _REQUIRED else p for p in ENSEMBLE_PARAMS
+) + (
+    Param(
+        "grid",
+        "string",
+        "Parameters to sweep, every combination: e.g. measurement_rate=[0.05,0.1,0.15]; "
+        "num_system=[64,128].",
+        required=True,
+    ),
+)
+
+
+def _point_name(point: dict[str, Any]) -> str:
+    return ",".join(f"{k}={fmt(v, 6)}" for k, v in point.items())
+
+
+def _grid_points(args: dict[str, Any]) -> list[dict[str, Any]]:
+    grid = parse_grid(args["grid"])
+    by_name = {p.name: p for p in ENSEMBLE_PARAMS}
+    for key, values in grid.items():
+        if key not in SWEEPABLE:
+            raise ValueError(f"grid: {key} cannot be swept; sweepable: {sorted(SWEEPABLE)}")
+        if key in args:
+            raise ValueError(f"{key} is both in grid and as an argument; give it in one place")
+        grid[key] = [by_name[key].check(v, "grid") for v in values]
+    missing = [k for k in _REQUIRED if k not in args and k not in grid]
+    if missing:
+        raise ValueError(f"give {', '.join(missing)} as arguments or in grid")
+    keys = list(grid)
+    return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*grid.values())]
+
+
+def _sweep_estimate(ctx, args):
+    _grid_points(args)  # a bad grid is an error now, not a failed background job
+    return math.inf
+
+
+def _sweep(ctx, args):
+    points = _grid_points(args)
+    root = ctx.output_dir("ensemble_sweep", args)
+    root.mkdir(parents=True, exist_ok=True)
+    meta_path = root / "sweep.json"
+    if meta_path.exists():
+        seed = json.loads(meta_path.read_text(encoding="utf-8"))["seed"]
+    else:
+        seed = args["seed"] if args.get("seed") is not None else api._resolve_seed(None)
+    base = {k: v for k, v in args.items() if k not in ("grid", "output_dir")}
+    meta = {
+        "version": 1,
+        "grid": args["grid"],
+        "seed": seed,
+        "base": base,
+        "points": [{"params": p, "dir": _point_name(p)} for p in points],
+    }
+    meta_path.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    done: list[dict[str, Any]] = []
+    for i, point in enumerate(points):
+        if sessions.cancelled():
+            break
+        point_args = {**args, **point, "seed": seed}
+        out = root / _point_name(point)
+        spec, mc, _ = prepare(ctx, {**point_args, "output_dir": str(out)}, "ensemble_sweep")
+        status = start_or_join(ctx, spec, point_args, out, "mcp:ensemble_sweep")
+        job = api._get_job(status["job_id"])
+        while job.thread is not None and job.thread.is_alive():
+            job.thread.join(0.5)
+            if sessions.cancelled():
+                api.cancel_job(job.job_id)
+        if job.status == "failed":
+            raise RuntimeError(f"point {_point_name(point)} failed: {job.error}")
+        done.append({"params": point, "dir": ctx.show(out), "status": job.status})
+        sessions.report(i + 1, len(points), "points")
+    return {
+        "output_dir": ctx.show(root),
+        "seed": seed,
+        "points": done,
+        "total_points": len(points),
+        "cancelled": sessions.cancelled(),
+    }
+
+
+def _render_sweep(d, ctx):
+    rows = [[p["dir"].rsplit("/", 1)[-1], p["status"]] for p in d["points"]]
+    return lines(
+        f"ensemble_sweep: {len(d['points'])}/{d['total_points']} points, seed {d['seed']} "
+        f"-> {d['output_dir']}" + (" (cancelled)" if d["cancelled"] else ""),
+        table(["point", "status"], rows),
+        f'next: analysis_compare(source="{d["output_dir"]}", metrics=["mean(code_dimension)"])',
+    )
+
+
+register(
+    ToolDef(
+        name="ensemble_sweep",
+        stack="ensemble",
+        summary="A grid of ensembles (e.g. a scan in p).",
+        description=(
+            "Run ensemble_run at every combination of the grid, e.g. "
+            'grid="measurement_rate=[0.05, 0.1, 0.15]; num_system=[64, 128]". All points share '
+            "graph seeds and the circuit seed, so lower rates measure a subset of the qubits "
+            "higher ones do. A background job by default; each point is saved as it finishes and "
+            "rerunning resumes. Compare the points with analysis_compare(source=output_dir). "
+            'Example: {"num_system": 32, "layers": 128, "grid": '
+            '"measurement_rate=[0.05, 0.1, 0.2]", "reference": "purification", "probes": '
+            '["code_dimension"], "trajectories": 200, "seed": 1}'
+        ),
+        params=SWEEP_PARAMS,
+        handler=_sweep,
+        render=_render_sweep,
+        read_only=False,
+        long_running=True,
+        estimate=_sweep_estimate,
+        examples=(
+            {
+                "num_system": 8,
+                "layers": 4,
+                "trajectories": 8,
+                "reference": "purification",
+                "grid": "measurement_rate=[0.1, 0.2]",
+                "probes": ["code_dimension"],
+                "background": "never",
                 "seed": 1,
             },
         ),
