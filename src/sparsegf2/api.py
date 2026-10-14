@@ -1124,14 +1124,23 @@ def _save_circuit_run(
 # ensembles: spec translation
 # ---------------------------------------------------------------------------
 
-_GRAPH_HELPERS = {"from_edges", "from_networkx", "degrees", "edge_coloring"}
+_GRAPH_HELPERS = {
+    "from_edges",
+    "from_networkx",
+    "degrees",
+    "edge_coloring",
+    "stats",
+    "shortcut_fraction",
+}
 
 
 def _graph_families() -> dict[str, Callable]:
     return {
         name: getattr(graphs, name)
         for name in graphs.__all__
-        if name not in _GRAPH_HELPERS and not name.endswith("_weights")
+        if name not in _GRAPH_HELPERS
+        and not name.endswith("_weights")
+        and callable(getattr(graphs, name))
     }
 
 

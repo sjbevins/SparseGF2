@@ -26,11 +26,14 @@ __all__ = [
     "erdos_renyi",
     "from_edges",
     "from_networkx",
+    "MAX_STATS_NODES",
     "lattice_2d",
     "newman_watts",
     "path",
     "power_law_weights",
     "random_regular",
+    "shortcut_fraction",
+    "stats",
     "watts_strogatz",
 ]
 
@@ -251,3 +254,79 @@ def edge_coloring(edges: np.ndarray, n: int) -> list[np.ndarray]:
         colours_at[b].add(c)
     num = int(colour_of.max()) + 1 if len(edges) else 0
     return [np.flatnonzero(colour_of == c) for c in range(num)]
+
+
+MAX_STATS_NODES = 4096
+
+
+def _adjacency(edges: np.ndarray, n: int) -> np.ndarray:
+    adj = np.zeros((n, n))
+    adj[edges[:, 0], edges[:, 1]] = 1.0
+    adj[edges[:, 1], edges[:, 0]] = 1.0
+    return adj
+
+
+def _csr(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    a = np.concatenate([edges[:, 0], edges[:, 1]])
+    b = np.concatenate([edges[:, 1], edges[:, 0]])
+    order = np.argsort(a, kind="stable")
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    indptr[1:] = np.cumsum(np.bincount(a, minlength=n))
+    return indptr, b[order].astype(np.int64)
+
+
+def stats(edges: np.ndarray, n: int) -> dict:
+    """Spectral, distance and clustering statistics of one graph on ``n`` nodes.
+
+    ``lambda2``: the algebraic connectivity, i.e. the second-smallest
+    eigenvalue of the Laplacian (0 when disconnected). ``connected``.
+    ``mean_path_length``: the mean shortest-path length over ordered pairs of
+    distinct nodes (NaN when disconnected). ``clustering``: the average local
+    clustering coefficient, with nodes of degree < 2 counting 0. Then
+    ``degree_min``, ``degree_mean`` and ``degree_max``. Dense linear algebra,
+    so ``n <= MAX_STATS_NODES``.
+    """
+    from sparsegf2._kernel.graphstats import path_length_sum
+
+    n = int(n)
+    if n > MAX_STATS_NODES:
+        raise ValueError(
+            f"graph statistics take at most {MAX_STATS_NODES} nodes (dense linear algebra), got n = {n}"
+        )
+    e = from_edges(np.asarray(edges, dtype=np.int64).reshape(-1, 2), n)
+    deg = degrees(e, n)
+    adj = _adjacency(e, n)
+    lam = np.linalg.eigvalsh(np.diag(adj.sum(axis=1)) - adj)
+    lambda2 = float(max(lam[1], 0.0)) if n > 1 else 0.0
+    triangles = ((adj @ adj) * adj).sum(axis=1) / 2.0
+    k = adj.sum(axis=1)
+    possible = k * (k - 1) / 2.0
+    local = np.divide(triangles, possible, out=np.zeros(n), where=possible > 0)
+    indptr, indices = _csr(e, n)
+    total, pairs = path_length_sum(indptr, indices, n)
+    connected = bool(pairs == n * (n - 1))
+    return {
+        "lambda2": lambda2,
+        "connected": connected,
+        "mean_path_length": float(total / pairs) if connected and pairs else float("nan"),
+        "clustering": float(local.mean()) if n else 0.0,
+        "degree_min": int(deg.min()) if n else 0,
+        "degree_mean": float(deg.mean()) if n else 0.0,
+        "degree_max": int(deg.max()) if n else 0,
+    }
+
+
+def shortcut_fraction(edges: np.ndarray, n: int, k: int) -> float:
+    """Fraction of edges whose ring distance exceeds k/2: the shortcuts of a ring-based graph.
+
+    ``k`` is the ring lattice's total degree (``watts_strogatz`` /
+    ``newman_watts``), so its own edges reach k/2 sites each way.
+    """
+    if k % 2:
+        raise ValueError(f"k must be even (k/2 neighbours per side), got {k}")
+    e = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    if not len(e):
+        return 0.0
+    r = np.abs(e[:, 0] - e[:, 1])
+    r = np.minimum(r, n - r)
+    return float(np.mean(r > k // 2))
