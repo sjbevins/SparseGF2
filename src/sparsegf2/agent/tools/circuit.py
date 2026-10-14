@@ -81,8 +81,11 @@ def _render_run(d, ctx):
         [
             "measurements",
             "random",
+            "num_random",
+            "num_ones",
             "detectors",
-            "observables_record",
+            "detector_fraction",
+            "observable_flips",
             "random_fraction",
             "measurement_mean",
             "measurement_means",
@@ -91,7 +94,8 @@ def _render_run(d, ctx):
             "detector_rate_max",
             "detector_rates",
             "any_detector_fraction",
-            "observable_rates",
+            "observable_flip_rates",
+            "elapsed_seconds",
         ],
     )
     obs = d.get("observables")
@@ -105,7 +109,9 @@ def _render_run(d, ctx):
         rows = [[t, *[ticks["values"][n][i] for n in names]] for i, t in enumerate(ticks["ticks"])]
         tick_text = "per tick:\n" + table(["tick", *names], rows[:40])
     files = f"saved: {d['files']}" if d.get("files") else ""
-    return lines(head, body, obs_text, tick_text, files)
+    notes = "\n".join(f"note: {n}" for n in d.get("notes") or [])
+    cut = "(result truncated)" if d.get("truncated") and not notes else ""
+    return lines(head, body, obs_text, tick_text, files, notes, cut)
 
 
 def _convert(ctx, a):

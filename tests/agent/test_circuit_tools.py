@@ -45,3 +45,18 @@ def test_convert_expands_cliffords(run_tool, ctx):
 def test_crosscheck(run_tool):
     out = run_tool("circuit_crosscheck", circuit=GHZ.replace("DETECTOR", "TICK\nDETECTOR"), seed=3)
     assert "stabilizers: match" in out.text and "measurements: match" in out.text
+
+
+OBS = "H 0\nCX 0 1\nM 0 1\nDETECTOR rec[-1] rec[-2]\nOBSERVABLE_INCLUDE(0) rec[-1]"
+
+
+def test_run_shows_observable_flips_and_rates(run_tool):
+    one = run_tool("circuit_run", circuit=OBS, seed=1)
+    assert "observable_flips: " in one.text and "detector_fraction: " in one.text
+    many = run_tool("circuit_run", circuit=OBS, shots=100, seed=1)
+    assert "observable_flip_rates: " in many.text
+
+
+def test_run_shows_final_state_note(run_tool):
+    out = run_tool("circuit_run", circuit=GHZ, shots=100, seed=1, observables=["entropy(0:1)"])
+    assert "note: observables are evaluated on the final state of the shots=1 run" in out.text
