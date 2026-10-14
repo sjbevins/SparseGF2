@@ -96,6 +96,7 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -137,8 +138,10 @@ _REFERENCES = {
     "purification": _ens.REF_PURIFICATION,
     "single": _ens.REF_SINGLE,
 }
-_H_INDEX = gate("H").clifford.index()
-_CX_INDEX = gate("CX").clifford.index()
+_H_CLIFFORD, _CX_CLIFFORD = gate("H").clifford, gate("CX").clifford
+assert _H_CLIFFORD is not None and _CX_CLIFFORD is not None, "H and CX are unitary gates"
+_H_INDEX = _H_CLIFFORD.index()
+_CX_INDEX = _CX_CLIFFORD.index()
 
 #: Version of the engine's random streams. Trajectory t of run(seed=s) is a
 #: function of (protocol, s, t) only; bump this whenever a change to the
@@ -485,7 +488,9 @@ class MonitoredCircuit:
     periodic: bool = True
     # Per-instance caches, never copied by dataclasses.replace (init=False): a
     # derived spec always resolves and compiles its own fields.
-    _checkpoint_layers: np.ndarray = field(init=False, repr=False, compare=False, default=None)
+    _checkpoint_layers: np.ndarray | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
     _probe_layers: tuple = field(init=False, repr=False, compare=False, default=())
     _compiled: dict = field(init=False, default_factory=dict, repr=False, compare=False)
 
@@ -588,9 +593,7 @@ class MonitoredCircuit:
             self,
             "_probe_layers",
             tuple(
-                self._checkpoint_layers
-                if p.checkpoints is None
-                else self._resolve_checkpoints(p.checkpoints)[1]
+                layers_ if p.checkpoints is None else self._resolve_checkpoints(p.checkpoints)[1]
                 for p in self.probes
             ),
         )
@@ -604,7 +607,8 @@ class MonitoredCircuit:
         if p.kind not in _KINDS:
             raise ValueError(f"unknown probe kind {p.kind!r}")
         n = self.num_system
-        order = self.system_order.tolist()
+        assert self.system_order is not None, "system_order is resolved before probes"
+        order = np.asarray(self.system_order).tolist()
         if _KINDS[p.kind].reference and self.reference == "none":
             raise ValueError(
                 f"probe {p.name!r} needs a reference (reference='purification' or 'single')"
@@ -666,7 +670,7 @@ class MonitoredCircuit:
             # silently skip every later checkpoint.
             layers = np.unique(_int_array(spec, "checkpoints"))
             explicit = True
-        if layers.size == 0 or layers.min() < 0 or layers.max() > self.layers:
+        if layers.size == 0 or np.min(layers) < 0 or np.max(layers) > self.layers:
             raise ValueError(f"checkpoints must lie in [0, layers={self.layers}]")
         layers = _read_only(layers.astype(np.int64))
         return (layers if explicit else spec), layers
@@ -702,6 +706,7 @@ class MonitoredCircuit:
     @property
     def checkpoint_layers(self) -> np.ndarray:
         """The layers at which probes are evaluated (sorted, read-only)."""
+        assert self._checkpoint_layers is not None, "resolved in __post_init__"
         return self._checkpoint_layers
 
     @property
@@ -749,14 +754,14 @@ class MonitoredCircuit:
             graph_ptr = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
             if self.schedule == "matching":
                 color_ptr_ptr = np.zeros(self.num_graphs + 1, dtype=np.int64)
-                color_ptr, color_idx = [], []
+                ptr_parts, idx_parts = [], []
                 for g, edges in enumerate(self.graphs):
                     colors = edge_coloring(edges, self.num_system)
-                    color_ptr.append(np.concatenate([[0], np.cumsum([len(c) for c in colors])]))
+                    ptr_parts.append(np.concatenate([[0], np.cumsum([len(c) for c in colors])]))
                     color_ptr_ptr[g + 1] = color_ptr_ptr[g] + len(colors) + 1
-                    color_idx.append(np.concatenate(colors))
-                color_ptr = np.concatenate(color_ptr).astype(np.int64)
-                color_idx = np.concatenate(color_idx).astype(np.int64)
+                    idx_parts.append(np.concatenate(colors))
+                color_ptr = np.concatenate(ptr_parts).astype(np.int64)
+                color_idx = np.concatenate(idx_parts).astype(np.int64)
             else:
                 # Only the matching schedule reads the colouring: give every graph
                 # one colour holding all its edges instead of colouring it (pure
@@ -786,7 +791,8 @@ class MonitoredCircuit:
                 checkpoints=np.array(self.checkpoint_layers, dtype=np.int64),
             )
             n = self.num_system
-            ptr, idx = [], []
+            ptr: list[int] = []
+            idx: list[int] = []
             region_len = np.zeros((len(self.probes), 3), dtype=np.int64)
             for j, p in enumerate(self.probes):
                 ptr.append(len(idx))
@@ -1128,6 +1134,7 @@ def _protocol_difference(a: MonitoredCircuit, b: MonitoredCircuit) -> str | None
     wa, wb = a.edge_weights, b.edge_weights
     if (wa is None) != (wb is None) or (
         wa is not None
+        and wb is not None
         and not all(
             np.array_equal(x, y)
             for x, y in zip(
@@ -1200,7 +1207,7 @@ class EnsembleResult:
     """
 
     spec: MonitoredCircuit
-    seed_entropy: object
+    seed_entropy: int | Sequence[int] | None
     trajectories: np.ndarray
     checkpoint_layers: np.ndarray
     values: dict[str, np.ndarray]
@@ -1344,7 +1351,7 @@ class EnsembleResult:
             "checkpoints": spec.checkpoints if isinstance(spec.checkpoints, (str, int)) else None,
         }
         sizes = [len(g) for g in spec.graphs]
-        arrays = {
+        arrays: dict[str, Any] = {
             "edges": np.concatenate(spec.graphs),
             "graph_ptr": np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64),
             "gate_set": spec.gate_set,

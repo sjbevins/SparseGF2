@@ -55,6 +55,10 @@ jobs:
       - name: Format check (ruff format --check)
         run: ruff format --check src tests
 
+      - name: Type check (mypy)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python -m mypy
+
       - name: pytest
         run: python -m pytest
 

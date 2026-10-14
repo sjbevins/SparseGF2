@@ -46,10 +46,10 @@ def from_edges(edges: Iterable[tuple[int, int]], num_nodes: int | None = None) -
     """Normalise any edge list: orient ``a < b``, drop duplicates, sort; reject self-loops."""
     raw = edges if isinstance(edges, np.ndarray) else list(edges)
     arr = np.asarray(raw, dtype=np.int64).reshape(-1, 2)
-    if arr.size and arr.min() < 0:
+    if arr.size and np.min(arr) < 0:
         raise ValueError("node indices must be non-negative")
-    if num_nodes is not None and arr.size and arr.max() >= num_nodes:
-        raise ValueError(f"edge endpoint {int(arr.max())} out of range for {num_nodes} nodes")
+    if num_nodes is not None and arr.size and np.max(arr) >= num_nodes:
+        raise ValueError(f"edge endpoint {int(np.max(arr))} out of range for {num_nodes} nodes")
     if np.any(arr[:, 0] == arr[:, 1]):
         raise ValueError("self-loops are not allowed")
     if _is_normalised(arr):  # e.g. a graph from this module: skip the (slow) row-wise unique
@@ -247,7 +247,7 @@ def edge_coloring(edges: np.ndarray, n: int) -> list[np.ndarray]:
     into ``edges``.
     """
     edges = np.asarray(edges, dtype=np.int64)
-    colours_at = [set() for _ in range(n)]
+    colours_at: list[set[int]] = [set() for _ in range(n)]
     colour_of = np.zeros(len(edges), dtype=np.int64)
     for e, (a, b) in enumerate(edges):
         c = 0
@@ -256,7 +256,7 @@ def edge_coloring(edges: np.ndarray, n: int) -> list[np.ndarray]:
         colour_of[e] = c
         colours_at[a].add(c)
         colours_at[b].add(c)
-    num = int(colour_of.max()) + 1 if len(edges) else 0
+    num = int(np.max(colour_of)) + 1 if len(edges) else 0
     return [np.flatnonzero(colour_of == c) for c in range(num)]
 
 
@@ -394,7 +394,8 @@ def save(path, graphs_, num_nodes: int, weights=None) -> Path:
         if ws is not None:
             arrays["weights"] = np.concatenate([w for _, w in pairs])
         with path.open("wb") as fh:
-            np.savez(fh, **arrays)
+            # numpy's stubs type the **arrays of savez as its allow_pickle flag
+            np.savez(fh, **arrays)  # type: ignore[arg-type]
     else:
         raise ValueError(f"graph files end in .json or .npz, got {path.name!r}")
     return path

@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from sparsegf2.clifford import Clifford
 from sparsegf2.gates import GateInfo, gate
@@ -357,9 +358,11 @@ def _validate(name: str, targets: tuple[Target, ...], args: tuple[float, ...]) -
                 f"{info.name} needs one index per application ({count}), got {len(args)}"
             )
         limit = 24 if k == 1 else 11520
-        for a in args:
-            if not float(a).is_integer() or not 0 <= a < limit:
-                raise ValueError(f"{info.name} indices must be integers in [0, {limit}), got {a}")
+        for value in args:
+            if not float(value).is_integer() or not 0 <= value < limit:
+                raise ValueError(
+                    f"{info.name} indices must be integers in [0, {limit}), got {value}"
+                )
     return info
 
 
@@ -383,6 +386,9 @@ class Circuit:
     the ``CLIFFORD_1Q``/``CLIFFORD_2Q`` extensions, which :meth:`to_stim`
     expands).
     """
+
+    # (state key, compiled Program), set by sparsegf2._compile.compile_circuit
+    _compiled: tuple[Any, Any] | None
 
     def __init__(self, text: str = ""):
         self._items: list[Instruction | RepeatBlock] = []
@@ -476,7 +482,7 @@ class Circuit:
             return NotImplemented
         return self._items == other._items
 
-    __hash__ = None  # mutable
+    # Mutable, so unhashable: defining __eq__ already sets __hash__ to None.
 
     def __str__(self) -> str:
         return "\n".join(str(item) for item in self._items)

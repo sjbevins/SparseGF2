@@ -200,9 +200,11 @@ class Simulator:
         """
         path = Path(path)
         entropy = self._seed.entropy
+        entropy_json: str | list[int]
         if isinstance(entropy, (int, np.integer)):
             entropy_json = str(int(entropy))  # a string: seeds may exceed 64 bits
         else:
+            assert entropy is not None, "a SeedSequence always has entropy"
             entropy_json = [int(v) for v in entropy]  # a sequence seed, e.g. [seed, i]
         meta = {
             "format": self._STATE_FORMAT,
@@ -559,6 +561,7 @@ class Simulator:
         m = program.num_measurements
         record = np.zeros(m, dtype=np.uint8)
         random_flags = np.zeros(m, dtype=np.uint8)
+        coin_array: np.ndarray
         if coins is None:
             coin_array = np.zeros(0, dtype=np.uint8)
             use_coins = False
@@ -626,6 +629,7 @@ def _gate_index(name: str) -> tuple[int, int]:
                 f"{info.name} is not a unitary gate; use the measure/reset methods "
                 "or Simulator.run(circuit) for non-unitary instructions"
             )
+        assert info.clifford is not None, "unitary gates carry their Clifford"
         cached = (info.num_qubits, info.clifford.index())
         _GATE_INDEX[key] = cached
     return cached
@@ -649,6 +653,7 @@ def _make_gate_method(canonical: str, k: int, index: int):
 
 # One lowercase method per gate name and alias (sim.h, sim.cx, sim.cnot, sim.sqrt_x_dag, ...).
 for _info in all_gates("unitary"):
+    assert _info.clifford is not None, "unitary gates carry their Clifford"
     _k_arity, _index = _info.num_qubits, _info.clifford.index()
     for _name in (_info.name, *_info.aliases):
         _method = _make_gate_method(_info.name, _k_arity, _index)

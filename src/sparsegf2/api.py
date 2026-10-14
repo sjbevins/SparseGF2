@@ -139,7 +139,7 @@ _PROVENANCE_FILE = "provenance.json"
 # ---------------------------------------------------------------------------
 
 
-def _num(x: float) -> float | None:
+def _num(x: float | np.floating[Any]) -> float | None:
     """A float rounded to 6 significant digits; NaN and infinities become None."""
     x = float(x)
     if not math.isfinite(x):
@@ -979,46 +979,46 @@ def run_circuit(
     if shots == 1:
         if m <= MAX_BITS_SHOWN:
             out["random"] = _bits(random_flags)
-            if phases:
+            if records is not None:
                 out["measurements"] = _bits(records)
         elif m:
             out["num_random"] = int(random_flags.sum())
-            if phases:
+            if records is not None:
                 out["num_ones"] = int(records.sum())
                 out["measurement_mean"] = float(records.mean())
             cut.append(f"the {m}-bit measurement record")
-        if phases and detectors.shape[1]:
+        if detectors is not None and detectors.shape[1]:
             if detectors.shape[1] <= MAX_BITS_SHOWN:
                 out["detectors"] = _bits(detectors)
             else:
                 cut.append(f"the {detectors.shape[1]} detector bits")
             out["detector_fraction"] = float(detectors.mean())
-        if phases and obs_flips.shape[1]:
+        if obs_flips is not None and obs_flips.shape[1]:
             out["observable_flips"] = _bits(obs_flips[:, :MAX_BITS_SHOWN])
             if obs_flips.shape[1] > MAX_BITS_SHOWN:
                 cut.append(f"observable_flips beyond the first {MAX_BITS_SHOWN}")
     else:
-        if phases and m:
+        if records is not None and m:
             out["measurement_mean"] = float(records.mean())
             if m <= MAX_LIST_SHOWN:
                 out["measurement_means"] = records.mean(axis=0)
                 out["first_shots"] = [_bits(r) for r in records[:4]]
             else:
                 cut.append(f"per-measurement means of {m} measurements")
-        if phases and detectors.shape[1]:
+        if detectors is not None and detectors.shape[1]:
             rates = detectors.mean(axis=0)
             out["detector_rate_mean"] = float(rates.mean())
-            out["detector_rate_max"] = float(rates.max())
+            out["detector_rate_max"] = float(np.max(rates))
             out["any_detector_fraction"] = float(detectors.any(axis=1).mean())
             if rates.size <= MAX_LIST_SHOWN:
                 out["detector_rates"] = rates
             else:
                 cut.append(f"per-detector rates of {rates.size} detectors")
-        if phases and obs_flips.shape[1]:
+        if obs_flips is not None and obs_flips.shape[1]:
             out["observable_flip_rates"] = obs_flips.mean(axis=0)[:MAX_LIST_SHOWN]
             if obs_flips.shape[1] > MAX_LIST_SHOWN:
                 cut.append(f"observable_flip_rates beyond the first {MAX_LIST_SHOWN}")
-    if phases:
+    if records is not None and detectors is not None and obs_flips is not None:
         arrays["measurements"] = records
         arrays["detectors"] = detectors
         arrays["observable_flips"] = obs_flips
@@ -1156,7 +1156,7 @@ def _weight_families() -> dict[str, Callable]:
 
 def _probe_kinds() -> dict[str, Callable]:
     """Probe constructors of :mod:`sparsegf2.mipt`: the functions that return a Probe."""
-    kinds = {}
+    kinds: dict[str, Callable] = {}
     for name in mipt.__all__:
         fn = getattr(mipt, name)
         if inspect.isfunction(fn) and inspect.signature(fn).return_annotation in (
@@ -1258,7 +1258,12 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             raise ValueError("graph.realizations needs a random family with its own 'seed'")
         seed = params.pop("seed")
         base = [_require_int(seed, "graph.seed", minimum=0)] if not isinstance(seed, list) else seed
-        return [_build_graph({**params, "seed": [*base, i]}, n) for i in range(realizations)]
+        bank: list[np.ndarray] = []
+        for i in range(realizations):
+            one = _build_graph({**params, "seed": [*base, i]}, n)
+            assert isinstance(one, np.ndarray), "without realizations a family yields one graph"
+            bank.append(one)
+        return bank
     family = params.pop("family")
     if family not in families:
         raise ValueError(f"unknown graph family {family!r}; choose from {sorted(families)}")
@@ -1339,6 +1344,7 @@ def _gate_set(value: Any) -> np.ndarray | None:
                 raise ValueError(f"gate_set: unknown gate {g!r}") from None
             if info.kind != "unitary" or info.num_qubits != 2:
                 raise ValueError(f"gate_set: {g!r} is not a two-qubit unitary gate")
+            assert info.clifford is not None, "unitary gates carry their Clifford"
             out.append(info.clifford.index())
         else:
             out.append(_require_int(g, "gate_set entries", minimum=0))
@@ -1419,7 +1425,8 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
 
 
 def _random_family(graph: Any) -> bool:
-    fn = _graph_families().get(graph.get("family")) if isinstance(graph, dict) else None
+    family: Any = graph.get("family") if isinstance(graph, dict) else None
+    fn = _graph_families().get(family) if isinstance(graph, dict) else None
     return fn is not None and "seed" in _params(fn)
 
 
@@ -1992,7 +1999,8 @@ def _output_dir(path: Any) -> Path:
 
 def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
     tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez_compressed(tmp, **arrays)
+    # numpy's stubs type the **arrays of savez_compressed as its allow_pickle flag
+    np.savez_compressed(tmp, **arrays)  # type: ignore[arg-type]
     os.replace(tmp, path)
 
 

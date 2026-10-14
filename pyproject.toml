@@ -37,7 +37,7 @@ test = [
     "hypothesis>=6.100",
     "pytest-cov>=5",
 ]
-lint = ["ruff>=0.5"]
+lint = ["ruff>=0.5", "mypy>=1.10", "pre-commit>=3.7"]
 # The MCP server for LLM agents (sparsegf2-mcp). Imported only by mcp_server.py,
 # so the simulator itself never needs it.
 mcp = ["mcp>=2.2", "pydantic>=2"]
@@ -69,6 +69,24 @@ filterwarnings = [
     'ignore:overflow encountered in scalar:RuntimeWarning:sparsegf2\._kernel\..*',
 ]
 xfail_strict = true
+
+[tool.mypy]
+files = ["src/sparsegf2"]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# numba and llvmlite have partial or misleading annotations (numba.config is filled in at
+# run time; @intrinsic is typed as a class), so they are treated as untyped (Any).
+[[tool.mypy.overrides]]
+module = ["numba", "numba.*", "llvmlite", "llvmlite.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# These packages ship no type stubs.
+[[tool.mypy.overrides]]
+module = ["stim", "mcp.*", "pydantic.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

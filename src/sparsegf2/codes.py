@@ -243,7 +243,7 @@ class StabilizerCode:
 
     def _qubits(self, qubits: Iterable[int]) -> np.ndarray:
         a = np.array([int(q) for q in qubits], dtype=np.int64)
-        if a.size and (a.min() < 0 or a.max() >= self._n):
+        if a.size and (np.min(a) < 0 or np.max(a) >= self._n):
             raise ValueError(f"qubit indices must be in [0, {self._n})")
         if np.unique(a).size != a.size:
             raise ValueError("qubit indices must be distinct")
@@ -297,8 +297,8 @@ def _pack(rows: np.ndarray) -> np.ndarray:
     out = np.zeros((s, 2 * wsys), dtype=np.uint64)
     for half in range(2):
         for q in np.flatnonzero(rows[:, half * n : (half + 1) * n].any(axis=0)):
-            bit = np.uint64(1) << np.uint64(q & 63)
-            out[rows[:, half * n + q].astype(bool), half * wsys + (q >> 6)] |= bit
+            bit = np.uint64(1) << np.uint64(int(q) & 63)
+            out[rows[:, half * n + q].astype(bool), half * wsys + (int(q) >> 6)] |= bit
     return out
 
 
