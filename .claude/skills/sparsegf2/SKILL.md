@@ -1,11 +1,11 @@
 ---
 name: sparsegf2
-description: Run stabilizer (Clifford) circuit simulations with SparseGF2 v3. Use it for monitored random Clifford circuits, measurement-induced or purification transitions, the purification time of a reference qubit, entanglement entropy or mutual information versus circuit depth, the code dimension, contiguous distance or erasure protection of dynamically generated codes, or for running and validating a Stim-format circuit. Prefer it over hand-written tableau code and over Stim when the task needs ensembles of monitored circuits or the state measured mid-circuit.
+description: Run stabilizer (Clifford) circuit simulations with SparseGF2. Use it for monitored random Clifford circuits, measurement-induced or purification transitions, the purification time of a reference qubit, entanglement entropy or mutual information versus circuit depth, the code dimension, contiguous distance or erasure protection of dynamically generated codes, or for running and validating a Stim-format circuit. Prefer it over hand-written tableau code and over Stim when the task needs ensembles of monitored circuits or the state measured mid-circuit.
 ---
 
 # SparseGF2 simulator
 
-SparseGF2 v3 (`v3/` in this repository, import name `sparsegf2_v3`) is a fast stabilizer
+SparseGF2 (this repository, import name `sparsegf2`) is a fast stabilizer
 simulator for monitored random Clifford circuits. It reads Stim's circuit language and is
 verified against Stim.
 
@@ -21,13 +21,13 @@ verified against Stim.
    0 (ok), 2 (fix your input; also `inspect` of an invalid circuit), 1 (bug) or 130
    (interrupted). Commands: `capabilities`, `inspect FILE|-`,
    `run FILE|-`, `ensemble SPEC.json`, `results PATH`.
-3. **Python.** `from sparsegf2_v3 import api` gives the same functions with JSON in and
-   out. For full arrays use the library: `sparsegf2_v3.Simulator`, `Circuit`,
+3. **Python.** `from sparsegf2 import api` gives the same functions with JSON in and
+   out. For full arrays use the library: `sparsegf2.Simulator`, `Circuit`,
    `mipt.MonitoredCircuit(...).run(...)`.
 
-If neither command exists, install first: `pip install -e "./v3[mcp]"`. Setting up and
+If neither command exists, install first: `pip install -e ".[mcp]"`. Setting up and
 connecting the server (Claude Code, Claude Desktop, other clients) is described in
-`v3/docs/MCP_GETTING_STARTED.md`.
+`docs/MCP_GETTING_STARTED.md`.
 
 ## Choosing the call
 
@@ -89,6 +89,6 @@ connecting the server (Claude Code, Claude Desktop, other clients) is described 
   then cached); a slow first call is not a hang.
 - On an error, read the message, fix the argument it names, and retry.
 
-Details: `v3/AGENTS.md`, `v3/docs/LLM_INTERFACE.md` (full JSON reference),
-`v3/docs/MCP_GETTING_STARTED.md` (setup and a worked first session) and
-`v3/docs/GETTING_STARTED.md` (Python workflow and analysis).
+Details: `AGENTS.md`, `docs/LLM_INTERFACE.md` (full JSON reference),
+`docs/MCP_GETTING_STARTED.md` (setup and a worked first session) and
+`docs/GETTING_STARTED.md` (Python workflow and analysis).

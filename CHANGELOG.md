@@ -1,314 +1,386 @@
 # Changelog
 
-All notable changes to `sparsegf2` are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## 3.0.0.dev10: v3 becomes the `sparsegf2` package
 
-## [Unreleased]
+SparseGF2 v3 is promoted to the repository root and is now the only
+maintained version.
 
-### Added
+* **Import and distribution name `sparsegf2`** (was `sparsegf2_v3` /
+  `sparsegf2-v3`). Replace `import sparsegf2_v3` with `import sparsegf2`
+  and reinstall with `pip install -e ".[mcp]"` from the repository root.
+  Saved results load unchanged (`EnsembleResult.load` does not store the
+  module name).
+* **v2 is deprecated** and no longer in the tree. Its last state is the
+  branch `v2-legacy`; the tag `v2.0.0` is unchanged. Do not install v2 and
+  3.x in one environment: both import as `sparsegf2`.
+* **Layout:** the former `v3/` directory is the repository root (`src/`,
+  `tests/`, `docs/`, `examples/`, `benchmarks/`). The layout prototypes in
+  `benchmarks/prototypes/`, which imported v2, were removed (they remain in
+  the history; see `docs/DESIGN.md`).
+* **Windows:** every text file the package, tests and benchmarks read or
+  write is opened as UTF-8, so the suite passes under the default Windows
+  code page (cp1252) instead of failing in `tests/test_docs.py`.
+* **CI** runs on pushes to `main` and `v3` and on pull requests: Ubuntu,
+  macOS and Windows on Python 3.12, plus 3.11 (the floor) and 3.14.
 
-- `CircuitConfig(total_layers_override=T)` for a literal measured-layer cap,
-  independent of the depth-mode formula.
-- `single_qubit_entropy`, an exact singleton stabilizer-entropy fast path for
-  per-layer single-reference first-passage checks.
-- Layer checkpoints on `simulate` and `SimulationRunner.run`, including
-  read-only live callbacks and the `CHECKPOINT_STOP` sentinel for
-  checkpoint-granular early stopping.
-- Deterministic `gating_mode="all_edges"`, which fires the graph's full stored
-  edge list each layer.
-- Degree-preserving Watts--Strogatz graphs through `watts_strogatz(...)` and
-  parameterized string specifications such as
-  `"watts_strogatz(k=2,beta=0.1)"`, with graph provenance recorded on every
-  sample.
-- Dtype-preserving analysis-array NPZ I/O and general finite-size-scaling
-  collapse tools.
-- `SparseGF2.project_pauli_into_pair`, the code-space projection primitive
-  needed to expurgate a selected logical pair even when the Pauli is a
-  stabilizer of the pure-state tableau used to present the code.
-- A resume-safe PRL production workflow for exact-layer single-reference
-  purification times on mean-degree-four Watts--Strogatz graphs, including
-  deterministic data files, censoring flags, live status, and scalar/batch
-  parity validation.
-- Manifest-validated live Kaplan--Meier summaries, graph-bootstrap median error
-  bars, and preliminary raw-curve plots for the production campaign.
-- Bounded three-parameter purification-time collapse tools with a profiled
-  smooth master curve, deterministic multistart fitting, and all three
-  pairwise profiled loss landscapes.
-- A versioned SQLite graph registry for 350,000 independently indexed
-  mean-degree-four Watts--Strogatz draws, with deterministic tuple-keyed seed
-  derivation, strict provenance, integrity checks, and resume-safe insertion.
-- Complete per-graph realized-rewiring and combinatorial-Laplacian algebraic-
-  connectivity analyses for the paper graph registry, including compact cell
-  summaries, conditional histograms, cumulative normalized-gain estimates,
-  deterministic bootstrap intervals, and reproducible figure recipes.
-- A graph-family-agnostic raw purification-time workflow over Cartesian graph
-  parameter grids, with exact decimal measurement grids, stable named RNG
-  streams, per-graph/per-circuit censoring data, plan-first launch guards,
-  runtime-attempt auditing, generator- and environment-bound edge banks,
-  resume-safe checkpoint journals, and a coordinator-owned SQLite artifact
-  catalog with container and logical-result digests.
-- A real-kernel single-reference benchmark harness with stage timings,
-  one-thread-per-process safeguards, work/storage estimates, and bounded
-  Windows process-scaling measurements.
+## 3.0.0.dev9: erasure probes, graph collections, codes after the run
 
-### Changed
+v3 is now developed for its own simulation campaigns: the v2 production
+protocol, the cross-check against v2 and the v2 speed comparisons are gone
+(see "Removed"). The old package still lives in the repository root.
 
-- Circuit gates and Z measurements use ordered batched Numba kernels while
-  preserving scalar operation order, RNG draws, hybrid mode-switch points, and
-  final tableaux.
-- Per-sample RNG streams use the pair `(base_seed, sample_seed)` rather than
-  their sum. This removes collisions between distinct seed pairs but changes
-  seeded trajectories relative to 2.1.0.
-- Integer-valued circuit, Pauli, erasure, and expurgation inputs reject Boolean
-  aliases and lossy numeric coercions. Measurement rates and probability
-  targets must be finite real numbers in their documented ranges.
-- Atomic analysis writes use unique same-directory staging paths, so concurrent
-  writers cannot clobber one another's temporary payload.
+Behaviour changes (some existing scripts and results change):
 
-### Fixed
+* **Graph collections replace `t mod G`.** `MonitoredCircuit(edges=[g0, g1,
+  ...], circuits_per_graph=c)` runs `c` random circuits on each of the `G`
+  graphs (default `c = 1`); trajectory `t` uses graph `t // c`, so each
+  graph's circuits are consecutive and chunks keep graphs together. The old
+  rule, trajectory `t` on graph `t mod G`, is gone everywhere (engine, API,
+  examples). With one circuit per graph and as many trajectories as graphs,
+  trajectory `t` still runs on graph `t`; asking for more than `G * c`
+  trajectories, which used to wrap around, is now an error.
+  `spec.num_trajectories` is `G * c` (`None` for a single graph), and
+  `spec.run(seed=...)` without a count runs all of them;
+  `run(trajectories, seed=..., first_trajectory=...)` still runs chunks.
+  `circuits_per_graph` must be 1 for a single graph.
+  `EnsembleResult.graph_index` gives each trajectory's graph, and
+  `spec.with_edges(edges, edge_weights, circuits_per_graph)` swaps the graphs.
+  The same collection (same graph seeds) can be reused at every measurement
+  rate; with the same circuit seed the gates and random numbers are shared
+  too.
+* **Removed probes**: `erasure_lost_information`,
+  `erasure_correctable_fraction` and `erasure_correctable_profile` (kinds
+  `erasure_mean_lost`, `erasure_correctable`, `erasure_correctable_profile`).
+  Use `erasure_first_failure` (P_C(m), the uncorrectable fraction at every
+  size m), `uncorrectable_region_counts` (exact P_C(m) for small m),
+  `erasure_lost_profile` or `lost_information`.
+* **Exact values after a stop.** With `stop_when_purified`, evaluations after
+  a trajectory stops hold the probe's exact value for a pure reference instead
+  of NaN: `code_dimension`, `lost_information`, `erasure_lost_profile` and
+  `uncorrectable_region_counts` 0, `erasure_first_failure` n + 1,
+  `code_snapshot` n (no code stored; snapshot count -1). Entanglement probes
+  (`entropy`, `half_cut_entropy`, `mutual_information`,
+  `tripartite_information`, `entropy_profile`) and `contiguous_distance` stay
+  NaN there. Code-rate and erasure averages over all trajectories need no NaN
+  handling.
 
-- The `analysis` extra now installs SciPy, which its finite-size-scaling and
-  production-collapse routines require; minimal-runtime CI skips only tests for
-  optional plotting/scaling dependencies. GitHub Actions now use the Node
-  24-based checkout and Python setup releases.
-- Expurgation now always consumes exactly one logical pair for every validated
-  logically nontrivial measurement. Previously an encoded logical-Z operator
-  could be mistaken for a deterministic pure-state measurement, or a
-  pre-existing gauge pair could absorb the pivot; either path left `k`
-  unchanged and violated the algorithm's accounting and monotonicity contract.
-- The optional PDF drawing test now checks for the required LaTeX classes and
-  packages, rather than failing merely because `pdflatex` exists without
-  `standalone` or `quantikz`.
-- Production readers take short, share-safe NPZ snapshots, and production
-  workers retry transient Windows destination locks without changing completed
-  trajectory data.
-- Finite-size-scaling fits reject unsuccessful, nonfinite, and out-of-bounds
-  optimizer results instead of reporting fallback parameters as valid fits.
-- Production resume validation now rejects inconsistent incomplete rows and
-  observed purification times beyond the configured depth cap.
+New:
 
-## [2.1.0] - 2026-07-24
+* **Per-probe checkpoints.** Every probe factory takes `checkpoints=`
+  (`"final"`, `"every_layer"`, a positive stride or a list of layers; default:
+  the spec's `checkpoints`), so a cheap probe can run every layer and an
+  expensive one at a few depths. `values[name]` has shape `(trajectories,
+  evaluations)` or `(trajectories, evaluations, length)`, one evaluation per
+  layer of `result.layers(name)` (also `spec.probe_layers(name)`). The
+  purification layer is still detected only at the spec's `checkpoints`.
+* **`erasure_first_failure(samples=100)`**: for each of `samples` uniformly
+  random orderings of the system qubits, the first-failure size D, the
+  smallest m such that erasing the first m qubits leaks logical information
+  (I(A:R) > 0); n + 1 when k = 0. The fraction of samples with D <= m
+  estimates P_C(m) for every m at once.
+* **`uncorrectable_region_counts(max_size=2)`**: the number of uncorrectable
+  m-qubit erasures for m = 1..w, by exhaustion (exact P_C(m) = count / C(n, m);
+  all zero exactly when the distance exceeds w). Default name
+  `uncorrectable_region_counts[w]`.
+* **`code_snapshot()`**: saves the code's stabilizer generators at its
+  checkpoints (at most one per spec; give it its own, e.g. `"final"`). Its
+  value is the number of generators, n - k. `result.snapshots[name]` holds the
+  packed generators and counts, `result.code(t, c)` returns a
+  `StabilizerCode`, and snapshots are saved and loaded with the result
+  (`.npz`).
+* **`codes.StabilizerCode`** (also `sparsegf2_v3.StabilizerCode`): a code from
+  an (s, 2n) 0/1 array (X bits, then Z bits) or Pauli strings (`"XZZX_"`;
+  commuting, not necessarily independent), or from packed rows
+  (`from_packed`). `num_qubits`, `num_stabilizers`, `num_logical`,
+  `stabilizer_matrix()`, `lost_information(A)` (l(A) = I(A:R)),
+  `is_correctable(A)`, `first_failure_sizes(samples, seed=...)` and
+  `uncorrectable_counts(max_size)`, computed by the engine's kernels.
+* **Erasure estimators in `analysis`**: `failure_by_size` (P_C(m), m = 0..n,
+  from first-failure samples), `exact_failure_by_size` (exact P_C(m),
+  m = 1..w, from counts), `erasure_failure_probability` (Phi_C(e) =
+  sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) = mean_j Pr[Bin(n, e) >= D_j], for
+  independent erasure with probability e; with `exact_counts`, the hybrid
+  estimator that is exact for m <= w) and `erasure_tolerance`
+  (e_delta = sup{e : Phi(e) <= delta} for an ensemble, by bisection).
+  Purified codes (D = n + 1) give Phi = 0.
+* Examples: `examples/code_and_erasure.py` runs the erasure workflow versus
+  depth on a graph collection (`--graphs`, `--circuits-per-graph`);
+  `examples/purification_time.py` takes `--graphs`, `--circuits-per-graph` and
+  `--graph-seed`.
 
-Expurgation: the code-surgery algorithm of Gullans, Krastanov, Huse, Jiang, and
-Flammia, PRX **11**, 031066 (2021), Sec. VI, implemented natively on the
-phase-free tableau (no signed simulator anywhere in the pipeline).
+Interfaces (API, CLI, MCP):
 
-### Core simulator
+* JSON spec key `circuits_per_graph`; `"realizations": G` in `graph` builds a
+  collection (graph `i` from seed `[seed, i]`). `trajectories` may be omitted
+  for a collection (all `G * c` run); asking for more than `G * c` is an
+  error.
+* MCP tools `run_ensemble(spec, trajectories=None, ...)`,
+  `estimate_ensemble(spec, trajectories=None)` and
+  `start_ensemble_job(spec, output_dir, trajectories=None, ...)` (`output_dir`
+  now comes before `trajectories`). CLI `sparsegf2 ensemble`: `--trajectories`
+  is optional for graph collections.
+* Probes accept `"checkpoints"` in JSON. Summaries show each probe on its own
+  layers (a `layers` key appears when they differ from the spec's);
+  `erasure_first_failure` and `uncorrectable_region_counts` are summarized as
+  P_C(m) curves (index = m) with a `what` description, `code_snapshot` as the
+  mean generator count with a note (the codes are saved only with
+  `output_dir`).
+* `estimate_ensemble` returns `trajectories` and `result_megabytes` and
+  counts each probe on its own layers; runs whose result would exceed 8 GB
+  (`api.MAX_RESULT_GB`) are refused with a message saying what to change.
+* The MCP erasure prompt uses `erasure_first_failure` and
+  `uncorrectable_region_counts`.
 
-- **`SparseGF2.measure_pauli(qubits, letters)`**: projective measurement of an
-  arbitrary multi-qubit Pauli via the same Aaronson-Gottesman three-step update
-  as `measure_z` (anticommuters by parity accumulation, `pivot_mode`-respecting
-  stabilizer pivot, decouple / re-pair / install). Returns the pivot pair index,
-  or `None` for a deterministic measurement (tableau unchanged, matching
-  `measure_z`). Native sparse and hybrid-dense paths; cross-checked against
-  Stim's `MPP` at the stabilizer-subspace level.
-- **`SparseGF2.pauli_anticommuting_rows(qubits, letters)`**: the underlying
-  commutation query (all generator rows anticommuting with a sparse Pauli),
-  `O(sum |inv[q]|)` over the support in sparse mode, bit-packed popcounts in
-  dense mode.
-- **`gf2_eliminate_on_columns`** promoted from an observables-internal helper
-  to `sparsegf2.core.linalg_gf2` (single source of truth): forward GF(2)
-  elimination on a chosen pivot-column set, shared by `contiguous_distance`
-  and the expurgation witness extraction.
+Performance:
 
-### Expurgation (`sparsegf2.expurgation`)
+* The erasure kernels work on the columns of the system qubits in a row basis
+  adapted to the code (the first s rows span S, all r = n + k rows span
+  N(S)). First-failure scans skip the N(S) rank while the S-rank is full and
+  build the N(S) basis once, at the first deficient prefix. Exhaustive counting
+  prunes failing prefixes, builds N(S) bases only when needed, and finds the
+  uncorrectable last qubits of each prefix with hash lookups over the prefix's
+  span. Measured one-thread costs per evaluation at n = 256 (codes from random
+  circuits): `erasure_first_failure` with 100 samples 3 to 7 ms;
+  `uncorrectable_region_counts` about 1 ms for w = 2, 40 to 50 ms for w = 3
+  and about 7 s for w = 4 (C(256, 4) = 1.7e8 sets; practical only at a few
+  depths); `code_snapshot` under 1 ms. Trajectories run in parallel over all
+  cores.
 
-- **`StabilizerCode`**: the (check / logical / gauge) role array over
-  destabilizer/stabilizer pairs plus the elementary measure-and-relabel move.
-  Tableau-agnostic: couples only to the public `SparseGF2` measurement and
-  commutation API, so encoding circuits, `from_symplectic` imports, and
-  hand-built tableaux all work; `from_encoding(sim, data_qubits)` covers the
-  standard convention.
-- **Erasure decoding**: `uncorrectable_matrix` (`M(S, L, e)` assembled from
-  per-site commutation queries), `uncorrectable_rank`
-  (`r_M = rank M - rank M_S`), exact `recovery_probability` (`2**-r_M`), and
-  `expurgation_candidates` (augmented `[M | I]` elimination whose witness bits
-  reconstruct the uncorrectable operators, lightest first).
-- **Purification bridge**: `from_purification(sim, system_qubits)` extracts the
-  system code of a monitored purification-picture tableau (system + reference
-  qubits) into the presentation the machinery uses: the system-supported
-  stabilizers become the checks (kernel of the reference-column map) and a
-  symplectic Gram-Schmidt completes the logical pairs, with `k = S(system)`
-  verified internally. Tests pin the extracted brute-force distance against an
-  independent purification-side computation and the targeted-purification
-  identity (measuring an extracted candidate on the original tableau lowers
-  `code_dimension` by exactly one).
-- **`expurgate` driver**: the published loop with mid-sequence re-validation,
-  gauge and stabilizer strategies, frozen validation patterns (monotone
-  before/after recovery comparison), and stopping criteria (`k_target`,
-  `recovery_target`, barren rounds, `max_rounds`, `k = 0`), returning a full
-  `ExpurgationResult` record; `random_encoding` builds brickwork or all-to-all
-  random codes so the package runs standalone.
-- **Tests**: the companion notes' worked examples traced verbatim (matrix
-  entries, extracted candidates, a brute-force-verified distance increase from
-  1 to 2), random-code cross-checks of `M` against dense symplectic products,
-  loop accounting and monotonicity, and Stim `MPP` parity for the new kernel.
-  See `src/sparsegf2/expurgation/README.md`.
+Removed:
 
-## [2.0.0] - 2026-06-15
+* The v2 cross-check and production benchmark:
+  `benchmarks/crosscheck_v2_production.py`,
+  `benchmarks/results/crosscheck_v2.json`, the production figure
+  (`docs/figures/production-*.png`) and table, and every PRL production
+  protocol speed-up claim.
+* The v2 engine in the simulator comparison (`benchmarks/compare_simulators.py`,
+  `benchmarks/results/simulators.json`, the figures and `tables.md`).
+* The migration guide, `docs/MIGRATING_FROM_V2.md`.
 
-A self-contained, phase-free sparse stabilizer simulator over GF(2) with a
-graph-circuit layer and an analysis/studies layer. Cross-checked against Stim at
-the stabilizer-subspace level, with no runtime Stim dependency.
+Documentation: `docs/DESIGN.md` documents the probe registry and how to add a
+probe, graph collections, and the erasure kernels; `README.md`, `AGENTS.md`,
+`llms.txt` and `docs/LLM_INTERFACE.md` describe the erasure workflow.
 
-### Core simulator
+## 3.0.0.dev8: fixes from the review
 
-- **`SparseGF2`**: phase-free sparse stabilizer tableau. `SparseGF2(n)` is
-  exactly `n` qubits in `|0^n⟩`. Inverted-index storage with numba JIT kernels
-  and pure-Python fallbacks; `pivot_mode="min_weight"|"first"`.
-- **Hybrid sparse/dense mode**: `SparseGF2(n, hybrid=True)` (and
-  `CircuitConfig(..., hybrid=True)`). The simulator monitors the tableau's
-  stabilizer density (`a_bar`, the average column weight) and switches to a
-  bit-packed dense representation while the state is volume-law, where the sparse
-  inverted-index bookkeeping costs more than it saves, switching back to sparse
-  when it thins. A 2x hysteresis band (enter above `max(n//4, 16)`, leave below
-  half) checked every `max(n//2, 32)` ops keeps it from thrashing. Gates and
-  measurements then run via dense Stim-style kernels (numba + pure-Python
-  mirrors) with no index maintenance: ~2.5-3x faster on volume-law /
-  low-measurement-rate circuits (e.g. all-to-all studies at low `p`), and
-  ~parity in the area-law regime. The physical state and every gauge-invariant
-  observable are identical to the pure-sparse engine; only the basis-dependent
-  generator-weight diagnostics may differ, exactly as they do across
-  `pivot_mode`. Default is `False`.
-- **Gates**: `apply_h`, `apply_s`, `apply_sqrt_x`, `apply_cx`, `apply_cz`,
-  `apply_swap`, and generic `apply_gate_1q` / `apply_gate_2q` (validated against
-  the symplectic condition on every call).
-- **Measurement**: `measure_z`, `measure_x`, `measure_y`, `is_deterministic_z`.
-  Deterministic outcomes return `0` (the sign bit is not tracked).
-- **Reset/projection**: `reset_z`, `reset_x`, `reset_y`.
-- **State extraction**: `to_symplectic()` / `from_symplectic()` (round-trip),
-  `canonical_form()` (RREF of the stabilizer subspace, the comparator for state
-  equality), and copy / pickle support for checkpointing and trajectory
-  branching.
-- **Factories**: `from_zero_state(n)`, `from_bell_purification(n_system)`.
-- **`Sp(2n, F₂)` toolkit** (`sparsegf2.core.symplectic`): two uniform samplers
-  (kernel-basis and Bravyi-Maslov, selected via `random_symplectic(...,
-  sampler=...)`), the cached `random_symplectic_2q` fast path, and enumeration
-  (`enumerate_sp4`, `enumerate_symplectic_group`).
-- **Observables** (`sparsegf2.core.observables`): `subsystem_rank`,
-  `entanglement_entropy`, `mutual_information`, `tripartite_mutual_info`,
-  `code_dimension`, `code_rate`, `contiguous_distance`, `generator_weights`,
-  `stabilizer_weight_spectrum`, `average_stabilizer_weight`, and `active_count()`
-  (the mean number of generators touching a qubit, the tableau-density
-  diagnostic `a_bar`; dense-aware).
-- **GF(2) linear algebra** (`sparsegf2.core.linalg_gf2`): `gf2_rref`, `gf2_rank`,
-  `gf2_kernel_basis`, and the bit-packed `gf2_rank_bits` (64 columns per `uint64`
-  word; ~7-27x faster at observable-sized matrices and never slower).
-  numba-accelerated with pure-Python fallbacks; every observable's subsystem rank
-  routes through the bit-packed path.
-- **`SimulatorProtocol`**: observables couple against this structural protocol
-  rather than the concrete class, so alternative backends can opt in.
-- **Exception hierarchy** at `sparsegf2.errors`, each multi-inheriting from the
-  fitting standard exception so existing `except ValueError:` callers still work.
+Behaviour changes (results of some existing seeds change):
 
-### Circuits (`sparsegf2.circuits`)
+* **`scramble_layers` with `schedule="matching"`**: the colour cycle now runs on
+  from the scramble layers into the measured layers. It used to restart, so
+  when `scramble_layers` was 1 more than a multiple of the number of colours
+  the first measured layer repeated the last scramble matching and absorbed it
+  (`scramble_layers=1` on a brickwork did nothing). Unchanged when
+  `scramble_layers` is a multiple of the number of colours (e.g. `2n` on an
+  even ring) and for the other schedules.
+* The `contiguous_distance` probe records NaN, not 0, where the code
+  dimension is 0, so `EnsembleResult.mean` and the API summaries average only
+  trajectories that still hold a code (the summary's `count` says how many).
 
-- Graph-defined random-Clifford + measurement circuits with three pictures
-  (pure state, purification, single reference).
-- Arbitrary geometry via `from_networkx` plus built-in `cycle` / `complete` /
-  `path` / `lattice_2d`.
-- Gating modes `brickwork` / `random_edge` / `random_pool` (the last applies
-  `O(n)` random edges per layer, default `n/2`), four measurement modes
-  (`bernoulli` / `gated` / `random_pair` / `uniform_count`), early-stop
-  (`depth_mode="until_purified"`, with an exact `purified_at_layer`) and
-  per-layer time series.
-- **`scramble_entangled_qubit`** (default `True`): for `single_ref` with
-  `scramble=True`, choose whether the global scramble covers the reference's Bell
-  partner (qubit `n-1`). `False` holds it out, so the probe qubit stays a
-  localized Bell pair until the monitored dynamics spread it. The two settings are
-  different single-qubit-probe protocols. `CircuitConfig.scramble_qubits()`
-  exposes the scramble support, shared by the runner and the inspector.
-- Each circuit run records `mean_active_generators` (`a_bar` averaged over the
-  measured layers) on the `SampleRecord` and in the sweep/study rows.
-- Text and visual circuit inspection (`inspect_circuit`, `draw_circuit`,
-  `scripts/inspect_circuit.py`), reading one shared trace so all three always
-  agree. The global `scramble` is drawn as one labeled block over exactly the
-  qubits it acts on; the inspector and drawer draw a fresh random realization each
-  call (the chosen seed is reported in the summary) and accept an explicit
-  `sample_seed` to reproduce one. Diagrams render with the **quantikz2** LaTeX
-  package (`circuit_to_quantikz` / `save_circuit` / inline `draw_circuit`); system
-  wires are black and the reference register is red, with dashed `setup` / `t_1,
-  t_2, …` separators marking the individual timesteps. One example per gating /
-  matching / measurement mode lives in `docs/figures/gallery/`.
+Fixes:
 
-### Analysis & studies (`sparsegf2.analysis`)
+* Checkpoints given as an int64 array are sorted and deduplicated like any
+  list (a repeated or out-of-order entry silently skipped every later
+  checkpoint and censored purification times).
+* `dataclasses.replace(spec, ...)` gives an independent spec: the compiled
+  cache is per instance (a derived spec ran the original's graph, partner or
+  probes, and could write past its result buffers), and `"final"`,
+  `"every_layer"` and strides follow a new `layers`.
+* `MonitoredCircuit` normalises numpy scalars (sizes from numpy arrays, numpy
+  seeds), so `EnsembleResult.save` no longer fails after the run; it copies
+  `system_order`, `gate_set` and `edge_weights` and keeps them read-only.
+* `EnsembleResult` records the `SeedSequence` actually used
+  (`seed_entropy`, `seed_spawn_key`, `seed_pool_size`; `result.seed_sequence`
+  repeats the run, also for `seed=None` and spawned sequences) and the package
+  `version`. `save` stores both. `concatenate` refuses results whose spec,
+  seed or version differ, or that share trajectories.
+* `Circuit.from_stim` reads Stim's instruction objects instead of its 6-digit
+  text, so arguments keep full precision (`from_stim(c).to_stim() == c`).
+* `Circuit.copy()`, `+`, `+=` and `*` copy `REPEAT` bodies, and editing a
+  `REPEAT` body recompiles the circuit before it next runs.
+* NaN probabilities are rejected; anti-Hermitian MPP products are rejected
+  when the circuit is built, with the line number; `#` inside an
+  instruction tag is not a comment, and `REPEAT` tags are kept.
+* `Simulator.run` and `sample` raise a `TypeError` that names
+  `Circuit.from_stim` for a `stim.Circuit` (and `Circuit(text)` for text),
+  take `max_ops`, and name the instruction of a bad `rec[-k]` lookback.
+  `measure_pauli`, `peek_pauli` and `is_deterministic` accept `!` on any
+  factor, as Stim's MPP does.
+* `observables.contiguous_code_distance` returns 0 when no contiguous run is
+  uncorrectable (system plus reference need not be pure); observables refuse
+  fractional qubit indices; `analysis.kaplan_meier` refuses negative times
+  (the `-1` censoring marker) with a message saying what to pass.
+* `examples/purification_time.py` saves the result before printing, and
+  reports the median as "> T_max" when more than half the trajectories are
+  censored (it crashed and lost the run).
+* Graph banks: the engine colours graphs only for `schedule="matching"`, and
+  `graphs.from_edges` skips re-sorting an already normalised edge array, so
+  preparing a Watts-Strogatz bank for `schedule="random_edges"` costs about
+  13 us per graph at n = 32 and 20 us at n = 256 (it was 190 us and 970 us).
+  `EnsembleResult.elapsed_seconds` now includes that preparation.
+* API: list `edge_weights` follow their edges when an explicit edge list is
+  normalised (they were applied in the user's order to the sorted edges), and
+  are refused with random graph families; `spec.json` stores the spec
+  exactly and resumes compare it exactly; resuming keeps the original
+  provenance, records each resume, and refuses another package version;
+  `estimate_ensemble` counts graph generation and preprocessing, and
+  `run_ensemble` reports wall-clock time; the MCP `run_ensemble` builds the
+  spec once; phase-free `stabilizers` are unsigned; full profiles are saved
+  with `output_dir` and cuts are flagged; oversized summaries show fewer,
+  evenly spaced checkpoints (first and last kept); out-of-range integers are
+  input errors.
+* Documentation: replay with `coins` is exact only when resets act on
+  unentangled qubits; the reference record can differ from Stim's for
+  multi-target X/Y-basis instructions (deterministic detectors are
+  unaffected); circuits are lists of Python objects (DESIGN.md); the
+  single-reference tau is O(log L) after a scramble (LITERATURE.md);
+  `bernoulli_erasure_curve` needs `1 - correctable_fraction` for the failure
+  probability; the PRL production speed-ups over v2 are measured end to end
+  (spec construction and graph preparation included): 26–49× per thread,
+  69–122× on 4 cores (the README said 27–60× and 90–210×, engine time only);
+  the throughput figure labels its phase-free curve; the phase-free margin
+  over Stim at n = 512–1024 is 9–15× (not 11–15×).
+* `benchmarks/make_figures.py --outdir` writes `tables.md` there too, never
+  over the committed copy.
 
-- A registry of named, picture-aware observables usable both online
-  (`simulate(..., analyses=[...])`, which computes then discards the tableau) and
-  offline (`analyze` / `analyze_tableaux` over saved tableaux); custom
-  `fn(sim, spec) -> value` callables work the same way.
-- A parameter-`sweep` driver with on-disk parquet/HDF5 output. The parallel sweep
-  yields results in completion order internally (`joblib
-  return_as="generator_unordered"`, with an ordered fallback for joblib < 1.4)
-  and restores submission order by index, so the progress bar ticks the moment any
-  worker finishes instead of stalling behind the slowest head-of-queue cell on
-  mixed-duration grids.
-- The augmentable **`Study`** database: run a sweep saving tableaux, then
-  `study.augment([...])` to compute new observables on the saved tableaux and
-  merge them in keyed by cell, with no re-simulation (idempotent).
-- **Crash-only run logging**: `Study.run` / `Study.augment` write a verbose
-  descriptive trace to `<path>/logs`, kept only if the run fails (a clean run
-  deletes it); `log_detail="trace"` adds a per-layer record. `Study.run` shows a
-  single whole-study progress bar (the current `n`/`p`/seed while simulating, then
-  the tableau write) as one 0-100% meter.
-- **Plotting** (`plot_study` + `scripts/plot_study.py`): auto-detects every
-  numeric observable column (so it picks up `Study.augment` columns), and shows
-  uncertainty across seeds: error bars by default, `errorstyle="band"` for a
-  shaded band, via `aggregate()`.
+## 3.0.0.dev7: production protocol, cheap code observables, agent interface
 
-### HPC / headless
+* **Graph disorder in the engine.** `MonitoredCircuit(edges=[g0, g1, ...])`
+  takes a graph bank; trajectory `t` runs on graph `t mod G` (graphs may have
+  different edge counts; `edge_weights` then takes one array per graph).
+  `spec.graphs`, `spec.num_graphs`; banks round-trip through
+  `EnsembleResult.save/load`. Graph seeds may be tuples, e.g.
+  `graphs.watts_strogatz(n, 4, beta, seed=(17, i))`.
+* **`scramble_matchings`**: layers of uniformly random all-to-all perfect
+  matchings before the dynamics (the PRL production scramble).
+* `examples/purification_time.py` runs the PRL single-reference protocol; on
+  identical graph banks its purification-time distribution agrees with the v2
+  production engine (`benchmarks/crosscheck_v2_production.py`, KS test).
+* **Reference rows.** With a reference, the engine prefers reference-free
+  pivots and keeps the set of stabilizer rows touching the reference. The
+  code dimension is then a popcount and I(R:E) = rank(E) - rank(E over the
+  other rows), so no reference column enters an elimination: k(t) at every
+  layer costs nothing extra (41 -> 13 us per layer at n = 128, purification
+  picture), erasure profiles and contiguous distances are 1.3-2x faster.
+  Results are unchanged (the stabilizer group is the same; tests compare the
+  new kernels with the generic ones on random codes).
+* Removed the `mean_stabilizer_weight` probe: it depended on the generating
+  set, not on the state, so its value changed with implementation details.
+  `observables.stabilizer_length_distribution` (clipped gauge) is the
+  gauge-invariant alternative.
+* **LLM interface.** `sparsegf2_v3.api` (JSON-in, JSON-out service layer), the
+  `sparsegf2` CLI and the `sparsegf2-mcp` MCP server (`pip install
+  "./v3[mcp]"`), with background jobs for long ensembles; `AGENTS.md`,
+  `llms.txt`, `docs/LLM_INTERFACE.md`, the repository's `.mcp.json` and a
+  Claude Code skill.
+* Benchmarks against Stim, Qiskit Aer, Cirq and v2
+  (`benchmarks/compare_simulators.py`), physics data and README figures
+  (`benchmarks/physics_data.py`, `benchmarks/make_figures.py`).
 
-- `sparsegf2.analysis.available_cores()` resolves the usable core count from the
-  scheduler allocation (`SLURM_CPUS_PER_TASK`, `PBS_NCPUS`, the CPU affinity mask,
-  then `cpu_count`), and a sweep with `n_jobs=-1` fills that allocation rather than
-  the whole node.
-- `SPARSEGF2_PROGRESS=0` is a global progress-bar kill-switch for batch logs, so a
-  job runs silently regardless of any `progress=True` in the code.
-- `Study` output is resumable: chunks already on disk are skipped, so a re-queued
-  job never redoes finished work, and the crash-only log names the exact cell if a
-  run dies.
-- `scripts/hpc_sweep_array.{py,sbatch}` is a SLURM job-array template that runs
-  resumable study chunks across nodes, one task per chunk.
+## 3.0.0.dev6: literature-driven observables
 
-### Packaging
+* New probes: `mutual_information`, `tripartite_information` (default: the
+  first three quarters of the system), and vector probes `entropy_profile`,
+  `erasure_lost_profile`, `erasure_correctable_profile` (I(R:E_m) for every
+  erasure size m in one incremental pass). `record_profile` is replaced by the
+  `entropy_profile()` probe; vector probes have shape
+  `(trajectories, checkpoints, n + 1)`.
+* Long-range circuits: `edge_weights` for `schedule="random_edges"` and
+  `graphs.power_law_weights` (P(r) ~ r^-alpha, Block et al.).
+* `EnsembleResult.survival()`: P(tau > layer) at every checkpoint.
+* Observables: `clipped_gauge`, `stabilizer_length_distribution`,
+  `erasure_profile`.
+* `sparsegf2_v3.analysis`: `kaplan_meier` (Greenwood errors),
+  `bernoulli_erasure_curve` (erasure threshold curves from per-size data),
+  `mean_and_error`.
 
-- MIT `LICENSE`, `py.typed` marker, project URLs and classifiers, and a CI
-  workflow (ruff + pytest) running the full suite on Linux, macOS, and Windows, in
-  two install configurations per OS (the bare `numpy`+`numba` floor and the full
-  optional-extras set), so the analysis / parallel (`n_jobs>1`) / data / graph
-  paths and the Stim-parity cross-checks are all exercised on every platform.
-- The runtime floor stays numpy + numba; heavier dependencies (networkx, pyarrow,
-  h5py, pandas, joblib, matplotlib) are optional extras (`graph`, `data`,
-  `parallel`, `viz`, `analysis`), imported lazily only when used.
-- Package-owned text metadata I/O specifies `encoding="utf-8"`, while a
-  `.gitattributes` pins LF line endings, so the installed package and its test
-  suite behave consistently on Windows, macOS, and Linux. Standalone benchmark
-  and research scripts are outside this portability claim.
-- Stim is its own `stim` extra, separate from `test`; the suite runs without it
-  (the Stim-parity tests skip), so the simulator and tests install on any
-  supported Python (3.12+) even when Stim has no wheel for it yet.
+## 3.0.0.dev5: the monitored-circuit ensemble engine
 
-### Performance
+* `sparsegf2_v3.graphs`: edge-array graphs (`cycle`, `path`, `complete`,
+  `lattice_2d`, `watts_strogatz`, `newman_watts`, `erdos_renyi`,
+  `random_regular`, `from_networkx`, `from_edges`) with platform-independent
+  seeded generation, plus `edge_coloring` (brickwork on any graph).
+* `sparsegf2_v3.mipt`: `MonitoredCircuit` protocol spec (pictures: none,
+  purification, single reference with fixed or random partner; scrambles;
+  schedules: matching, random_edges, all_edges; gate sets; checkpoints; stop at
+  purification) and probes (`code_dimension`, `half_cut_entropy`, `entropy`,
+  `contiguous_distance`, `lost_information`, `erasure_lost_information`,
+  `erasure_correctable_fraction`, `mean_stabilizer_weight`, profiles).
+* `spec.run(trajectories, seed=...)` generates and simulates every trajectory in
+  compiled code, in parallel; results are independent of thread count and
+  chunking (`first_trajectory`, `EnsembleResult.concatenate`), and saved/loaded
+  with `EnsembleResult.save/load`. `spec.circuit(t, seed=...)` returns the exact
+  circuit of trajectory `t`.
+* Tests: engine output equals the general Simulator running the exported
+  circuits, probe by probe at every checkpoint, for five protocol variants.
 
-- ~30x faster than the pure-Python reference via `@njit(inline="always")` on the
-  position-map primitives; faster than Stim above `n ≈ 64` on the brick-wall
-  benchmark (≈4x at `n = 256`, growing with `n`). `to_symplectic()` is vectorized
-  and `canonical_form()` uses a JIT'd GF(2) RREF.
-- Two-qubit gate hot loop (the largest single cost, ~54% of a circuit): the
-  per-generator LUT is indexed by the packed Pauli pair `(xz_i<<2)|xz_j` and
-  returns the packed result, so the inner loop is one lookup on the two `plt`
-  bytes with no bit unpack/repack and an early-skip for unaffected generators; and
-  the runner prebuilds each gate's LUT once from the fixed gate table instead of
-  re-keying the symplectic on every gate.
-- `until_purified` / `record_time_series` recompute the order parameter only on
-  layers that actually measured (an entanglement entropy is invariant under the
-  gates, and the references are never gated) instead of every layer, and skip
-  provably redundant checks (the order parameter is non-increasing and drops at
-  most 1 per measurement), keeping `purified_at_layer` exact while cutting the
-  per-layer rank cost.
-- `contiguous_distance` factors the reference out of the stabilizer block once
-  (each window is then two small ranks instead of a fresh rank over ~n columns)
-  and short-circuits fully purified cells, making it 100-3000x faster at
-  `n = 128`, the difference between a multi-minute and a few-second
-  `Study.augment`.
+## 3.0.0.dev4: milestone 4, observables and erasure protection
+
+* `sparsegf2_v3.observables`: `entropy`, `mutual_information`,
+  `tripartite_information`, `entropy_profile` (all prefix entropies in one
+  incremental pass), `code_dimension` (S(R)), `lost_logical_information`
+  (I(R:E)), `erasure_is_correctable`, `recovery_probability` (2**-I(R:E)),
+  `random_erasure_statistics` (erasure-threshold curves),
+  `contiguous_code_distance`, `stabilizer_weights`.
+* Compiled kernels for all of the above (incremental GF(2) bases on the column
+  bitsets), reusable by the ensemble engine.
+* Tests against independent state-vector calculations and brute-force
+  definitions, at sizes across 64-bit word boundaries.
+
+## 3.0.0.dev3: milestone 3, circuits and compiled execution
+
+* `Circuit`: Stim's circuit language (parse, print, append, REPEAT, tags),
+  lossless `from_stim`/`to_stim`, and validation with line-numbered errors.
+  Supports every Clifford gate, `M MX MY MR MRX MRY MXX MYY MZZ MPP R RX RY`,
+  inverted results (`!q`), classically controlled Paulis (`CX rec[-1] q`),
+  Pauli noise (`X/Y/Z_ERROR`, `DEPOLARIZE1/2`, `PAULI_CHANNEL_1/2`, `M(p)`),
+  `DETECTOR`, `OBSERVABLE_INCLUDE`, `QUBIT_COORDS`, `SHIFT_COORDS`, `TICK`.
+* Extensions `CLIFFORD_1Q(i...)` / `CLIFFORD_2Q(i...)` apply Cliffords by
+  canonical index; `to_stim()` expands them into Stim gates.
+* `Simulator.run(circuit, coins=None, observe=None)`: one compiled Numba call;
+  `observe(sim, tick)` runs at every TICK to measure the state as it evolves.
+  `RunResult` has `measurements`, `random`, `detectors`, `observables`,
+  `observations`. Detectors/observables follow Stim's convention (XOR with the
+  noiseless reference sample).
+* `sample(circuit, shots, seed=..., num_threads=...)`: many shots in parallel;
+  results independent of the thread count.
+* Tests: Stim-generated QEC circuits round-trip exactly; random noiseless
+  circuits replayed with Stim's record reproduce every outcome, final signed
+  state and deterministic detector/observable; 11 noise channels match Stim's
+  sampler statistically; a noisy d=3 surface code matches Stim's per-detector
+  rates.
+
+## 3.0.0.dev2: milestone 2, the kernel and `Simulator`
+
+* Column-major, bit-packed tableau kernel (Numba): one 64-bit word holds one
+  Pauli bit of 64 generators, so gates are word-parallel and a measurement finds
+  all anticommuting generators in one bitset read.
+* `Simulator(n, phases=True|False, seed=...)` with Stim-style methods: every
+  Clifford gate by name (`sim.h`, `sim.cx`, `sim.iswap`, ...), `do`,
+  `clifford_1q/2q` by canonical index, `apply(Clifford)`, `measure`,
+  `measure_x/y`, `measure_many`, `measure_pauli` (MPP syntax), `reset`,
+  `reset_x/y`, `peek_z/x/y`, `peek_pauli`, `is_deterministic`, `stabilizers`
+  (Stim canonical form), `destabilizers`, `stabilizer_arrays`, `entropy`,
+  `copy`, `from_tableau`.
+* Outcomes are physical in phases mode; phase-free mode returns `None` and
+  raises `PhaseFreeError` for sign-dependent queries. `coin=` forces random
+  outcomes; every collapse consumes one bit of the xoshiro256** stream.
+* Lock-step tests against `stim.TableauSimulator` with forced outcomes: exact
+  signed canonical stabilizers after every operation, deterministic outcomes,
+  randomness flags, peeks; random initial states; sizes across 64-bit word
+  boundaries; plus state-vector checks of the entropy.
+
+## 3.0.0.dev1: milestone 1, foundations
+
+* Audit of v2 (`docs/AUDIT.md`) and the v3 design proposal (`docs/DESIGN.md`).
+* `PauliString`: immutable Pauli operators with exact phases, Stim's notation
+  and sign conventions; products, commutation, matrices, Stim conversion.
+* `Clifford`: k-qubit Clifford unitaries as signed tableaux; conjugation,
+  composition, inverse, symplectic matrix, conjugation tables, Stim conversion.
+  Canonical, Stim-independent indexing of the 24 one-qubit and 11,520
+  two-qubit Cliffords (`Clifford.from_index`, `Clifford.index`,
+  `random_clifford_indices`).
+* `gate()` / `all_gates()`: every one- and two-qubit Clifford unitary in Stim
+  (46 gates plus aliases), identical names and conventions.
+* Test suite (156 tests, plus doctests) checking all of the above against Stim, plus
+  Stim-independent checks against dense matrices.
+* `benchmarks/prototypes/`: the layout prototypes behind the kernel design.
