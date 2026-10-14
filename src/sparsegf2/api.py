@@ -2000,7 +2000,7 @@ def _output_dir(path: Any) -> Path:
 def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
     tmp = path.with_name(path.name + ".tmp.npz")
     # numpy's stubs type the **arrays of savez_compressed as its allow_pickle flag
-    np.savez_compressed(tmp, **arrays)  # type: ignore[arg-type]
+    np.savez_compressed(tmp, **arrays)  # type: ignore[arg-type, unused-ignore]
     os.replace(tmp, path)
 
 

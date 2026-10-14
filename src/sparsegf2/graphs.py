@@ -395,7 +395,7 @@ def save(path, graphs_, num_nodes: int, weights=None) -> Path:
             arrays["weights"] = np.concatenate([w for _, w in pairs])
         with path.open("wb") as fh:
             # numpy's stubs type the **arrays of savez as its allow_pickle flag
-            np.savez(fh, **arrays)  # type: ignore[arg-type]
+            np.savez(fh, **arrays)  # type: ignore[arg-type, unused-ignore]
     else:
         raise ValueError(f"graph files end in .json or .npz, got {path.name!r}")
     return path

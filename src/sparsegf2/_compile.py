@@ -351,7 +351,7 @@ def parity_of(record: np.ndarray, ptr: np.ndarray, idx: np.ndarray) -> np.ndarra
         out = np.zeros(groups, dtype=np.uint8)
         for g in range(groups):
             # numpy's stubs lack the plain reduce(array, initial=...) overload
-            out[g] = np.bitwise_xor.reduce(  # type: ignore[call-overload]
+            out[g] = np.bitwise_xor.reduce(  # type: ignore[call-overload, unused-ignore]
                 record[idx[ptr[g] : ptr[g + 1]]], initial=0
             )
         return out
@@ -360,5 +360,5 @@ def parity_of(record: np.ndarray, ptr: np.ndarray, idx: np.ndarray) -> np.ndarra
         sel = idx[ptr[g] : ptr[g + 1]]
         if sel.size:
             # numpy's stubs lack the plain reduce(array, axis=...) overload
-            out[:, g] = np.bitwise_xor.reduce(record[:, sel], axis=1)  # type: ignore[call-overload]
+            out[:, g] = np.bitwise_xor.reduce(record[:, sel], axis=1)  # type: ignore[call-overload, unused-ignore]
     return out

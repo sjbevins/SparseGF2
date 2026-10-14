@@ -79,11 +79,12 @@ warn_redundant_casts = true
 # numba and llvmlite have partial or misleading annotations (numba.config is filled in at
 # run time; @intrinsic is typed as a class), so they are treated as untyped (Any).
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*", "llvmlite", "llvmlite.*"]
+module = ["numba.*", "llvmlite.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
-# These packages ship no type stubs.
+# stim ships no py.typed; mcp and pydantic do, so this matters for them only when the
+# [mcp] extra is not installed.
 [[tool.mypy.overrides]]
 module = ["stim", "mcp.*", "pydantic.*"]
 ignore_missing_imports = true

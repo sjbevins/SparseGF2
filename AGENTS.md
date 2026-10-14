@@ -326,7 +326,7 @@ crosscheck.compare_measurements(circuit, seed=0)
 ```sh
 python -m pytest          # full suite; Stim is required
 ruff check src tests && ruff format src tests
-python -m mypy             # type check; must report Success (the package ships py.typed)
+python -m mypy            # type check; must report Success (the package ships py.typed)
 pre-commit install        # once, optional: ruff, mypy and file hygiene before each commit
 ```
 
