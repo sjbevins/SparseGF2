@@ -88,9 +88,20 @@ def _parse(doc: Any, origin: str) -> dict[str, StackDef]:
         extra = set(body) - {"description", "include", "exclude", "fixed", "defaults"}
         if extra:
             raise ValueError(f"{origin}: stack {name!r} has unknown key(s) {sorted(extra)}")
+        here = f"{origin}: stack {name!r}"
+        if not isinstance(body.get("description", ""), str):
+            raise ValueError(f"{here}: description must be a string")
+        for key in ("include", "exclude"):
+            value = body.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+                raise ValueError(f"{here}: {key} must be a list of names")
+        for key in ("fixed", "defaults"):
+            value = body.get(key, {})
+            if not isinstance(value, dict) or not all(isinstance(v, dict) for v in value.values()):
+                raise ValueError(f"{here}: {key} must be an object of objects (tool -> parameters)")
         out[name] = StackDef(
             name,
-            str(body.get("description", "")),
+            body.get("description", ""),
             tuple(body.get("include", ())),
             tuple(body.get("exclude", ())),
             dict(body.get("fixed", {})),
@@ -217,6 +228,12 @@ def resolve(
                 cur[0].update(fx)
                 cur[1].update(df)
         for t in stack.exclude:
+            if t not in registry:
+                close = difflib.get_close_matches(t, list(registry), n=3)
+                hint = f"; did you mean {', '.join(close)}?" if close else ""
+                raise ValueError(
+                    f"stack {stack.name!r}: exclude names {t!r}, which is not a tool{hint}"
+                )
             tools.pop(t, None)
         apply(stack.fixed, tools, 0, stack)
         apply(stack.defaults, tools, 1, stack)

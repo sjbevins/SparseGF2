@@ -427,10 +427,11 @@ def _command_line() -> str:
 
 
 def _cmd_stacks(args: argparse.Namespace) -> _Outcome:
-    import contextlib
-
-    with contextlib.suppress(ImportError):  # the tool modules land in later tasks
+    try:
         import sparsegf2.agent.tools  # noqa: F401  (registers the tools)
+    except ModuleNotFoundError as exc:
+        if exc.name != "sparsegf2.agent.tools":  # only "not written yet" is tolerated
+            raise
     from sparsegf2.agent import stacks
 
     root = Path(args.root).resolve()

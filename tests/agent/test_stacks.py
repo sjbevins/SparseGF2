@@ -169,3 +169,18 @@ def test_cli_save_show_delete(tmp_path, capsys):
     out = capsys.readouterr().out.strip().splitlines()[-1]
     assert "job_status" in json.loads(out)["tools"]
     assert cli.main(["stacks", "delete", "mine", "--stacks-file", f, "--json"]) == 0
+
+
+@pytest.mark.parametrize(
+    "stack, message",
+    [
+        ({"include": ["ensemble"], "exclude": ["nope_tool"]}, r"exclude names 'nope_tool'"),
+        ({"include": "job"}, r"stack 'mine': include must be a list of names"),
+        ({"include": ["job"], "fixed": {"ensemble_run": 3}}, r"fixed must be an object"),
+    ],
+)
+def test_field_type_and_exclude_validation(tmp_path, reg, stack, message):
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"version": 1, "stacks": {"mine": stack}}), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        stacks.resolve("mine", root=tmp_path, stacks_file=f, registry=reg)
