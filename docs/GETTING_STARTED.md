@@ -41,7 +41,6 @@ kernels are compiled by Numba, which ships its own LLVM.
 ```sh
 git clone https://github.com/sjbevins/SparseGF2
 cd SparseGF2
-git checkout v3                                 # until the 3.0 promotion is merged into main
 python -m venv .venv
 source .venv/bin/activate                       # Windows: .venv\Scripts\activate
 pip install -e ".[test]"

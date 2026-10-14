@@ -145,7 +145,6 @@ named `sparsegf2`):
 
 ```sh
 git clone https://github.com/sjbevins/SparseGF2 && cd SparseGF2
-git checkout v3                     # until the 3.0 promotion is merged into main
 python -m venv .venv                # then activate it (.venv\Scripts\activate on Windows)
 pip install -e ".[test]"            # add ,mcp for the MCP server:  ".[test,mcp]"
 ```
