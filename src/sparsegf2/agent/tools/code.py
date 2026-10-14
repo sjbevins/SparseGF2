@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +15,10 @@ from sparsegf2.agent.registry import Param, ToolDef, register
 from sparsegf2.agent.render import curve, fmt, lines
 from sparsegf2.codes import StabilizerCode
 
+EXHAUSTIVE_LIMIT = 1e10
+SAMPLES = 512
+MAX_SIZE = 2
+MAX_SAMPLES = 1_000_000
 _PAULI = np.array(["_", "X", "Z", "Y"])
 
 
@@ -21,7 +26,7 @@ def _qubits(code: StabilizerCode, value: Any, what: str) -> list[int]:
     return api._qubit_list(plain(value), what, code.num_qubits)
 
 
-def _ff(code, cache, samples=512, seed=0):
+def _ff(code, cache, samples=SAMPLES, seed=0):
     key = ("ff", int(samples), int(seed))
     if key not in cache:
         cache[key] = code.first_failure_sizes(int(samples), seed=int(seed))
@@ -39,7 +44,7 @@ def _summary(code, cache):
     return {"n": code.num_qubits, "k": code.num_logical, "generators": code.num_stabilizers}
 
 
-def _first_failure(code, cache, samples=512, seed=0):
+def _first_failure(code, cache, samples=SAMPLES, seed=0):
     d = _ff(code, cache, samples, seed)
     return {
         "samples": int(d.size),
@@ -50,7 +55,7 @@ def _first_failure(code, cache, samples=512, seed=0):
     }
 
 
-def _failure_by_size(code, cache, samples=512, seed=0):
+def _failure_by_size(code, cache, samples=SAMPLES, seed=0):
     return analysis.failure_by_size(_ff(code, cache, samples, seed), code.num_qubits)
 
 
@@ -59,7 +64,7 @@ def _exhaustive(code, cache, max_size=2):
     return {"counts": c, "p_c_exact": analysis.exact_failure_by_size(c, code.num_qubits)}
 
 
-def _bounds(code, cache, samples=512, max_size=2, seed=0):
+def _bounds(code, cache, samples=SAMPLES, max_size=MAX_SIZE, seed=0):
     low, high = analysis.distance_bounds(
         _ff(code, cache, samples, seed),
         code.num_qubits,
@@ -68,7 +73,7 @@ def _bounds(code, cache, samples=512, max_size=2, seed=0):
     return {"low": int(low), "high": int(high)}
 
 
-def _mu(code, cache, samples=512, max_size=2, seed=0):
+def _mu(code, cache, samples=SAMPLES, max_size=MAX_SIZE, seed=0):
     return float(
         analysis.mean_first_failure(
             _ff(code, cache, samples, seed),
@@ -78,7 +83,15 @@ def _mu(code, cache, samples=512, max_size=2, seed=0):
     )
 
 
-def _phi(code, cache, rates=(0.01, 0.02, 0.05, 0.1), delta=0.01, samples=512, max_size=2, seed=0):
+def _phi(
+    code,
+    cache,
+    rates=(0.01, 0.02, 0.05, 0.1),
+    delta=0.01,
+    samples=SAMPLES,
+    max_size=MAX_SIZE,
+    seed=0,
+):
     d = _ff(code, cache, samples, seed)
     counts = _counts(code, cache, max_size)
     rates = [float(r) for r in (rates if isinstance(rates, list | tuple) else [rates])]
@@ -165,37 +178,34 @@ CODE_PROPERTIES: dict[str, tuple[tuple[str, ...], str, Callable]] = {
 }
 
 
-def load_code(ctx, a: dict[str, Any]) -> tuple[StabilizerCode, str]:
-    given = [k for k in ("stabilizers", "source", "state_id") if a.get(k) is not None]
-    if len(given) != 1:
-        raise ValueError("give exactly one of stabilizers, source or state_id")
-    if given == ["stabilizers"]:
-        return StabilizerCode(list(a["stabilizers"])), "the given stabilizers"
-    if given == ["state_id"]:
-        if not a.get("reference_qubits"):
-            raise ValueError("state_id needs reference_qubits (e.g. 8:16)")
-        sim = ctx.states.get(a["state_id"])
-        ref = api._qubit_list(a["reference_qubits"], "reference_qubits", sim.num_qubits)
-        return StabilizerCode.from_simulator(sim, ref), f"state {a['state_id']}"
-    path = ctx.path(a["source"], what="source", must_exist=True)
-    if path.name.endswith(".code.npz"):
-        with np.load(path, allow_pickle=False) as z:
-            return StabilizerCode(z["stabilizers"], num_qubits=int(z["num_qubits"])), ctx.show(path)
-    if path.name.endswith(".state.npz"):
-        if not a.get("reference_qubits"):
-            raise ValueError("a state file needs reference_qubits (e.g. 8:16)")
-        from sparsegf2.simulator import Simulator
+def _from_state(sim, a: dict[str, Any], origin: str) -> tuple[StabilizerCode, str]:
+    if not a.get("reference_qubits"):
+        raise ValueError(f"{origin} needs reference_qubits (e.g. 8:16)")
+    ref = api._qubit_list(a["reference_qubits"], "reference_qubits", sim.num_qubits)
+    return StabilizerCode.from_simulator(sim, ref), origin
 
-        sim = Simulator.load(path)
-        ref = api._qubit_list(a["reference_qubits"], "reference_qubits", sim.num_qubits)
-        return StabilizerCode.from_simulator(sim, ref), ctx.show(path)
-    res = api._load_directory(path)[0] if path.is_dir() else api._load_result_file(path)
+
+def _from_result(ctx, path, a: dict[str, Any]) -> tuple[StabilizerCode, str]:
+    if path.is_dir() and (path / "trajectory.json").exists():  # a traj_run record: one row
+        res = api._load_result_file(path / "result.npz")
+    else:
+        res = api._load_directory(path)[0] if path.is_dir() else api._load_result_file(path)
+    where = ctx.show(path)
     if res is None:
-        raise ValueError(f"no saved result in {ctx.show(path)}")
-    evaluations = len(res.layers(next(iter(res.snapshots))) if res.snapshots else [])
+        raise ValueError(f"no saved result in {where}")
+    if not res.snapshots:
+        raise ValueError(
+            f"{where} saved no code: add code_snapshot to probes (ensemble_run) or use traj_run"
+        )
+    name = next(iter(res.snapshots))
+    layers = [int(x) for x in res.layers(name)]
     evaluation = a.get("evaluation", -1)
-    if evaluation < 0:
-        evaluation += evaluations
+    if not -len(layers) <= evaluation < len(layers):
+        raise ValueError(
+            f"evaluation {evaluation} out of range: {where} has {len(layers)} code snapshots at "
+            f"layers {layers} (use 0..{len(layers) - 1} or -1 for the last)"
+        )
+    evaluation %= len(layers)
     t = a.get("trajectory")
     numbers = np.asarray(res.trajectories)
     if t is None:
@@ -204,18 +214,70 @@ def load_code(ctx, a: dict[str, Any]) -> tuple[StabilizerCode, str]:
         hits = np.flatnonzero(numbers == t)
         if not hits.size:
             raise ValueError(
-                f"trajectory {t} is not in {ctx.show(path)} (it holds "
-                f"{numbers.min()}..{numbers.max()})"
+                f"trajectory {t} is not in {where} (it holds {numbers.min()}..{numbers.max()})"
             )
         row = int(hits[0])
-    code = res.code(row, evaluation)
-    return code, f"{ctx.show(path)}, trajectory {int(numbers[row])}, evaluation {evaluation}"
+    try:
+        code = res.code(row, evaluation, name)
+    except ValueError as err:
+        raise ValueError(
+            f"trajectory {int(numbers[row])} had stopped (reference purified) before layer "
+            f"{layers[evaluation]}: k = 0, so there is no code there; use an earlier evaluation "
+            f"(layers {layers})"
+        ) from err
+    return code, f"{where}, trajectory {int(numbers[row])}, layer {layers[evaluation]}"
 
 
-def _analyze(ctx, a):
-    code, origin = load_code(ctx, a)
-    cache: dict = {}
-    results = []
+def load_code(ctx, a: dict[str, Any]) -> tuple[StabilizerCode, str]:
+    given = [k for k in ("stabilizers", "source", "state_id") if a.get(k) is not None]
+    if len(given) != 1:
+        raise ValueError("give exactly one of stabilizers, source or state_id")
+    if given == ["stabilizers"]:
+        return StabilizerCode(list(a["stabilizers"])), "the given stabilizers"
+    if given == ["state_id"]:
+        return _from_state(ctx.states.get(a["state_id"]), a, f"state {a['state_id']}")
+    path = ctx.path(a["source"], what="source", must_exist=True)
+    if path.name.endswith(".code.npz"):
+        with np.load(path, allow_pickle=False) as z:
+            return StabilizerCode(z["stabilizers"], num_qubits=int(z["num_qubits"])), ctx.show(path)
+    if path.name.endswith(".state.npz"):
+        from sparsegf2.simulator import Simulator
+
+        return _from_state(Simulator.load(path), a, ctx.show(path))
+    return _from_result(ctx, path, a)
+
+
+_NEEDS_COUNTS = (
+    "exhaustive_counts",
+    "distance_bounds",
+    "mean_first_failure",
+    "failure_probability",
+)
+_NEEDS_SAMPLES = (
+    "first_failure",
+    "failure_by_size",
+    "distance_bounds",
+    "mean_first_failure",
+    "failure_probability",
+)
+
+
+def _int_arg(value: Any, name: str, low: int, high: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if value < low:
+        raise ValueError(f"{name} must be at least {low}, got {value!r}")
+    if high is not None and value > high:
+        raise ValueError(f"{name} must be at most {high}, got {value!r}")
+    return value
+
+
+def _checks(n: int, w: int) -> int:
+    return sum(math.comb(n, m) for m in range(1, min(w, n) + 1))
+
+
+def _calls(a: dict[str, Any]) -> list[tuple[Any, dict[str, Any]]]:
+    out = []
     for i, call in enumerate(parse_calls(a.get("properties") or ["summary"], what="properties")):
         if call.name not in CODE_PROPERTIES:
             close = difflib.get_close_matches(call.name, list(CODE_PROPERTIES), n=2)
@@ -224,8 +286,58 @@ def _analyze(ctx, a):
                 f"properties[{i}]: unknown property {call.name!r}{hint} "
                 "(help_list(what=code_properties))"
             )
-        names, _, fn = CODE_PROPERTIES[call.name]
-        kwargs = plain(bind(call, names, what=f"properties[{i}]"))
+        names = CODE_PROPERTIES[call.name][0]
+        out.append((call, plain(bind(call, names, what=f"properties[{i}]"))))
+    return out
+
+
+def _cost(n: int, calls: list[tuple[Any, dict[str, Any]]]) -> float:
+    """Pessimistic seconds, shared caches counted once; refuses too many exhaustive checks."""
+    scale = max(1.0, n / 256)
+    seen: set = set()
+    seconds = 0.0
+    for call, kw in calls:
+        if call.name in _NEEDS_SAMPLES:
+            m = _int_arg(kw.get("samples", SAMPLES), "samples", 1, MAX_SAMPLES)
+            key = ("ff", m, kw.get("seed", 0))
+            if key not in seen:
+                seen.add(key)
+                seconds += 1.5e-5 * m * scale**2
+        if call.name in _NEEDS_COUNTS:
+            w = _int_arg(kw.get("max_size", MAX_SIZE), "max_size", 1)
+            if ("counts", w) not in seen:
+                seen.add(("counts", w))
+                checks = _checks(n, w)
+                t = 3e-8 * checks * scale
+                if checks > EXHAUSTIVE_LIMIT:
+                    w_max = max(
+                        (x for x in range(1, n + 1) if _checks(n, x) <= EXHAUSTIVE_LIMIT),
+                        default=0,
+                    )
+                    raise ValueError(
+                        f"max_size={w} needs {checks:.3g} erasure checks (about {t:.3g} s); the "
+                        f"exhaustive limit is 1e10 checks: use max_size <= {w_max} for n = {n}, "
+                        "or rely on sampled first failures"
+                    )
+                seconds += t
+        if call.name == "contiguous_distance":
+            seconds += 2e-8 * n * n * math.log2(max(n, 2))
+    return seconds
+
+
+def _estimate(ctx, a: dict[str, Any]) -> float:
+    code, _ = load_code(ctx, a)
+    return _cost(code.num_qubits, _calls(a))
+
+
+def _analyze(ctx, a):
+    code, origin = load_code(ctx, a)
+    calls = _calls(a)
+    _cost(code.num_qubits, calls)
+    cache: dict = {}
+    results = []
+    for call, kwargs in calls:
+        fn = CODE_PROPERTIES[call.name][2]
         results.append(
             {"property": call.text.strip(), "name": call.name, "value": fn(code, cache, **kwargs)}
         )
@@ -245,7 +357,9 @@ def _analyze(ctx, a):
     return out
 
 
-def _show(name: str, label: str, v: Any) -> str:
+def _show(name: str, label: str, v: Any, k: int) -> str:
+    if k == 0 and name in ("distance_bounds", "contiguous_distance"):
+        return f"{label}: no logical qubits (k = 0)"
     if name == "summary":
         return f"{label}: n={v['n']}, k={v['k']}, generators={v['generators']}"
     if name == "first_failure":
@@ -278,7 +392,7 @@ def _show(name: str, label: str, v: Any) -> str:
 
 def _render(d, ctx):
     head = f"code_analyze: [[{d['n']}, {d['k']}]] code from {d['origin']}"
-    body = [_show(r["name"], r["property"], r["value"]) for r in d["results"]]
+    body = [_show(r["name"], r["property"], r["value"], d["k"]) for r in d["results"]]
     tail = f"saved: {d['saved']}" if d.get("saved") else ""
     return lines(head, *body, tail)
 
@@ -314,7 +428,7 @@ register(
             Param(
                 "trajectory",
                 "integer",
-                "Trajectory number in a saved ensemble (default: its first).",
+                "Global trajectory number in a saved ensemble (default: its first).",
                 minimum=0,
             ),
             Param("evaluation", "integer", "Snapshot index (-1 = the last).", default=-1),
@@ -322,6 +436,7 @@ register(
             Param("save_to", "string", "Also save the code as a .code.npz file."),
         ),
         handler=_analyze,
+        estimate=_estimate,
         render=_render,
         long_running=True,
         examples=({"stabilizers": ["XXXX", "ZZZZ"], "properties": ["summary", "distance_bounds"]},),
