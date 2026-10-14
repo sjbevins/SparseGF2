@@ -90,6 +90,15 @@ Needs the optional extra: pip install 'sparsegf2[mcp]'.
 """
 
 
+_STACKS_HELP = """\
+examples:
+  sparsegf2 stacks list
+  sparsegf2 stacks show erasure
+  sparsegf2 stacks save ws128 --from erasure --fix "*.num_system=128" --project
+  sparsegf2 stacks delete ws128 --project
+"""
+
+
 class _UsageError(Exception):
     """Raised instead of argparse's sys.exit so main() can report it its own way."""
 
@@ -179,6 +188,25 @@ def _build_parser() -> _Parser:
         "results", "Summarize a saved ensemble (result.npz or an output directory).", _RESULTS_HELP
     )
     p.add_argument("path", metavar="PATH", help="result .npz file or output directory")
+
+    p = add("stacks", "List, show, save or delete MCP tool stacks.", _STACKS_HELP)
+    p.add_argument("action", choices=["list", "show", "save", "delete"])
+    p.add_argument("name", nargs="?", help="stack name (show, save, delete)")
+    p.add_argument("--root", default=".", help="project root (default: current directory)")
+    p.add_argument("--stacks-file", default=None, help="a stacks.json to use first")
+    p.add_argument("--from", dest="base", default=None, help="save: start from this stack")
+    p.add_argument("--include", default="", help="save: comma-separated stacks and tools")
+    p.add_argument("--exclude", default="", help="save: comma-separated tools to drop")
+    p.add_argument(
+        "--fix", action="append", default=[], help="save: TOOL.PARAM=VALUE (TOOL may be *)"
+    )
+    p.add_argument("--default", action="append", default=[], help="save: TOOL.PARAM=VALUE")
+    p.add_argument("--description", default="", help="save: one line about the stack")
+    where = p.add_mutually_exclusive_group()
+    where.add_argument(
+        "--project", action="store_true", help="the project's .sparsegf2/stacks.json"
+    )
+    where.add_argument("--user", action="store_true", help="the user stacks file (default)")
 
     add("mcp", "Start the MCP server over stdio.", _MCP_HELP)
     return parser
@@ -398,7 +426,79 @@ def _command_line() -> str:
     return shlex.join(["sparsegf2", *sys.argv[1:]])
 
 
+def _cmd_stacks(args: argparse.Namespace) -> _Outcome:
+    import contextlib
+
+    with contextlib.suppress(ImportError):  # the tool modules land in later tasks
+        import sparsegf2.agent.tools  # noqa: F401  (registers the tools)
+    from sparsegf2.agent import stacks
+
+    root = Path(args.root).resolve()
+    stacks_file = Path(args.stacks_file) if args.stacks_file else None
+    target = (
+        stacks_file
+        if stacks_file
+        else stacks.project_file(root)
+        if args.project
+        else stacks.user_file()
+    )
+    if args.action == "list":
+        return {"stacks": stacks.catalog(root, stacks_file)}, EXIT_OK
+    if not args.name:
+        raise ValueError(f"stacks {args.action} needs a stack name")
+    if args.action == "show":
+        r = stacks.resolve(args.name, root=root, stacks_file=stacks_file)
+        return {
+            "name": args.name,
+            "tools": [b.name for b in r.bounds],
+            "fixed": {b.name: dict(b.fixed) for b in r.bounds if b.fixed},
+            "defaults": {b.name: dict(b.defaults) for b in r.bounds if b.defaults},
+            "size_chars": sum(b.size() for b in r.bounds),
+            "notes": r.notes,
+        }, EXIT_OK
+    if args.action == "delete":
+        removed = stacks.delete_stack(target, args.name)
+        return {"deleted": removed, "file": str(target)}, EXIT_OK if removed else EXIT_USAGE
+
+    def pairs(items: list[str], what: str) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for item in items:
+            key, _, raw = item.partition("=")
+            tool, _, param = key.partition(".")
+            if not raw or not tool or not param:
+                raise ValueError(f"--{what} expects TOOL.PARAM=VALUE, got {item!r}")
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                value = raw
+            out.setdefault(tool, {})[param] = value
+        return out
+
+    include = tuple(x for x in args.include.split(",") if x) or ((args.base,) if args.base else ())
+    if args.base and args.base not in include:
+        include = (args.base, *include)
+    stack = stacks.StackDef(
+        args.name,
+        args.description,
+        include,
+        tuple(x for x in args.exclude.split(",") if x),
+        pairs(args.fix, "fix"),
+        pairs(args.default, "default"),
+    )
+    if not stack.include:
+        raise ValueError("stacks save needs --include or --from")
+    # validate by resolving against a temporary file holding just this stack
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = stacks.save_stack(Path(tmp) / "stacks.json", stack)
+        stacks.resolve(args.name, root=root, stacks_file=probe)
+    path = stacks.save_stack(target, stack)
+    return {"saved": args.name, "file": str(path)}, EXIT_OK
+
+
 _COMMANDS = {
+    "stacks": _cmd_stacks,
     "capabilities": _cmd_capabilities,
     "inspect": _cmd_inspect,
     "run": _cmd_run,

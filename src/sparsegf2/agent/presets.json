@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "stacks": {
+    "erasure": {
+      "description": "Erasure protection of the codes monitored circuits generate (Watts-Strogatz ensembles by default).",
+      "include": ["ensemble_run", "ensemble_sweep", "traj_run", "code_analyze", "analysis_erasure",
+                  "analysis_compare", "graph_stats", "result_list", "job", "help_topic"],
+      "defaults": {
+        "*": {"reference": "purification", "schedule": "random_edges", "graph": "watts_strogatz",
+              "graph_k": 4, "graph_count": 50, "circuits_per_graph": 4},
+        "ensemble_run": {"probes": ["code_dimension", "erasure_first_failure(samples=512)",
+                                    "uncorrectable_region_counts(2)"]},
+        "ensemble_sweep": {"probes": ["code_dimension", "erasure_first_failure(samples=512)",
+                                      "uncorrectable_region_counts(2)"]}
+      }
+    },
+    "purification": {
+      "description": "Purification of a single reference qubit: survival curves and transitions.",
+      "include": ["ensemble_run", "ensemble_sweep", "analysis_purification", "analysis_compare",
+                  "plot_make", "job", "help_topic"],
+      "defaults": {
+        "*": {"reference": "single", "reference_partner": -1, "stop_when_purified": true,
+              "checkpoints": "every_layer"},
+        "ensemble_run": {"probes": ["code_dimension"]},
+        "ensemble_sweep": {"probes": ["code_dimension"]}
+      }
+    },
+    "entanglement": {
+      "description": "Entanglement dynamics and the measurement-induced transition.",
+      "include": ["ensemble_run", "ensemble_sweep", "analysis_probe", "analysis_compare",
+                  "plot_make", "job", "help_topic"],
+      "defaults": {
+        "ensemble_run": {"probes": ["half_cut_entropy", "tripartite_information"]},
+        "ensemble_sweep": {"probes": ["half_cut_entropy", "tripartite_information"]}
+      }
+    },
+    "circuits": {
+      "description": "Stabilizer states gate by gate and Stim-language circuits.",
+      "include": ["state", "circuit", "code_analyze", "help"]
+    }
+  }
+}

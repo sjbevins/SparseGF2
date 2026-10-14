@@ -40,7 +40,7 @@ sparsegf2-mcp = "sparsegf2.mcp_server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sparsegf2 = ["py.typed"]
+sparsegf2 = ["py.typed", "agent/*.json", "agent/topics/*.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "sparsegf2._version.__version__" }
