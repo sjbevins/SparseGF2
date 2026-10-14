@@ -1131,6 +1131,8 @@ _GRAPH_HELPERS = {
     "edge_coloring",
     "stats",
     "shortcut_fraction",
+    "save",
+    "load",
 }
 
 
@@ -1207,6 +1209,25 @@ def _call_with(fn: Callable, given: dict, fill: dict, what: str) -> Any:
         raise ValueError(f"{what}: {exc}") from None
 
 
+def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any]:
+    """Edges (one array, or a list for a collection) and weights of a ``{"family": "file"}`` graph."""
+    extra = sorted(set(graph) - {"family", "path"})
+    if extra:
+        raise ValueError(f"graph (file): unknown key(s) {extra}; give only 'path'")
+    path = graph.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError('graph (file): give "path", a .json or .npz graph file')
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        raise ValueError(f"graph (file): no such file {str(p)!r}")
+    num_nodes, gs, ws = graphs.load(p)
+    if num_nodes != n:
+        raise ValueError(f"graph (file): {p.name} has num_nodes {num_nodes}, but num_system is {n}")
+    if len(gs) == 1:
+        return gs[0], (None if ws is None else ws[0])
+    return gs, ws
+
+
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
     """One edge array, or a collection of graphs (a list) when ``realizations`` is given.
 
@@ -1216,6 +1237,8 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
     uses graph ``t // circuits_per_graph``, and all ``G * circuits_per_graph``
     trajectories run unless fewer are asked for.
     """
+    if isinstance(graph, dict) and graph.get("family") == "file":
+        return _file_graph(graph, n)[0]
     families = _graph_families()
     if not isinstance(graph, dict) or "family" not in graph:
         raise ValueError(
@@ -1354,7 +1377,15 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         kwargs["checkpoints"] = _checkpoints(spec["checkpoints"])
     weights = spec.get("edge_weights")
     if "graph" in spec:
-        edges = _build_graph(spec["graph"], n)
+        graph = spec["graph"]
+        if isinstance(graph, dict) and graph.get("family") == "file":
+            edges, file_weights = _file_graph(graph, n)
+            if file_weights is not None:
+                if weights is not None:
+                    raise ValueError("the graph file already holds weights; drop edge_weights")
+                kwargs["edge_weights"] = file_weights
+        else:
+            edges = _build_graph(graph, n)
         if isinstance(weights, list) and (isinstance(edges, list) or _random_family(spec["graph"])):
             raise ValueError(
                 "edge_weights as a list needs a known edge order, which a random graph family "
@@ -2593,7 +2624,11 @@ def _capability_sections() -> dict[str, Any]:
             for name, fn in _probe_kinds().items()
         },
         "graph_families": {
-            name: _signature_summary(fn, skip=("n",)) for name, fn in _graph_families().items()
+            **{name: _signature_summary(fn, skip=("n",)) for name, fn in _graph_families().items()},
+            "file": (
+                'a .json or .npz graph collection: {"family": "file", "path": ...} '
+                "(any geometry; see graphs.save)"
+            ),
         },
         "edge_weight_families": {
             name: _signature_summary(fn, skip=("edges", "n"))
