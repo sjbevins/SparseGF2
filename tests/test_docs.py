@@ -67,9 +67,18 @@ def test_getting_started_marks_only_full_scale_code_as_not_run():
         assert "1000" in match.group(1) or "256" in match.group(1), match.group(1)
 
 
+def _working_bash() -> bool:
+    # On Windows, System32's bash.exe is the WSL launcher, which fails without
+    # an installed distribution, so being on PATH is not enough.
+    if shutil.which("bash") is None:
+        return False
+    probe = subprocess.run(["bash", "-c", "exit 0"], capture_output=True)
+    return probe.returncode == 0
+
+
 def test_getting_started_cluster_script_is_valid_bash():
-    if shutil.which("bash") is None:  # pragma: no cover
-        pytest.skip("bash not available")
+    if not _working_bash():  # pragma: no cover
+        pytest.skip("no working bash")
     text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     scripts = [b for b in re.findall(r"```bash\n(.*?)```", text, flags=re.S) if "#SBATCH" in b]
     assert scripts, "the SLURM array example is missing"
