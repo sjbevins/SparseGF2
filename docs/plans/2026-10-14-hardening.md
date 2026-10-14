@@ -431,7 +431,7 @@ def entropy(gens, n, region) -> int                   # pure state (n independen
   - `deep`: `max_examples=2000`, `deadline=None`, `print_blob=True`.
   - Load `os.environ.get("HYPOTHESIS_PROFILE", "ci")`.
 - **Analysis properties.** Draw first-failure arrays and counts from small random codes: n <= 10, codes from `stim.Tableau.random`, D sampled with `StabilizerCode.first_failure_sizes`, counts from `_gf2_oracle.uncorrectable_counts`. Include codes with k = 0.
-  - `failure_by_size`: P(0) = 0; non-decreasing; for codes with k > 0, `P[n] == 1.0` exactly. That last property fails today (finding E2). Mark it `@pytest.mark.xfail(strict=True, reason="E2: fixed in Task 14")`.
+  - `failure_by_size`: P(0) = 0; non-decreasing; for codes with k > 0, `P[n] == pytest.approx(1.0, abs=1e-12)`. Do not use an xfail: a derandomized search may miss the rounding case of finding E2, and under `xfail_strict` that would XPASS. Task 14 tightens this to exact equality.
   - `erasure_failure_probability`:
     - Phi(0) = 0;
     - Phi(1) equals the fraction of codes with k > 0;
@@ -441,7 +441,7 @@ def entropy(gens, n, region) -> int                   # pure state (n independen
     - `erasure_tolerance(delta)` agrees with a fine-grid inversion of `erasure_failure_probability(..., exact_counts=...)` within the grid resolution;
     - `Phi(e_delta) <= delta + 1e-9`.
 
-    This catches the mutant `tolerance_hybrid_junction`. If it fails today, mark it `xfail(strict=True, reason="... fixed in Task 14")` and report it.
+    This catches the mutant `tolerance_hybrid_junction`. The current code is believed correct here. If it fails today, that is a new finding: report it with the shrunk example, and mark it `xfail(strict=True, reason="... fixed in Task 14")` only with an `@example` that fails deterministically.
   - `mean_first_failure` equals `sum_m (1 - hybrid P(m))` for m = 0..n.
   - `distance_bounds`: `1 <= low <= high <= n + 1`. If some count m <= w is positive, `low == high ==` the first such m. Codes with k = 0 give `(n + 1, n + 1)`.
   - `kaplan_meier` against a direct implementation written in the test on random (time, observed) data with ties: equal survival values. Without censoring, it equals the empirical survival.
@@ -584,7 +584,7 @@ class EnsembleResult:
   - `failure_by_size` forms P_C(m) as `cumsum(integer bin counts) / samples`, with one division. `_histogram` returns counts, or callers divide once.
   - `failure_by_size(...)[..., n] == 1.0` exactly for codes with k > 0.
   - Regression (`scripts/erasure/t14_junction_dip_rounding.py`): on the [[10,4]] code with D histogram `[13, 21, 30, 36]`, `junction_dip` is False and `failure_by_size[n] == 1.0`.
-  - Remove the `xfail` that Task 10 put on the exact-1 property.
+  - Tighten Task 10's `pytest.approx(1.0, abs=1e-12)` property to exact equality, with an `@example` built from the [[10,4]] histogram above.
 - **E1:**
   - The exhaustive counts are exact wherever an exact integer fits. Accumulate in int64 while `C(n, m) < 2**63`, using an int64 comb table where it fits, and float64 beyond. Document the choice in the kernel and in the `uncorrectable_counts` docstring.
   - `exact_failure_by_size` accepts float counts up to `C(n, m) * (1 + 1e-12)`, clips the ratio to [0, 1], and still rejects clearly wrong values.
