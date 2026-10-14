@@ -64,6 +64,7 @@ class Xoshiro:
         if len(state) != 4:
             raise ValueError("state must have 4 words")
         self.s = [int(w) & MASK64 for w in state]
+        self.rejections = 0  # draws next_below discarded (for tests of the rejection path)
 
     def next_u64(self) -> int:
         s = self.s
@@ -93,6 +94,7 @@ class Xoshiro:
         if low < bound:
             threshold = ((1 << 32) - bound) % bound
             while low < threshold:
+                self.rejections += 1
                 x = self.next_u64() >> 32
                 m = x * bound
                 low = m & 0xFFFFFFFF

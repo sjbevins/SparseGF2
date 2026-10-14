@@ -22,8 +22,8 @@ def _state(words) -> np.ndarray:
 
 
 def test_published_xoshiro_vector():
-    # xoshiro256** from state [1, 2, 3, 4]; the first three values follow by hand from
-    # rotl(s1 * 5, 7) * 9.
+    # xoshiro256** from state [1, 2, 3, 4] (the published values); the first output is
+    # rotl(2 * 5, 7) * 9 = 1280 * 9 = 11520.
     expected = [11520, 0, 1509978240, 1215971899390074240]
     r = ref.Xoshiro([1, 2, 3, 4])
     assert [r.next_u64() for _ in expected] == expected
@@ -47,13 +47,17 @@ def test_kernel_equals_reference(seed):
     s, r = _state(words), ref.Xoshiro(words)
     for _ in range(draws):
         assert int(krng.next_bit(s)) == r.next_bit()
-    # next_below, including bounds that force rejections' threshold branch
-    for bound in (1, 2, 3, 11520, 2**31 - 1):
+    # next_below. Only a bound that does not divide 2**32 and is large (here 3 * 2**30,
+    # threshold 2**30, about 25% rejection per draw) reaches the rejection loop.
+    for bound in (1, 2, 3, 11520, 2**31 - 1, 3 * 2**30):
         s, r = _state(words), ref.Xoshiro(words)
         for _ in range(draws):
             got = int(krng.next_below(s, bound))
             assert got == r.next_below(bound)
             assert 0 <= got < bound
+        if bound == 3 * 2**30:
+            # ~250 expected rejections in 1000 draws; the loop really ran
+            assert r.rejections > 100
         # the two generators consumed the same number of draws
         assert int(krng.next_u64(s)) == r.next_u64()
 
