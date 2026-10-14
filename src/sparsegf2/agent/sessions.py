@@ -165,6 +165,10 @@ class JobStore:
             return self._jobs.get(job_id) if isinstance(job_id, str) else None
 
     def status(self, job_id: Any, wait_seconds: float = 0.0) -> dict[str, Any]:
+        if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
+            raise ValueError("wait_seconds must be a number")
+        if not 0 <= wait_seconds <= 60:
+            raise ValueError("wait_seconds must be between 0 and 60")
         job = self._get(job_id)
         if job is None:
             return self._ensemble("status", job_id, wait_seconds)
@@ -196,7 +200,9 @@ class JobStore:
                 s = api.job_status(job_id, wait_seconds)
             else:
                 s = api.cancel_job(job_id)
-        except ValueError:
+        except ValueError as exc:
+            if not str(exc).startswith("unknown job_id"):
+                raise
             raise ValueError(
                 f"unknown job_id {job_id!r}; jobs in this server: {sorted(self._jobs)} plus the "
                 "ensemble jobs job_list shows (jobs do not survive a server restart; run the same "

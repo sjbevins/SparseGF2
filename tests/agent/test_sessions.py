@@ -26,7 +26,7 @@ def test_state_store_ids_limits_and_listing():
         "measurements": 3,
     }
     store.close(a)
-    with pytest.raises(ValueError, match="unknown state_id 's1'.*open: \['s2'\]"):
+    with pytest.raises(ValueError, match=r"unknown state_id 's1'.*open: \['s2'\]"):
         store.get(a)
     assert [s["state_id"] for s in store.list()] == ["s2"]
 
@@ -98,3 +98,27 @@ def test_render_job_has_next_step():
     )
     assert text.startswith("job abc (x_y): running, 1/4 points")
     assert 'next: job_status(job_id="abc", wait_seconds=30)' in text
+
+
+def test_ensemble_jobs_appear_through_the_store(tmp_path):
+    from sparsegf2 import api
+
+    spec = {
+        "num_system": 4,
+        "graph": {"family": "cycle"},
+        "layers": 2,
+        "measurement_rate": 0.1,
+        "reference": "purification",
+    }
+    started = api.start_ensemble_job(spec, trajectories=4, output_dir=str(tmp_path / "ens"), seed=1)
+    jid = started["job_id"]
+    jobs = JobStore()
+    done = jobs.status(jid, wait_seconds=30)
+    assert done["kind"] == "ensemble" and done["status"] == "completed"
+    assert done["progress"] == {"done": 4, "total": 4, "unit": "trajectories"}
+    assert jid in [row["job_id"] for row in jobs.list()]
+    assert jobs.cancel(jid)["kind"] == "ensemble"
+    with pytest.raises(ValueError, match="between 0 and 60"):
+        jobs.status(jid, wait_seconds=100)
+    with pytest.raises(ValueError, match="unknown job_id"):
+        jobs.status("nope")
