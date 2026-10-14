@@ -37,3 +37,10 @@ def test_needs_exactly_one_source(run_tool):
 def test_save_suffix(run_tool):
     run_tool("state_new", num_qubits=1)
     assert ".state.npz" in run_tool("state_save", state_id="s1", path="x.npz").text
+
+
+def test_num_qubits_capped(run_tool):
+    from sparsegf2 import api
+
+    out = run_tool("state_new", num_qubits=api.MAX_QUBITS + 1)
+    assert out.is_error and "at most" in out.text

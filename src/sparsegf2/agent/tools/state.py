@@ -143,7 +143,13 @@ register(
             'state_apply/state_query. Example: {"num_qubits": 4, "seed": 1}'
         ),
         params=(
-            Param("num_qubits", "integer", "Qubits of a new |0...0> state.", minimum=1),
+            Param(
+                "num_qubits",
+                "integer",
+                "Qubits of a new |0...0> state.",
+                minimum=1,
+                maximum=api.MAX_QUBITS,
+            ),
             Param("source", "string", "A .state.npz file under the root, instead."),
             Param("phases", "boolean", "Track signs (outcomes, expectations).", default=True),
             SEED,
@@ -163,7 +169,8 @@ register(
         description=(
             "Apply Stim-language circuit text to an open state: gates, measurements, resets, MPP, "
             "noise, REPEAT. Returns the new measurement outcomes (with phases) and which were "
-            'random. Example: {"state_id": "s1", "circuit": "H 0\\nCX 0 1\\nM 0"}'
+            'random. Long circuits (large REPEAT counts) should run with background="always". '
+            'Example: {"state_id": "s1", "circuit": "H 0\\nCX 0 1\\nM 0"}'
         ),
         params=(STATE_ID, Param("circuit", "string", "Circuit text to apply.", required=True)),
         handler=_apply,
