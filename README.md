@@ -1,467 +1,686 @@
 # SparseGF2
 
-A phase-free sparse stabilizer simulator over $\mathbb{F}_2$ for measurement-induced
-phase transition (MIPT) research on random Clifford circuits. It stores the
-Aaronson-Gottesman tableau sparsely, so a measurement is a cheap rank update
-instead of a dense $O(n^2)$ step. That makes it fast in the measurement-heavy
-regime where the stabilizers stay low weight (see [SparseGF2 vs Stim](#sparsegf2-vs-stim)).
+**Fast stabilizer simulation for monitored random Clifford circuits, checked against Stim.**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/circuit-dark.png">
+  <img alt="A monitored random Clifford circuit: random two-qubit Cliffords in a brickwork, Z measurements at rate p, and a reference qubit Bell-paired with the system" src="docs/figures/circuit-light.png">
+</picture>
+
+SparseGF2 simulates Clifford circuits with mid-circuit measurements. It is built
+for the physics of **monitored random circuits**: the measurement-induced and
+purification transitions, the quantum error-correcting codes these circuits
+generate as they run, and how well those codes survive erasures. It also runs
+general circuits written in **Stim's circuit language** (surface-code memory
+experiments included), and every operation is tested against Stim.
+
+There are three ways in, from interactive to industrial:
+
+| | what it is | use it for |
+|---|---|---|
+| [`Simulator`](#1-the-simulator-gate-by-gate) | a stabilizer state you act on gate by gate | exploring, small studies, exact entropies and code properties at any moment |
+| [`Circuit` + `run` / `sample`](#2-circuits-in-stims-language) | Stim-language circuits, compiled to one call | measurement records, detectors, noise, many shots in parallel, observing the state at every `TICK` |
+| [`mipt.MonitoredCircuit`](#3-ensembles-of-random-monitored-circuits) | random monitored circuits generated *and* simulated inside one compiled parallel kernel | the studies: millions of trajectories on collections of graphs, probes at the layers you choose, purification times with censoring, [erasure protection](#4-erasure-protection-of-the-generated-code) of the generated codes |
+
+…and a [CLI and an MCP server](#for-ai-agents) so that AI agents can run all of it.
+
+**New here?** [Getting started](#getting-started) installs it in three commands
+and points to the step-by-step guides; [Why SparseGF2](#why-sparsegf2) shows
+what it is for, with measurements.
+
+> **Status:** `3.0.0.dev10`, in development toward 3.0. This is the only
+> maintained version. The old v2 package is deprecated and no longer in this
+> tree: it is preserved at the tag [`v2.0.0`](https://github.com/sjbevins/SparseGF2/tree/v2.0.0)
+> and the branch [`v2-legacy`](https://github.com/sjbevins/SparseGF2/tree/v2-legacy)
+> (its last state). See [Status and roadmap](#status-and-roadmap).
+
+## Contents
+
+* [Why SparseGF2](#why-sparsegf2)
+* [Getting started](#getting-started)
+* [Quickstart](#quickstart): [Simulator](#1-the-simulator-gate-by-gate), [circuits](#2-circuits-in-stims-language), [ensembles](#3-ensembles-of-random-monitored-circuits), [erasure protection](#4-erasure-protection-of-the-generated-code)
+* [What it shows: three standard experiments](#what-it-shows-three-standard-experiments)
+* [Performance](#performance)
+* [Phases: tracked or not](#phases-tracked-or-not)
+* [For AI agents](#for-ai-agents)
+* [How it works](#how-it-works)
+* [Documentation map](#documentation-map)
+* [Status and roadmap](#status-and-roadmap)
+
+## Why SparseGF2
+
+A study of monitored random circuits asks a simulator for the same things
+over and over: run a very large number of short random circuits, look at the
+state many times along each one (entropies, the code it holds, how that code
+survives erasures), and do it reproducibly, on every core, from a script or
+an agent. General-purpose stabilizer simulators are built for a different
+job: one circuit at a time, or many shots of a fixed circuit, with the state
+read out through Python. SparseGF2 puts the whole loop (draw a random
+circuit, simulate it, measure the state, screen the code) inside one compiled
+kernel. Four things follow from that, and each is measured below on the same
+4-core Xeon (2.1 GHz), one thread unless stated.
+
+### Faster per circuit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/runtime-dark.png">
+  <img alt="Seconds per monitored circuit versus n for SparseGF2 (with and without phases), Stim, Qiskit Aer and Cirq; SparseGF2 is fastest at every size" src="docs/figures/runtime-light.png">
+</picture>
+
+Every simulator runs the same monitored circuits (n qubits on a ring, depth
+2n, random two-qubit Cliffords in a brickwork, Z measurements at rate p) on
+one core, and the final states are cross-checked. Without sign tracking,
+which is all that entanglement, codes and purification need, SparseGF2 is
+3–15× faster than Stim for n ≥ 64; with signs tracked it is about 3× faster.
+Qiskit Aer and Cirq are slower by two to four orders of magnitude. The
+method and every number are under [Performance](#performance).
+
+### Measuring the state as it evolves costs little
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/why-observe-dark.png">
+  <img alt="Milliseconds per layer versus n, evolving only and evolving plus measuring after every layer, for SparseGF2 and Stim. Left, the half-cut entropy: measuring adds 0.37 ms per layer at n = 1024 for SparseGF2 and 3.2 ms for Stim. Right, the code dimension: SparseGF2's two lines coincide, Stim's measuring adds 4.3 ms per layer at n = 1024" src="docs/figures/why-observe-light.png">
+</picture>
+
+Most quantities in these studies are watched versus depth: entanglement
+growth, the code rate k/n, purification. Stim has no entropy function, so
+the fastest route there is to read the stabilizer columns out of its inverse
+tableau after every layer and rank them with a compiled GF(2) elimination
+(the route the benchmark gives it; see
+[`benchmarks/README.md`](benchmarks/README.md)). SparseGF2 evaluates the same
+quantity inside its layer loop, on the column-major tableau it already
+holds. On the same circuits (p = 0.16, one thread, n = 32 to 1024), with the
+observable measured after every layer, the whole run takes 5.5–12× less time
+than in Stim for the half-cut entropy and 12–21× less for the code dimension.
+At n = 1024, measuring adds 0.37 ms per layer to SparseGF2 against 3.2 ms to
+Stim for the half-cut entropy, and almost nothing against 4.3 ms for the code
+dimension: SparseGF2 keeps the generators that touch the reference separate,
+so k is a count of rows rather than a rank. Every value Stim produced equals
+SparseGF2's exactly.
+
+### Screening the generated codes against erasures
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/why-erasure-dark.png">
+  <img alt="Milliseconds per code versus n = 64 to 512 for SparseGF2 and a compiled from-scratch baseline, in three panels: every erasure of 1 or 2 qubits (4.8 times faster at n = 512), every erasure of up to 3 qubits (21 times faster at n = 512), and first failure along 100 random orderings (5.0 times faster at n = 512)" src="docs/figures/why-erasure-light.png">
+</picture>
+
+The circuits generate codes, and the question is how well those codes
+survive erasures. Two probes answer it inside the engine at the depths you
+choose (the same routines analyse a saved code through `StabilizerCode`):
+exact counts of the uncorrectable erasures of up to w qubits, and
+first-failure sizes along random orderings of the qubits. Rather than
+computing two ranks from scratch for every erased set, they work in a row
+basis adapted to the code, extend ranks incrementally along each ordering or
+prefix, and settle the last qubit of a set with hash-table lookups. Against a
+compiled baseline on the same data that does compute both ranks from scratch
+(identical answers, checked), on codes made by the engine at n = 64 to 512:
+3.0–4.8× faster for every erasure of 1 or 2 qubits, 6.0–21× for every
+erasure of up to 3 qubits, and 1.5–6.6× for first failure along 100
+orderings. For the exhaustive counts the gap grows with n: at n = 512,
+checking every erasure of up to 3 qubits takes 0.24 s per code instead of
+5.2 s.
+
+### Ensembles on every core, probes inside the kernel, an interface for agents
+
+The ensemble engine draws each trajectory's random circuit from its own
+random stream and simulates it straight away, in parallel over all cores; no
+circuit is ever built in Python. At p = 0.16 that is about 128,000 circuits
+per second at n = 16 and 1,700 at n = 128 on four cores (the throughput
+figure under [Performance](#performance)). Trajectory `t` depends only on
+`(spec, seed, t)`, never on the thread count, so a campaign splits into
+chunks or cluster jobs and merges exactly. The probes (entanglement, the
+code, erasure statistics, the code itself) run inside the same kernel at the
+layers each one asks for, and purification times come with censoring. The
+same simulator is served to AI agents through an MCP server, a JSON command
+line and a JSON Python layer, with runtime and memory estimates and
+resumable background jobs, so an agent can plan and run a study as reliably
+as a script.
 
 ## Getting started
 
-This assumes you already have **git** and **Python 3.12 or newer**. Use the
-latest stable Python you have; the simulator and the full test suite run on it,
-and so do the optional Stim benchmarks (Stim is an extra, not a runtime
-dependency). Check your version with `python3 --version` (macOS/Linux) or
-`py --version` (Windows). Every command below runs in a terminal.
-
-### 1. Get the code
+Python 3.11 or newer. Install into a virtual environment of its own (an
+environment that still has the deprecated v2 installed would see two packages
+named `sparsegf2`):
 
 ```sh
-git clone https://github.com/sjbevins/SparseGF2.git
-cd SparseGF2
+git clone https://github.com/sjbevins/SparseGF2 && cd SparseGF2
+python -m venv .venv                # then activate it (.venv\Scripts\activate on Windows)
+pip install -e ".[test]"            # add ,mcp for the MCP server:  ".[test,mcp]"
 ```
 
-### 2. Create and activate a virtual environment
+To use it from another project (your own study directory), install this
+checkout into that project's environment: `pip install -e path/to/SparseGF2[mcp]`.
 
-A virtual environment keeps SparseGF2's dependencies separate from the rest of
-your system. Create one, then **activate** it so that `python`, `pip`, and
-`jupyter` in this terminal all use it. Once active, your prompt starts with
-`(.venv)`.
+Then follow the guide that fits:
 
-macOS / Linux:
-```sh
-python3 -m venv .venv          # or pin a version, e.g. python3.14 -m venv .venv
-source .venv/bin/activate
-```
+* [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md): from a fresh install
+  to your own campaigns. Concepts (pictures, layers, checkpoints, probes,
+  seeds, graph collections), a first erasure study end to end, scaling it up
+  with time and memory estimates, chunked runs and a SLURM array script, and
+  troubleshooting.
+* [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md): letting an AI
+  agent run your simulations. Installing the MCP server, connecting Claude
+  Code, Claude Desktop or another client, a worked first session, background
+  jobs for long runs, and analysing the saved results in Python.
+* [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md): how the simulator works
+  inside, with diagrams.
 
-Windows (PowerShell):
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-(If PowerShell blocks the script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again. In `cmd.exe` use `.venv\Scripts\activate.bat`.)
+To run the tests (about 600; Stim is required), `python -m pytest`.
+The first call to each compiled kernel takes a few seconds while Numba
+compiles it; the result is cached on disk, so later runs start immediately.
 
-Run `deactivate` to leave it. In a new terminal, `cd` back into the repo and run
-the activate command again to reconnect.
+## Quickstart
 
-### 3. Install
-
-With the venv active (you see `(.venv)`):
-
-```sh
-pip install -e ".[dev]"
-```
-
-That installs the simulator, the analysis layer, plotting, and the notebook
-tooling. To also run the Stim cross-check and the SparseGF2-vs-Stim benchmarks,
-add the `stim` extra:
-
-```sh
-pip install -e ".[dev,stim]"
-```
-
-### 4. Check it works
-
-```sh
-python -c "import sparsegf2; print(sparsegf2.__version__, sparsegf2.__file__)"
-python -m pytest
-```
-
-The printed path should be inside this repo's `src/sparsegf2/`. If it points
-elsewhere, this terminal is not using the venv: re-run the activate command from
-step 2. `pytest` should report all passed; the Stim-parity tests show as skipped
-unless you installed the `stim` extra.
-
-### 5. Your first script
-
-With the venv active, create a file `first.py`:
+### 1. The Simulator, gate by gate
 
 ```python
-from sparsegf2.circuits import CircuitConfig, simulate
+import sparsegf2 as sg
 
-# one monitored circuit in the purification picture. code_dimension is the MIPT
-# order parameter (logical qubits still protected); entropy_half_cut is the
-# half-system entanglement.
-rec = simulate(CircuitConfig(graph_spec="cycle", n=64, picture="purification", p=0.08),
-               sample_seed=0)
-print(rec.code_dimension, rec.entropy_half_cut)   # e.g. 14 15
+sim = sg.Simulator(3, seed=1)       # |000>, signs tracked (phases=True is the default)
+sim.h(0)
+sim.cx(0, 1)
+sim.cx(1, 2)                        # GHZ state
+print(sim.stabilizers())            # [+XXX, +Z_Z, +_ZZ]  (Stim's canonical form)
+print(sim.entropy([0]))             # 1 bit of entanglement between qubit 0 and the rest
+outcome = sim.measure(0)            # 0 or 1
+assert sim.peek_z(2) == (1 if outcome == 0 else -1)   # now determined: +1 / -1 like Stim
 ```
 
-Run it:
-```sh
-python first.py
-```
-
-### 6. Your first notebook
-
-A notebook runs against its **kernel's** environment, not your terminal's, so you
-have to point Jupyter at this venv. Skipping that is the usual cause of
-`ImportError: cannot import name 'simulate' from 'sparsegf2.circuits'` (the
-notebook's kernel resolves `import sparsegf2` to some other install).
-
-The simplest way: launch Jupyter **from the activated venv**, and the notebook
-uses this Python automatically:
-
-```sh
-jupyter lab          # or: jupyter notebook
-```
-
-To use it in VS Code, or to reuse a Jupyter you already run, register the venv as
-a named kernel (with the venv active), then select it:
-
-```sh
-python -m ipykernel install --user --name sparsegf2 --display-name "SparseGF2"
-```
-
-Pick the **SparseGF2** kernel (the kernel picker in JupyterLab, or "Select
-Kernel" in VS Code). Confirm you are on the right one in the first cell:
+Every Stim gate is a method under its Stim name (`sim.sqrt_x_dag(q)`,
+`sim.iswap(a, b)`, ...); `sim.measure_pauli("X0*Z3")`, `sim.reset_x(q)`,
+`sim.peek_pauli(...)` and `sim.stabilizer_arrays()` cover the rest. Code and
+erasure observables live in `sparsegf2.observables`:
 
 ```python
-import sparsegf2
-print(sparsegf2.__file__)   # must be inside .../SparseGF2/src/sparsegf2/
+from sparsegf2 import observables as ob
+
+# a 2-qubit code: system qubits 0, 1 each Bell-paired with a reference (2, 3), then scrambled
+sim = sg.Simulator(4, seed=2)
+for q in (0, 1):
+    sim.h(q)
+    sim.cx(q, q + 2)
+sim.cx(0, 1)
+sim.measure_pauli("Z0*Z1")          # measuring a system check removes one logical qubit
+print(ob.code_dimension(sim, reference=[2, 3]))                    # 1 logical qubit left
+print(ob.lost_logical_information(sim, erased=[0], reference=[2, 3]))  # bits lost if qubit 0 is erased
 ```
 
-If that path is wrong, you are on the wrong kernel: switch to **SparseGF2** (or
-launch Jupyter from the activated venv) and restart the kernel.
-
-### Optional extras
-
-The runtime floor is just `numpy>=2` and `numba>=0.60`. Everything else is an
-optional extra, installed with `pip install -e ".[<name>]"`:
-
-| extra | pulls | for |
-|---|---|---|
-| `viz` | `matplotlib` | study plotting (`plot_study`); circuit diagrams use LaTeX/quantikz, not this |
-| `graph` | `networkx` | arbitrary geometry via `from_networkx` |
-| `data` | `pyarrow`, `h5py`, `pandas` | on-disk sweeps and studies |
-| `parallel` | `joblib` | multi-process sweeps (`n_jobs > 1`) |
-| `progress` | `tqdm`, `ipywidgets` | a live progress bar (`sweep(progress=True)`) |
-| `analysis` | `graph` + `data` + `parallel` + `progress` + `scipy` | the full analysis and finite-size-scaling layer |
-| `test` | `pytest` | run the test suite |
-| `lint` | `ruff` | linting + formatting (`ruff check` / `ruff format`) |
-| `stim` | `stim` | the Stim cross-check tests and the SparseGF2-vs-Stim benchmarks |
-| `notebook` | `ipykernel`, `jupyter`, `nbformat`, `nbclient` | running the notebooks |
-| `dev` | `test` + `lint` + `notebook` + `viz` + `analysis` (not `stim`) | development |
-
-`stim` is kept separate so the simulator and test suite install on any supported
-Python even when Stim has no wheel for it yet; the Stim-parity tests skip without
-it. Add `,stim` (e.g. `pip install -e ".[dev,stim]"`) to run them and the
-benchmarks.
-
-## Quick start
-
-**The simulator.** `SparseGF2(n)` is a pure $|0^n\rangle$ state on exactly $n$
-qubits, with no implicit purification and no sign bits.
+### 2. Circuits in Stim's language
 
 ```python
-import numpy as np
-from sparsegf2 import SparseGF2, entanglement_entropy
-
-sim = SparseGF2(4, rng=np.random.default_rng(0))
-sim.apply_h(0)
-sim.apply_cx(0, 1); sim.apply_cx(1, 2); sim.apply_cx(2, 3)
-print(entanglement_entropy(sim, [0, 1]))   # bipartite entropy in ebits
-out = sim.measure_z(0)                      # project; returns a phase-free bit
+circuit = sg.Circuit("""
+H 0
+CX 0 1
+M 0 1
+DETECTOR rec[-1] rec[-2]
+""")
+result = sg.Simulator(2, seed=3).run(circuit)     # one compiled call
+print(result.measurements, result.detectors)      # e.g. [0 0] [0]
+shots = sg.sample(circuit, shots=10_000, seed=1)  # parallel over cores
+print(shots.measurements.mean(axis=0))            # about [0.5 0.5]
 ```
 
-Key observables: `entanglement_entropy`, `single_qubit_entropy`, `mutual_information`,
-`tripartite_mutual_info`, `code_dimension`, `code_rate`, `contiguous_distance`,
-`stabilizer_weight_spectrum`; `sim.active_count()` gives the tableau-density
-diagnostic `a_bar` (also recorded per circuit run as `mean_active_generators`).
-Top-level exports are listed in the `__all__` of
-[`src/sparsegf2/__init__.py`](src/sparsegf2/__init__.py). The public subpackage
-APIs are likewise listed in [`circuits`](src/sparsegf2/circuits/__init__.py),
-[`analysis`](src/sparsegf2/analysis/__init__.py), and
-[`expurgation`](src/sparsegf2/expurgation/__init__.py).
-
-**Circuits.** The `circuits` package builds graph-defined random Clifford and
-measurement circuits.
+`Circuit.from_stim(...)` / `circuit.to_stim()` convert both ways, so a
+Stim-generated surface code runs as is, with noise, detectors and observables
+(its detection-event statistics are tested against Stim's sampler). To watch
+the state *as the circuit evolves*, pass `observe`: it is called at every `TICK`.
 
 ```python
-from sparsegf2.circuits import CircuitConfig, simulate
+circuit = sg.Circuit("H 0\nTICK\nCX 0 1\nTICK\nCX 1 2\nTICK")
+result = sg.Simulator(3, seed=0).run(circuit, observe=lambda sim, tick: sim.entropy([0]))
+print(result.observations)                        # [(0, 0), (1, 1), (2, 1)]
+```
 
-cfg = CircuitConfig(
-    graph_spec="cycle",       # also "watts_strogatz(k=2,beta=0.1)" or any nx.Graph
-    n=32,
-    picture="purification",   # "pure_state" | "purification" | "single_ref"
-    gating_mode="brickwork",  # "brickwork" | "random_edge" | "random_pool" | "all_edges"
-    measurement_mode="bernoulli",  # "bernoulli" | "gated" | "random_pair" | "uniform_count"
-    p=0.16,
-    depth_factor=8,
+### 3. Ensembles of random monitored circuits
+
+Describe the protocol once; the engine generates every trajectory's random
+circuit and simulates it in compiled code, in parallel, recording *probes* at
+*checkpoint* layers. Here: the measurement-induced transition in a brickwork
+circuit on a ring, through the tripartite information of the four quarters.
+
+```python
+from sparsegf2 import analysis, graphs, mipt
+
+spec = mipt.MonitoredCircuit(
+    num_system=64,
+    edges=graphs.cycle(64),            # brickwork: the ring's edge colouring
+    layers=256,
+    measurement_rate=0.1,
+    checkpoints=[256],
+    probes=[mipt.half_cut_entropy(), mipt.tripartite_information()],
 )
-rec = simulate(cfg, sample_seed=0)
-print(rec.code_dimension, rec.entropy_half_cut)
+result = spec.run(trajectories=2000, seed=1)
+mean, err = analysis.mean_and_error(-result.values["tripartite_information"][:, -1])
+print(f"-I3 = {mean:.2f} ± {err:.2f}")
 ```
 
-Use `gating_mode="all_edges"` to fire the graph's complete stored edge list on
-every layer. `total_layers_override=T` requests a literal measured-layer count.
-For depth-resolved observables, pass `checkpoint_layers=[...]` to `simulate`;
-add a read-only `checkpoint_callback` to compute values on the live tableau
-without saving each full checkpoint. A callback may return the public sentinel
-`from sparsegf2.circuits import CHECKPOINT_STOP` to end the run after that
-checkpoint without storing the sentinel as a value.
-
-**Studies.** The `sparsegf2.analysis` layer sweeps parameters and persists the
-results. You can compute observables online (and discard each tableau) or save
-the tableaux and add observables later without re-simulating.
+**Collections of graphs.** Pass a list of graphs as `edges` and each graph
+is evolved with `circuits_per_graph` random circuits (default 1); a graph is
+fixed for the whole circuit, never redrawn per layer. Trajectory `t` runs on
+graph `t // circuits_per_graph`, and `spec.run(seed=...)` without a
+trajectory count runs all `len(edges) * circuits_per_graph` of them. Here:
+purification of a single reference qubit on 500 Watts–Strogatz graphs, four
+circuits each, stopping each trajectory when the reference is pure:
 
 ```python
-from sparsegf2.circuits import CircuitConfig
-from sparsegf2.analysis import Study, plot_study
-
-base = CircuitConfig(graph_spec="cycle", n=32, picture="purification", p=0.1, depth_factor=8)
-study = Study.run("runs/transition", base,
-                  grid={"n": [16, 32], "p": [0.05, 0.1, 0.15, 0.2]}, seeds=50,
-                  analyses=["code_dimension"], save_tableaux=True, progress=True)
-study.augment(["code_rate", "contiguous_distance"])   # add observables later, keyed merge
-plot_study(study, out="transition.png")               # auto-detects every column
+n = 32
+spec = mipt.MonitoredCircuit(
+    num_system=n,
+    edges=[graphs.watts_strogatz(n, k=4, beta=0.1, seed=(1, g)) for g in range(500)],
+    circuits_per_graph=4,
+    layers=8 * n,
+    measurement_rate=0.2,
+    schedule="random_edges",           # n/2 random edges per layer, with replacement
+    reference="single",
+    reference_partner=n - 1,
+    scramble_matchings=32,             # 32 layers of random all-to-all matchings first
+    checkpoints="every_layer",
+    stop_when_purified=True,
+)
+result = spec.run(seed=7)              # all spec.num_trajectories = 2000 trajectories
+result.graph_index                     # the graph of each trajectory: 0, 0, 0, 0, 1, 1, ...
+layers, surviving = result.survival()  # P(tau > t); result.purification_layer has tau (-1 = censored)
+spec.circuit(trajectory=3, seed=7)     # the exact circuit trajectory 3 ran, as a Circuit
 ```
 
-## Looking at circuits
+The same collection serves every measurement rate
+(`dataclasses.replace(spec, measurement_rate=0.25)`), and with the same seed
+the gates and random numbers are shared across rates: the qubits measured at
+a lower rate are a subset of those measured at a higher one.
+`spec.with_edges(...)` puts the protocol on other graphs.
 
-Circuit diagrams are drawn with the [quantikz2](https://arxiv.org/abs/1809.03842)
-LaTeX/TikZ package, so they drop straight into a paper. Each box is a gate
-(`H`/CX for the Bell-pair setup, `C[index]` for a random
-$\mathrm{Sp}(4,\mathbb{F}_2)$ Clifford), each meter is a measurement that fired,
-and dashed `setup` / `t_1, t_2, …` separators mark the individual timesteps.
-**System qubits are black wires, the reference register is red**, so the
-Bell-paired references are unmistakable.
-
-![A few timesteps of a purification brickwork circuit, system wires black and reference wires red](docs/figures/circuit_diagram.png)
-
-In a notebook, call `draw_circuit(cfg)` as the **last line of a cell** to show the
-diagram inline (it returns an image; if it is not the last line, wrap it as
-`display(draw_circuit(cfg))`). `save_circuit` writes a file, and
-`circuit_to_quantikz` returns the LaTeX without needing a compiler:
+**Probes on their own schedules.** Every probe takes `checkpoints=` (the same
+forms as the spec's: `"final"`, `"every_layer"`, a stride or a list of
+layers), so expensive probes run at a few depths while cheap ones run at every
+layer; purification is tested at the spec's checkpoints. Here in the
+purification picture, where every system qubit starts Bell-paired with its own
+reference, so the system starts maximally mixed and the reference holds the
+logical information:
 
 ```python
-from IPython.display import display
-from sparsegf2.circuits import CircuitConfig, draw_circuit, save_circuit, circuit_to_quantikz
-
-cfg = CircuitConfig(graph_spec="cycle", n=4, picture="purification",
-                    gating_mode="brickwork", measurement_mode="bernoulli", p=0.3)
-
-display(draw_circuit(cfg, max_layers=4))         # inline in a Jupyter notebook
-save_circuit(cfg, "circuit.png", max_layers=4)   # write a PNG/PDF (needs pdflatex + quantikz)
-latex = circuit_to_quantikz(cfg, max_layers=4)   # the LaTeX string, no compiler needed
+n = 32
+spec = mipt.MonitoredCircuit(
+    num_system=n, edges=graphs.cycle(n), layers=64, measurement_rate=0.3,
+    reference="purification", checkpoints="every_layer", stop_when_purified=True,
+    probes=[mipt.code_dimension(),                                  # every layer
+            mipt.contiguous_distance(checkpoints=16),              # layers 0, 16, ..., 64
+            mipt.erasure_first_failure(samples=20, checkpoints=[32, 64])],
+)
+result = spec.run(100, seed=3)
+result.layers("contiguous_distance")           # [ 0 16 32 48 64]
+result.values["erasure_first_failure"].shape   # (100, 2, 20): trajectories, evaluations, samples
+rate = result.values["code_dimension"].mean(axis=0) / n   # code rate k/n at every layer
 ```
 
-Each call draws a fresh random realization (different Cliffords and measured
-qubits), so re-running the cell shows a new example; pass `sample_seed=...` to
-lock a specific one (the chosen seed is reported in `inspect_circuit`'s summary).
-When the config sets `scramble=True`, the global random Clifford is drawn as one
-block over the system qubits it acts on. For `single_ref`, setting
-`scramble_entangled_qubit=False` holds the probe qubit (the reference's Bell
-partner) out of that block, so it stays localized until the monitored dynamics
-spread it.
+After `stop_when_purified` ends a trajectory, the code probes record their
+exact values for a pure reference: code dimension 0, lost information 0,
+first-failure size n + 1, no uncorrectable regions. So code-rate averages need
+no special handling. Entanglement probes and `contiguous_distance` record NaN
+there (`result.mean(name)` skips NaN).
 
-Compiling needs a LaTeX install (TeX Live ships `quantikz`) plus a PDF→PNG tool
-(`pdftoppm`, `sips`, or ImageMagick) for `.png`; without LaTeX you still get the
-`.tex`/string to compile elsewhere (e.g. Overleaf).
+Probes: entanglement (`entropy`, `half_cut_entropy`, `mutual_information`,
+`tripartite_information`, and the vector `entropy_profile`, one value per
+cut) and the code (`code_dimension`, `contiguous_distance`,
+`lost_information` of a fixed region, the vector `erasure_lost_profile` of
+mean lost information per erasure size, and `erasure_first_failure`,
+`uncorrectable_region_counts` and `code_snapshot`, described next).
+`result.values[name]` has shape `(trajectories, evaluations)`, or
+`(trajectories, evaluations, length)` for a vector probe, with the layers in
+`result.layers(name)`. Trajectory `t` depends only on `(spec, seed, t)`,
+never on the thread count, so big runs split into chunks
+(`spec.run(count, seed=..., first_trajectory=...)`) and merge with
+`EnsembleResult.concatenate`; `result.save(path)` /
+`EnsembleResult.load(path)` keep everything, spec and saved codes included.
+[`examples/purification_time.py`](examples/purification_time.py) is a full
+purification-time study on a graph collection.
 
-Rendered examples for the gallery configurations live under
-[docs/figures/gallery/](docs/figures/gallery/) and are regenerated by
-`python docs/figures/circuit_gallery.py`. The matching examples pair with a
-uniform measurement set, since when a brickwork layer gates every qubit the
-`gated` candidate set is identical to measuring everything.
+### 4. Erasure protection of the generated code
 
-A text view (`inspect_circuit(cfg)`) and a CLI (`python scripts/inspect_circuit.py`)
-read the same trace, so all three always agree.
+Run the dynamics in the purification picture; the system then holds a code C
+with stabilizer group S on n qubits and k logical qubits (the code rate is
+k/n). Now erase every qubit independently with probability e. Erasing a set A
+destroys l(A) bits of logical information, and the erasure is correctable
+exactly when l(A) = 0:
 
-## Running at scale (HPC)
-
-Large studies run headless on a cluster with no code changes. The pieces:
-
-- **Fill the allocation.** `n_jobs=-1` resolves through the scheduler allocation
-  (`SLURM_CPUS_PER_TASK`, the CPU affinity mask, then `cpu_count`), so a job that
-  reserves part of a node uses exactly its cores without oversubscribing.
-  `sparsegf2.analysis.available_cores()` returns that number if you want it.
-- **No progress bars in logs.** Set `SPARSEGF2_PROGRESS=0` once in the job script
-  and every sweep and study runs silently, regardless of any `progress=True` in
-  the code, so batch logs stay clean.
-- **Resumable, crash-safe.** A `Study` writes its rows to disk as it goes and
-  skips chunks already on disk, so a re-queued job never redoes finished work.
-  The crash-only log under `runs/<study>/logs` names the exact cell if a run
-  dies.
-- **Many nodes via job arrays.** Split the work into one resumable `Study` per
-  chunk and run a SLURM array, one task per chunk across nodes.
-  [`scripts/hpc_sweep_array.py`](scripts/hpc_sweep_array.py) and
-  [`scripts/hpc_sweep_array.sbatch`](scripts/hpc_sweep_array.sbatch) are a
-  copy-pasteable template: each array task takes a stride-slice of the chunk
-  list and fills its own cores.
-
-```bash
-export SPARSEGF2_PROGRESS=0
-sbatch --array=0-7 --cpus-per-task=32 scripts/hpc_sweep_array.sbatch
+```text
+l(A)   = I(A:R) = rank N(S)|_A − rank S|_A           bits lost by erasing A
+P_C(m) = probability that a uniformly random m-qubit erasure is uncorrectable
+Φ_C(e) = Σ_m C(n,m) e^m (1 − e)^(n − m) P_C(m)       failure probability under erasure rate e
+e_δ    = sup{ e : Φ(e) ≤ δ }                          Φ = mean of Φ_C over the ensemble
 ```
 
-## SparseGF2 vs Stim
+Three probes measure this inside the engine:
 
-[Stim](https://github.com/quantumlib/Stim) is a state-of-the-art dense-tableau
-simulator. The two simulators trade off differently, and which one wins depends
-on the regime. The mechanism behind that trade-off is the one Aaronson and
-Gottesman identified for the CHP algorithm:
+* `erasure_first_failure(samples=M)`: for each of M uniformly random orderings
+  of the qubits, the first-failure size D_j, the smallest m such that erasing
+  the first m qubits is uncorrectable (n + 1 when k = 0). One ordering
+  answers every m at once: P_C(m) is estimated by the fraction of D_j ≤ m, and
+  Φ_C(e) by the mean over j of Pr[Bin(n, e) ≥ D_j].
+* `uncorrectable_region_counts(max_size=w)`: the number of uncorrectable
+  m-qubit erasures for m = 1..w, by exhaustion, so P_C(m) = count / C(n, m)
+  exactly; all counts are 0 exactly when the distance exceeds w.
+* `code_snapshot()`: the code's stabilizer generators, saved with the result;
+  `result.code(t, c)` returns trajectory row `t`'s code at evaluation `c` as a
+  `StabilizerCode`, to analyse again later with more orderings or a larger w.
 
-> Thus, Figure 2 gives striking evidence for a "phase transition" in simulation
-> time, as increasing the number of unitary gates by only a constant factor
-> shifts us from a regime of simple states that are easy to measure, to a regime
-> of complicated states that are hard to measure.
-
-SparseGF2 exploits exactly that. In the measurement-heavy (area-law) regime the
-stabilizers stay low weight, the state is "simple," and each measurement is
-cheap. Stim pays a dense $O(n^2)$ cost per step regardless of state complexity,
-so it is the better choice for complicated (volume-law) states, and it always
-wins on memory.
-
-For the volume-law regime, SparseGF2 has its own dense path: pass
-`hybrid=True` and it monitors the stabilizer density and **switches to a
-bit-packed dense representation** when the state becomes complicated, switching
-back to sparse when measurements thin it out. You get the sparse engine's edge in
-the area-law regime and a Stim-style dense cost in the volume-law regime, from a
-single object, with no change to the results:
+`sparsegf2.analysis` turns these into the physics:
+`erasure_failure_probability` gives Φ_C(e), exact for m ≤ w and sampled above
+when given the counts (the hybrid estimator Σ_{m≤w} C(n,m) e^m (1 − e)^(n−m) P_C(m)
++ mean_j Pr[Bin(n, e) ≥ max(D_j, w + 1)]); `erasure_tolerance` gives e_δ for
+an ensemble; `failure_by_size` and `exact_failure_by_size` give P_C(m).
 
 ```python
-sim = SparseGF2(n, hybrid=True)                 # core simulator
-study = Study.run(..., base_config=CircuitConfig(..., hybrid=True))  # whole study
+from sparsegf2 import StabilizerCode
+
+n = 32
+spec = mipt.MonitoredCircuit(
+    num_system=n,
+    edges=[graphs.watts_strogatz(n, 4, 0.1, seed=(0, g)) for g in range(8)],
+    circuits_per_graph=4,                                   # 8 graphs x 4 circuits = 32 trajectories
+    layers=64, measurement_rate=0.05, schedule="random_edges",
+    reference="purification", checkpoints=16,
+    probes=[mipt.code_dimension(),
+            mipt.erasure_first_failure(samples=100),
+            mipt.uncorrectable_region_counts(2),
+            mipt.code_snapshot(checkpoints="final")],       # codes are big: save them once
+)
+res = spec.run(seed=1)
+k = res.values["code_dimension"]                            # (32, 5): layers 0, 16, ..., 64
+first = res.values["erasure_first_failure"]                 # (32, 5, 100)
+counts = res.values["uncorrectable_region_counts[2]"]       # (32, 5, 2)
+
+e = [0.05, 0.1]
+phi = analysis.erasure_failure_probability(first[:, -1], n, e, exact_counts=counts[:, -1]).mean(axis=0)
+code = k[:, -1] > 0                                         # circuits that kept a code (k = 0 gives Phi = 0)
+e10 = analysis.erasure_tolerance(first[code, -1], n, 0.1, exact_counts=counts[code, -1])
+p_m = analysis.failure_by_size(first[code, -1], n).mean(axis=0)   # P_C(m), m = 0..n
+
+c0 = res.code(0, 0)                                         # trajectory 0's final code
+print(c0, c0.uncorrectable_counts(3))                       # StabilizerCode(n=32, k=..., ...)
+more = c0.first_failure_sizes(1000, seed=0)                 # 1000 more orderings, offline
+
+toy = StabilizerCode(["XXXX", "ZZZZ"])                      # a code from Pauli strings: [[4, 2, 2]]
+print(toy.lost_information([0]), toy.lost_information([0, 1]))   # 0 2
 ```
 
-It is ~2.5-3× faster than the pure-sparse engine on low-`p` (volume-law) circuits
-and within noise of it in the area-law regime. The physical state and every
-gauge-invariant observable are identical either way (`hybrid=False` is the
-default).
+Costs per evaluation at n = 256, one thread, on random-circuit codes
+(trajectories run in parallel over all cores):
 
-### Runtime
+| probe | cost |
+|---|---|
+| `erasure_first_failure`, M = 100 | 3–7 ms |
+| `uncorrectable_region_counts`, w = 2 | about 1 ms |
+| `uncorrectable_region_counts`, w = 3 | 40–50 ms |
+| `uncorrectable_region_counts`, w = 4 | about 7 s (C(256, 4) = 1.7·10⁸ subsets: only at a few depths) |
+| `code_snapshot` | under 1 ms |
 
-Nearest-neighbor brickwork random Cliffords with $Z$-measurements at $p=0.25$,
-run to depth $8n$. The same circuit is replayed in Stim for a like-for-like
-wall-clock comparison. SparseGF2's advantage grows with $n$ because the per-step
-saving compounds over the circuit.
+[`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole
+workflow versus depth: code rate, the fraction of circuits that keep a code,
+Φ(e) at several erasure rates, e_δ conditioned on k > 0, and a saved code
+analysed again with ten times more orderings.
 
-![Runtime vs n, SparseGF2 vs Stim](docs/figures/runtime_vs_stim.png)
+## What it shows: three standard experiments
 
-| $n$ | depth | SparseGF2 | Stim | speedup |
-|----:|------:|----------:|-----:|--------:|
-| 32  | 256  | 0.014 s | 0.020 s | 1.5x |
-| 64  | 512  | 0.056 s | 0.123 s | 2.2x |
-| 128 | 1024 | 0.222 s | 0.798 s | 3.6x |
-| 256 | 2048 | 0.942 s | 7.42 s  | 7.9x |
-| 512 | 4096 | 3.68 s  | 86.1 s  | 23.4x |
+All three figures come from [`benchmarks/physics_data.py`](benchmarks/physics_data.py)
+(a few minutes on a laptop).
 
-Reproduce with the committed script (it builds the matched circuit, times both
-backends, and writes the figure). It needs the `stim` extra
-(`pip install -e ".[dev,stim]"`):
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/transition-dark.png">
+  <img alt="Tripartite information -I3 versus measurement rate for n = 32 to 256; the curves cross near p = 0.16" src="docs/figures/transition-light.png">
+</picture>
 
-```sh
-python docs/figures/benchmark_runtime.py
-```
+**The measurement-induced transition.** Below the critical measurement rate the
+steady state has volume-law entanglement and −I₃ grows with system size; above
+it, entanglement obeys an area law and −I₃ vanishes. The curves for different
+`n` cross at p_c ≈ 0.16, the known value for this circuit family.
 
-### Memory
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/purification-dark.png">
+  <img alt="Survival probability of the reference's entanglement versus time, for n = 8 to 64, in the mixed and pure phases" src="docs/figures/purification-light.png">
+</picture>
 
-This is where Stim wins, at every size. Stim stores a bit-packed dense tableau
-($\sim n^2$ bytes). SparseGF2's inverted-index structure is sized to the worst
-case (several integer arrays of shape $\sim(2n, n)$), so it uses roughly 30x
-more memory. That is the price of the sparse fast path for measurement.
+**Purification.** A reference qubit entangled with the system stays mixed for
+a time that grows exponentially with `n` in the mixed phase (left: the larger
+systems never purify within 4000 layers) and only logarithmically in the pure
+phase (right). This is the same transition seen as a dynamical protection of
+quantum information.
 
-![Memory footprint vs n, SparseGF2 vs Stim](docs/figures/memory_vs_stim.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/erasure-dark.png">
+  <img alt="Left: code rate k/n versus time for three measurement rates. Right: probability that a random erasure is correctable versus erased fraction" src="docs/figures/erasure-light.png">
+</picture>
 
-```sh
-python docs/figures/benchmark_memory.py
-```
+**Erasure protection.** Starting maximally mixed, the circuit's measurements
+purify the system; what is left is a code with `k` logical qubits (left). At
+any moment the code can be tested against erasures: erasing a set E of qubits
+is correctable exactly when E holds no logical information, I(R:E) = 0 (right:
+the probability for a random E of each size, from first-failure sizes; see
+[section 4](#4-erasure-protection-of-the-generated-code)).
 
-The core of that measurement is the exact data-structure size:
+## Performance
 
-```python
-from sparsegf2 import SparseGF2
-import math
+The runtime figure under [Faster per circuit](#faster-per-circuit) uses the
+workload this simulator exists for: `n` qubits on a ring, depth `2n`,
+uniformly random two-qubit Cliffords in a brickwork, every qubit measured in
+Z with probability `p` after each layer. Every simulator runs the same
+circuits on one core, and the final states are cross-checked. On this
+machine (4-core Xeon, 2.1 GHz):
 
-def sparsegf2_bytes(n):   # sum the actual tableau arrays
-    s = SparseGF2(n)
-    arrays = ("plt","supp_q","supp_len","supp_pos","inv","inv_len","inv_pos",
-              "inv_x","inv_x_len","inv_x_pos")
-    return sum(getattr(s, a).nbytes for a in arrays if hasattr(s, a))
+* **Phase-free mode** (entanglement, codes, purification): **3–15× faster than
+  Stim for n ≥ 64**, and the margin grows with `n`: about 9× at n = 256 and
+  9–15× at n = 512–1024 (2–7× at n = 16–32).
+* **With signs tracked** (the default; outcomes, detectors): about **3× faster
+  than Stim** (1.5–6× across all points).
+* In either mode, **300–1800× faster than Qiskit Aer** (stabilizer method)
+  and **1300–9000× faster than Cirq**.
 
-def stim_bytes(n):        # bit-packed tableau (2n generators, padded to 256-bit words)
-    return 2 * (2*n) * 2 * (math.ceil(n/256) * 32)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/speedup-dark.png">
+  <img alt="Speed-up of SparseGF2 over Stim versus n for three measurement rates, with and without phase tracking" src="docs/figures/speedup-light.png">
+</picture>
+
+For small systems a single `Simulator.run` call is dominated by Python
+overhead (the 1.5–2× points at n = 16–32). Many small circuits are what the
+ensemble engine is for: it generates and simulates a fresh random circuit per
+trajectory inside one compiled, parallel kernel.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/throughput-dark.png">
+  <img alt="Circuits per second versus n: the SparseGF2 ensemble engine on 4 threads, SparseGF2 Simulator.run (phase-free) on one thread, Stim on one thread and Stim with ideal 4-process scaling" src="docs/figures/throughput-light.png">
+</picture>
+
+At p = 0.16 that is about **128,000 circuits per second at n = 16, 7,000 at
+n = 64 and 1,700 at n = 128** on 4 cores. At n = 128, Stim manages 53 per
+second on one core, or about 210 if run as four perfectly parallel processes.
+
+<details>
+<summary>All the numbers</summary>
+
+**Milliseconds per circuit, p = 0.05** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 | SparseGF2, phase-free | Stim | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 0.045 (3.8×) | 0.043 (3.9×) | 0.169 | 40.2 | 180 |
+| 32 | 0.134 (4.4×) | 0.121 (4.9×) | 0.590 | 175 | 702 |
+| 64 | 0.828 (2.2×) | 0.569 (3.2×) | 1.83 | 807 | 4,683 |
+| 128 | 2.80 (4.4×) | 1.59 (7.7×) | 12.3 | 2,919 | – |
+| 256 | 14.9 (4.6×) | 7.89 (8.6×) | 67.8 | 12,632 | – |
+| 512 | 142 (3.2×) | 51.4 (8.7×) | 449 | – | – |
+| 1024 | 1,286 (3.4×) | 430 (10.2×) | 4,379 | – | – |
+
+**Milliseconds per circuit, p = 0.16** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 | SparseGF2, phase-free | Stim | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 0.140 (1.8×) | 0.136 (1.9×) | 0.257 | 65.7 | 182 |
+| 32 | 0.258 (4.3×) | 0.166 (6.7×) | 1.11 | 196 | 816 |
+| 64 | 0.951 (3.1×) | 0.660 (4.4×) | 2.90 | 789 | 5,960 |
+| 128 | 7.69 (2.5×) | 2.90 (6.5×) | 18.9 | 3,243 | – |
+| 256 | 39.3 (3.1×) | 14.3 (8.5×) | 122 | 12,667 | – |
+| 512 | 316 (3.3×) | 89.9 (11.4×) | 1,026 | – | – |
+| 1024 | 3,025 (3.4×) | 796 (12.9×) | 10,276 | – | – |
+
+**Milliseconds per circuit, p = 0.3** (depth 2n; speed-up over Stim in brackets)
+
+| n | SparseGF2 | SparseGF2, phase-free | Stim | Qiskit Aer (stabilizer) | Cirq (Clifford) |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 0.087 (3.6×) | 0.085 (3.7×) | 0.312 | 43.6 | 178 |
+| 32 | 0.590 (1.5×) | 0.333 (2.6×) | 0.873 | 187 | 1,141 |
+| 64 | 1.28 (4.4×) | 1.16 (4.9×) | 5.68 | 665 | 7,349 |
+| 128 | 6.59 (6.0×) | 4.50 (8.8×) | 39.5 | 4,109 | – |
+| 256 | 39.0 (4.9×) | 20.9 (9.1×) | 192 | 13,027 | – |
+| 512 | 521 (3.2×) | 140 (12.0×) | 1,672 | – | – |
+| 1024 | 4,598 (3.5×) | 1,103 (14.5×) | 16,010 | – | – |
+
+**Ensemble engine throughput** (fresh random circuits, depth 2n, 4 threads), circuits per second
+
+| p | n = 16 | n = 32 | n = 64 | n = 128 | n = 256 | n = 512 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.05 | 180,855 | 48,985 | 12,860 | 2,803 | 538 | 78 |
+| 0.16 | 127,998 | 35,072 | 7,035 | 1,658 | 294 | 37 |
+| 0.3 | 96,749 | 27,296 | 6,390 | 1,312 | 225 | 38 |
+
+</details>
+
+The measurements behind the two other figures in [Why SparseGF2](#why-sparsegf2)
+(measuring the state every layer, and erasure screening) are tabulated in
+[`benchmarks/results/tables.md`](benchmarks/results/tables.md).
+
+**How the comparison is kept fair** (details in
+[`benchmarks/README.md`](benchmarks/README.md)):
+
+* Identical circuits for every simulator. SparseGF2 applies each random
+  Clifford as one fused gate (`CLIFFORD_2Q`), which is part of what it offers.
+  Stim gets each Clifford in its tightest form, at most five of its native
+  gates with each layer batched into a few instructions; every decomposition
+  is checked against the Clifford's tableau.
+* Each simulator's fastest documented path. Stim runs a prebuilt circuit with
+  `TableauSimulator.do_circuit`. Stim 1.16 from PyPI ships an SSE2 build; a
+  `-march=native` source build was slower on this machine, so the PyPI build
+  is used.
+* One thread each, median of repeated runs after a warm-up; SparseGF2's
+  one-off compilation is excluded, Qiskit Aer's per-run circuit conversion is
+  included (it is part of its API).
+
+**Where other tools are better.** For sampling millions of shots of a
+quantum error-correction circuit, use Stim's detector sampler: Pauli-frame
+simulation is a different algorithm and is far faster than any tableau
+simulator for that job. And deep in the area-law phase at very large n, every
+random measurement scans all n columns for the pivot's support, which a
+row-major layout avoids; the planned row cache
+([DESIGN.md §5.3](docs/DESIGN.md#53-operations-and-their-cost)) targets
+exactly that case.
+
+## Phases: tracked or not
+
+`Simulator(n, phases=True)` (the default) tracks stabilizer signs and
+destabilizers, so measurement outcomes, detectors and observables are exact:
+replaying Stim's measurement record reproduces every outcome, and
+deterministic detectors and observables give exactly Stim's detection events. `phases=False` stores only the stabilizers' X/Z bits:
+entanglement, code dimension, distances and erasure quantities are all exactly
+the same (they never depend on signs), it is faster, and asking for an outcome
+says why there is none (`measure()` returns `None`; `result.measurements`
+raises `PhaseFreeError`; `result.random` still tells which outcomes were
+random). The ensemble engine always runs phase-free.
+
+## For AI agents
+
+SparseGF2 is designed to be driven by language-model agents as easily as by
+people. To set that up, start with
+[`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md): it installs the
+MCP server, connects Claude Code, Claude Desktop or another client, and walks
+through a first session (a circuit, a purification ensemble, an erasure study
+on a graph collection, background jobs, and the analysis of the saved result).
+
+* **MCP server**: `pip install -e ".[mcp]"`, then `claude mcp add sparsegf2 -- sparsegf2-mcp`
+  (the repository's `.mcp.json` already registers it for Claude Code). Tools
+  cover discovery, circuit checking, running circuits with observables,
+  ensembles (graph collections and the erasure probes included), runtime and
+  memory estimates, and background jobs for long ensembles with resumable
+  chunk files.
+* **CLI**: `sparsegf2 capabilities | inspect | run | ensemble | results`, with
+  `--json` on every command.
+* **Python**: `sparsegf2.api`, the JSON-in/JSON-out layer both of those use.
+
+Agents themselves should read [`AGENTS.md`](AGENTS.md) (also
+[`llms.txt`](llms.txt)); the complete reference is
+[`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md).
 
 ## How it works
 
-A pure stabilizer state on $n$ qubits is fixed by $n$ independent stabilizer
-generators. The Aaronson--Gottesman tableau carries those $n$ rows together
-with $n$ paired destabilizer rows, each represented by a Pauli vector
-$[x \mid z]$ over $\mathbb{F}_2$. SparseGF2 stores all $2n$ tableau rows
-**sparsely**: for each row it keeps the list of qubits it acts on, and for each
-qubit it keeps the list of rows that touch it (an inverted index). A two-qubit
-gate or a $Z$-measurement only needs the rows supported on the qubits involved,
-which the inverted index returns in $O(1)$. A measurement is then a rank update
-whose cost is
-(number of anticommuting generators) $\times$ (their weight), not the dense
-$O(n^2)$ of a full tableau sweep. When measurements keep the stabilizers short,
-this is far cheaper.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/tableau-dark.png">
+  <img alt="A column-major stabilizer tableau for 6 system qubits and one reference: one row per generator, an X and a Z column per qubit, stored as bitsets over the generators; a two-qubit gate rewrites four columns; the entropy of a region is the rank of its columns minus its size; the reference rows give the code dimension" src="docs/figures/tableau-light.png">
+</picture>
 
-Two deliberate choices set it apart from Stim:
+**The state** is a stabilizer tableau stored **column-major**: for every
+qubit, an X and a Z bitset over the stabilizer generators, packed 64
+generators per machine word.
 
-- **Phase-free.** Only the symplectic part is tracked; sign bits are dropped.
-  Every observable built from the GF(2) row span (rank, entanglement entropy,
-  mutual information, code dimension, weight spectrum) is exact. Signed Pauli
-  expectations $\langle\psi|P|\psi\rangle$ are not available, so use Stim for
-  those.
-- **Sparse, not dense.** Stim's bit-packed tableau is optimal for dense states
-  and minimal in memory. SparseGF2 trades memory for speed in the regime where
-  the state stays simple, which is the regime MIPT studies live in.
+* A two-qubit gate rewrites the four columns of its qubits with word-wide
+  XORs: n/64 word operations, however entangled the state is.
+* A measurement finds the anticommuting generators with one word-wide test
+  and multiplies the pivot into them column by column.
+* The entropy of a region A is the GF(2) rank of its 2|A| columns minus |A|,
+  read directly from storage with no transposition.
+* In the ensemble engine the measurement pivot prefers generators that do
+  not touch the reference, which keeps the reference rows a basis: the code
+  dimension is then a count of rows, and the information an erasure leaks is
+  a rank difference over the erased qubits only.
 
-No path under `src/` imports Stim. The two-qubit Clifford table is built natively
-from $\mathrm{Sp}(4,\mathbb{F}_2)$, and Stim is used only as a test-time
-cross-checker (every circuit is checked against it by GF(2) RREF).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/engine-dark.png">
+  <img alt="The ensemble engine: a MonitoredCircuit spec (graphs, protocol, checkpoints, probes) is compiled once into arrays; run(trajectories, seed) simulates every trajectory in parallel, each with its own random streams and graph t // c, through setup, layers of gates and measurements, and probe evaluations at checkpoints, writing one flat row of floats; the EnsembleResult feeds analysis, StabilizerCode and save/load/concatenate" src="docs/figures/engine-light.png">
+</picture>
 
-## More
+**The ensemble engine** compiles a `MonitoredCircuit` spec into arrays once,
+then runs every trajectory in parallel over the cores. Each trajectory draws
+its circuit from its own random streams (on graph `t // circuits_per_graph`),
+applies the gates and measurements of each layer, and evaluates the probes
+due at each checkpoint into its own row of the result. The erasure probes
+write the system's columns in a row basis adapted to the code, so every lost
+information l(A) is a difference of two ranks over A's columns, extended
+incrementally as qubits are added.
 
-- **Analysis and studies.** Online vs offline analysis, the augmentable `Study`
-  database, and plotting are covered in
-  [`notebooks/analysis.ipynb`](notebooks/analysis.ipynb). Built-in observables
-  are listed in [`src/sparsegf2/analysis/__init__.py`](src/sparsegf2/analysis/__init__.py).
-- **Expurgation.** `sparsegf2.expurgation` implements the code-surgery
-  algorithm of [Gullans et al., PRX 11, 031066 (2021)](https://arxiv.org/abs/2010.09775),
-  Sec. VI, natively on the tableau: find the error operators an encoded code
-  cannot correct and measure them away, trading rate for distance and erasure
-  recovery. Built on the core's general `SparseGF2.measure_pauli` kernel and
-  agnostic to how the tableau was generated. See
-  [`src/sparsegf2/expurgation/README.md`](src/sparsegf2/expurgation/README.md).
-- **Reproducible paper campaigns.** The versioned protocols, production
-  drivers, graph registry, and analysis recipes used for current paper runs
-  live in [`studies/prl_production/`](studies/prl_production/README.md). This
-  includes a generalized, plan-first single-reference purification-time runner
-  over Cartesian graph-parameter grids, with exact measurement-rate grids,
-  raw per-graph/per-circuit results, resumable storage, a searchable artifact
-  catalog, a standalone flowchart, and a production benchmark protocol.
-  Generated trajectories and large numerical artifacts remain local.
-- **Notebooks** (executable, with the math worked out):
-  [`master.ipynb`](notebooks/master.ipynb) (the core walkthrough),
-  [`analysis.ipynb`](notebooks/analysis.ipynb) (run a study end to end),
-  [`benchmarks.ipynb`](notebooks/benchmarks.ipynb), and the per-module
-  [`notebooks/circuits/`](notebooks/circuits/) set.
-- **Project map:**
-  ```
-  src/sparsegf2/
-  ├── core/         the simulator: sparse_tableau, numba_kernels, symplectic, observables, linalg_gf2
-  ├── circuits/     graph-defined MIPT circuits: picture, graphs, matching, measurements, scheduler, runner, draw
-  ├── analysis/     online/offline analysis, parameter sweeps, studies, plotting
-  └── expurgation/  Gullans et al. code surgery on the tableau: roles, erasure decoding, the loop
-  scripts/         inspect_circuit.py, plot_study.py
-  benchmarks/      SparseGF2-vs-Stim and per-optimization performance scripts
-  docs/figures/    the figures in this README and the scripts that produce them
-  studies/prl_production/  fingerprinted production protocols, runners, and analysis
-  ```
+[`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) goes through all of it in
+detail: storage and memory, gates, measurement, reference qubits, entropies,
+circuit compilation, the ensemble engine and its randomness contract, the
+erasure kernels, the agent interfaces, and how correctness is checked.
+[`docs/DESIGN.md`](docs/DESIGN.md) gives the reasons behind the design and
+the benchmarks that settled them.
 
-## References
+## Documentation map
 
-- Aaronson and Gottesman, *Improved Simulation of Stabilizer Circuits*,
-  [PRA 70, 052328 (2004)](https://arxiv.org/abs/quant-ph/0406196).
-- Fattal et al., *Entanglement in the Stabilizer Formalism*,
-  [quant-ph/0406168](https://arxiv.org/abs/quant-ph/0406168).
-- Gullans and Huse, *Dynamical Purification Phase Transition Induced by Quantum
-  Measurements*, [PRX 10, 041020 (2020)](https://arxiv.org/abs/1905.05195).
+| document | what it covers |
+|---|---|
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | the full getting-started guide: install, concepts, a first study end to end, scaling up to a campaign (estimates, chunks, a cluster), troubleshooting |
+| [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md) | getting started with the MCP server: install, connect a client, a first agent session, long runs |
+| [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) | how the simulator works inside, with diagrams |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | design decisions and the benchmarks behind them, roadmap |
+| [`docs/LITERATURE.md`](docs/LITERATURE.md) | the literature review behind the feature set (protocols, observables, codes, erasure, graphs) |
+| [`docs/AUDIT.md`](docs/AUDIT.md) | the audit of the deprecated v2 package that shaped this design |
+| [`AGENTS.md`](AGENTS.md), [`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md) | running SparseGF2 from AI agents (MCP, CLI, JSON API) |
+| [`examples/`](examples/) | complete study scripts: purification times on a graph collection, transition scans, and [`code_and_erasure.py`](examples/code_and_erasure.py), the erasure workflow |
+| [`benchmarks/`](benchmarks/) | the speed comparison and the figure data |
+| [`CHANGELOG.md`](CHANGELOG.md) | what changed in each development version |
 
-## License
+The module docstrings of `sparsegf2.mipt` (protocol and probes),
+`sparsegf2.codes` (`StabilizerCode`) and `sparsegf2.analysis`
+(survival and erasure estimators) are the API reference.
 
-MIT. See the `[project] license` field in [pyproject.toml](pyproject.toml).
+## Status and roadmap
+
+Done: the kernel and `Simulator` (both modes, lock-step tested against Stim
+with exact signs and outcomes), Stim-language circuits with noise, detectors
+and parallel sampling, the observables (state-vector checked), the ensemble
+engine with graph collections (several circuits per graph), pictures,
+scrambles and probes on their own schedules, survival analysis, erasure
+protection of the generated codes (first-failure sizes, exhaustive counts,
+code snapshots, `StabilizerCode`, and the Φ(e) and e_δ estimators), the agent
+interface, and the benchmarks.
+
+Next (see [DESIGN.md §14](docs/DESIGN.md#14-roadmap)): a row cache for large
+systems in the area-law phase, erasure and noise channels during the
+circuit, expurgation, more measurement schedules, and annealed (per-layer)
+graph disorder.

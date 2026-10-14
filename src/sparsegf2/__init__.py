@@ -1,186 +1,79 @@
-"""SparseGF2: phase-free sparse stabilizer simulator over GF(2).
+"""SparseGF2: a fast stabilizer-circuit simulator for monitored Clifford circuits.
 
-A self-contained, Stim-free phase-free stabilizer simulator that other
-packages (notably the ``circuits`` MIPT runner) build on top of.
+Verified against Stim. The main pieces:
 
-What you get
-============
-
-* :class:`SparseGF2`: the simulator core. ``SparseGF2(n)`` is a pure
-  ``|0^n⟩`` state on exactly ``n`` qubits (no implicit purification).
-
-* **Gate application**: :meth:`SparseGF2.apply_h`, :meth:`apply_s`,
-  :meth:`apply_sqrt_x`, :meth:`apply_cx`, :meth:`apply_cz`,
-  :meth:`apply_swap`, plus :meth:`apply_gate_1q` / :meth:`apply_gate_2q`
-  for arbitrary user-supplied symplectic matrices.
-
-* **Measurement**: :meth:`SparseGF2.measure_z`, :meth:`measure_x`,
-  :meth:`measure_y` + the determinism predicate
-  :meth:`is_deterministic_z`.
-
-* **Reset / projection**: :meth:`SparseGF2.reset_z`, :meth:`reset_x`,
-  :meth:`reset_y`.
-
-* **State extraction**: :meth:`SparseGF2.to_symplectic`
-  (the raw ``(2n, 2n)`` ``[X | Z]`` matrix) and
-  :meth:`SparseGF2.canonical_form` (GF(2) RREF of the stabilizer
-  block, the canonical representative for state-equality testing).
-
-* **Factories**: :func:`from_zero_state`, :func:`from_bell_purification`.
-
-* **Native ``Sp(2n, F_2)`` machinery**, in
-  :mod:`sparsegf2.core.symplectic`: :func:`enumerate_symplectic_group`,
-  :func:`random_symplectic_2q`, :func:`random_symplectic` for arbitrary
-  ``n`` (no runtime Stim dependency).
-
-* **Observables**, in :mod:`sparsegf2.core.observables`:
-  :func:`subsystem_rank`, :func:`entanglement_entropy`,
-  :func:`single_qubit_entropy`,
-  :func:`mutual_information`, :func:`tripartite_mutual_info`,
-  :func:`code_dimension`, :func:`generator_weights`,
-  :func:`stabilizer_weight_spectrum`,
-  :func:`average_stabilizer_weight`.
-
-* **Named gate constants**: :data:`H_SYMP`, :data:`S_SYMP`,
-  :data:`SQRT_X_SYMP`, :data:`CX_SYMP`, :data:`CZ_SYMP`, :data:`SWAP_SYMP`,
-  :data:`PAULI_I/X/Y/Z`.
-
-Subpackages built on the core
-=============================
-
-* :mod:`sparsegf2.circuits`: graph-defined random-Clifford + measurement
-  circuits (the MIPT workhorse): ``simulate(CircuitConfig(...))``, pictures,
-  graphs (incl. ``from_networkx`` for arbitrary geometry), gating / matching /
-  measurement modes, plus text and visual circuit inspection.
-* :mod:`sparsegf2.analysis`: named observables, online/offline analysis of
-  final tableaux, and the parameter-:func:`~sparsegf2.analysis.sweep` driver
-  with on-disk (parquet / HDF5) output.
-* :mod:`sparsegf2.expurgation`: the Gullans et al. expurgation algorithm
-  (targeted measurement of uncorrectable error operators) run natively on
-  the tableau, with role bookkeeping, exact erasure recovery, and the loop
-  driver.
-
-Contracts
-=========
-
-* **Stim parity** at the level of the **stabilizer subspace**
-  (GF(2) RREF of rows ``n..2n-1`` of ``[X | Z]``).
-  ``SparseGF2.canonical_form()`` returns this RREF.
-* **Phase-free.** Sign bits are not tracked; methods like
-  :meth:`measure_z` return ``0`` for every deterministic outcome.
-* **No runtime Stim import.** Stim is a test-time cross-checker only;
-  no path under ``src/`` ever calls ``import stim``.
+* :class:`Simulator`, :class:`Circuit` and :func:`sample`: single circuits in
+  the Stim circuit language, with or without signs (``phases``).
+* :mod:`~sparsegf2.observables`: entanglement, code and erasure quantities
+  of a simulator's state.
+* :mod:`~sparsegf2.mipt`: ensembles of random monitored circuits at full
+  speed (graph collections, reference pictures, probes on their own
+  checkpoints), and :mod:`~sparsegf2.graphs` for the interaction graphs.
+* :mod:`~sparsegf2.codes`: :class:`StabilizerCode`, the code a circuit
+  generated, for erasure analysis after the run.
+* :mod:`~sparsegf2.analysis`: estimators (survival, erasure failure
+  probability Phi(e), tolerance e_delta, means with errors).
+* :class:`PauliString`, :class:`Clifford` and :func:`gate`: Pauli operators,
+  small Cliffords with stable indices, and the gate library under Stim's names.
 """
 
-import logging as _logging
-
+from sparsegf2 import analysis, codes, graphs, mipt, observables
 from sparsegf2._version import __version__
-from sparsegf2.core.observables import (
-    Subsystem,
-    average_stabilizer_weight,
-    code_dimension,
-    code_rate,
-    complement,
-    contiguous_distance,
-    entanglement_entropy,
-    generator_weights,
-    mutual_information,
-    single_qubit_entropy,
-    stabilizer_weight_spectrum,
-    subsystem_rank,
-    tripartite_mutual_info,
+from sparsegf2.circuit import (
+    Circuit,
+    Instruction,
+    RepeatBlock,
+    Target,
+    target_combiner,
+    target_inv,
+    target_rec,
+    target_x,
+    target_y,
+    target_z,
 )
-from sparsegf2.core.sparse_tableau import (
-    CX_SYMP,
-    CZ_SYMP,
-    H_SYMP,
-    PAULI_I,
-    PAULI_X,
-    PAULI_Y,
-    PAULI_Z,
-    S_SYMP,
-    SQRT_X_SYMP,
-    SWAP_SYMP,
-    SparseGF2,
-    from_bell_purification,
-    from_zero_state,
+from sparsegf2.clifford import (
+    Clifford,
+    num_cliffords,
+    random_clifford_indices,
+    symplectic_group,
 )
-from sparsegf2.core.symplectic import (
-    enumerate_sp4,
-    enumerate_symplectic_group,
-    is_symplectic,
-    random_symplectic,
-    random_symplectic_2q,
-    random_symplectic_2q_batch,
-    random_symplectic_batch,
-    symplectic_form,
-    symplectic_group_order,
-    symplectic_product,
-)
-from sparsegf2.errors import (
-    InvalidArgumentError,
-    SimulatorBackendError,
-    SparseGF2Error,
-    SymplecticConditionError,
-    TableauCorruption,
-)
+from sparsegf2.codes import StabilizerCode
+from sparsegf2.errors import PhaseFreeError
+from sparsegf2.gates import GateInfo, all_gates, gate
+from sparsegf2.pauli import PauliString
+from sparsegf2.result import RunResult, SampleResult
+from sparsegf2.sampling import sample
+from sparsegf2.simulator import Simulator
 
 __all__ = [
-    # Core class
-    "SparseGF2",
-    # Factories
-    "from_bell_purification",
-    "from_zero_state",
-    # Named symplectic constants
-    "CX_SYMP",
-    "CZ_SYMP",
-    "H_SYMP",
-    "PAULI_I",
-    "PAULI_X",
-    "PAULI_Y",
-    "PAULI_Z",
-    "S_SYMP",
-    "SQRT_X_SYMP",
-    "SWAP_SYMP",
-    # Sp(2n, F_2) machinery
-    "enumerate_sp4",
-    "enumerate_symplectic_group",
-    "is_symplectic",
-    "random_symplectic",
-    "random_symplectic_2q",
-    "random_symplectic_2q_batch",
-    "random_symplectic_batch",
-    "symplectic_form",
-    "symplectic_group_order",
-    "symplectic_product",
-    # Observables
-    "Subsystem",
-    "average_stabilizer_weight",
-    "code_dimension",
-    "code_rate",
-    "complement",
-    "contiguous_distance",
-    "entanglement_entropy",
-    "generator_weights",
-    "mutual_information",
-    "single_qubit_entropy",
-    "stabilizer_weight_spectrum",
-    "subsystem_rank",
-    "tripartite_mutual_info",
-    # Exception hierarchy
-    "InvalidArgumentError",
-    "SimulatorBackendError",
-    "SparseGF2Error",
-    "SymplecticConditionError",
-    "TableauCorruption",
+    "Circuit",
+    "Clifford",
+    "GateInfo",
+    "Instruction",
+    "PauliString",
+    "PhaseFreeError",
+    "RepeatBlock",
+    "RunResult",
+    "SampleResult",
+    "Simulator",
+    "StabilizerCode",
+    "Target",
     "__version__",
+    "all_gates",
+    "analysis",
+    "codes",
+    "gate",
+    "graphs",
+    "mipt",
+    "num_cliffords",
+    "observables",
+    "random_clifford_indices",
+    "sample",
+    "symplectic_group",
+    "target_combiner",
+    "target_inv",
+    "target_rec",
+    "target_x",
+    "target_y",
+    "target_z",
 ]
-
-# Library logger. SparseGF2 itself never logs at runtime (no INFO/DEBUG
-# spam in hot paths), but downstream packages (notably the circuits
-# package) can attach handlers to this parent to route diagnostic
-# messages through a known namespace. ``NullHandler`` suppresses the
-# "No handlers could be found" warning that older logging APIs would
-# emit when nothing is attached.
-_logger = _logging.getLogger("sparsegf2")
-_logger.addHandler(_logging.NullHandler())

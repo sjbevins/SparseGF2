@@ -52,8 +52,9 @@ htmlcov/
 .vscode/tasks.json
 # Note: .vscode/settings.json IS committed (project config)
 
-# Editor / agent local settings
-.claude/
+# Editor / agent local settings (project skills under .claude/skills/ are shared)
+.claude/*
+!.claude/skills/
 
 # LaTeX build artifacts (the .tex and .pdf in docs/ are committed)
 *.aux
@@ -76,75 +77,8 @@ docs/figures/runtime_data.json
 runs/
 
 # ---- Local research scratch (not part of the public release) ----
-# Working scripts, research notebooks, logs, and pickled data behind the paper
-# results. The public notebooks are the documentation builders
-# (notebooks/**/_build_*.py + _nbtools.py) and their rendered .ipynb (analysis,
-# benchmarks, circuits/*); everything else that lands in notebooks/ is local.
 /misc/
 /results/
 /archive/
-/MONITOR.md
 *.log
 *.pkl
-
-# notebooks/: the tracked documentation builders and rendered doc notebooks
-# stay tracked (git never ignores tracked files); everything else that lands
-# here -- research scripts, logs, rendered research notebooks, figures -- is
-# local scratch. Add a NEW public notebook/builder with `git add -f`.
-notebooks/**/*.py
-notebooks/**/*.ipynb
-notebooks/**/*.txt
-notebooks/**/*.sh
-notebooks/**/*.png
-
-# Research FSS pipelines that live under the analysis package but are not part
-# of the shipped API (superseded by sparsegf2.analysis.fss_collapse).
-/src/sparsegf2/analysis/fss_pipeline/
-/src/sparsegf2/analysis/fss_pipeline_v2/
-/src/sparsegf2/analysis/fss_pipeline_v3/
-
-# Studies are an intentionally untracked research area. These patterns keep its
-# large generated data/results out of Git even if selected drivers or writeups
-# are explicitly added later; small document figures under figs/ remain eligible.
-studies/**/data/
-studies/**/results/
-studies/**/*_data/
-studies/**/*_data_n*/
-studies/**/data_tmi/
-studies/**/data_growth_pc/
-studies/*/*.tex.tmp
-# large, regenerable interactive plots (the static figs the .tex includes ARE kept)
-studies/**/*.html
-# good_codes: regenerable metadata + saved code tableaux (catalog.json keeps seeds);
-# figures and catalog.json ARE kept (the .tex includes them).
-studies/good_codes/search_meta/
-studies/good_codes/codes/*.npz
-studies/good_codes/*/*.tmp
-
-# PRL production: keep the reproducible scaffold, never the high-file-count
-# graph banks, trajectory arrays, detached logs, or live runtime manifests.
-!studies/prl_production/data/
-studies/prl_production/data/*
-!studies/prl_production/data/README.md
-studies/prl_production/logs/*
-!studies/prl_production/logs/README.md
-studies/prl_production/manifests/runtime/
-studies/prl_production/analysis/runs/
-studies/prl_production/figures/raw/*/
-studies/prl_production/figures/diagnostics/*/
-
-# Exact-distance and MILP research remains local until the solver workflow is
-# validated and explicitly approved for publication.
-studies/distance_ilp/
-studies/**/_exact_dist*.py
-studies/**/exact_dist*.py
-studies/**/_prl_dist_campaign.py
-studies/**/true_dist*.py
-studies/**/truedist*.py
-studies/**/truedist*/
-studies/**/*exact_dist*
-studies/**/*true_dist*
-studies/**/*truedist*
-studies/**/*_prl_dist*
-studies/**/code_distance.py
-studies/**/verify_distance.py
