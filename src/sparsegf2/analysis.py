@@ -26,12 +26,16 @@ import numpy as np
 
 __all__ = [
     "bernoulli_erasure_curve",
+    "distance_bounds",
     "erasure_failure_probability",
     "erasure_tolerance",
     "exact_failure_by_size",
     "failure_by_size",
+    "hybrid_failure_by_size",
+    "junction_dip",
     "kaplan_meier",
     "mean_and_error",
+    "mean_first_failure",
 ]
 
 
@@ -218,6 +222,83 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
     if not np.all(np.isfinite(c)) or np.any((c < 0) | (c > binom)):
         raise ValueError("counts[..., m - 1] must lie in [0, C(n, m)]")
     return c / binom
+
+
+def hybrid_failure_by_size(first_failure, num_qubits: int, *, exact_counts=None) -> np.ndarray:
+    """P_C(m) for m = 0..n as the hybrid estimators see it, shape ``(..., n + 1)``.
+
+    Without ``exact_counts`` this is :func:`failure_by_size`. With counts of
+    the uncorrectable m-subsets for m = 1..w, the entries m <= w are the exact
+    P_C(m) and the entries m > w the sampled fractions. This is the curve
+    behind :func:`erasure_failure_probability`, whose hybrid estimate equals
+    ``sum_m C(n, m) e^m (1 - e)^(n - m) P_C(m)`` of this curve.
+    """
+    n = int(num_qubits)
+    curve = failure_by_size(first_failure, n)
+    if exact_counts is None:
+        return curve
+    d = _first_failure_array(first_failure, n)
+    exact = exact_failure_by_size(_matching_counts(exact_counts, d), n)
+    out = curve.copy()
+    out[..., 1 : exact.shape[-1] + 1] = exact
+    return out
+
+
+def mean_first_failure(first_failure, num_qubits: int, *, exact_counts=None) -> np.ndarray:
+    """mu_D = E[D] = sum_{m=0}^{n} (1 - P_C(m)) per code, shape ``(...)``.
+
+    Uses :func:`hybrid_failure_by_size`, so it agrees with
+    :func:`erasure_failure_probability` given the same data. A code without
+    logical qubits (every D = n + 1) gives n + 1; condition on k > 0 before
+    averaging over an ensemble.
+    """
+    curve = hybrid_failure_by_size(first_failure, num_qubits, exact_counts=exact_counts)
+    return (1.0 - curve).sum(axis=-1)
+
+
+def distance_bounds(
+    first_failure, num_qubits: int, *, exact_counts=None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bounds ``(low, high)`` on each code's distance d, as int64 arrays of shape ``(...)``.
+
+    Erasing fewer than d qubits is always correctable, so every sampled
+    first-failure size D_j >= d and ``high = min_j D_j``. Without counts
+    ``low = 1``. With exhaustive counts for m = 1..w, the smallest m with an
+    uncorrectable m-subset is d exactly (``low = high = m``); if there is none,
+    ``low = w + 1``. A code without logical qubits (min D = n + 1) gets
+    ``(n + 1, n + 1)``: it has no distance, so reports exclude it.
+    """
+    n = int(num_qubits)
+    d = _first_failure_array(first_failure, n)
+    high = d.min(axis=-1)
+    low = np.ones_like(high)
+    if exact_counts is not None:
+        c = _matching_counts(exact_counts, d)
+        w = c.shape[-1]
+        positive = c > 0
+        found = positive.any(axis=-1)
+        first = np.argmax(positive, axis=-1) + 1
+        low = np.where(found, first, w + 1)
+        high = np.where(found, first, high)
+    no_code = d.min(axis=-1) == n + 1
+    low = np.where(no_code, n + 1, low)
+    high = np.where(no_code, n + 1, high)
+    return low.astype(np.int64), high.astype(np.int64)
+
+
+def junction_dip(first_failure, num_qubits: int, exact_counts) -> np.ndarray:
+    """Whether the sampled P_C(w + 1) falls below the exact P_C(w), per code.
+
+    The true P_C(m) is non-decreasing; a dip at the junction of the hybrid
+    curve is sampling noise. The estimators stay unbiased (nothing is
+    clipped); reports flag it and suggest more orderings.
+    """
+    n = int(num_qubits)
+    curve = hybrid_failure_by_size(first_failure, n, exact_counts=exact_counts)
+    w = np.asarray(exact_counts).shape[-1]
+    if w >= n:
+        return np.zeros(curve.shape[:-1], dtype=bool)
+    return curve[..., w + 1] < curve[..., w]
 
 
 def erasure_failure_probability(first_failure, num_qubits: int, e, *, exact_counts=None):
