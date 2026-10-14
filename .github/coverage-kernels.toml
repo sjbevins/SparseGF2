@@ -1,0 +1,10 @@
+# Coverage settings for the weekly JIT-free run (NUMBA_DISABLE_JIT=1): there the kernels run as
+# plain Python and can be traced, so the pyproject omit of _kernel is replaced by an include (no source: it makes coverage import numpy twice).
+[run]
+include = ["*/sparsegf2/_kernel/*"]
+branch = true
+
+[report]
+show_missing = true
+skip_covered = true
+fail_under = 98

@@ -62,7 +62,12 @@ testpaths = ["tests", "src"]
 pythonpath = ["src"]
 addopts = "-q --doctest-modules --strict-markers"
 # Warnings are errors, and an xfail that starts passing is a failure.
-filterwarnings = ["error"]
+# The kernels use intended mod-2**64 wraparound (xoshiro, splitmix, hashing). numpy warns
+# about it only as plain Python (NUMBA_DISABLE_JIT=1); compiled kernels never do.
+filterwarnings = [
+    "error",
+    'ignore:overflow encountered in scalar:RuntimeWarning:sparsegf2\._kernel\..*',
+]
 xfail_strict = true
 
 [tool.ruff]
@@ -81,3 +86,14 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sparsegf2"]
+
+# Compiled kernels are not traced by the JIT run; the weekly JIT-free run covers them.
+[tool.coverage.run]
+source = ["sparsegf2"]
+branch = true
+omit = ["*/sparsegf2/_kernel/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90

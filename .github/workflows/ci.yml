@@ -16,6 +16,8 @@ permissions:
 
 jobs:
   test:
+    env:
+      SPARSEGF2_NO_SKIPS: "1"
     # Stim is a required test dependency: the suite fails rather than skips
     # without it.
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -55,3 +57,58 @@ jobs:
 
       - name: pytest
         run: python -m pytest
+
+  boundscheck:
+    # Array indices in the kernels are checked at run time (a separate cache, so the
+    # bounds-checked kernels never mix with normal ones).
+    name: test (bounds-checked kernels)
+    runs-on: ubuntu-latest
+    env:
+      SPARSEGF2_NO_SKIPS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,mcp]"
+
+      - name: pytest
+        # The runner context is not available in job-level env, so these are set here.
+        env:
+          NUMBA_BOUNDSCHECK: "1"
+          NUMBA_CACHE_DIR: ${{ runner.temp }}/numba-boundscheck
+        run: python -m pytest
+
+  coverage:
+    # Compiled kernels are not traced; the weekly JIT-free run covers them.
+    name: coverage
+    runs-on: ubuntu-latest
+    env:
+      SPARSEGF2_NO_SKIPS: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,mcp]"
+
+      - name: pytest with coverage (fail_under is in pyproject.toml)
+        run: python -m pytest --cov
