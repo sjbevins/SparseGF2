@@ -4,7 +4,7 @@
 
 1. `ensemble_sweep(num_system=32, layers=256, reference="single", reference_partner=-1, schedule="matching", stop_when_purified=true, checkpoints="every_layer", probes=["code_dimension"], trajectories=500, seed=1, grid="measurement_rate=[0.05,0.1,0.15,0.2]; num_system=[32,64]", output_dir="runs/pt")`. It returns a job id.
 2. `job_status(job_id, wait_seconds=30)` until it reports completed.
-3. `analysis_compare(source="runs/pt", metrics=["censored_fraction", "survival(layer=128)", "tau_median"])`. The rate where the curves for different sizes cross locates the transition.
+3. `analysis_compare(source="runs/pt", metrics=["censored_fraction", "survival(at=128)", "tau_median"])`. The rate where the curves for different sizes cross locates the transition.
 
 ## 2. An erasure study on a Watts-Strogatz collection
 

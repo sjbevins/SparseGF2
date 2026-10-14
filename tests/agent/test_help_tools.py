@@ -25,6 +25,7 @@ def test_every_topic_renders(run_tool, topic):
         ("protocol_parameters", "measurement_rate"),
         ("tools", "help_topic"),
         ("stacks", "core"),
+        ("metrics", "phi(e, where)"),
     ],
 )
 def test_lists(run_tool, what, expect):

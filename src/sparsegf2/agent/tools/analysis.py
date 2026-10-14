@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from sparsegf2 import analysis, api
-from sparsegf2.agent.grammar import parse_checkpoints, parse_qubits
+from sparsegf2.agent.grammar import bind, parse_calls, parse_checkpoints, parse_qubits, plain
 from sparsegf2.agent.params import SOURCE
 from sparsegf2.agent.registry import Param, ToolDef, register
 from sparsegf2.agent.render import curve, fmt, lines, pm, table
@@ -675,5 +678,258 @@ register(
         ),
         handler=_purification,
         render=_render_purification,
+    )
+)
+
+
+class _Unknown(ValueError):
+    """A metric has no value for this run; the message says why (shown as a note)."""
+
+
+def _scalar(res, name: str, layer: int) -> np.ndarray:
+    if name not in res.values or np.ndim(res.values[name]) != 2:
+        raise ValueError(f"{name!r} is not a scalar probe of this run")
+    c = at_layer(res, name, layer)
+    if c is None:
+        raise ValueError(f"{name} was not recorded at layer {layer}")
+    v = np.asarray(res.values[name], dtype=float)[:, c]
+    return v[~np.isnan(v)]
+
+
+def _mean(v: np.ndarray, layer: int, name: str) -> tuple[float, float]:
+    if not v.size:
+        raise _Unknown(f"no trajectory has {name} at layer {layer}")
+    return _mean_err(v)
+
+
+def _m_mean(res, layer, probe):
+    return _mean(_scalar(res, probe, layer), layer, probe)
+
+
+def _m_stderr(res, layer, probe):
+    return _mean(_scalar(res, probe, layer), layer, probe)[1], None
+
+
+def _m_fraction(res, layer, probe, above=0):
+    v = _scalar(res, probe, layer) > float(above)
+    return _mean(v.astype(float), layer, probe)
+
+
+def _erasure_metrics(res, layer, *, rates=(0.1,), delta=0.01) -> dict[str, Any]:
+    ff = probe_by_kind(res, "erasure_first_failure")
+    if ff is not None and at_layer(res, ff, layer) is None:
+        raise ValueError(f"erasure_first_failure was not recorded at layer {layer}")
+    return erasure_at(res, layer, rates=list(rates), delta=float(delta))
+
+
+def _needs(r: dict[str, Any], key: str):
+    if key not in r:
+        raise _Unknown(r.get("note", f"{key} is not available"))
+    return r[key]
+
+
+def _m_phi(res, layer, e, where="all"):
+    if where not in ("all", "code"):
+        raise ValueError(f"where must be all or code, got {where!r}")
+    r = _erasure_metrics(res, layer, rates=[float(e)])
+    m, err = _needs(r, "phi_code" if where == "code" else "phi_all")[0]
+    return m, err
+
+
+def _m_e_delta(res, layer, delta=0.01):
+    return _needs(_erasure_metrics(res, layer, delta=delta), "e_delta"), None
+
+
+def _m_mu(res, layer):
+    return tuple(_needs(_erasure_metrics(res, layer), "mu_D"))
+
+
+def _m_q_plus(res, layer):
+    q = _erasure_metrics(res, layer)["q_plus"]
+    if q is None:
+        raise _Unknown(f"no trajectory selected at layer {layer}")
+    return q, None
+
+
+def _m_tau_median(res, layer):
+    tau = tau_median_all(km_curve(res))
+    if tau is None:
+        raise _Unknown("fewer than half the trajectories purified, so the median is undefined")
+    return tau, None
+
+
+def _m_censored(res, layer):
+    tau = res.purification_layer
+    if tau is None:
+        raise ValueError("this run has no reference, so no purification times")
+    return float(np.mean(np.asarray(tau) < 0)), None
+
+
+def _m_survival(res, layer, at):
+    km = km_curve(res)
+    tau = np.asarray(res.purification_layer)
+    horizon = int(max(int(x) for x in res.checkpoint_layers))
+    s = survival_at(km, int(at), horizon=horizon, censored=int((tau < 0).sum()))
+    if s is None:
+        raise _Unknown(f"unknown beyond horizon {horizon}")
+    return s, None
+
+
+METRICS: dict[str, tuple[tuple[str, ...], str, Callable]] = {
+    "mean": (("probe",), "mean of a scalar probe at the depth (+- stderr)", _m_mean),
+    "stderr": (("probe",), "standard error of a scalar probe's mean", _m_stderr),
+    "fraction": (("probe", "above"), "fraction of trajectories with probe > above", _m_fraction),
+    "phi": (("e", "where"), "erasure failure probability Phi(e); where=all or code (k>0)", _m_phi),
+    "e_delta": (
+        ("delta",),
+        "tolerable erasure rate: sup{e : Phi(e) <= delta}, codes with k>0",
+        _m_e_delta,
+    ),
+    "mu_D": ((), "mean first-failure size of codes with k>0", _m_mu),
+    "q_plus": ((), "fraction of trajectories that hold a code (k>0)", _m_q_plus),
+    "tau_median": (
+        (),
+        "median purification time over all trajectories (Kaplan-Meier)",
+        _m_tau_median,
+    ),
+    "censored_fraction": ((), "fraction never purified within the horizon", _m_censored),
+    "survival": (
+        ("at",),
+        "fraction not purified after layer `at` (Kaplan-Meier); unknown beyond the horizon "
+        "when trajectories are censored",
+        _m_survival,
+    ),
+}
+
+
+def metric_value(res, call, layer: int, notes: list[str] | None = None):
+    """(value, error) of one metric call; (None, None) with a note where it is undefined."""
+    names, _, fn = METRICS[call.name]
+    try:
+        return fn(res, layer, **plain(bind(call, names, what="metrics")))
+    except _Unknown as exc:
+        if notes is not None:
+            notes.append(f"{call.text}: {exc}")
+        return None, None
+
+
+def sources_of(ctx, a) -> list[Path]:
+    if ("sources" in a) == ("source" in a):
+        raise ValueError("give sources (a list of runs) or source (a sweep folder), not both")
+    if "source" in a:
+        root = ctx.path(a["source"], what="source", must_exist=True)
+        meta = root / "sweep.json"
+        if not meta.exists():
+            return [root]
+        points = json.loads(meta.read_text(encoding="utf-8"))["points"]
+        return [root / p["dir"] for p in points if (root / p["dir"] / "result.npz").exists()]
+    return [ctx.path(s, what="sources", must_exist=True) for s in a["sources"]]
+
+
+def _flat(d: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(d, dict):
+        out: dict[str, Any] = {}
+        for k, v in d.items():
+            if k == "probes":
+                continue
+            out.update(_flat(v, f"{prefix}{k}."))
+        return out
+    return {prefix.rstrip("."): json.dumps(d, sort_keys=True)}
+
+
+def differing(specs: list[dict]) -> list[str]:
+    flats = [_flat(s or {}) for s in specs]
+    keys = sorted(set().union(*flats))
+    return [k for k in keys if len({f.get(k) for f in flats}) > 1]
+
+
+def _compare(ctx, a):
+    calls = parse_calls(a["metrics"], what="metrics")
+    for i, call in enumerate(calls):
+        if call.name not in METRICS:
+            close = difflib.get_close_matches(call.name, list(METRICS), n=2)
+            hint = f"; did you mean {', '.join(close)}?" if close else ""
+            raise ValueError(
+                f"metrics[{i}]: unknown metric {call.name!r}{hint} (help_list(what=metrics))"
+            )
+    paths = sources_of(ctx, a)
+    if not paths:
+        raise ValueError("no finished runs to compare")
+    loaded = [load_result(ctx, str(p)) for p in paths]
+    specs = [(meta.get("spec") if meta else None) or {} for _, meta, _ in loaded]
+    diff = differing(specs)
+    rows = []
+    for (res, _, path), spec in zip(loaded, specs, strict=True):
+        layer = int(a["depth"]) if a.get("depth") is not None else int(res.checkpoint_layers[-1])
+        flat = _flat(spec)
+        row: dict[str, Any] = {
+            "run": ctx.show(path),
+            "params": {k: json.loads(flat[k]) if k in flat else None for k in diff},
+            "layer": layer,
+            "values": [],
+            "notes": [],
+        }
+        for call in calls:
+            try:
+                row["values"].append(metric_value(res, call, layer, row["notes"]))
+            except ValueError as exc:
+                row["values"].append((None, None))
+                row["notes"].append(f"{call.text}: {exc}")
+        rows.append(row)
+    return {"metrics": [c.text for c in calls], "differing": diff, "rows": rows}
+
+
+def _render_compare(d, ctx):
+    cols = (d["differing"] or ["run"]) + ["layer"] + d["metrics"]
+    rows = []
+    for r in d["rows"]:
+        first = [r["params"][k] for k in d["differing"]] if d["differing"] else [r["run"]]
+        rows.append([*[fmt(v) for v in first], r["layer"], *[pm(m, e) for m, e in r["values"]]])
+    notes, seen = [], set()
+    for r in d["rows"]:
+        label = r["run"] if len(d["rows"]) > 1 else None
+        for n in r["notes"]:
+            text = f"{label}: {n}" if label else n
+            if text not in seen:
+                seen.add(text)
+                notes.append(text)
+    shown = notes[:4]
+    if len(notes) > len(shown):
+        shown.append(f"... and {len(notes) - len(shown)} more notes")
+    return lines(
+        f"analysis_compare: {len(d['rows'])} runs",
+        table(cols, rows),
+        *[f"note ('-' = no value): {n}" for n in shown],
+    )
+
+
+register(
+    ToolDef(
+        name="analysis_compare",
+        stack="analysis",
+        summary="Compare runs or a sweep: a metrics table.",
+        description=(
+            "One row per run (a list of runs, or the points of an ensemble_sweep folder), with "
+            "the parameters that differ between runs as columns, then metrics as call strings: "
+            "mean(probe), stderr(probe), fraction(probe, above=0), phi(e=0.05, where=code), "
+            "e_delta(0.01), mu_D, q_plus, tau_median, censored_fraction, survival(at=100) "
+            "(unknown beyond the horizon when trajectories are censored; help_list(what=metrics)). "
+            'Example: {"source": "runs/ensemble_sweep-1a2b", '
+            '"metrics": ["mean(code_dimension)", "phi(e=0.05)"]}'
+        ),
+        params=(
+            Param("sources", "array", "Runs to compare.", items="string"),
+            Param("source", "string", "A sweep folder (or one run)."),
+            Param("metrics", "array", "Metric calls.", required=True, items="string"),
+            Param(
+                "depth",
+                "integer",
+                "Layer to evaluate at (default each run's last).",
+                minimum=0,
+            ),
+        ),
+        handler=_compare,
+        render=_render_compare,
+        long_running=True,
     )
 )

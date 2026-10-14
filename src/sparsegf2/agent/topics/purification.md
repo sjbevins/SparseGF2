@@ -10,6 +10,6 @@ Use `reference="single"`: one reference qubit `n` is Bell-paired with `reference
 
 ## Finding the transition
 
-Sweep the measurement rate with `ensemble_sweep` (grid `measurement_rate=[0.05,0.1,0.15,0.2]`, optionally times `num_system=[32,64,128]`), then compare with `analysis_compare(metrics=["survival(layer=256)", "censored_fraction"])`. Below the critical rate the reference survives to the horizon; above it the survival drops quickly, and the drop sharpens as the system size grows. The rate where curves for different sizes cross marks the transition.
+Sweep the measurement rate with `ensemble_sweep` (grid `measurement_rate=[0.05,0.1,0.15,0.2]`, optionally times `num_system=[32,64,128]`), then compare with `analysis_compare(metrics=["survival(at=256)", "censored_fraction"])`. Below the critical rate the reference survives to the horizon; above it the survival drops quickly, and the drop sharpens as the system size grows. The rate where curves for different sizes cross marks the transition.
 
 For brickwork on a ring the entanglement transition is near p_c ~ 0.16.
