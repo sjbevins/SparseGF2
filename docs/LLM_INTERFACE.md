@@ -118,8 +118,9 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 
 `trajectories` may be omitted for a collection of graphs (`graph.realizations`, or a
 graph file holding several graphs), which then runs all of its circuits, and when
-`start_ensemble_job` resumes a single-graph run, which then runs to the target stored in
-its `spec.json` (section 3.5). The signatures are the MCP tools'. In Python,
+`start_ensemble_job` resumes a run, which then runs to the target stored in its
+`spec.json`, a collection's included (section 3.5). The signatures are the MCP tools'. In
+Python,
 `api.start_ensemble_job(spec, trajectories=None, output_dir=None, ...)` keeps
 `trajectories` second, and `output_dir` is still required (pass it by keyword).
 
@@ -348,7 +349,9 @@ $ sparsegf2 ensemble spec.json --trajectories 2000 --seed 7 --output-dir runs/p0
 also stores `graph_file`: the file's resolved absolute path and the sha256 of its bytes,
 with which a resume checks that the file still holds the run's graphs. `load_results`
 returns the stored `spec` exactly (its floats are not rounded for display), so it can be
-passed back to `start_ensemble_job`.
+passed back to `start_ensemble_job`. A spec longer than about 2000 characters (a long
+explicit edge or weight list) is shown as `"too long to show; see the saved files"`;
+take the exact spec to pass back from the `"spec"` entry of `spec.json` instead.
 
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
@@ -438,17 +441,19 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
-  `seed` may be omitted (the stored one is used), and so may `trajectories`: a
-  single-graph run then resumes to the target stored in `spec.json`, and a graph
-  collection runs all of its circuits (so a collection started with fewer can be
-  finished this way). A larger `trajectories` extends a finished run. `load_results`
-  returns the stored spec exactly, ready to pass back.
+  `seed` may be omitted (the stored one is used), and so may `trajectories`: the run then
+  resumes to the target stored in `spec.json`, for a graph collection too (a new
+  collection run without `trajectories` stores all of its circuits; one started with
+  fewer is not grown by a resume). Only a larger `trajectories` extends a run.
+  `load_results` returns the stored spec exactly, ready to pass back.
 * What is refused, before anything runs, in this order: a run made under another
-  randomness contract or SparseGF2 version; a graph file whose contents changed; a spec
-  that builds another protocol than the saved run (the message names the first differing
-  key path with both values, such as
-  `measurement_rate is 0.3333333333333333 in its spec.json and 0.333333 here`, and the
-  protocol field that differs); another `seed`.
+  randomness contract or SparseGF2 version (read from `provenance.json` and from the saved
+  results, so a missing `provenance.json` does not hide it); a graph file whose contents
+  changed; a spec that builds another protocol than the saved run (the message names a
+  differing key path with both values, such as
+  `measurement_rate is 0.3333333333333333 in its spec.json and 0.333333 here`, chosen
+  among the keys that set the protocol field that differs, and that field); another
+  `seed`, or a `spec.json` seed that is not the one the saved results were made with.
   The protocol, not the spec's text, identifies the run (it is what a merge of saved
   parts requires), so a spec written differently that builds the same protocol
   continues the run, with a note, and `spec.json` then stores the new form: a cutoff
@@ -463,8 +468,9 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * A merge that still fails (a directory mixed by an earlier version) names the chunk
   files that do not belong to the run in `result.npz` (or the first chunk); deleting them
   makes the earlier trajectories readable and resumable again.
-* Graph collections: `trajectories` may be omitted (all `G * circuits_per_graph` run) and
-  cannot exceed that count. Changing `circuits_per_graph` changes the spec, so more
+* Graph collections: in a new run `trajectories` may be omitted (all
+  `G * circuits_per_graph` run) and cannot exceed that count. To finish a collection
+  started with fewer, pass that count (`estimate_ensemble(spec)["trajectories"]`). Changing `circuits_per_graph` changes the spec, so more
   circuits per graph need a new directory.
 * Concurrency: compiled kernels run one at a time (a process-wide lock), so jobs and
   interactive calls interleave chunk by chunk. Every function is safe to call from any

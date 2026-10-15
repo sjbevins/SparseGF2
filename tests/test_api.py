@@ -1291,9 +1291,11 @@ def test_resume_refuses_a_changed_graph_file_before_running(tmp_path):
     assert not np.array_equal(other_graph, first_graph)
     graphs.save(gfile, [other_graph], n)
     changed = re.escape(f"the graph file {str(gfile.resolve())!r} changed since the run started")
+    before = {name: (out / name).read_bytes() for name in ("spec.json", "provenance.json")}
     with pytest.raises(ValueError, match=changed + r".*edges differs"):
         api.start_ensemble_job(spec, 40, output_dir=str(out), chunk_size=10)
-    assert not (out / "chunks").exists()  # refused before anything ran
+    assert not (out / "chunks").exists()  # refused before anything ran or was written
+    assert {name: (out / name).read_bytes() for name in before} == before
     assert api.load_results(str(out))["num_trajectories"] == 20
 
     # a spec.json from before the hash was recorded: the saved graphs are compared instead
@@ -1344,6 +1346,71 @@ def test_a_graph_file_rewritten_with_the_same_graphs_resumes_only_against_saved_
         api.start_ensemble_job(spec, 20, output_dir=str(out))
 
 
+def test_a_relative_graph_path_read_from_another_directory_is_checked(tmp_path, monkeypatch):
+    n, first, second = 12, tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    graph = graphs.watts_strogatz(n, 4, 0.1, seed=1)
+    graphs.save(first / "g.npz", [graph], n)
+    graphs.save(second / "g.npz", [graphs.watts_strogatz(n, 4, 0.1, seed=2)], n)
+    spec, out = _file_spec("g.npz"), str(tmp_path / "run")  # resolved from the cwd
+    monkeypatch.chdir(first)
+    job = api.start_ensemble_job(spec, 10, output_dir=out, seed=3)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    monkeypatch.chdir(second)  # the same spec text now reads another file
+    named = re.escape(
+        f"the graph file {str((second / 'g.npz').resolve())!r} changed since the run started "
+        f"(then {str((first / 'g.npz').resolve())!r})"
+    )
+    with pytest.raises(ValueError, match=named):
+        api.start_ensemble_job(spec, 20, output_dir=out)
+    # a byte-identical copy at the new path is the same file: the run continues
+    (second / "g.npz").write_bytes((first / "g.npz").read_bytes())
+    more = api.start_ensemble_job(spec, 20, output_dir=out)
+    assert api.job_status(more["job_id"], wait_seconds=60)["status"] == "completed"
+    saved = mipt.EnsembleResult.load(tmp_path / "run" / "result.npz")
+    direct = _direct_file_run(graph, 20, seed=3)
+    np.testing.assert_array_equal(saved.purification_layer, direct.purification_layer)
+
+
+def _rewrite_meta(path, **changes):
+    """Rewrite entries of a saved result's metadata (as a file from elsewhere would have)."""
+    with np.load(path, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    meta.update(changes)
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(path, **arrays)
+
+
+def test_version_and_seed_are_checked_against_the_saved_results(tmp_path):
+    out = tmp_path / "copied"
+    job = api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=4)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    # copied without provenance.json, from another version
+    (out / "provenance.json").unlink()
+    _rewrite_meta(out / "result.npz", version="3.0.0.dev11")
+    with pytest.raises(ValueError, match=r"started with sparsegf2 3\.0\.0\.dev11, but this is"):
+        api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert not (out / "chunks").exists()
+    # this version's results, but spec.json gives another seed than they were made with
+    _rewrite_meta(out / "result.npz", version=sg.__version__)
+    meta = json.loads((out / "spec.json").read_text(encoding="utf-8"))
+    (out / "spec.json").write_text(json.dumps({**meta, "seed": 5}), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="gives seed 5, but the saved results were made with seed 4"
+    ):
+        api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert not (out / "chunks").exists()
+    (out / "spec.json").write_text(json.dumps(meta), encoding="utf-8")
+    more = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert api.job_status(more["job_id"], wait_seconds=60)["status"] == "completed"
+    saved = mipt.EnsembleResult.load(out / "result.npz")
+    np.testing.assert_array_equal(
+        saved.purification_layer, _direct_spec().run(20, seed=4).purification_layer
+    )
+
+
 def test_a_merge_that_fails_names_the_chunk_files_that_do_not_belong(tmp_path):
     out = tmp_path / "mixed"
     api.run_ensemble(SMALL_SPEC, 20, seed=4, output_dir=str(out))
@@ -1390,6 +1457,12 @@ def test_load_results_returns_the_exact_spec_which_extends_the_run(tmp_path):
     without = {k: v for k, v in spec.items() if k != "checkpoints"}  # "final" by default
     with pytest.raises(ValueError, match=re.escape("checkpoints is 5 in its spec.json and absent")):
         api.start_ensemble_job(without, 20, output_dir=out)
+    # a harmless difference first in the file (10.0 for 10) does not hide the one that counts
+    rate = "different spec: measurement_rate is 0.3333333333333333 in its spec.json and 0.25 here"
+    with pytest.raises(ValueError, match=re.escape(rate)):
+        api.start_ensemble_job(
+            {**spec, "layers": 10.0, "measurement_rate": 0.25}, 20, output_dir=out
+        )
 
 
 def test_bounded_keeps_an_exact_field_whole_when_it_cuts_the_rest():
@@ -1445,17 +1518,43 @@ def test_resume_without_trajectories_runs_to_the_stored_target(tmp_path):
     )
     again = api.start_ensemble_job(SMALL_SPEC, output_dir=str(out))  # finished: nothing to do
     assert (again["resumed_from"], again["trajectories_total"]) == (30, 30)
-    api.job_status(again["job_id"], wait_seconds=60)
+    assert api.job_status(again["job_id"], wait_seconds=60)["status"] == "completed"
     with pytest.raises(ValueError, match="give trajectories"):  # a new directory needs a count
         api.start_ensemble_job(SMALL_SPEC, output_dir=str(tmp_path / "new"))
-    # a graph collection keeps its own default: all of its circuits, so the rest can be run
-    bank = {**SMALL_SPEC, "graph": {**SMALL_SPEC["graph"], "realizations": 3},
-            "circuits_per_graph": 2}  # fmt: skip
-    job = api.start_ensemble_job(bank, 2, output_dir=str(tmp_path / "bank"), seed=1)
+    assert not (tmp_path / "new").exists()  # and is not created by the refusal
+
+
+def test_a_graph_collection_resumes_to_its_stored_target_too(tmp_path):
+    # 5 graphs x 4 circuits = 20 trajectories; the run is started with 8 of them
+    bank = {**SMALL_SPEC, "graph": {**SMALL_SPEC["graph"], "realizations": 5},
+            "circuits_per_graph": 4}  # fmt: skip
+    direct = _direct_spec(
+        edges=[graphs.watts_strogatz(10, k=4, beta=0.2, seed=[3, i]) for i in range(5)],
+        circuits_per_graph=4,
+    )
+    out = tmp_path / "bank"
+    job = api.start_ensemble_job(bank, 8, output_dir=str(out), seed=1, chunk_size=4)
     assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
-    rest = api.start_ensemble_job(bank, output_dir=str(tmp_path / "bank"))
-    assert (rest["resumed_from"], rest["trajectories_total"]) == (2, 6)
+    # a crash after the first chunk of 4: the resume reaches the target 8, not all 20
+    (out / "result.npz").unlink()
+    (out / "chunks").mkdir()
+    direct.run(4, seed=1).save(out / "chunks" / "traj_000000000000.npz")
+    resumed = api.start_ensemble_job(bank, output_dir=str(out))
+    assert (resumed["resumed_from"], resumed["trajectories_total"]) == (4, 8)
+    assert api.job_status(resumed["job_id"], wait_seconds=60)["status"] == "completed"
+    saved = mipt.EnsembleResult.load(out / "result.npz")
+    np.testing.assert_array_equal(
+        saved.purification_layer, direct.run(8, seed=1).purification_layer
+    )
+    # the rest needs an explicit count; a new run without one runs (and stores) all 20
+    rest = api.start_ensemble_job(bank, 20, output_dir=str(out))
+    assert (rest["resumed_from"], rest["trajectories_total"]) == (8, 20)
     assert api.job_status(rest["job_id"], wait_seconds=60)["status"] == "completed"
+    fresh = api.start_ensemble_job(bank, output_dir=str(tmp_path / "fresh"), seed=1)
+    assert fresh["trajectories_total"] == 20
+    assert api.job_status(fresh["job_id"], wait_seconds=60)["status"] == "completed"
+    stored = json.loads((tmp_path / "fresh" / "spec.json").read_text(encoding="utf-8"))
+    assert stored["trajectories"] == 20
 
 
 def test_contract_refusal_comes_before_the_spec_comparison(tmp_path):

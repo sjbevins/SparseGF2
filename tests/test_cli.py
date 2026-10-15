@@ -248,9 +248,34 @@ def test_ensemble_graph_file_collection_runs_every_circuit_without_trajectories(
     assert code == 2 and "graph must be an object" in data["error"]["message"]
 
 
+def test_ensemble_chunked_resume_runs_to_the_stored_target(capsys, spec_file, tmp_path):
+    out_dir = tmp_path / "crashed"
+    argv = ["ensemble", str(spec_file), "--output-dir", str(out_dir), "--chunk-size", "2"]
+    code, data = run_json(capsys, *argv, "--trajectories", "6", "--seed", "3")
+    assert code == 0 and data["num_trajectories"] == 6
+    # a crash after the first chunk: spec.json asks for 6, one chunk of 2 is saved
+    direct = mipt.MonitoredCircuit(
+        num_system=8, edges=graphs.cycle(8), layers=20, measurement_rate=0.2,
+        reference="single", checkpoints=5, probes=[mipt.code_dimension()],
+    )  # fmt: skip
+    (out_dir / "result.npz").unlink()
+    (out_dir / "chunks").mkdir()
+    direct.run(2, seed=3).save(out_dir / "chunks" / "traj_000000000000.npz")
+    code, data = run_json(capsys, *argv)  # the same command, without --trajectories or --seed
+    assert code == 0 and data["job"]["resumed_from"] == 2 and data["num_trajectories"] == 6
+    saved = mipt.EnsembleResult.load(out_dir / "result.npz")
+    assert np.array_equal(saved.purification_layer, direct.run(6, seed=3).purification_layer)
+
+
 def test_ensemble_errors(capsys, spec_file, tmp_path):
     code, data = run_json(capsys, "ensemble", str(spec_file))
-    assert code == 2 and "give trajectories" in data["error"]["message"]  # one graph
+    message = data["error"]["message"]  # the API's, for one graph
+    assert code == 2 and "give trajectories" in message and "--trajectories" in message
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text(json.dumps({"spec": SPEC, "trajectories": 2, "extra": 1}), encoding="utf-8")
+    code, data = run_json(capsys, "ensemble", str(wrapped))
+    assert code == 2 and "['extra']" in data["error"]["message"]
+    assert "graph_file" in data["error"]["message"]
     code, data = run_json(
         capsys, "ensemble", str(spec_file), "--trajectories", "5", "--chunk-size", "2"
     )

@@ -650,21 +650,28 @@ Load results in Python with `mipt.EnsembleResult.load(path)`; several result fil
 same spec and seed merge with `mipt.EnsembleResult.concatenate`.
 
 **Resuming and extending jobs.** Call `start_ensemble_job` again with the same spec and
-the same `output_dir`; `seed` may be omitted (the stored one is used). Saved trajectories
-are kept and the job continues from there (`resumed_from` in the status). A larger
-`trajectories` extends a finished run; for a graph collection the maximum is
-`realizations x circuits_per_graph`, so start with fewer trajectories and leave
-`trajectories` out later to run the rest. A directory holding a different spec, a
-different seed, or a run started with a different SparseGF2 version or randomness
-contract (`mipt.RANDOMNESS_CONTRACT`) is refused with a message.
+the same `output_dir`; `seed` and `trajectories` may be omitted (the stored seed and
+target are used). Saved trajectories are kept and the job continues from there
+(`resumed_from` in the status). Only a larger `trajectories` extends a run; for a graph
+collection the maximum is `realizations x circuits_per_graph` (what `estimate_ensemble`
+reports as `trajectories`), so start with fewer and pass that count later to run the
+rest. Before anything runs, the spec is compared with the saved run by the protocol it
+builds: a spec that builds another protocol is refused, with a message naming a
+differing key and both values, while a spec written differently that builds the same
+protocol (a default written out, a cutoff given another way that resolves to the same
+size) continues the run, and `spec.json` then stores the new form. A graph file whose
+contents changed, a different seed, or a run started with a different SparseGF2 version
+or randomness contract (`mipt.RANDOMNESS_CONTRACT`) is refused too.
 
 **Jobs live inside the server process.** The client starts the server, and when the
 client exits (you close Claude Code or Claude Desktop, or the client restarts the server)
 the server and its running jobs stop. Saved chunks stay on disk. In the next session the
 old `job_id` is unknown (the error message says so), and the remedy is to resume: ask
-the agent to call `start_ensemble_job` with the same spec and `output_dir`. If the agent
-no longer has the spec, `load_results` on the directory returns it under `"spec"` (the
-file `spec.json` holds it too). Verified while writing this guide: a job of 100 out of
+the agent to call `start_ensemble_job` with the same spec and `output_dir`
+(`trajectories` may be left out: the job resumes to its stored target). If the agent no
+longer has the spec, `load_results` on the directory returns it, exactly as stored, under
+`"spec"` (the file `spec.json` holds it too; read it there if the summary says the spec
+is too long to show). Verified while writing this guide: a job of 100 out of
 400 trajectories in one server process, then, in a new process, `job_status` of the old
 id failed with `unknown job_id ... (jobs do not survive a restart; resume by calling
 start_ensemble_job with the same output_dir)`, and `start_ensemble_job` with the same

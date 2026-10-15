@@ -114,9 +114,9 @@ split into chunks (chunk_size trajectories, default about 10 s each), each saved
 output_dir as soon as it finishes, then merged into output_dir/result.npz. Results equal
 one run_ensemble call with the same spec and seed. To resume after a cancel or restart,
 call again with the same spec and output_dir; seed and trajectories may be omitted (the
-stored target is used; a graph collection runs all its circuits). A larger trajectories
-extends a finished run. A spec that builds another protocol, or a changed graph file, is
-refused before anything runs. Poll with job_status, then call load_results(output_dir).
+stored seed and target are used, also for a graph collection). Only a larger trajectories
+extends a run. A spec that builds another protocol, or a changed graph file, is refused
+before anything runs. Poll with job_status, then call load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,

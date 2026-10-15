@@ -58,7 +58,7 @@ import traceback
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1701,9 +1701,11 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     if trajectories is None:
         if mc.num_trajectories is None:
             raise ValueError(
-                "give trajectories (the number of random circuits); it may be omitted only for "
-                "a collection of graphs (graph.realizations), which runs circuits_per_graph "
-                "circuits on each graph"
+                "give trajectories (the number of random circuits; --trajectories in the CLI); "
+                "it may be omitted only for a collection of graphs (graph.realizations, or a "
+                "graph file holding several graphs), which runs circuits_per_graph circuits on "
+                "each graph, or to resume a job in its output_dir, which runs to the target "
+                "stored there"
             )
         trajectories = mc.num_trajectories
     trajectories = _require_int(trajectories, "trajectories", minimum=1)
@@ -2323,6 +2325,43 @@ def _check_contract(out: Path, stored: dict | None, existing: mipt.EnsembleResul
             )
 
 
+def _check_version(out: Path, stored: dict | None, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse to resume or extend a run started with another ``sparsegf2`` version.
+
+    The version is read from ``provenance.json`` (the original record) and
+    from the saved results, which a merge requires to match, so a missing or
+    unreadable ``provenance.json`` cannot let another version's results through.
+    """
+    made = [] if stored is None or stored.get("sparsegf2") is None else [stored["sparsegf2"]]
+    if existing is not None:
+        made.append(existing.version)
+    for made_with in made:
+        if made_with != __version__:
+            shown = f"sparsegf2 {made_with}" if made_with else "an unrecorded sparsegf2 version"
+            raise ValueError(
+                f"output_dir {str(out)!r} holds a run started with {shown}, "
+                f"but this is {__version__}; trajectories from different versions need not "
+                "agree, so finish the run with that version or start a new directory"
+            )
+
+
+def _check_saved_seed(out: Path, seed: Any, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse a ``spec.json`` seed that is not the one the saved results were made with.
+
+    New chunks run with ``seed`` from ``spec.json``; a merge requires the seed
+    record of every part to match, so a mismatch is refused before anything runs.
+    """
+    if existing is None:
+        return
+    ss = np.random.SeedSequence(_resolve_seed(seed))
+    if mipt._seed_record(existing) != (ss.entropy, tuple(ss.spawn_key), ss.pool_size):
+        raise ValueError(
+            f"output_dir {str(out)!r}: its spec.json gives seed {seed}, but the saved results "
+            f"were made with seed {existing.seed_entropy}; restore the seed in spec.json, or "
+            "use a new directory"
+        )
+
+
 def _result_parts(out: Path) -> list[Path]:
     """``result.npz`` (if any) followed by the saved chunk files in trajectory order."""
     parts = []
@@ -2396,12 +2435,12 @@ def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
     data; a part of another run (another protocol, seed, version or randomness
     contract) is named so that deleting it makes the directory readable again.
     """
-    strays = []
-    for path, part in zip(paths[1:], results[1:], strict=True):
-        try:
-            mipt.EnsembleResult.concatenate([results[0], part])
-        except ValueError:
-            strays.append(path)
+    first = results[0]
+    strays = [
+        path
+        for path, part in zip(paths[1:], results[1:], strict=True)
+        if not _same_run_as(first, part)
+    ]
     if not strays:
         return ""
     names = [p.name for p in strays[:_STRAYS_SHOWN]]
@@ -2411,6 +2450,21 @@ def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
         f". These files in {str(strays[0].parent)!r} do not belong to the run in "
         f"{paths[0].name}: {', '.join(names)}; delete them to recover the trajectories saved "
         "before (load_results then reads them, and start_ensemble_job resumes the run)"
+    )
+
+
+def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
+    """Whether ``part`` could be merged with ``first``: what ``EnsembleResult.concatenate``
+    checks, without copying any data (contract, seed, protocol, probes, layers, version,
+    and no trajectory saved twice)."""
+    return (
+        part.randomness_contract == first.randomness_contract
+        and mipt._seed_record(part) == mipt._seed_record(first)
+        and mipt._protocol_difference(first.spec, part.spec) is None
+        and list(part.values) == list(first.values)
+        and np.array_equal(part.checkpoint_layers, first.checkpoint_layers)
+        and part.version == first.version
+        and not np.intersect1d(first.trajectories, part.trajectories).size
     )
 
 
@@ -2631,19 +2685,23 @@ def start_ensemble_job(
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
     larger ``trajectories`` extends a finished run. Without ``trajectories``
-    a single-graph run resumes to the target stored in ``spec.json``; a
-    collection of graphs runs all of its circuits (every graph gets
-    ``circuits_per_graph``). Before anything runs, a directory made under
-    another randomness contract or ``sparsegf2`` version, or holding another
-    seed, is refused, and so is a spec that builds another protocol than the
-    saved run (the error names the first differing key and both values) or a
-    graph file whose contents changed since the run started.
+    a resume runs to the target stored in ``spec.json``, for a collection of
+    graphs too: a new collection run without it stores all of its circuits
+    (every graph gets ``circuits_per_graph``), and one started with fewer
+    is extended only by an explicit count. Before anything runs, a directory
+    made under another randomness contract or ``sparsegf2`` version, or with
+    another seed, is refused (the saved results are checked as well as
+    ``provenance.json`` and ``spec.json``), and so is a spec that builds
+    another protocol than the saved run (the error names a differing key
+    and both values) or a graph file whose contents changed since the run
+    started.
     """
     mc = _build_spec(spec)
     graph_file = _graph_file_record(spec)
-    if trajectories is None and mc.num_trajectories is None:
-        trajectories = _stored_target(output_dir)  # a resume: the target in spec.json
-    trajectories = _trajectory_count(mc, trajectories)
+    # Without a count, a resume runs to the target in spec.json, read once the directory is
+    # known to hold this run; otherwise the count is checked before the directory is made.
+    resume_to_target = trajectories is None and _stored_target(output_dir) is not None
+    count = 0 if resume_to_target else _trajectory_count(mc, trajectories)
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     if output_dir is None:
@@ -2657,13 +2715,7 @@ def start_ensemble_job(
         # The contract and version first: nothing else can be resumed under another one.
         stored = _read_provenance(out)
         _check_contract(out, stored, existing)
-        made_with = None if stored is None else stored.get("sparsegf2")
-        if made_with is not None and made_with != __version__:
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run started with sparsegf2 {made_with}, "
-                f"but this is {__version__}; trajectories from different versions need not "
-                "agree, so finish the run with that version or start a new directory"
-            )
+        _check_version(out, stored, existing)
         notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
         if seed is not None and _resolve_seed(seed) != meta.get("seed"):
             raise ValueError(
@@ -2671,6 +2723,7 @@ def start_ensemble_job(
                 "resume it, or use a new directory"
             )
         seed = meta["seed"]
+        _check_saved_seed(out, seed, existing)
         started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
         if started_at and now_at and started_at != now_at:
             notes.append(
@@ -2681,6 +2734,8 @@ def start_ensemble_job(
         raise ValueError(
             f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
         )
+    if resume_to_target:  # the directory holds this run: run to its stored target
+        count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
     seed = _resolve_seed(seed)
     with _JOBS_LOCK:
         for other in _JOBS.values():
@@ -2692,13 +2747,13 @@ def start_ensemble_job(
         job = _Job(
             job_id=uuid.uuid4().hex[:12],
             spec=spec,
-            trajectories=max(trajectories, done),
+            trajectories=max(count, done),
             seed=seed,
             output_dir=out,
             chunk_size=(
                 _require_int(chunk_size, "chunk_size", minimum=1)
                 if chunk_size is not None
-                else _default_chunk_size(mc, trajectories)
+                else _default_chunk_size(mc, count)
             ),
             num_threads=num_threads,
             created=time.time(),
@@ -2758,8 +2813,8 @@ def _shown(value: Any) -> str:
     return text if len(text) <= 80 else text[:77] + "..."
 
 
-def _spec_difference(saved: Any, given: Any, path: str = "") -> str | None:
-    """The first key path where two JSON specs differ, with both values, or None.
+def _spec_differences(saved: Any, given: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """Every key path where two JSON specs differ, as ``(top-level key, message)``.
 
     Values compare as exact JSON (``1`` and ``1.0`` differ). The keys of
     ``saved`` come first, in their order, then the keys only ``given`` has.
@@ -2768,29 +2823,57 @@ def _spec_difference(saved: Any, given: Any, path: str = "") -> str | None:
         for key in [*saved, *(k for k in given if k not in saved)]:
             where = f"{path}.{key}" if path else str(key)
             a, b = saved.get(key, _ABSENT), given.get(key, _ABSENT)
-            found = (
-                _spec_difference(a, b, where)
-                if a is not _ABSENT and b is not _ABSENT
-                else f"{where} is {_shown(a)} in its spec.json and {_shown(b)} here"
-            )
-            if found:
-                return found
-        return None
-    if isinstance(saved, list) and isinstance(given, list):
+            if a is _ABSENT or b is _ABSENT:
+                yield _difference(where, a, b)
+            else:
+                yield from _spec_differences(a, b, where)
+    elif isinstance(saved, list) and isinstance(given, list):
         for i in range(max(len(saved), len(given))):
             a = saved[i] if i < len(saved) else _ABSENT
             b = given[i] if i < len(given) else _ABSENT
-            found = (
-                _spec_difference(a, b, f"{path}[{i}]")
-                if a is not _ABSENT and b is not _ABSENT
-                else f"{path}[{i}] is {_shown(a)} in its spec.json and {_shown(b)} here"
-            )
-            if found:
-                return found
-        return None
-    if _canonical(saved) != _canonical(given):
-        return f"{path or 'the spec'} is {_shown(saved)} in its spec.json and {_shown(given)} here"
-    return None
+            if a is _ABSENT or b is _ABSENT:
+                yield _difference(f"{path}[{i}]", a, b)
+            else:
+                yield from _spec_differences(a, b, f"{path}[{i}]")
+    elif _canonical(saved) != _canonical(given):
+        yield _difference(path, saved, given)
+
+
+def _difference(path: str, saved: Any, given: Any) -> tuple[str, str]:
+    """``(top-level key of path, message naming the path and both values)``."""
+    top = re.split(r"[.\[]", path, maxsplit=1)[0]
+    where = path or "the spec"
+    return top, f"{where} is {_shown(saved)} in its spec.json and {_shown(given)} here"
+
+
+# The spec keys that set each field compared by mipt._protocol_difference, where they
+# are not the field itself.
+_PROTOCOL_KEYS = {
+    "num_system": ("num_system", "graph", "edges"),
+    "edges": ("graph", "edges", "num_system"),
+    "edge_weights": ("edge_weights", "graph", "edges"),
+    "checkpoint_layers": ("checkpoints", "layers"),
+}
+
+
+def _spec_difference(saved: Any, given: Any, protocol: str | None = None) -> str | None:
+    """A key path where two JSON specs differ, with both values, or None.
+
+    With ``protocol`` (what :func:`sparsegf2.mipt._protocol_difference` says
+    differs) the first difference among the keys that set that field is
+    named, so changing it back resolves the refusal; otherwise, and if no
+    such key differs, the first difference.
+    """
+    field = None if protocol is None else protocol.split(" (", 1)[0]
+    keys = _PROTOCOL_KEYS.get(field or "", (field,))
+    first = None
+    for top, message in _spec_differences(saved, given):
+        if top in keys:
+            return message
+        first = first or message
+        if field is None:
+            break
+    return first
 
 
 def _check_same_run(
@@ -2821,14 +2904,16 @@ def _check_same_run(
     Returns notes for the job status; raises ``ValueError`` naming what differs.
     """
     where = f"output_dir {str(out)!r}"
-    text = _spec_difference(meta.get("spec"), _jsonable(spec, exact=True))
+    stored_spec, given = meta.get("spec"), _jsonable(spec, exact=True)
+    same_text = _canonical(stored_spec) == _canonical(given)
     saved: mipt.MonitoredCircuit | None = None
     if existing is not None:
         saved = existing.spec
-    elif text is not None:
+    elif not same_text:
         with contextlib.suppress(ValueError):  # e.g. its graph file is gone
-            saved = _build_spec(meta.get("spec"))
+            saved = _build_spec(stored_spec)
     difference = None if saved is None else mipt._protocol_difference(saved, mc)
+    text = None if same_text else _spec_difference(stored_spec, given, difference)
     notes = []
     recorded = meta.get("graph_file")
     if (

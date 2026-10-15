@@ -315,7 +315,8 @@ def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
         unknown = sorted(set(data) - {"spec", "trajectories", "seed", "graph_file"})
         if unknown:
             raise ValueError(
-                f"SPEC.json: unknown top-level key(s) {unknown}; expected spec, trajectories, seed"
+                f"SPEC.json: unknown top-level key(s) {unknown}; expected spec, trajectories, "
+                "seed (and graph_file, which a run writes beside the spec)"
             )
         spec, trajectories, seed = data["spec"], data.get("trajectories"), data.get("seed")
     else:
