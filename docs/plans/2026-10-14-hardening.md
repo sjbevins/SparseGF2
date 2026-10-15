@@ -431,7 +431,7 @@ def entropy(gens, n, region) -> int                   # pure state (n independen
   - `deep`: `max_examples=2000`, `deadline=None`, `print_blob=True`.
   - Load `os.environ.get("HYPOTHESIS_PROFILE", "ci")`.
 - **Analysis properties.** Draw first-failure arrays and counts from small random codes: n <= 10, codes from `stim.Tableau.random`, D sampled with `StabilizerCode.first_failure_sizes`, counts from `_gf2_oracle.uncorrectable_counts`. Include codes with k = 0.
-  - `failure_by_size`: P(0) = 0; non-decreasing; for codes with k > 0, `P[n] == pytest.approx(1.0, abs=1e-12)`. Do not use an xfail: a derandomized search may miss the rounding case of finding E2, and under `xfail_strict` that would XPASS. Task 14 tightens this to exact equality.
+  - `failure_by_size`: P(0) = 0; non-decreasing; for codes with k > 0, `P[n] == 1.0` exactly. Under ruling R-e, Task 14 (finding E2) has already landed. Add the [[10,4]] histogram from Task 14's regression test as an `@example`.
   - `erasure_failure_probability`:
     - Phi(0) = 0;
     - Phi(1) equals the fraction of codes with k > 0;
@@ -584,7 +584,7 @@ class EnsembleResult:
   - `failure_by_size` forms P_C(m) as `cumsum(integer bin counts) / samples`, with one division. `_histogram` returns counts, or callers divide once.
   - `failure_by_size(...)[..., n] == 1.0` exactly for codes with k > 0.
   - Regression (`scripts/erasure/t14_junction_dip_rounding.py`): on the [[10,4]] code with D histogram `[13, 21, 30, 36]`, `junction_dip` is False and `failure_by_size[n] == 1.0`.
-  - Tighten Task 10's `pytest.approx(1.0, abs=1e-12)` property to exact equality, with an `@example` built from the [[10,4]] histogram above.
+  - Add a unit test for exact equality (Task 10's property comes later and also asserts it).
 - **E1:**
   - The exhaustive counts are exact wherever an exact integer fits. Accumulate in int64 while `C(n, m) < 2**63`, using an int64 comb table where it fits, and float64 beyond. Document the choice in the kernel and in the `uncorrectable_counts` docstring.
   - `exact_failure_by_size` accepts float counts up to `C(n, m) * (1 + 1e-12)`, clips the ratio to [0, 1], and still rejects clearly wrong values.
@@ -653,6 +653,7 @@ class EnsembleResult:
 **Requirements:**
 - **The bug.** `__post_init__` writes resolved defaults back into public fields: `gates_per_layer` (None becomes `n // 2`), `system_order` (None becomes `arange(n)`) and the default tripartite regions. `dataclasses.replace` then copies stale values. See `scripts/ensemble/n_replace_stale.py`.
 - **The fix:** keep the user's input in the public field, None or empty for "default", and put resolved values in private `init=False` fields, the way `_checkpoint_layers` already works.
+  - This includes probes whose size comes from a budget or a per-size mapping (Task 26). `replace(spec, num_system=m)` must resolve them again for m.
   - Add read-only properties for the resolved values where code or users need them. For example `resolved_gates_per_layer` and `resolved_system_order`. Choose names that fit `mipt`'s style and report them.
   - Update every internal reader: `_arrays`, `circuit`, `_protocol_difference`, the API's spec building and summaries, and `EnsembleResult.save`/`load`.
 - **Saved files.** Files written before this change store the resolved values. They must still load and compare equal to a spec built with those explicit values.
@@ -875,6 +876,216 @@ class EnsembleResult:
 - [ ] Implement.
 - [ ] Run the full suite.
 - [ ] Commit: `simulator: the unrolling guard counts annotations; detection events warn when a run did not start from |0...0>; docstrings corrected`
+
+---
+
+# Phase 2b: research tooling (requested by the owner on 2026-10-14)
+
+**Execution order (ruling R-e in the ledger):**
+1. After Task 5: 25, 6, 7, 14, 15, 26, 27, 28.
+2. Then 12, 13, 29, 30, 31.
+3. Then 8, 9, 10, 11, 16-23 and 24.
+
+Consequences:
+- Task 10 asserts P_C(n) == 1.0 exactly, because Task 14 lands first.
+- Task 16's "resolve defaults privately" covers the budget and per-size probe forms of Task 26.
+- The observable docs (Tasks 28-31) are in the doc tests (`tests/test_docs.py`).
+
+### Task 25: multithreading works, and how it scales
+
+**Files:**
+- Create: `benchmarks/thread_scaling.py`
+- Create: `benchmarks/results/thread_scaling.json` and `benchmarks/results/thread_scaling.md`
+- Modify: `benchmarks/README.md` (a table row and the command)
+- Modify: `AGENTS.md` (a short "Threads" bullet under Conventions)
+- Modify: `docs/GETTING_STARTED.md` (a short "Threads" subsection)
+- Test: `tests/test_benchmarks.py`, a smoke test of `--quick`
+
+**Requirements:**
+- **Record the environment:** CPU model, physical and logical cores, `numba.config.NUMBA_NUM_THREADS`, and `numba.threading_layer()` (read after a parallel call). Say whether that layer is safe for concurrent use from several Python threads, as MCP background jobs do (the Numba docs say `tbb` and `omp` are, and `workqueue` is not).
+- **Workloads,** each at thread counts 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS`:
+  - W1: Watts-Strogatz n=64, k=4, beta=0.1; purification; p=0.1; 256 layers; `random_edges`. Probes `code_dimension` every 32 layers, `erasure_first_failure(samples=512)` final, and `uncorrectable_region_counts(max_size=2)` final.
+  - W2: the same at n=256.
+  - W3: the purification-time workload. Cycle n=128, single reference, p=0.1, `layers=8*n`, `stop_when_purified`, `code_dimension` every layer.
+  - W4: `Simulator.sample` (or the documented shot API) of a small noisy repetition-code memory circuit, 200 000 shots.
+- **Sizing and measurement:** choose trajectory and shot counts so that the largest thread count takes at least about 5 s. Report wall time as the median of 3 runs (after a warm-up compile), throughput, speedup over 1 thread, and parallel efficiency.
+- **Identity across thread counts:** check that results are identical at every thread count (arrays equal; samples equal for a fixed seed). Fail loudly if not.
+- **Options:** `--quick` (tiny sizes, under about 30 s including compilation) and `--out <dir>`. By default results go to `benchmarks/results/`.
+- **Run it on this machine** and commit both result files. In the report, state whether 32 threads beat 16 (SMT) for each workload. In AGENTS.md and GETTING_STARTED, recommend a `num_threads` / `NUMBA_NUM_THREADS` setting based on these measurements, and say that every result is identical at any thread count.
+
+**Steps:**
+- [ ] Write the script and the smoke test.
+- [ ] Run the full benchmark on an otherwise idle machine; no other test run may be going on at the same time.
+- [ ] Commit the script, the results and the docs: `benchmarks: thread scaling of ensembles and sampling; results identical at every thread count`
+
+### Task 26: the exhaustive cutoff m*(n), set by a budget or per system size
+
+**Files:**
+- Modify: `src/sparsegf2/analysis.py`
+- Modify: `src/sparsegf2/mipt.py` (`uncorrectable_region_counts`, probe resolution)
+- Modify: `src/sparsegf2/api.py` (JSON probe forms, estimate)
+- Modify: `AGENTS.md`, `docs/LLM_INTERFACE.md`, `CHANGELOG.md`
+- Tests: `tests/test_analysis_erasure_stats.py`, `tests/test_mipt.py`, `tests/test_api.py`
+
+**Interfaces produced:**
+
+```python
+# analysis.py
+def exhaustive_region_count(num_qubits: int, max_size: int) -> int: ...
+    # N_exact(n, w) = sum_{m=1}^{w} C(n, m), exact Python int
+def exhaustive_cutoff(num_qubits: int, budget: int) -> int: ...
+    # m*(n) = max{w in 0..n : N_exact(n, w) <= budget}
+# mipt.py
+def uncorrectable_region_counts(
+    max_size: int | Mapping[int, int] | None = None,
+    name: str | None = None,
+    *,
+    budget: int | Mapping[int, int] | None = None,
+    checkpoints=None,
+) -> Probe: ...
+```
+
+**Requirements:**
+- **Definitions** (the owner's): the exhaustive regime is 0 <= m <= m*(n) (every m-subset is enumerated), and the sampled regime is m*(n) < m <= n. The budget form is m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B}.
+- **Arguments:**
+  - Give exactly one of `max_size` and `budget`. With neither, `max_size=2` (the current default). With both, raise `ValueError`.
+  - Either may be an int, or a mapping from system size n to a value, so one probe definition can serve a sweep over n: `max_size={64: 3, 128: 2, 256: 2}` or `budget={64: 20_000, 256: 50_000}`.
+  - Resolution happens when a `MonitoredCircuit` resolves its probes, for its own `num_system`.
+  - A mapping without an entry for n raises `ValueError` that lists the sizes given.
+  - A resolved w must satisfy 1 <= w <= n. A budget that allows no size raises `ValueError`: "budget B allows no exhaustive region size at n = N (C(N, 1) = N > B); raise the budget or drop the probe".
+- **Naming and storage:** the default probe name stays `uncorrectable_region_counts[w]`, with the resolved w. Document passing `name=` to keep one key across a sweep over n. The resolved w is what the engine uses and what saved results store. Saving a result and loading it back gives the same key and values.
+- **JSON (API, CLI, MCP):**
+  - `{"kind": "uncorrectable_region_counts", "budget": 50000}`;
+  - `{"kind": "uncorrectable_region_counts", "max_size": {"64": 3, "128": 2}}`;
+  - `{"kind": "uncorrectable_region_counts", "budget": {"64": 20000, "256": 50000}}`.
+
+  JSON object keys are strings, so accept integer-valued keys and validate them. Validation errors name the field. `estimate_ensemble` uses the resolved w. `capabilities` documents the forms.
+- **Tests:**
+  - The owner's examples: `exhaustive_cutoff(n, 50_000)` is 3, 2, 2 and 1 for n = 64, 128, 256 and 512, and `exhaustive_region_count(256, 2) == 32_896`.
+  - Edge cases: budget 0 gives 0; a budget >= 2**n - 1 gives n.
+  - A run with `budget=B` equals a run with `max_size=exhaustive_cutoff(n, B)`: same key, same values.
+  - Mapping forms in Python and JSON; the errors for a missing n, a budget that is too small, both arguments, and non-integer keys or values.
+  - A save/load round trip.
+- **Docs:** update AGENTS.md (the probe line and the erasure section), LLM_INTERFACE.md and the CHANGELOG.
+
+**Steps:**
+- [ ] Write the failing tests.
+- [ ] Implement.
+- [ ] Run the full suite, ruff and mypy.
+- [ ] Commit: `erasure: the exhaustive cutoff m*(n) can be set per system size or by an enumeration budget`
+
+### Task 27: the cost of exhaustive enumeration and of sampling, measured
+
+**Files:**
+- Create: `benchmarks/erasure_cost.py`
+- Create: `benchmarks/results/erasure_cost.json` and `benchmarks/results/erasure_cost.md`
+- Modify: `benchmarks/README.md`
+- Test: `tests/test_benchmarks.py` (a `--quick` smoke test)
+
+**Requirements:**
+- **Codes:** take them from real trajectories. Use n in {32, 64, 128, 256, 512}; Watts-Strogatz k=4, beta=0.1; purification; `random_edges`; p in {0.05, 0.1}; final layer 4n. Take `code_snapshot` at the final layer, about 8 codes per (n, p) with k > 0, and record their k and their distance bounds.
+- **What to measure:**
+  - The one-thread wall time of the exhaustive counts for w = 1, 2, ... until one evaluation exceeds 10 s or N_exact exceeds 1e9. Measure both the engine probe path (a run whose only probe is the counts at the final layer, minus the same run without it, per trajectory) and `StabilizerCode.uncorrectable_counts(w)`. Report both if they differ.
+  - The time per first-failure ordering, for M in {100, 512, 2048}.
+- **What to report:**
+  - for each (n, p, w): the median and max seconds per code, N_exact(n, w), and the seconds per region test;
+  - for budgets B in {1e4, 5e4, 1e5, 1e6, 1e7}: the resulting m*(n) and the expected seconds per code;
+  - the expected total for a study: per-code time × trajectories × checkpoints ÷ the effective threads from Task 25.
+- **Options:** `--quick` and `--out`. Run it on this machine and commit the results. The erasure README (Task 28) cites them.
+
+**Steps:**
+- [ ] Write the script and the smoke test.
+- [ ] Run it on an otherwise idle machine.
+- [ ] Commit: `benchmarks: the cost of exhaustive erasure enumeration and of sampled orderings, by n and budget`
+
+### Tasks 28-31: one detailed document per observable
+
+**Files:**
+- Create: `docs/observables/README.md` (the index: observable, definition, probe/observable/function names, file)
+- Create: one file per observable family (listed per task below)
+- Modify: `tests/test_docs.py` (run their Python blocks)
+- Modify: `README.md` and `AGENTS.md` (link the index)
+
+**Each document must contain, in order:**
+1. **Definition.** The quantity in equations (GitHub math, `$...$` and `$$...$$`) and the setting: the purification picture, the reference R, the [[n, k_C]] code.
+2. **The formula the simulator evaluates, and why it equals the definition.** A short derivation or proof sketch. Examples:
+   - S(A) = rank(G_A) - |A| for a pure stabilizer state;
+   - formula (1), $\ell_C(A) = 2|A| - s - \operatorname{rank}(H_A) + \operatorname{rank}(H_{\bar A})$, via the cleaning lemma;
+   - the prefix of a uniformly random ordering is a uniformly random m-subset, and I(A:R) is monotone under inclusion (data processing), so D <= m exactly when ell(A_m) > 0, and Pr[D <= m] = P_C(m) for every m at once.
+3. **From the kernel to the code you run.**
+   - The data layout (the tableau's bitset columns and rows, the reference rows).
+   - The kernel routines, by file and function name, with what each computes and its cost.
+   - How the compiled ensemble engine dispatches the probe at checkpoints.
+   - The Python layers: `mipt` probes, `observables`, `StabilizerCode`, `analysis`.
+   - The JSON/MCP forms.
+   - Every statement about the code must match the source; cite `path::function`.
+4. **Cost and accuracy:** complexity, measured costs (Task 27), statistical error bars, and the exact and sampled regimes.
+5. **Worked examples on single trajectories.** These are runnable and run by the doc tests: small n, a few seconds.
+   - Run one trajectory, then compute the observable through the engine probe, through the library on the replayed state, and through an independent brute force written in the example.
+   - Show that they agree.
+   - Show printed numbers only where they are deterministic (contract-independent): exact counts, k, entropies.
+6. **Pitfalls.**
+
+### Task 28: random-region erasure, lost information and the code dimension
+
+**Files:**
+- Create: `docs/observables/random-region-erasure.md`
+- Create: `docs/observables/lost-information.md`
+- Create: `docs/observables/code-dimension.md`
+- Create: `docs/observables/README.md`
+
+**Requirements** (beyond the common list above):
+- **`random-region-erasure.md`** is the most detailed. It covers:
+  - P_C(m) as a probability over uniform m-subsets (the owner's definition). It is not an independent per-qubit erasure channel. Explain that Phi(e) mixes P_C(m) with binomial weights, and how that relates to the per-qubit channel.
+  - The two regimes and the cutoff m*(n), given directly or by a budget (Task 26), with the owner's table for n = 256 and the budget examples.
+  - The exhaustive regime: the counts kernel's enumeration (its walk, its pruning, why it is exact, its integer accumulation after Task 14).
+  - The sampled regime: uniform random orderings, so each region is drawn without replacement and the M regions at a given m are independent and identically distributed. The nested regions give every m at once. The estimates at different m are positively correlated, each is unbiased with a binomial error bar, and the curve is monotone in m. Cover the per-evaluation streams after Task 15, which make replay exact.
+  - The hybrid estimator; `junction_dip`; Phi(e); e_delta; mu_C; the distance bounds; conditioning on k > 0 (and the summaries after Task 13).
+  - Measured costs from Task 27, and how to choose a budget.
+  - A single-trajectory example. Take a Watts-Strogatz n = 16 trajectory. Its exact P_C(m) for every m comes from brute force over all subsets with formula (1), written with numpy in the example. Compare that with `uncorrectable_region_counts`, with the first-failure estimate (M = 2000), and with the hybrid curve.
+- **`lost-information.md`:** ell_C(A) = I(A:R), correctability, formula (1), complementarity (ell(A) + ell(complement A) = 2k), `lost_information` (fixed region), `erasure_lost_profile`, and `StabilizerCode.lost_information` / `is_correctable`.
+- **`code-dimension.md`:** k = S(R), the reference-row invariant (k is a popcount), the purification and single pictures, `code_dimension`, and the link to purification (`purification.md`, Task 30).
+
+**Steps:**
+- [ ] Write the documents and run their examples.
+- [ ] Add them to the doc tests.
+- [ ] Run the full suite.
+- [ ] Commit: `docs: random-region erasure, lost information and the code dimension, from definition to kernel to examples`
+
+### Task 29: entanglement observables
+
+**Files:**
+- Create: `docs/observables/entanglement.md`
+
+**Requirements:**
+- Cover S(A), the half-cut entropy, I(A:B), I3(A:B:C) and the entropy profile.
+- Give the GF(2) formulas, the kernel rank routines (the complement path, the single-qubit fast path, `prefix_entropies`), phased vs phase-free, and the NaN after `stop_when_purified`.
+- Give single-trajectory examples checked against a state vector for n <= 8.
+
+**Commit:** `docs: entanglement observables, from definition to kernel to examples`
+
+### Task 30: purification and contiguous distance
+
+**Files:**
+- Create: `docs/observables/purification.md`
+- Create: `docs/observables/contiguous-distance.md`
+
+**Requirements:**
+- **`purification.md`:** tau, checkpoints, censoring, `purification_times()` and Kaplan-Meier (after Task 12), `survival()`, and the summaries (after Task 13).
+- **`contiguous-distance.md`:** the definition along an order, periodic and open boundaries, the kernel window scan, NaN without a code, and a brute-force example.
+
+**Commit:** `docs: purification time and contiguous distance, from definition to kernel to examples`
+
+### Task 31: codes after the run
+
+**Files:**
+- Create: `docs/observables/codes.md`
+
+**Requirements:**
+- Cover `code_snapshot`, the packed generator format, `EnsembleResult.code`, and `StabilizerCode` (`from_simulator`, `from_packed`, `from_strings`, every method).
+- Cover re-analysing a saved code with more orderings, replay to get a code at a new depth, and saving and loading.
+
+**Commit:** `docs: codes after the run, from snapshot to StabilizerCode`
 
 ---
 
