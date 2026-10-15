@@ -15,12 +15,16 @@ random ordering of the qubits; see :func:`sparsegf2.mipt.erasure_first_failure`)
   with exhaustive counts for m <= w
   (:func:`sparsegf2.mipt.uncorrectable_region_counts`) the m <= w terms are
   exact and the samples cover only m > w;
-* ``erasure_tolerance``: e_delta = sup{e : Phi(e) <= delta} for an ensemble.
+* ``erasure_tolerance``: e_delta = sup{e : Phi(e) <= delta} for an ensemble;
+* ``exhaustive_cutoff``: the cutoff w = m*(n) that an enumeration budget of B
+  regions allows, max{w : sum_{m=1}^{w} C(n, m) <= B}, and
+  ``exhaustive_region_count`` that sum.
 """
 
 from __future__ import annotations
 
 import math
+import operator
 
 import numpy as np
 
@@ -30,6 +34,8 @@ __all__ = [
     "erasure_failure_probability",
     "erasure_tolerance",
     "exact_failure_by_size",
+    "exhaustive_cutoff",
+    "exhaustive_region_count",
     "failure_by_size",
     "hybrid_failure_by_size",
     "junction_dip",
@@ -166,14 +172,18 @@ def _first_failure_array(first_failure, num_qubits: int) -> np.ndarray:
 
 
 def _histogram(d: np.ndarray, num_qubits: int) -> np.ndarray:
-    """Per-code fraction of samples with D = d, for d = 0..n+1: shape (..., n + 2)."""
+    """Per-code number of samples with D = d, for d = 0..n+1: int64, shape (..., n + 2).
+
+    Callers sum the integer counts first and divide by the number of samples
+    once, so a fraction that should be exactly 1 (or equal another ratio) is.
+    """
     lead, samples = d.shape[:-1], d.shape[-1]
     flat = d.reshape(-1, samples)
     rows = np.repeat(np.arange(flat.shape[0]), samples)
     hist = np.bincount(
         rows * (num_qubits + 2) + flat.ravel(), minlength=flat.shape[0] * (num_qubits + 2)
     )
-    return (hist.reshape(flat.shape[0], num_qubits + 2) / samples).reshape(*lead, num_qubits + 2)
+    return hist.reshape(*lead, num_qubits + 2)
 
 
 def _matching_counts(exact_counts, d: np.ndarray) -> np.ndarray:
@@ -187,10 +197,25 @@ def _matching_counts(exact_counts, d: np.ndarray) -> np.ndarray:
     return c
 
 
-def _exact_part(counts, num_qubits: int, weights: np.ndarray) -> tuple[np.ndarray, int]:
-    p_exact = exact_failure_by_size(counts, num_qubits)  # (..., w)
+def _hybrid_phi(hist, samples: int, p_exact, num_qubits: int, e: float, log_binom) -> np.ndarray:
+    """Phi(e) from first-failure histograms and, if given, the exact P_C(m) for m = 1..w.
+
+    ``hist`` (``(..., n + 2)``) counts the samples with D = d out of
+    ``samples``; ``p_exact`` is ``(..., w)`` or None. Without it, Phi is the
+    mean of Pr[Bin(n, e) >= D]; with it, the hybrid
+    ``sum_{m <= w} b_m(e) P_C(m)`` plus the mean of Pr[Bin(n, e) >= max(D, w + 1)].
+    Linear in both, so pooled data give the mean of the per-code values. The
+    single implementation behind :func:`erasure_failure_probability` and
+    :func:`erasure_tolerance`.
+    """
+    weights = _binomial_weights(num_qubits, e, log_binom)
+    tail = _tail(weights)  # (n + 2,)
+    if p_exact is None:
+        return hist @ tail / samples
     w = p_exact.shape[-1]
-    return p_exact @ weights[1 : w + 1], w
+    sampled = tail.copy()
+    sampled[: w + 1] = tail[w + 1]  # Pr[Bin >= max(D, w + 1)]
+    return p_exact @ weights[1 : w + 1] + hist @ sampled / samples
 
 
 def failure_by_size(first_failure, num_qubits: int) -> np.ndarray:
@@ -198,11 +223,13 @@ def failure_by_size(first_failure, num_qubits: int) -> np.ndarray:
 
     ``first_failure`` has shape ``(..., samples)``; the result has shape
     ``(..., n + 1)``. Because the erased regions of one ordering are nested,
-    one ordering contributes to every m at once.
+    one ordering contributes to every m at once. Each entry is the integer
+    number of samples with D <= m divided once by ``samples``, so P_C(n) is
+    exactly 1 for a code with logical qubits.
     """
     d = _first_failure_array(first_failure, num_qubits)
-    hist = _histogram(d, num_qubits)
-    return np.cumsum(hist, axis=-1)[..., : num_qubits + 1]
+    failed = np.cumsum(_histogram(d, num_qubits), axis=-1)[..., : num_qubits + 1]
+    return failed / d.shape[-1]
 
 
 def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
@@ -210,7 +237,9 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
 
     ``counts[..., m - 1]`` is the number of uncorrectable m-subsets (the
     output of :func:`sparsegf2.mipt.uncorrectable_region_counts`); each is
-    divided by C(n, m).
+    divided by C(n, m). Float counts above 2**53 are rounded and may lie a
+    few ulps above C(n, m): counts up to C(n, m) (1 + 1e-12) are accepted and
+    the ratio is clipped to [0, 1]; anything further out raises ``ValueError``.
     """
     c = np.asarray(counts, dtype=np.float64)
     if c.ndim == 0:
@@ -218,10 +247,75 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
     w = c.shape[-1]
     if w > num_qubits:
         raise ValueError(f"counts cover sizes up to {w} > n = {num_qubits}")
-    binom = np.array([math.comb(num_qubits, m) for m in range(1, w + 1)], dtype=np.float64)
-    if not np.all(np.isfinite(c)) or np.any((c < 0) | (c > binom)):
-        raise ValueError("counts[..., m - 1] must lie in [0, C(n, m)]")
-    return c / binom
+    binom = np.array([float(math.comb(num_qubits, m)) for m in range(1, w + 1)])
+    if not np.all(np.isfinite(c)) or np.any((c < 0) | (c > binom * (1 + 1e-12))):
+        raise ValueError(
+            "counts[..., m - 1] must lie in [0, C(n, m)] (up to a relative 1e-12 of rounding)"
+        )
+    return np.clip(c / binom, 0.0, 1.0)
+
+
+def _integer(value, what: str) -> int:
+    """``value`` as a Python int: numpy integers and whole-number floats are accepted.
+
+    Fractions, bools and strings raise ``TypeError``. :mod:`sparsegf2.mipt` validates
+    every integer of a spec and its probes with this function too.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{what} must be an integer, got {value!r}")
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return int(value)
+    try:
+        return operator.index(value)
+    except TypeError:
+        raise TypeError(f"{what} must be an integer, got {value!r}") from None
+
+
+def _qubit_count(num_qubits) -> int:
+    n = _integer(num_qubits, "num_qubits")
+    if n < 0:
+        raise ValueError(f"num_qubits must be non-negative, got {n}")
+    return n
+
+
+def exhaustive_region_count(num_qubits: int, max_size: int) -> int:
+    """N_exact(n, w) = sum_{m=1}^{w} C(n, m): the regions an exhaustive count up to size w covers.
+
+    That is the number of m-subsets with 1 <= m <= w that
+    :func:`sparsegf2.mipt.uncorrectable_region_counts` with ``max_size=w``
+    accounts for, as an exact Python int (it exceeds 2**63 for large n and w).
+    ``max_size`` must lie in [0, n]; 0 gives 0.
+    """
+    n = _qubit_count(num_qubits)
+    w = _integer(max_size, "max_size")
+    if not 0 <= w <= n:
+        raise ValueError(f"max_size must be in [0, {n}], got {w}")
+    return sum(math.comb(n, m) for m in range(1, w + 1))
+
+
+def exhaustive_cutoff(num_qubits: int, budget: int) -> int:
+    """m*(n) = max{w in 0..n : sum_{m=1}^{w} C(n, m) <= budget}: the largest exhaustive size a budget allows.
+
+    P_C(m) is then exact for m <= m*(n) (every m-subset is enumerated) and
+    sampled above. ``budget`` counts regions (:func:`exhaustive_region_count`),
+    not seconds: the time per region depends on n and w, and every evaluation
+    also pays a fixed elimination. 0 means that not even the n single-qubit
+    regions fit; a budget of at least 2**n - 1 (every non-empty subset) gives n.
+    The probe takes the budget directly:
+    ``mipt.uncorrectable_region_counts(budget=B)``.
+    """
+    n = _qubit_count(num_qubits)
+    b = _integer(budget, "budget")
+    if b < 0:
+        raise ValueError(f"budget must be non-negative, got {b}")
+    total, term, w = 0, 1, 0
+    while w < n:
+        term = term * (n - w) // (w + 1)  # C(n, w + 1), exactly
+        if total + term > b:
+            break
+        total += term
+        w += 1
+    return w
 
 
 def hybrid_failure_by_size(first_failure, num_qubits: int, *, exact_counts=None) -> np.ndarray:
@@ -320,20 +414,13 @@ def erasure_failure_probability(first_failure, num_qubits: int, e, *, exact_coun
     if es.ndim != 1 or np.any((es < 0) | (es > 1)):
         raise ValueError("e must be a number or a 1-D array of probabilities in [0, 1]")
     hist = _histogram(d, n)  # (..., n + 2)
+    p_exact = None
     if exact_counts is not None:
-        exact_counts = _matching_counts(exact_counts, d)
+        p_exact = exact_failure_by_size(_matching_counts(exact_counts, d), n)  # (..., w)
     log_binom = _log_binomial(n)
     out = np.empty(hist.shape[:-1] + (es.size,))
     for i, ei in enumerate(es):
-        weights = _binomial_weights(n, float(ei), log_binom)
-        tail = _tail(weights)  # (n + 2,)
-        if exact_counts is None:
-            out[..., i] = hist @ tail
-        else:
-            exact, w = _exact_part(exact_counts, n, weights)
-            sampled = tail.copy()
-            sampled[: w + 1] = tail[w + 1]  # Pr[Bin >= max(D, w + 1)]
-            out[..., i] = exact + hist @ sampled
+        out[..., i] = _hybrid_phi(hist, d.shape[-1], p_exact, n, float(ei), log_binom)
     return out if np.ndim(e) else out[..., 0]
 
 
@@ -356,25 +443,20 @@ def erasure_tolerance(first_failure, num_qubits: int, delta: float, *, exact_cou
     d = _first_failure_array(first_failure, n)
     if d.size == 0:
         return math.nan
-    pooled = _histogram(d, n).reshape(-1, n + 2).mean(axis=0)
+    # Phi is linear in the histogram and in P_C(m): the samples of all codes pooled
+    # (every code has the same number) and the mean exact P_C(m) give the mean Phi_C.
+    pooled = _histogram(d, n).reshape(-1, n + 2).sum(axis=0)
     log_binom = _log_binomial(n)
-    mean_counts = None
+    mean_exact = None
     if exact_counts is not None:
         c = _matching_counts(exact_counts, d)
-        mean_counts = exact_failure_by_size(c, n).reshape(-1, c.shape[-1]).mean(axis=0)
+        mean_exact = exact_failure_by_size(c, n).reshape(-1, c.shape[-1]).mean(axis=0)
 
     def phi(e: float) -> float:
-        weights = _binomial_weights(n, e, log_binom)
-        tail = _tail(weights)
-        if mean_counts is None:
-            return float(pooled @ tail)
-        w = mean_counts.size
-        sampled = tail.copy()
-        sampled[: w + 1] = tail[w + 1]  # Pr[Bin >= max(D, w + 1)]
-        return float(mean_counts @ weights[1 : w + 1] + pooled @ sampled)
+        return float(_hybrid_phi(pooled, d.size, mean_exact, n, e, log_binom))
 
     if delta == 0.0:  # Phi(e) > 0 for every e > 0 as soon as some erasure can fail
-        never_fails = pooled[: n + 1].sum() == 0 and (mean_counts is None or not mean_counts.any())
+        never_fails = pooled[: n + 1].sum() == 0 and (mean_exact is None or not mean_exact.any())
         return 1.0 if never_fails else 0.0
     grid = np.linspace(0.0, 1.0, 2049)
     below = np.array([phi(float(e)) <= delta for e in grid])

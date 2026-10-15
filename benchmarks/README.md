@@ -10,6 +10,8 @@ them directly).
 | [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 (both modes), Stim, Qiskit Aer and Cirq on identical circuits; SparseGF2's ensemble throughput | `results/simulators.json` |
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
 | [`why_data.py`](why_data.py) | the two "why this simulator" figures: the cost of measuring the state after every layer (SparseGF2 vs Stim, same circuits), and the cost of erasure screening per code (SparseGF2 kernels vs a compiled from-scratch baseline) | `results/why.json` |
+| [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling (four workloads in all; the run is timed, result digests are not) at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
+| [`erasure_cost.py`](erasure_cost.py) | one-thread seconds per code of the exhaustive erasure counts (w = 1, 2, ... per n and p, through `StabilizerCode` and through the engine probe) and of first-failure orderings (M = 100, 512, 2048), on codes from Watts–Strogatz trajectories, n = 32 to 512; the cutoff m\*(n) and seconds per code of region budgets B; an example study total; levels it does not run are extrapolated and labelled so | `results/erasure_cost.json`, `results/erasure_cost.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -17,8 +19,13 @@ pip install -e ".[test]" qiskit-aer cirq matplotlib
 python benchmarks/compare_simulators.py
 python benchmarks/physics_data.py
 python benchmarks/why_data.py          # about 4 minutes, one thread
+python benchmarks/thread_scaling.py    # about 15 minutes, all cores; idle machine
+python benchmarks/erasure_cost.py      # about 20 minutes, one thread; idle machine
 python benchmarks/make_figures.py
 ```
+
+`thread_scaling.py --quick --out <dir>` is its smoke test (a few seconds once compiled), and so
+is `erasure_cost.py --quick --out <dir>`.
 
 `why_data.py --quick --out <file>` is a smoke test (tiny sizes, under a
 minute including compilation); pass that file to `make_figures.py --why <file>
@@ -110,3 +117,29 @@ for the first failure, the same orderings (same PRNG draws) searched by
 doubling then bisection on the prefix length. The baselines must reproduce the
 kernels' counts and first-failure sizes exactly. A baseline whose estimated
 time exceeds `--baseline-limit` (120 s) is skipped and recorded as skipped.
+
+## The erasure cost measurements (`erasure_cost.py`)
+
+What choosing the exhaustive cutoff m\*(n) and the number of orderings M
+costs, per code, on one thread.
+
+* **Codes from real trajectories.** n = 32 to 512, p = 0.05 and 0.1,
+  Watts–Strogatz graphs (k = 4, beta = 0.1, one graph per trajectory),
+  purification picture, `random_edges`, 4n layers, `code_snapshot` at the
+  final layer; the first 8 trajectories with k > 0 per (n, p). Their k and
+  distance bounds are recorded.
+* **Two paths.** `StabilizerCode.uncorrectable_counts(w)` and
+  `first_failure_sizes(M)` on the saved code; and the engine probe, timed as
+  the trajectory rerun with R copies of the probe at its final layer minus the
+  same run without probes, divided by R. The engine's counts must equal the
+  library's, or the script aborts.
+* **How far w goes.** w rises until one evaluation takes over 10 s. A level
+  is not run when N_exact(n, w) exceeds 1e9, or when the walk model predicts
+  over 90 s per evaluation. Slow levels are measured on the first two to four
+  codes only. The next level is extrapolated with the walk model and
+  labelled as an extrapolation; a per-code model check beside it shows how
+  far to trust it.
+* **Derived tables.** m\*(n) and the seconds per code for budgets B = 1e4 to
+  1e7, and an example study total that divides by the effective threads of
+  `results/thread_scaling.json`. `--from-json <file>` recomputes these from a
+  results file without measuring again.

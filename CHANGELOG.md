@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+* **Exact erasure counts:** `StabilizerCode.uncorrectable_counts` and the
+  `uncorrectable_region_counts` probe add up each count in int64 while
+  C(n, m) < 2**63, so counts above 2**53 no longer carry accumulated rounding
+  error. `uncorrectable_counts` now returns int64 whenever every C(n, m) is below
+  2**63 (before: 2**53). The probe stores float64, so it holds the exact count
+  rounded once, and that value never exceeds float(C(n, m)). Sizes with C(n, m) >= 2**63 use a
+  compensated float64 sum.
+* **Rounded counts accepted:** `analysis.exact_failure_by_size` accepts float
+  counts up to C(n, m) (1 + 1e-12) and clips the ratio to [0, 1]. Counts rounded
+  just above C(n, m) (for example n = 200, `max_size` 13) used to raise
+  `ValueError` in every hybrid estimator and in the `run_ensemble` summary (CLI
+  and MCP).
+* **P_C(m) from integer counts:** `analysis.failure_by_size` adds up the integer
+  sample counts and divides once, so P_C(n) is exactly 1 for every code with
+  k > 0. `junction_dip` no longer reports rounding one ulp below 1 as a dip. Phi
+  and mu may change in the last bit.
+* **One hybrid estimator:** `analysis.erasure_tolerance` now computes Phi with
+  the same function as `erasure_failure_probability`, no longer with a copy of
+  its own.
+* **Breaking: randomness contract 2.** `mipt.RANDOMNESS_CONTRACT` is now 2.
+  Random streams now use all 128 bits of their key (`stream_state` used only
+  `key0 ^ key1` before), so a fixed seed gives other random numbers everywhere
+  a stream is drawn: the circuits and probe samples of `MonitoredCircuit.run`,
+  `replay` and `circuit`, the shot streams of `sample()` (and of `run_circuit`
+  with more than one shot), and the subsets of the `random_erasure_statistics`
+  and `erasure_profile` observables. A `Simulator`'s own stream, the graph
+  families and `StabilizerCode.first_failure_sizes` are unchanged. Results
+  saved before this version cannot be extended: `EnsembleResult.concatenate`
+  refuses to merge them with new chunks, and `start_ensemble_job` refuses to
+  resume or extend their output_dir ("this run was made under randomness
+  contract 1; this version uses 2; start a new output_dir"). They still load
+  and summarize.
+* **Replay reproduces the sampled probes:** every evaluation of
+  `erasure_first_failure` or `erasure_lost_profile` draws its orderings from a
+  stream of its own, keyed by the trajectory, the probe's name and the layer.
+  Their samples no longer depend on the other probes, the checkpoints or the
+  earlier evaluations, so `replay(t, probes=..., checkpoints=...)` reproduces
+  them, as its documentation always said. Fewer samples are a prefix of more,
+  and renaming a probe gives it other orderings.
+* **The contract is recorded:** `EnsembleResult.randomness_contract` is saved
+  with every result (files without it load as 1), `provenance.json` records
+  `randomness_contract` next to the package version, and the `run_ensemble`
+  and `load_results` summaries show it.
+* **`EnsembleResult.replay(t, probes=..., checkpoints=...)`** replays
+  trajectory `t` of a saved run with the run's own spec and seed, and refuses a
+  result made under another randomness contract: this version cannot
+  reproduce the trajectories of a run made under contract 1.
+  `MonitoredCircuit.replay(t, seed=...)`, `circuit(t, seed=...)` and
+  rerunning a saved `spec.json` repeat a run only under the contract it was
+  made under, and do not check it.
+* **Cached kernels follow every kernel source:** Numba checks only each
+  function's own file, so before this a cached caller could keep running an old
+  callee from another file (for example `sample()` with an old `stream_state`
+  after a change to `rng.py`). Now every cached kernel is stamped with a
+  fingerprint of all kernel sources and the Numba and Python versions. A
+  kernel compiled from other sources is recompiled rather than loaded, even one
+  saved after an update by a process that had imported the old sources.
+  Importing the package also deletes such stale cache files. The first import
+  after an update, including this one, recompiles the kernels once (10 to 30 s).
+  A process that was already running keeps the code it loaded, so restart it
+  (for example the MCP server) to use the new code. If a Numba version lacks the
+  private locator list this relies on, or `NUMBA_CACHE_LOCATOR_CLASSES` is set,
+  stale files are only deleted. Then an old process can still save a stale
+  kernel after an update; deleting the `sparsegf2-kernels.*.sha256` marker
+  next to the cache files clears them on the next import.
+* **The exhaustive cutoff by budget or per system size:**
+  `uncorrectable_region_counts` takes `budget=B`, the number of regions to
+  enumerate per evaluation, as an alternative to `max_size`; the cutoff is then
+  m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B}. Either may be one int or a
+  mapping from the system size n to a value (`max_size={64: 3, 128: 2}`,
+  `budget={64: 20_000, 256: 50_000}`), which the spec resolves for its
+  `num_system`, so one probe definition serves a sweep over n. The JSON forms
+  are `{"budget": 50000}` and objects keyed by n (`{"64": 3, "128": 2}`); a
+  missing n, a budget below n, both arguments, and non-integer keys or values
+  are refused with a message that names the field (`probes[i]` in JSON); the
+  entries of a mapping are checked against their own n when the probe is built.
+  The key stays `uncorrectable_region_counts[w]` with the resolved w (give
+  `name` to keep one key at every n), saved results store the resolved w and
+  the input (loading refuses a file in which they disagree), and
+  `estimate_ensemble` costs the resolved w. New `analysis.exhaustive_cutoff(n, B)`
+  and `analysis.exhaustive_region_count(n, w)` (sum_{m=1}^{w} C(n, m), an exact
+  int). The default is unchanged: `max_size=2`.
+
 ## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
 
 * **mu_C and distance bounds** from the saved erasure arrays:

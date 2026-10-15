@@ -1,5 +1,6 @@
 """Graph generators: structure, determinism, and agreement with the standard definitions."""
 
+import networkx as nx
 import numpy as np
 import pytest
 
@@ -105,7 +106,6 @@ def test_from_edges_normalises_and_validates():
 
 
 def test_from_networkx():
-    nx = pytest.importorskip("networkx")
     g = nx.cycle_graph(6)
     np.testing.assert_array_equal(graphs.from_networkx(g), graphs.cycle(6))
     with pytest.raises(ValueError, match="0..n-1"):

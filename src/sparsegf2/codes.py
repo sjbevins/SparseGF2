@@ -192,18 +192,26 @@ class StabilizerCode:
 
         Entry ``m - 1`` divided by C(n, m) is the exact probability that a
         uniformly random m-qubit erasure is uncorrectable. The code distance
-        exceeds ``max_size`` exactly when every count is 0. The counts are
-        int64 while every C(n, m) is below 2**53 (so the counts are exact);
-        beyond that they are float64, exact to double precision.
+        exceeds ``max_size`` exactly when every count is 0.
+
+        The counts are int64, and exact, while every C(n, m), m <= ``max_size``,
+        is below 2**63. Beyond that they are float64: a count whose C(n, m) is
+        below 2**63 is still computed exactly and rounded once, so it never
+        exceeds float(C(n, m)); a larger one is a compensated float64 sum with
+        relative error below about (2 ``max_size`` + 2) 2**-53, which
+        :func:`sparsegf2.analysis.exact_failure_by_size` tolerates.
         """
         w = operator.index(max_size)
         if not 1 <= w <= self._n:
             raise ValueError(f"max_size must be in [1, {self._n}]")
         out = np.zeros(w, dtype=np.float64)
+        exact = np.zeros(w, dtype=np.int64)
         if self.num_logical > 0:
-            _ent.uncorrectable_counts_rows(self._tab, self._ws, self._system, self._marked, w, out)
-        if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**53:
-            return out.astype(np.int64)
+            _ent.uncorrectable_counts_rows(
+                self._tab, self._ws, self._system, self._marked, w, out, exact
+            )
+        if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**63:
+            return exact
         return out
 
     def contiguous_distance(self, order=None, *, periodic: bool = True) -> int:
@@ -243,7 +251,7 @@ class StabilizerCode:
 
     def _qubits(self, qubits: Iterable[int]) -> np.ndarray:
         a = np.array([int(q) for q in qubits], dtype=np.int64)
-        if a.size and (a.min() < 0 or a.max() >= self._n):
+        if a.size and (np.min(a) < 0 or np.max(a) >= self._n):
             raise ValueError(f"qubit indices must be in [0, {self._n})")
         if np.unique(a).size != a.size:
             raise ValueError("qubit indices must be distinct")
@@ -297,8 +305,8 @@ def _pack(rows: np.ndarray) -> np.ndarray:
     out = np.zeros((s, 2 * wsys), dtype=np.uint64)
     for half in range(2):
         for q in np.flatnonzero(rows[:, half * n : (half + 1) * n].any(axis=0)):
-            bit = np.uint64(1) << np.uint64(q & 63)
-            out[rows[:, half * n + q].astype(bool), half * wsys + (q >> 6)] |= bit
+            bit = np.uint64(1) << np.uint64(int(q) & 63)
+            out[rows[:, half * n + q].astype(bool), half * wsys + (int(q) >> 6)] |= bit
     return out
 
 

@@ -256,8 +256,86 @@ def test_counts_switch_to_floats_beyond_exact_integers():
     small = StabilizerCode(np.zeros((0, 16), dtype=np.uint8)).uncorrectable_counts(3)
     assert small.dtype == np.int64 and small.tolist() == [8, 28, 56]
     big = StabilizerCode(np.zeros((0, 400), dtype=np.uint8)).uncorrectable_counts(13)
-    assert big.dtype == np.float64
-    assert big[12] == pytest.approx(math.comb(200, 13), rel=1e-12)
+    assert big.dtype == np.float64  # C(200, 13) > 2**63
+    # every C(200, m), m <= 12, fits in int64: those counts are exact, then rounded once,
+    # so they equal float(C(n, m)) and never exceed it (finding E1)
+    assert big[:12].tolist() == [float(math.comb(200, m)) for m in range(1, 13)]
+    assert abs(big[12] / math.comb(200, 13) - 1) < 1e-15
+
+
+def _frozen_then_bare(n, frozen):
+    """Qubits 0..frozen-1 frozen (stabilizer Z), the rest bare: k = n - frozen."""
+    rows = np.zeros((frozen, 2 * n), dtype=np.uint8)
+    rows[np.arange(frozen), n + np.arange(frozen)] = 1
+    return StabilizerCode(rows)
+
+
+def test_counts_stay_exact_integers_while_every_binomial_fits_in_int64():
+    """E1: counts above 2**53 are accumulated in int64, so they are exact up to 2**63."""
+    n, w = 200, 12
+    assert 2**53 < math.comb(n, w) < 2**63
+    code = _frozen_then_bare(n, 4)
+    assert code.num_logical == n - 4
+    counts = code.uncorrectable_counts(w)
+    # an erasure is correctable exactly when it holds frozen qubits only
+    assert counts.dtype == np.int64
+    assert counts.tolist() == [math.comb(n, m) - math.comb(4, m) for m in range(1, w + 1)]
+
+
+def test_float_counts_include_the_last_level_of_the_walk():
+    """C(200, 13) > 2**63: size 13 is a float sum, reached by the walk through 12 frozen qubits."""
+    n, w = 200, 13
+    counts = _frozen_then_bare(n, 12).uncorrectable_counts(w)
+    expected = [math.comb(n, m) - math.comb(12, m) for m in range(1, w + 1)]
+    assert counts.dtype == np.float64
+    assert counts[:-1].tolist() == [float(c) for c in expected[:-1]]
+    assert abs(counts[-1] / expected[-1] - 1) < 1e-15
+
+
+def test_binomial_tables_are_exact_below_two_to_the_63_and_marked_beyond():
+    """The counts kernel's tables: int64 C(a, j) where it fits, -1 where it does not."""
+    from sparsegf2._kernel.entropy import _binomial_tables
+
+    n, w = 70, 40  # C(70, 35) ~ 1.1e20 > 2**63: rows from a = 67 on cross the boundary
+    exact, approx = _binomial_tables(n, w)
+    crossed = 0
+    for a in range(n + 1):
+        for j in range(w + 1):
+            c = math.comb(a, j)
+            if c < 2**63:
+                assert exact[a, j] == c and approx[a, j] == float(c), (a, j)
+            else:
+                crossed += 1
+                assert exact[a, j] == -1, (a, j)
+                assert abs(approx[a, j] / c - 1) <= (2 * j + 1) * 2.0**-53, (a, j)
+    assert crossed > 0
+
+
+def test_engine_counts_beyond_two_to_the_53_pass_through_the_estimators():
+    """E1 regression: n = 200, w = 13 at layer 0 of the purification picture (k = n)."""
+    from sparsegf2 import api
+
+    n, w = 200, 13
+    spec = {
+        "num_system": n,
+        "graph": {"family": "cycle"},
+        "layers": 0,
+        "measurement_rate": 0.0,
+        "reference": "purification",
+        "checkpoints": "final",
+        "probes": [{"kind": "uncorrectable_region_counts", "max_size": w}],
+    }
+    name = f"uncorrectable_region_counts[{w}]"
+    counts = api._build_spec(spec).run(1, seed=0).values[name][:, -1]
+    assert counts[0, :-1].tolist() == [float(math.comb(n, m)) for m in range(1, w)]
+    p = analysis.exact_failure_by_size(counts, n)  # every erasure fails: P_C(m) = 1
+    assert p[0, :-1].tolist() == [1.0] * (w - 1)
+    assert 1.0 - 1e-15 <= p[0, -1] <= 1.0
+    first = np.ones((1, 5))  # every ordering fails at its first qubit
+    phi = analysis.erasure_failure_probability(first, n, 0.01, exact_counts=counts)
+    assert phi[0] == pytest.approx(1 - 0.99**n, rel=1e-12)  # Pr[Bin(n, e) >= 1]
+    summary = api.run_ensemble(spec, trajectories=1, seed=0)["probes"][name]
+    assert summary["mean"] == pytest.approx([0.0] + [1.0] * w, abs=1e-12)
 
 
 def test_erasure_tolerance_edge_cases():

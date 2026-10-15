@@ -1,4 +1,4 @@
-"""The Python examples in README.md and docs/GETTING_STARTED.md run, in order, as written.
+"""The Python examples in README.md and the guides under docs/ run, in order, as written.
 
 A python block immediately preceded by the line ``<!-- not run -->`` (blank
 lines between them allowed) is shown to the reader but not executed: the
@@ -34,7 +34,17 @@ def _blocks(path: Path) -> list[str]:
     return blocks
 
 
-@pytest.mark.parametrize("doc", ["README.md", "docs/GETTING_STARTED.md", "docs/HOW_IT_WORKS.md"])
+@pytest.mark.parametrize(
+    "doc",
+    [
+        "README.md",
+        "docs/GETTING_STARTED.md",
+        "docs/HOW_IT_WORKS.md",
+        "docs/observables/code-dimension.md",
+        "docs/observables/lost-information.md",
+        "docs/observables/random-region-erasure.md",
+    ],
+)
 def test_doc_examples_run(doc, tmp_path, monkeypatch):
     blocks = _blocks(ROOT / doc)
     assert blocks, f"no python examples found in {doc}"
@@ -94,6 +104,16 @@ def test_getting_started_links_resolve():
     assert local
     missing = [t for t in local if not (path.parent / t).exists()]
     assert not missing, f"broken links in GETTING_STARTED.md: {missing}"
+
+
+def test_observables_docs_links_resolve():
+    paths = sorted((ROOT / "docs" / "observables").glob("*.md"))
+    assert len(paths) >= 4  # the index and one document per observable family
+    for path in paths:
+        targets = re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", path.read_text(encoding="utf-8"))
+        local = [t for t in targets if not t.startswith(("http://", "https://", "mailto:"))]
+        missing = [t for t in local if not (path.parent / t).exists()]
+        assert not missing, f"broken links in docs/observables/{path.name}: {missing}"
 
 
 # -- statements corrected in the review stay true -------------------------------------------

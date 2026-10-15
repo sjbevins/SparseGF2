@@ -25,8 +25,19 @@ dependencies = [
 # imported by the simulator at runtime.
 # matplotlib: docs/GETTING_STARTED.md draws its heatmaps, and tests/test_docs.py
 # executes that guide (the simulator itself never imports matplotlib).
-test = ["pytest>=8", "stim>=1.15", "matplotlib>=3.8"]
-lint = ["ruff>=0.5"]
+# networkx: graphs.from_networkx is tested against the real library (the test
+# fails, rather than skips, when it is missing).
+# hypothesis: property-based tests of the simulator and its analysis helpers.
+# pytest-cov: coverage reports in CI.
+test = [
+    "pytest>=8",
+    "stim>=1.15",
+    "matplotlib>=3.8",
+    "networkx>=3.2",
+    "hypothesis>=6.100",
+    "pytest-cov>=5",
+]
+lint = ["ruff>=0.5", "mypy>=1.10", "pre-commit>=3.7"]
 # The MCP server for LLM agents (sparsegf2-mcp). Imported only by mcp_server.py,
 # so the simulator itself never needs it.
 mcp = ["mcp>=2.2", "pydantic>=2"]
@@ -49,7 +60,34 @@ version = { attr = "sparsegf2._version.__version__" }
 testpaths = ["tests", "src"]
 # Lets `pytest` run from this directory even before `pip install -e .`.
 pythonpath = ["src"]
-addopts = "-q --doctest-modules"
+addopts = "-q --doctest-modules --strict-markers"
+# Warnings are errors, and an xfail that starts passing is a failure.
+# The kernels use intended mod-2**64 wraparound (xoshiro, splitmix, hashing). numpy warns
+# about it only as plain Python (NUMBA_DISABLE_JIT=1); compiled kernels never do.
+filterwarnings = [
+    "error",
+    'ignore:overflow encountered in scalar:RuntimeWarning:sparsegf2\._kernel\..*',
+]
+xfail_strict = true
+
+[tool.mypy]
+files = ["src/sparsegf2"]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# numba and llvmlite have partial or misleading annotations (numba.config is filled in at
+# run time; @intrinsic is typed as a class), so they are treated as untyped (Any).
+[[tool.mypy.overrides]]
+module = ["numba.*", "llvmlite.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# stim ships no py.typed; mcp and pydantic do, so this matters for them only when the
+# [mcp] extra is not installed.
+[[tool.mypy.overrides]]
+module = ["stim", "mcp.*", "pydantic.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
@@ -67,3 +105,14 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sparsegf2"]
+
+# Compiled kernels are not traced by the JIT run; the weekly JIT-free run covers them.
+[tool.coverage.run]
+source = ["sparsegf2"]
+branch = true
+omit = ["*/sparsegf2/_kernel/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90

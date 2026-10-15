@@ -265,3 +265,8 @@ def test_copies_and_sums_do_not_share_repeat_bodies():
     outer.append_repeat(2, base * 2)
     outer[0].body[0].body.append("X", [0])
     assert str(base) == "REPEAT 3 {\n    M 0\n}"
+
+
+def test_circuit_is_unhashable():
+    with pytest.raises(TypeError):
+        hash(Circuit())

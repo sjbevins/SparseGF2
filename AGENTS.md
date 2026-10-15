@@ -136,11 +136,14 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   * erasure (need a reference): `erasure_first_failure` (`samples`, default 100) records,
     for each of `samples` random orderings of the system qubits, the first-failure size D:
     the smallest m such that erasing the first m qubits loses logical information (n + 1
-    when k = 0). `uncorrectable_region_counts` (`max_size` w, default 2; key
-    `uncorrectable_region_counts[w]`) counts the uncorrectable m-qubit erasures for
-    m = 1..w by exhaustion, so count / C(n, m) is the exact P_C(m), the fraction of
+    when k = 0). `uncorrectable_region_counts` counts the uncorrectable m-qubit erasures
+    for m = 1..w by exhaustion, so count / C(n, m) is the exact P_C(m), the fraction of
     m-qubit erasures that are uncorrectable; all counts are 0 exactly when the distance
-    exceeds w;
+    exceeds w. The cutoff w = m*(n) is `max_size` (default 2) or comes from `budget` B,
+    the number of regions to enumerate: the largest w with sum_{m=1}^{w} C(n, m) <= B.
+    Either may be an object per system size, `{"64": 3, "128": 2}`, so one probe serves a
+    sweep over n. The key is `uncorrectable_region_counts[w]` for the resolved w; give a
+    `name` to keep one key at every n;
   * `code_snapshot`: saves the code's stabilizer generators; its value is their number,
     n - k. At most one per spec; give it its own `"checkpoints": "final"`, since codes are
     large. The summary shows only the generator count; the codes are in the saved result
@@ -171,6 +174,14 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   semantics; `"0:16:2"` selects the even qubits).
 * **Units.** Entropies and mutual information are in bits, as exact integers per
   trajectory.
+* **Threads.** Ensembles and `sample` use every core by default (`NUMBA_NUM_THREADS`, set
+  before Python starts; `num_threads=` lowers it for one call). Every result is identical
+  at any thread count. Measured on a 16-core, 32-thread machine (Ryzen 9 9950X3D, `omp`
+  layer; [`benchmarks/results/thread_scaling.md`](benchmarks/results/thread_scaling.md)):
+  speedup over one thread was 12.3 to 13.7 at 16 threads and 17.3 to 21.1 at 32, and 32
+  threads beat 16 in every workload (by 1.4 to 1.5 times). So leave the default, one thread
+  per logical processor, unless the machine is shared; the purification-time workload (an entropy probe every
+  layer) scales least well (17.3 at 32).
 * **Random two-qubit Cliffords** in circuit text: `CLIFFORD_2Q(i) a b` applies Clifford
   number `i` in `[0, 11520)`. A uniformly random `i` gives a uniformly random Clifford.
   `Circuit.to_stim()` expands these into Stim gates.
@@ -193,10 +204,11 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   code (it is NaN wherever the code dimension is 0).
 * Results that would need more than 8 GB of memory are refused. `erasure_first_failure`
   stores `samples` numbers per evaluation and `code_snapshot` a whole code, so give them
-  few checkpoints of their own. Measured one-thread costs per evaluation at n = 256:
-  `erasure_first_failure` with 100 samples 3 to 7 ms; `uncorrectable_region_counts` about
-  1 ms for w = 2, 40 to 50 ms for w = 3, about 7 s for w = 4 (practical only at a few
-  depths).
+  few checkpoints of their own. Measured one-thread costs per evaluation in an ensemble at
+  n = 256 (AMD Ryzen 9 9950X3D, 2026-10-15): `erasure_first_failure` with 100 samples about
+  2 ms; `uncorrectable_region_counts` about 1 ms for w = 2, 20 ms for w = 3 and 4 s for
+  w = 4 (practical only at a few depths). Every n from 32 to 512, and what a region budget
+  costs, are in `benchmarks/results/erasure_cost.md`.
 * `stabilizers` lists generators only up to 32 qubits. For large states use
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means
@@ -205,6 +217,13 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
   `output_dir` to resume.
+* Compiled kernels are cached on disk and recompiled automatically whenever any kernel
+  source (or the Numba or Python version) changes, so the first import and run after an
+  update is slower (10 to 30 s). Kernels that a process started before the update saves
+  afterwards are ignored and recompiled. That process itself, such as a running MCP
+  server, keeps the code it loaded: restart it to use the new code. If cached kernels
+  ever look stale, delete the `sparsegf2-kernels.*.sha256` marker next to the cache
+  files (`src/sparsegf2/_kernel/__pycache__` by default) and the next import clears them.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around
@@ -259,6 +278,16 @@ select `k > 0` to condition on a code. `[:, -1]` is each probe's last evaluation
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole analysis
 versus depth.
 
+P_C(m) is exact for m <= w = m*(n) and sampled above. To set w by an enumeration budget
+B, the number of regions per evaluation, use
+`{"kind": "uncorrectable_region_counts", "budget": 50000}`: w is then
+`analysis.exhaustive_cutoff(n, B)` = max{w : sum_{m=1}^{w} C(n, m) <= B}, which is 3, 2, 2
+and 1 at n = 64, 128, 256 and 512, and `analysis.exhaustive_region_count(n, w)` is that
+sum (32,896 at n = 256, w = 2). B counts regions, not seconds: the time per region
+depends on n and w, and every evaluation also pays a fixed elimination. For a sweep over
+n, give `budget` or `max_size` per size, `{"64": 20000, "256": 50000}`, with a `name`
+such as `"counts"` so the key is the same at every n.
+
 ## Distances, graphs, saved states and cross-checks
 
 ```python
@@ -285,8 +314,8 @@ code.contiguous_distance()
 
 # exact states and trajectories
 sim.save("state.npz"); same = Simulator.load("state.npz")   # tableau, signs, random stream
-mc = mipt.MonitoredCircuit(...)                              # the spec of a saved run
-again = mc.replay(17, seed=7, probes=[...], checkpoints=[...])  # trajectory 17 of run(seed=7)
+res = mipt.EnsembleResult.load("runs/a/result.npz")          # a saved run
+again = res.replay(17, probes=[...], checkpoints=[...])      # its trajectory 17, observed anew
 
 # Stim comparison of any circuit, tick by tick
 crosscheck.compare_stabilizers(circuit, seed=0)
@@ -296,10 +325,21 @@ crosscheck.compare_measurements(circuit, seed=0)
 * `distance_bounds` uses `high = min_j D_j` from the orderings. With counts for m = 1..w,
   the smallest m with an uncorrectable m-subset is d exactly; with none, `low = w + 1`.
   A code with k = 0 gets `(n + 1, n + 1)`: it has no distance, so exclude it.
-* `replay` reruns one trajectory with other probes or checkpoints. Probes and checkpoints
-  never change the trajectory, so a replay matches the original run exactly
-  (`mipt.RANDOMNESS_CONTRACT` versions this guarantee). This is how to probe one
-  trajectory at new depths after a run.
+* `result.replay(t, probes=..., checkpoints=...)` reruns trajectory `t` of a saved run
+  with other probes or checkpoints, using the run's own spec and seed. Probes and
+  checkpoints never change the trajectory, so a replay matches the original run exactly.
+  The sampled probes (`erasure_first_failure`, `erasure_lost_profile`) are reproduced too:
+  each evaluation draws from its own stream, keyed by the trajectory, the probe's name and
+  the layer, so the same probe (same name and `samples`) at a layer the run evaluated
+  gives the same samples whatever the other probes and checkpoints. This is how to probe
+  one trajectory at new depths after a run.
+* All of this holds only under the randomness contract the run was made under:
+  `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (now 2). This version cannot
+  reproduce the trajectories of a run made under contract 1 (results saved before it was
+  recorded load as 1). `result.replay` refuses such a result, `start_ensemble_job`
+  refuses to resume or extend its output_dir, and `concatenate` refuses to mix contracts.
+  `spec.replay(t, seed=...)`, `spec.circuit(t, seed=...)` and rerunning a saved
+  `spec.json` do not check, so prefer `result.replay`.
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
   per side).
@@ -326,4 +366,8 @@ crosscheck.compare_measurements(circuit, seed=0)
 ```sh
 python -m pytest          # full suite; Stim is required
 ruff check src tests && ruff format src tests
+python -m mypy            # type check; must report Success (the package ships py.typed)
+pre-commit install        # once, optional: ruff, mypy and file hygiene before each commit
 ```
+
+CI also runs the kernels with array bounds checking on, enforces a coverage floor, and, weekly, runs the kernels without the JIT and fuzzes more deeply.

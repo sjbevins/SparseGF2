@@ -145,7 +145,7 @@ class _Builder:
     def __init__(self, max_ops: int):
         self.max_ops = max_ops
         self.current: Instruction | None = None  # for error messages
-        self.ops: list[tuple[int, int, int, int, int]] = []
+        self.ops: list[tuple[int, ...]] = []
         self.params: list[float] = []
         self.mpp_q: list[int] = []
         self.mpp_c: list[int] = []
@@ -190,6 +190,7 @@ class _Builder:
         t = ins.targets
 
         if kind == "unitary":
+            assert info.clifford is not None, "unitary gates carry their Clifford"
             index = info.clifford.index()
             if info.num_qubits == 1:
                 for tg in t:
@@ -208,25 +209,27 @@ class _Builder:
                         self.emit(OP_2Q, self.qubit(a.value), self.qubit(b.value), index)
         elif kind == "clifford_index":
             k = info.num_qubits
-            for j, index in enumerate(ins.args):
+            for j, clifford_number in enumerate(ins.args):
                 if k == 1:
-                    self.emit(OP_1Q, self.qubit(t[j].value), int(index))
+                    self.emit(OP_1Q, self.qubit(t[j].value), int(clifford_number))
                 else:
                     self.emit(
                         OP_2Q,
                         self.qubit(t[2 * j].value),
                         self.qubit(t[2 * j + 1].value),
-                        int(index),
+                        int(clifford_number),
                     )
         elif kind in ("measure", "measure_reset"):
             slot = self.slot(ins.args) if ins.args else -1
             flags_base = FLAG_RESET if kind == "measure_reset" else 0
+            assert info.basis is not None, "measurements carry a basis"
             for tg in t:
                 flags = flags_base | (FLAG_INVERT if tg.inverted else 0)
                 self.emit(OP_MEASURE, self.qubit(tg.value), _CODE[info.basis], flags, slot)
                 self.num_meas += 1
         elif kind == "measure_pair":
             slot = self.slot(ins.args) if ins.args else -1
+            assert info.basis is not None, "measurements carry a basis"
             code = _CODE[info.basis]
             for a, b in zip(t[::2], t[1::2], strict=True):
                 start = len(self.mpp_q)
@@ -240,6 +243,7 @@ class _Builder:
             for factors in _split_products(t):
                 self._emit_product(factors, slot)
         elif kind == "reset":
+            assert info.basis is not None, "resets carry a basis"
             for tg in t:
                 self.emit(OP_RESET, self.qubit(tg.value), _CODE[info.basis])
         elif kind == "noise":
@@ -346,11 +350,15 @@ def parity_of(record: np.ndarray, ptr: np.ndarray, idx: np.ndarray) -> np.ndarra
     if record.ndim == 1:
         out = np.zeros(groups, dtype=np.uint8)
         for g in range(groups):
-            out[g] = np.bitwise_xor.reduce(record[idx[ptr[g] : ptr[g + 1]]], initial=0)
+            # numpy's stubs lack the plain reduce(array, initial=...) overload
+            out[g] = np.bitwise_xor.reduce(  # type: ignore[call-overload, unused-ignore]
+                record[idx[ptr[g] : ptr[g + 1]]], initial=0
+            )
         return out
     out = np.zeros((record.shape[0], groups), dtype=np.uint8)
     for g in range(groups):
         sel = idx[ptr[g] : ptr[g + 1]]
         if sel.size:
-            out[:, g] = np.bitwise_xor.reduce(record[:, sel], axis=1)
+            # numpy's stubs lack the plain reduce(array, axis=...) overload
+            out[:, g] = np.bitwise_xor.reduce(record[:, sel], axis=1)  # type: ignore[call-overload, unused-ignore]
     return out

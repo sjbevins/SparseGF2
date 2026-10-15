@@ -5,22 +5,28 @@ The central test runs each trajectory's exported circuit through the general
 values to match exactly at every checkpoint.
 """
 
+import dataclasses
 import itertools
+import json
+import re
 
+import numba
 import numpy as np
 import pytest
 
-from sparsegf2 import Simulator, analysis, gate, graphs, mipt
+from sparsegf2 import Simulator, StabilizerCode, analysis, gate, graphs, mipt
 from sparsegf2 import observables as ob
 
 RANDOM_KINDS = ("erasure_first_failure", "erasure_lost_profile")  # checked separately
 
 
 def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
-    """Probe values and purity at every tick, from running the exported circuit."""
+    """Purity at every tick and each probe's value at its own layers, from running the
+    exported circuit."""
     circuit = spec.circuit(trajectory, seed=seed)
     refs = spec.reference_qubits
     order = spec.system_order.tolist()
+    probe_layers = {p.name: set(spec.probe_layers(p.name).tolist()) for p in spec.probes}
 
     def probe(sim, p):
         if p.kind in ("entropy", "half_cut"):
@@ -51,13 +57,51 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
         raise AssertionError(p.kind)
 
     def observe(sim, tick):
-        values = {p.name: probe(sim, p) for p in spec.probes if p.kind not in RANDOM_KINDS}
+        values = {
+            p.name: probe(sim, p)
+            for p in spec.probes
+            if p.kind not in RANDOM_KINDS and tick in probe_layers[p.name]
+        }
+        for p in spec.probes:  # the code itself, as a canonical basis of its stabilizer group
+            if p.kind == "code_snapshot" and refs and tick in probe_layers[p.name]:
+                code = StabilizerCode.from_simulator(sim, reference=refs)
+                values[(p.name, "code")] = _row_space(code.stabilizer_matrix())
         pure = sim.entropy(refs) == 0 if refs else False
         return values, pure
 
     sim = Simulator(spec.num_qubits, phases=False, seed=0)
     observations = dict(sim.run(circuit, observe=observe).observations)
     return observations
+
+
+def _row_space(rows: np.ndarray) -> np.ndarray:
+    """The reduced row echelon form of ``rows`` over GF(2) without its zero rows, which is
+    the same matrix for any two generating sets of one group."""
+    m = (np.asarray(rows) % 2).astype(np.uint8)
+    pivot = 0
+    for col in range(m.shape[1]):
+        if pivot == m.shape[0]:
+            break
+        nonzero = np.flatnonzero(m[pivot:, col])
+        if not nonzero.size:
+            continue
+        row = pivot + int(nonzero[0])
+        m[[pivot, row]] = m[[row, pivot]]
+        others = np.flatnonzero(m[:, col])
+        m[others[others != pivot]] ^= m[pivot]
+        pivot += 1
+    return m[:pivot]
+
+
+def _code_probes(region: list[int], layers: int) -> list[mipt.Probe]:
+    """The code probes of the specs with references above 64 qubits."""
+    return [
+        mipt.code_dimension(),
+        mipt.lost_information(region),
+        mipt.uncorrectable_region_counts(2, checkpoints=[0, layers // 2, layers]),
+        mipt.contiguous_distance(),
+        mipt.code_snapshot(checkpoints=[0, layers]),
+    ]
 
 
 SPECS = {
@@ -197,7 +241,136 @@ SPECS = {
         checkpoints="every_layer",
         probes=[mipt.half_cut_entropy(), mipt.entropy([0, 64])],
     ),
+    # References above 64 qubits and at the 64-bit word boundaries. The lost_information
+    # region crosses qubit 64 wherever the system has one (n > 64); for n <= 64 the
+    # references (qubits n .. 2n - 1) cross it instead. At rate 0.03 some single-reference
+    # trajectories purify (k = 0) and some keep their code: the test picks them by scanning
+    # (_chosen_trajectories), so the coverage survives a change of the random streams.
+    "purification_n40_80_qubits": dict(
+        num_system=40,
+        edges=graphs.watts_strogatz(40, 4, 0.2, seed=40),
+        layers=8,
+        measurement_rate=0.2,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 20, 39], 8),
+    ),
+    "single_n70_partner_64": dict(
+        num_system=70,
+        edges=graphs.watts_strogatz(70, 4, 0.2, seed=70),
+        layers=8,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        reference_partner=64,
+        checkpoints="every_layer",
+        probes=_code_probes(list(range(60, 68)), 8),
+    ),
+    "purification_n63": dict(
+        num_system=63,
+        edges=graphs.watts_strogatz(63, 4, 0.2, seed=63),
+        layers=6,
+        measurement_rate=0.2,
+        schedule="random_edges",
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 31, 62], 6),
+    ),
+    "purification_n64": dict(
+        num_system=64,
+        edges=graphs.cycle(64),
+        layers=6,
+        measurement_rate=0.2,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 62, 63], 6),
+    ),
+    "purification_n65": dict(
+        num_system=65,
+        edges=graphs.cycle(65),
+        layers=6,
+        measurement_rate=0.2,
+        schedule="all_edges",
+        reference="purification",
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64], 6),
+    ),
+    "single_n127_partner_63": dict(
+        num_system=127,
+        edges=graphs.cycle(127),
+        layers=4,
+        measurement_rate=0.03,
+        reference="single",
+        reference_partner=63,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 126], 4),
+    ),
+    "single_n128_partner_64": dict(
+        num_system=128,
+        edges=graphs.cycle(128),
+        layers=4,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        reference_partner=64,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 127], 4),
+    ),
+    "single_n129_random_partner": dict(
+        num_system=129,
+        edges=graphs.watts_strogatz(129, 4, 0.2, seed=129),
+        layers=4,
+        measurement_rate=0.03,
+        schedule="random_edges",
+        reference="single",
+        scramble_gates=16,
+        checkpoints="every_layer",
+        probes=_code_probes([0, 63, 64, 127, 128], 4),
+    ),
 }
+
+# Specs replayed with 3 trajectories instead of 6: their replays count every 1- and 2-qubit
+# erasure of up to 129 qubits in Python.
+FEW_REPLAYS = {
+    "purification_n40_80_qubits",
+    "single_n70_partner_64",
+    "purification_n63",
+    "purification_n64",
+    "purification_n65",
+    "single_n127_partner_63",
+    "single_n128_partner_64",
+    "single_n129_random_partner",
+}
+
+
+# Single-reference specs whose test trajectories are chosen by scanning: one that purifies,
+# one that does not, and one whose code has a contiguous distance above 1.
+SCANNED = {
+    "single_n70_partner_64",
+    "single_n127_partner_63",
+    "single_n128_partner_64",
+    "single_n129_random_partner",
+}
+
+
+def _chosen_trajectories(spec: mipt.MonitoredCircuit, seed, scan: int = 400) -> list[int]:
+    """The first purified, the first unpurified and the first distance > 1 trajectory.
+
+    Scans ``scan`` trajectories with two cheap probes only (probes never change a
+    trajectory), and fails if the spec has no trajectory of one of the three kinds.
+    """
+    cheap = dataclasses.replace(spec, probes=[mipt.code_dimension(), mipt.contiguous_distance()])
+    found = cheap.run(scan, seed=seed)
+    tau = found.purification_layer
+    distance = np.nan_to_num(found.values["contiguous_distance"])
+    kinds = {
+        "purified": np.flatnonzero(tau >= 0),
+        "unpurified": np.flatnonzero(tau < 0),
+        "distance above 1": np.flatnonzero((distance > 1).any(axis=1)),
+    }
+    for kind, rows in kinds.items():
+        assert rows.size, f"none of {scan} trajectories is {kind}; change the spec's rate"
+    return sorted({int(rows[0]) for rows in kinds.values()})
 
 
 @pytest.mark.parametrize("name", list(SPECS))
@@ -206,12 +379,23 @@ def test_engine_matches_exported_circuits_exactly(name):
 
     After a trajectory stops (stop_when_purified) the engine records the
     probe's exact value for a pure reference: the replay, which keeps
-    simulating, must agree with it; entanglement probes are NaN there.
+    simulating, must agree with it; entanglement probes are NaN there. A
+    saved code (with a reference) must span the same stabilizer group as the
+    replayed state's code.
     """
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
-    result = spec.run(6, seed=seed)
-    for t in range(6):
+    if name in SCANNED:
+        rows = _chosen_trajectories(spec, seed)
+    else:
+        rows = list(range(3 if name in FEW_REPLAYS else 6))
+    result = mipt.EnsembleResult.concatenate(
+        [spec.run(1, seed=seed, first_trajectory=t) for t in rows]
+    )
+    if name in SCANNED:
+        assert (result.purification_layer >= 0).any() and (result.purification_layer < 0).any()
+        assert (np.nan_to_num(result.values["contiguous_distance"]) > 1).any()
+    for row, t in enumerate(rows):
         obs = _replay(spec, t, seed)
         tau_expected = -1
         for layer in spec.checkpoint_layers:
@@ -220,27 +404,40 @@ def test_engine_matches_exported_circuits_exactly(name):
                 tau_expected = int(layer)
                 break
         if spec.reference != "none":
-            assert result.purification_layer[t] == tau_expected
+            assert result.purification_layer[row] == tau_expected
         stop = tau_expected if (spec.stop_when_purified and tau_expected >= 0) else None
         for p in spec.probes:
             if p.kind in RANDOM_KINDS:
                 continue
             for c, layer in enumerate(result.layers(p.name)):
-                got = result.values[p.name][t, c]
+                got = result.values[p.name][row, c]
                 expected = obs[int(layer)][0][p.name]
-                if (
-                    stop is not None
-                    and layer > stop
-                    and np.isnan(mipt._probe_fill(p, spec.num_system))
-                ):
+                after_stop = stop is not None and layer > stop
+                if after_stop and np.isnan(mipt._probe_fill(p, spec.num_system)):
                     assert np.all(np.isnan(got)), f"{p.name} t={t} layer={layer}"
                     continue
                 np.testing.assert_allclose(got, expected, err_msg=f"{p.name} t={t} layer={layer}")
+                if p.kind == "code_snapshot" and spec.reference != "none":
+                    # a code is saved at every evaluation up to the stop, and only there
+                    saved = result.snapshots[p.name][1][row, c] >= 0
+                    assert saved == (not after_stop), f"{p.name} t={t} layer={layer}"
+                    if not saved:
+                        continue
+                    np.testing.assert_array_equal(
+                        _row_space(result.code(row, c, p.name).stabilizer_matrix()),
+                        obs[int(layer)][0][(p.name, "code")],
+                        err_msg=f"{p.name} code t={t} layer={layer}",
+                    )
 
 
 def test_results_independent_of_threads_and_chunking():
     spec = mipt.MonitoredCircuit(**SPECS["random_edges_ws_single_random_partner"])
-    full = spec.run(40, seed=5, num_threads=4)
+    threads = min(4, numba.config.NUMBA_NUM_THREADS)
+    assert threads > 1 or numba.config.DISABLE_JIT, (
+        "this machine offers Numba a single thread, so the thread comparison would be vacuous;"
+        " set NUMBA_NUM_THREADS to at least 2"
+    )
+    full = spec.run(40, seed=5, num_threads=threads)
     one = spec.run(40, seed=5, num_threads=1)
     chunks = mipt.EnsembleResult.concatenate(
         [spec.run(15, seed=5), spec.run(25, seed=5, first_trajectory=15)]
@@ -903,3 +1100,181 @@ def test_probe_arguments_are_validated_like_the_spec():
         mipt.MonitoredCircuit(
             **base, reference="purification", probes=[mipt.erasure_lost_profile(samples=0)]
         )
+
+
+# -- the exhaustive cutoff m*(n): a budget, or one value per system size --------------------
+
+
+def _counts_spec(n: int, *probes: mipt.Probe) -> mipt.MonitoredCircuit:
+    return mipt.MonitoredCircuit(
+        num_system=n, edges=graphs.cycle(n), layers=6, measurement_rate=0.1,
+        reference="purification", checkpoints=[3, 6], probes=list(probes),
+    )  # fmt: skip
+
+
+def test_uncorrectable_counts_default_cutoff_is_unchanged():
+    p = mipt.uncorrectable_region_counts()
+    assert (p.size, p.name, p.cutoff) == (2, "uncorrectable_region_counts[2]", None)
+    assert mipt.uncorrectable_region_counts(3) == mipt.uncorrectable_region_counts(max_size=3)
+    # a budget is resolved by the spec; until then, different budgets are different probes
+    assert mipt.uncorrectable_region_counts(budget=100) != mipt.uncorrectable_region_counts(
+        budget=200
+    )
+
+
+def test_budget_gives_the_same_probe_and_values_as_its_cutoff():
+    n, budget = 12, 100  # C(12, 1) + C(12, 2) = 78 <= 100 < 78 + C(12, 3) = 298: m* = 2
+    w = analysis.exhaustive_cutoff(n, budget)
+    assert w == 2
+    by_budget = _counts_spec(n, mipt.uncorrectable_region_counts(budget=budget))
+    by_size = _counts_spec(n, mipt.uncorrectable_region_counts(max_size=w))
+    assert by_budget.probes == by_size.probes
+    assert mipt._protocol_difference(by_budget, by_size) is None
+    a, b = by_budget.run(20, seed=4), by_size.run(20, seed=4)
+    assert list(a.values) == list(b.values) == ["uncorrectable_region_counts[2]"]
+    counts = a.values["uncorrectable_region_counts[2]"]
+    np.testing.assert_array_equal(counts, b.values["uncorrectable_region_counts[2]"])
+    assert counts.shape == (20, 2, 2) and counts.max() > 0  # some codes have small failures
+    again = by_budget.replay(7, seed=4)  # replaying resolves the budget again, identically
+    np.testing.assert_array_equal(again.values["uncorrectable_region_counts[2]"][0], counts[7])
+
+
+def test_cutoff_mappings_resolve_for_each_system_size():
+    sizes = {12: 3, 16: 2}
+    # m*(12) = 1 (12 <= 20 < 12 + 66); m*(16) = 2 (16 + 120 = 136 <= 200 < 136 + 560)
+    budgets = {12: 20, 16: 200}
+    for n, w_size, w_budget in ((12, 3, 1), (16, 2, 2)):
+        spec = _counts_spec(
+            n,
+            mipt.uncorrectable_region_counts(sizes),
+            mipt.uncorrectable_region_counts(budget=budgets, name="counts"),
+        )
+        by_size, by_budget = spec.probes
+        assert (by_size.name, by_size.size) == (f"uncorrectable_region_counts[{w_size}]", w_size)
+        assert (by_budget.name, by_budget.size) == ("counts", w_budget)  # one key for every n
+        res = spec.run(5, seed=1)
+        assert res.values["counts"].shape == (5, 2, w_budget)
+        # both count the uncorrectable m-subsets, so they agree on the sizes they share
+        np.testing.assert_array_equal(
+            res.values["counts"], res.values[by_size.name][..., :w_budget]
+        )
+
+
+def test_resolved_cutoff_probes_resolve_again_for_another_size():
+    probes = [
+        mipt.uncorrectable_region_counts(budget={12: 100, 16: 20}),
+        mipt.uncorrectable_region_counts(max_size={12: 3, 16: 1}, name="pc"),
+        # renamed after construction (as the JSON layer does): the name is kept
+        dataclasses.replace(mipt.uncorrectable_region_counts(budget=20), name="renamed"),
+    ]
+    spec12 = _counts_spec(12, *probes)
+    assert [(p.name, p.size) for p in spec12.probes] == [
+        ("uncorrectable_region_counts[2]", 2),
+        ("pc", 3),
+        ("renamed", 1),
+    ]
+    # the resolved probes keep their cutoff, so a spec for another n resolves them again
+    spec16 = _counts_spec(16, *spec12.probes)
+    assert [(p.name, p.size) for p in spec16.probes] == [
+        ("uncorrectable_region_counts[1]", 1),
+        ("pc", 1),
+        ("renamed", 1),
+    ]
+
+
+def test_cutoff_arguments_are_validated():
+    with pytest.raises(ValueError, match="give max_size or budget, not both"):
+        mipt.uncorrectable_region_counts(2, budget=100)
+    with pytest.raises(ValueError, match=r"no entry for num_system = 12.*\[16, 32\]"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(max_size={32: 2, 16: 2}))
+    with pytest.raises(ValueError, match=r"no entry for num_system = 12.*\[16\]"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(budget={16: 100}))
+    message = (
+        "budget 11 allows no exhaustive region size at n = 12 (C(12, 1) = 12 > 11); "
+        "raise the budget or drop the probe"
+    )
+    probe = mipt.uncorrectable_region_counts(budget=11)  # n is not known yet
+    with pytest.raises(ValueError, match=re.escape(f"probe {probe.name!r}: {message}")):
+        _counts_spec(12, probe)
+    with pytest.raises(ValueError, match=re.escape(message)):  # each entry knows its n
+        mipt.uncorrectable_region_counts(budget={64: 50_000, 12: 11})
+    with pytest.raises(ValueError, match=r"max_size must be in \[1, 12\], got 13"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(max_size=13))
+    with pytest.raises(ValueError, match=r"max_size\[12\] must be in \[1, 12\], got 13"):
+        mipt.uncorrectable_region_counts(max_size={12: 13})
+    with pytest.raises(ValueError, match=r"max_size\[12\] must be in \[1, 12\], got 0"):
+        mipt.uncorrectable_region_counts(max_size={12: 0})
+    with pytest.raises(ValueError, match="budget must be non-negative"):
+        mipt.uncorrectable_region_counts(budget=-1)
+    with pytest.raises(ValueError, match=r"budget\[12\] must be non-negative"):
+        mipt.uncorrectable_region_counts(budget={12: -1})
+    with pytest.raises(ValueError, match="at least one system size"):
+        mipt.uncorrectable_region_counts(max_size={})
+    with pytest.raises(ValueError, match="system sizes .* at least 2, got 1"):
+        mipt.uncorrectable_region_counts(budget={1: 100})
+    # non-integer keys and values are errors, never truncated or parsed
+    for bad in ({"12": 2}, {12.5: 2}, {True: 2}):
+        with pytest.raises(TypeError, match="system sizes"):
+            mipt.uncorrectable_region_counts(max_size=bad)
+    with pytest.raises(TypeError, match=r"max_size\[12\] must be an integer, got 2.5"):
+        mipt.uncorrectable_region_counts(max_size={12: 2.5})
+    with pytest.raises(TypeError, match=r"budget\[12\] must be an integer, got '100'"):
+        mipt.uncorrectable_region_counts(budget={12: "100"})
+    with pytest.raises(TypeError, match="budget must be an integer"):
+        mipt.uncorrectable_region_counts(budget=100.5)
+    with pytest.raises(TypeError, match="max_size must be an integer"):
+        mipt.uncorrectable_region_counts(max_size=[2, 3])
+    # whole numbers of other types are accepted, as everywhere in the spec
+    probe = mipt.uncorrectable_region_counts(budget={12.0: 1e2})
+    assert _counts_spec(12, probe).probes[0].size == 2
+
+
+def test_cutoff_probes_survive_save_and_load(tmp_path):
+    spec = _counts_spec(
+        12,
+        mipt.uncorrectable_region_counts(budget=100),
+        mipt.uncorrectable_region_counts(max_size={12: 3, 64: 2}, checkpoints=[6]),
+        mipt.uncorrectable_region_counts(budget={12: 20, 64: 50_000}, name="pc"),
+    )
+    res = spec.run(6, seed=3)
+    res.save(tmp_path / "cutoff.npz")
+    back = mipt.EnsembleResult.load(tmp_path / "cutoff.npz")
+    names = ["uncorrectable_region_counts[2]", "uncorrectable_region_counts[3]", "pc"]
+    assert list(back.values) == list(res.values) == names
+    for name in names:
+        np.testing.assert_array_equal(back.values[name], res.values[name])
+    assert back.spec.probes == spec.probes
+    assert [p.cutoff for p in back.spec.probes] == [p.cutoff for p in spec.probes]
+    more = spec.run(2, seed=3, first_trajectory=6)
+    merged = mipt.EnsembleResult.concatenate([back, more])  # the same protocol
+    assert merged.num_trajectories == 8
+
+
+def _edit_saved_probe(src, dst, **changes) -> None:
+    """Copy the saved result ``src`` to ``dst`` with fields of its first stored probe changed."""
+    with np.load(src, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    meta["probes"][0].update(changes)
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(dst, **arrays)
+
+
+def test_load_refuses_a_probe_whose_size_disagrees_with_its_cutoff(tmp_path):
+    spec = _counts_spec(12, mipt.uncorrectable_region_counts(budget=100))  # 78 <= 100: w = 2
+    res = spec.run(3, seed=1)
+    res.save(tmp_path / "good.npz")
+    # A cutoff that no longer gives the stored size (an edit, or a future rule change):
+    # budget 1000 resolves to w = 4, but the file holds 2 columns under "[2]".
+    for i, changes in enumerate(({"cutoff": {"budget": 1000}}, {"size": 3})):
+        bad = tmp_path / f"bad{i}.npz"
+        _edit_saved_probe(tmp_path / "good.npz", bad, **changes)
+        with pytest.raises(ValueError, match="the stored probe sizes do not match their cutoff"):
+            mipt.EnsembleResult.load(bad)
+    # another budget with the same cutoff (78 <= 90 < 298) agrees with the file
+    _edit_saved_probe(tmp_path / "good.npz", tmp_path / "same.npz", cutoff={"budget": 90})
+    back = mipt.EnsembleResult.load(tmp_path / "same.npz")
+    assert back.spec.probes[0].cutoff == ("budget", 90)
+    np.testing.assert_array_equal(
+        back.values["uncorrectable_region_counts[2]"], res.values["uncorrectable_region_counts[2]"]
+    )

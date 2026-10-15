@@ -84,18 +84,23 @@ trajectories, so ensembles can be split into chunks (``first_trajectory``) and
 merged without changing any result. The measurement mask uses one uniform draw per
 qubit per layer whatever the rate, so runs at different ``measurement_rate``
 with the same seed share their random numbers (the measured set at a lower rate
-is a subset of that at a higher rate).
+is a subset of that at a higher rate). The sampled probes draw their orderings
+from a stream of their own at each evaluation, keyed by the trajectory, the
+probe's name and the layer, so other probes and other checkpoints never change
+them (:data:`RANDOMNESS_CONTRACT`).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import operator
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -103,6 +108,7 @@ from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
 from sparsegf2._parallel import threads
 from sparsegf2._version import __version__
+from sparsegf2.analysis import _integer, exhaustive_cutoff
 from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
@@ -137,14 +143,40 @@ _REFERENCES = {
     "purification": _ens.REF_PURIFICATION,
     "single": _ens.REF_SINGLE,
 }
-_H_INDEX = gate("H").clifford.index()
-_CX_INDEX = gate("CX").clifford.index()
+_H_CLIFFORD, _CX_CLIFFORD = gate("H").clifford, gate("CX").clifford
+assert _H_CLIFFORD is not None and _CX_CLIFFORD is not None, "H and CX are unitary gates"
+_H_INDEX = _H_CLIFFORD.index()
+_CX_INDEX = _CX_CLIFFORD.index()
 
-#: Version of the engine's random streams. Trajectory t of run(seed=s) is a
-#: function of (protocol, s, t) only; bump this whenever a change to the
-#: engine changes which circuit or which random numbers a trajectory gets, so
-#: saved trajectory records refuse to replay across the change.
-RANDOMNESS_CONTRACT = 1
+#: Version of the package's random streams: the same contract and seed give the
+#: same random numbers. It covers
+#:
+#: * the generator: xoshiro256** and its draw conventions (``next_u64``,
+#:   ``next_double``, ``next_below``, ``next_bit`` in ``sparsegf2._kernel.rng``);
+#: * the stream derivation ``stream_state(key, index)`` and the index mix
+#:   ``mix(a, b, c)`` (exact formulas in the ``_kernel.rng`` docstring);
+#: * every draw made through ``stream_state``: the ensemble circuit streams
+#:   (trajectory ``t`` uses stream ``t`` of words 0 and 1 of the run's
+#:   ``SeedSequence``, which fixes ``run``, ``replay`` and ``circuit``), the
+#:   ensemble probe streams (one per sampled-probe evaluation: stream
+#:   ``mix(t, name hash, layer)`` of words 2 and 3), the shot streams of
+#:   ``sparsegf2.sample`` (shot ``s`` uses stream ``s`` of ``stream_key(seed)``)
+#:   and the sampled observables ``random_erasure_statistics`` and
+#:   ``erasure_profile`` (stream 0 of ``stream_key(seed)``);
+#: * the order of the draws within a trajectory (``_kernel.ensemble``
+#:   docstring) and within a sampled evaluation.
+#:
+#: Generators seeded directly from a ``SeedSequence`` (``Simulator``'s own
+#: stream, the graph families, ``StabilizerCode.first_failure_sizes``) use the
+#: same generator but not ``stream_state``; contract 2 left them unchanged.
+#: Bump this whenever a change gives any covered draw other random numbers;
+#: results and output directories record it and refuse to merge, resume or
+#: replay (``EnsembleResult.replay``) across the change: this version cannot
+#: reproduce a run made under another contract. Contract 2 mixes all 128 key
+#: bits into every stream and gives each sampled-probe evaluation its own
+#: stream; contract 1 folded the key to ``key0 ^ key1`` and read one probe
+#: stream per trajectory in sequence.
+RANDOMNESS_CONTRACT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +202,15 @@ class Probe:
     size: int = 0
     samples: int = 0
     checkpoints: str | int | tuple[int, ...] | None = None
+    # uncorrectable_region_counts given a budget or a mapping from n: the input as
+    # ("max_size" or "budget", one int or sorted (n, value) pairs). The spec resolves it
+    # into ``size`` (and the default name) for its num_system; it stays on the resolved
+    # probe so that a spec of another size resolves it again. It is not compared: probes
+    # that record the same sizes under the same name are the same probe, however w was
+    # chosen.
+    cutoff: tuple[str, int | tuple[tuple[int, int], ...]] | None = field(
+        default=None, compare=False
+    )
 
     @property
     def is_vector(self) -> bool:
@@ -321,26 +362,141 @@ def erasure_first_failure(
 
 
 def uncorrectable_region_counts(
-    max_size: int = 2, name: str | None = None, *, checkpoints=None
+    max_size: int | Mapping[int, int] | None = None,
+    name: str | None = None,
+    *,
+    budget: int | Mapping[int, int] | None = None,
+    checkpoints=None,
 ) -> Probe:
-    """Vector: the number of uncorrectable m-qubit erasures for m = 1..``max_size``, by exhaustion.
+    """Vector: the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion.
 
     Entry ``m - 1`` counts the m-subsets A of the system with I(A:R) > 0, so
     ``count / C(n, m)`` is the exact P_C(m), and all counts are zero exactly
-    when every erasure of at most ``max_size`` qubits is correctable (code
-    distance > ``max_size``). The cost grows like C(n, max_size - 1): for
-    n = 256 (one thread), about 1 ms for 2, 40 to 50 ms for 3 and about 7 s for 4
-    per evaluation, so give larger sizes their own sparse ``checkpoints``.
+    when every erasure of at most w qubits is correctable (code distance > w).
+
+    The cutoff w = m*(n) splits P_C(m) into an exact regime, m <= w, and a
+    sampled one above (:func:`erasure_first_failure`). Give at most one of
+
+    * ``max_size``: w itself (default 2);
+    * ``budget``: the number B of regions to enumerate per evaluation, which
+      gives w = max{w : sum_{m=1}^{w} C(n, m) <= B}
+      (:func:`sparsegf2.analysis.exhaustive_cutoff`). B counts regions, not
+      seconds: the time per region depends on n and w.
+
+    Either may be one int or a mapping from the system size n to a value, so
+    one probe serves a sweep over n: ``max_size={64: 3, 128: 2, 256: 2}`` or
+    ``budget={64: 20_000, 256: 50_000}``. A budget or a mapping is resolved by
+    :class:`MonitoredCircuit` for its ``num_system``. The default name is
+    ``uncorrectable_region_counts[w]`` with the resolved w; pass ``name`` to
+    keep one key at every n.
+
+    The cost grows steeply with w, roughly like C(n, w - 1) 4**(w - 1): for
+    n = 256, on one thread of an AMD Ryzen 9 9950X3D (measured 2026-10-15,
+    ``benchmarks/results/erasure_cost.md``), about 1 ms for w = 2, 20 ms for
+    3 and 4 s for 4 per evaluation, so give larger sizes their own sparse
+    ``checkpoints``.
     """
-    w = _integer(max_size, "max_size")
+    if max_size is not None and budget is not None:
+        raise ValueError("give max_size or budget, not both")
+    if budget is None and not isinstance(max_size, Mapping):
+        w = _integer(2 if max_size is None else max_size, "max_size")
+        return Probe(
+            "uncorrectable_counts",
+            name or f"uncorrectable_region_counts[{w}]",
+            (),
+            w,
+            0,
+            _schedule(checkpoints),
+        )
+    form = "max_size" if budget is None else "budget"
+    cutoff = (form, _cutoff_value(max_size if budget is None else budget, form))
     return Probe(
         "uncorrectable_counts",
-        name or f"uncorrectable_region_counts[{w}]",
+        name or _unresolved_name(cutoff),
         (),
-        w,
+        0,
         0,
         _schedule(checkpoints),
+        cutoff,
     )
+
+
+def _cutoff_value(value, form: str) -> int | tuple[tuple[int, int], ...]:
+    """A budget (an int) or a mapping {n: value} as sorted ``(n, value)`` pairs, validated.
+
+    A budget must be non-negative. A mapping's entries are checked against
+    their own n at once: a ``max_size`` must lie in [1, n], and a budget must
+    allow at least the n single-qubit regions. One budget meets its n only in
+    the spec.
+    """
+    if not isinstance(value, Mapping):  # one budget (one max_size needs no resolving)
+        b = _integer(value, form)
+        if b < 0:
+            raise ValueError(f"{form} must be non-negative, got {b}")
+        return b
+    if not value:
+        raise ValueError(f"{form}: give at least one system size")
+    pairs = []
+    for key, v in value.items():
+        try:
+            n = _integer(key, form)
+        except TypeError:
+            raise TypeError(
+                f"the system sizes (keys) of {form} must be integers, got {key!r}"
+            ) from None
+        if n < 2:
+            raise ValueError(f"the system sizes (keys) of {form} must be at least 2, got {n}")
+        x = _integer(v, f"{form}[{n}]")
+        if form == "max_size" and not 1 <= x <= n:
+            raise ValueError(f"max_size[{n}] must be in [1, {n}], got {x}")
+        if form == "budget" and x < 0:
+            raise ValueError(f"budget[{n}] must be non-negative, got {x}")
+        if form == "budget" and x < n:
+            raise ValueError(_no_exhaustive_size(x, n))
+        pairs.append((n, x))
+    return tuple(sorted(pairs))
+
+
+def _unresolved_name(cutoff: tuple) -> str:
+    """The default name of a counts probe before its size is known: its cutoff, as given."""
+    form, value = cutoff
+    shown = dict(value) if isinstance(value, tuple) else value
+    return f"uncorrectable_region_counts({form}={shown})"
+
+
+def _no_exhaustive_size(budget: int, n: int) -> str:
+    """The error for a budget below n: not even the n single-qubit regions fit."""
+    return (
+        f"budget {budget} allows no exhaustive region size at n = {n} "
+        f"(C({n}, 1) = {n} > {budget}); raise the budget or drop the probe"
+    )
+
+
+def _counts_size(p: Probe, n: int) -> Probe:
+    """An uncorrectable_counts probe for ``n`` system qubits: its budget or mapping resolved
+    into ``size`` (and a default name), and the size checked against n.
+
+    The errors say what to change but not which probe; the caller names it.
+    """
+    if p.cutoff is not None:
+        form, value = p.cutoff
+        if isinstance(value, tuple):
+            given = dict(value)
+            if n not in given:
+                raise ValueError(
+                    f"{form} has no entry for num_system = {n}; it covers the system sizes "
+                    f"{sorted(given)}"
+                )
+            value = given[n]
+        w = exhaustive_cutoff(n, value) if form == "budget" else value
+        if form == "budget" and w == 0:
+            raise ValueError(_no_exhaustive_size(value, n))
+        # A default name follows the resolved size; a name the user chose stays.
+        default = p.name in (_unresolved_name(p.cutoff), f"uncorrectable_region_counts[{p.size}]")
+        p = replace(p, size=w, name=f"uncorrectable_region_counts[{w}]" if default else p.name)
+    if not 1 <= p.size <= n:
+        raise ValueError(f"max_size must be in [1, {n}], got {p.size}")
+    return p
 
 
 def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
@@ -485,7 +641,9 @@ class MonitoredCircuit:
     periodic: bool = True
     # Per-instance caches, never copied by dataclasses.replace (init=False): a
     # derived spec always resolves and compiles its own fields.
-    _checkpoint_layers: np.ndarray = field(init=False, repr=False, compare=False, default=None)
+    _checkpoint_layers: np.ndarray | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
     _probe_layers: tuple = field(init=False, repr=False, compare=False, default=())
     _compiled: dict = field(init=False, default_factory=dict, repr=False, compare=False)
 
@@ -588,9 +746,7 @@ class MonitoredCircuit:
             self,
             "_probe_layers",
             tuple(
-                self._checkpoint_layers
-                if p.checkpoints is None
-                else self._resolve_checkpoints(p.checkpoints)[1]
+                layers_ if p.checkpoints is None else self._resolve_checkpoints(p.checkpoints)[1]
                 for p in self.probes
             ),
         )
@@ -598,13 +754,14 @@ class MonitoredCircuit:
             raise ValueError("stop_when_purified needs a reference")
 
     def _resolve_probe(self, p: Probe) -> Probe:
-        """Validate a probe and fill in default regions."""
+        """Validate a probe and fill in default regions and the exhaustive size for this n."""
         if not isinstance(p, Probe):
             raise TypeError("probes must be created with the mipt probe functions")
         if p.kind not in _KINDS:
             raise ValueError(f"unknown probe kind {p.kind!r}")
         n = self.num_system
-        order = self.system_order.tolist()
+        assert self.system_order is not None, "system_order is resolved before probes"
+        order = np.asarray(self.system_order).tolist()
         if _KINDS[p.kind].reference and self.reference == "none":
             raise ValueError(
                 f"probe {p.name!r} needs a reference (reference='purification' or 'single')"
@@ -632,8 +789,11 @@ class MonitoredCircuit:
                 )
         if _KINDS[p.kind].sampled and p.samples < 1:
             raise ValueError(f"probe {p.name!r}: samples must be at least 1")
-        if p.kind == "uncorrectable_counts" and not 1 <= p.size <= n:
-            raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}]")
+        if p.kind == "uncorrectable_counts":  # a budget or a mapping gets its size for n here
+            try:
+                p = _counts_size(p, n)
+            except ValueError as exc:
+                raise ValueError(f"probe {p.name!r}: {exc}") from None
         return p
 
     def _resolve_checkpoints(self, spec) -> tuple[str | int | np.ndarray, np.ndarray]:
@@ -666,7 +826,7 @@ class MonitoredCircuit:
             # silently skip every later checkpoint.
             layers = np.unique(_int_array(spec, "checkpoints"))
             explicit = True
-        if layers.size == 0 or layers.min() < 0 or layers.max() > self.layers:
+        if layers.size == 0 or np.min(layers) < 0 or np.max(layers) > self.layers:
             raise ValueError(f"checkpoints must lie in [0, layers={self.layers}]")
         layers = _read_only(layers.astype(np.int64))
         return (layers if explicit else spec), layers
@@ -702,6 +862,7 @@ class MonitoredCircuit:
     @property
     def checkpoint_layers(self) -> np.ndarray:
         """The layers at which probes are evaluated (sorted, read-only)."""
+        assert self._checkpoint_layers is not None, "resolved in __post_init__"
         return self._checkpoint_layers
 
     @property
@@ -749,14 +910,14 @@ class MonitoredCircuit:
             graph_ptr = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
             if self.schedule == "matching":
                 color_ptr_ptr = np.zeros(self.num_graphs + 1, dtype=np.int64)
-                color_ptr, color_idx = [], []
+                ptr_parts, idx_parts = [], []
                 for g, edges in enumerate(self.graphs):
                     colors = edge_coloring(edges, self.num_system)
-                    color_ptr.append(np.concatenate([[0], np.cumsum([len(c) for c in colors])]))
+                    ptr_parts.append(np.concatenate([[0], np.cumsum([len(c) for c in colors])]))
                     color_ptr_ptr[g + 1] = color_ptr_ptr[g] + len(colors) + 1
-                    color_idx.append(np.concatenate(colors))
-                color_ptr = np.concatenate(color_ptr).astype(np.int64)
-                color_idx = np.concatenate(color_idx).astype(np.int64)
+                    idx_parts.append(np.concatenate(colors))
+                color_ptr = np.concatenate(ptr_parts).astype(np.int64)
+                color_idx = np.concatenate(idx_parts).astype(np.int64)
             else:
                 # Only the matching schedule reads the colouring: give every graph
                 # one colour holding all its edges instead of colouring it (pure
@@ -786,7 +947,8 @@ class MonitoredCircuit:
                 checkpoints=np.array(self.checkpoint_layers, dtype=np.int64),
             )
             n = self.num_system
-            ptr, idx = [], []
+            ptr: list[int] = []
+            idx: list[int] = []
             region_len = np.zeros((len(self.probes), 3), dtype=np.int64)
             for j, p in enumerate(self.probes):
                 ptr.append(len(idx))
@@ -814,6 +976,7 @@ class MonitoredCircuit:
                 idx=np.array(idx, dtype=np.int64),
                 size=np.array([p.size for p in self.probes], dtype=np.int64),
                 samples=np.array([p.samples for p in self.probes], dtype=np.int64),
+                phash=np.array([_name_hash(p.name) for p in self.probes], dtype=np.uint64),
                 snapshot=snapshot[0] if snapshot else -1,
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
@@ -887,7 +1050,8 @@ class MonitoredCircuit:
                     a["detect"], bool(self.stop_when_purified), a["pkind"], a["plen"], a["poff"],
                     a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"], a["idx"],
                     a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
-                    key_probe, first_trajectory, out, snap, snap_rows, tau, final, meas,
+                    key_probe, a["phash"], first_trajectory, out, snap, snap_rows, tau, final,
+                    meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
@@ -914,6 +1078,7 @@ class MonitoredCircuit:
             num_measurements=meas,
             elapsed_seconds=elapsed,
             snapshots=snapshots,
+            randomness_contract=RANDOMNESS_CONTRACT,
         )
 
     def replay(self, trajectory: int, *, seed, probes=None, checkpoints=None) -> EnsembleResult:
@@ -922,7 +1087,18 @@ class MonitoredCircuit:
         Probes and checkpoints never change a trajectory's circuit or random
         numbers, so this is exactly that trajectory, observed differently: a
         one-row :class:`EnsembleResult`. This is how a trajectory is probed at
-        new depths after the fact.
+        new depths after the fact. The sampled probes are reproduced too: an
+        evaluation's orderings depend only on the trajectory, the probe's name,
+        its ``samples`` and the layer, so the same probe at a layer the original
+        run evaluated gives the same values.
+
+        All of this holds only when the run was made under this version's
+        :data:`RANDOMNESS_CONTRACT` (``result.randomness_contract ==
+        RANDOMNESS_CONTRACT``). This version cannot reproduce the trajectories
+        of a run made under contract 1: the same seed gives other circuits and
+        samples, and nothing here can tell. For a saved run use
+        :meth:`EnsembleResult.replay`, which takes the run's own spec and seed
+        and refuses a result made under another contract.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -940,6 +1116,11 @@ class MonitoredCircuit:
         0), then per layer ``CLIFFORD_2Q`` gates, ``M`` measurements and a
         ``TICK``. So tick ``t`` of ``Simulator.run(circuit, observe=...)``
         sees the state after layer ``t``.
+
+        It is the circuit of a run made under this version's
+        :data:`RANDOMNESS_CONTRACT` only: for a result made under contract 1
+        (``result.randomness_contract == 1``) the same seed gives another
+        circuit, and this version cannot rebuild the one that run simulated.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -1025,18 +1206,6 @@ def _read_only(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _integer(value, what: str) -> int:
-    """``value`` as a Python int: numpy integers and whole-number floats are accepted."""
-    if isinstance(value, (bool, np.bool_)):
-        raise TypeError(f"{what} must be an integer, got {value!r}")
-    if isinstance(value, (float, np.floating)) and float(value).is_integer():
-        return int(value)
-    try:
-        return operator.index(value)
-    except TypeError:
-        raise TypeError(f"{what} must be an integer, got {value!r}") from None
-
-
 def _number(value, what: str) -> float:
     """``value`` as a Python float (numpy scalars accepted, strings and bools refused)."""
     if isinstance(value, (bool, np.bool_, str, bytes)):
@@ -1085,6 +1254,12 @@ def _keys(ss: np.random.SeedSequence) -> tuple[np.ndarray, np.ndarray]:
     return state[:2].copy(), state[2:].copy()
 
 
+def _name_hash(name: str) -> int:
+    """The 64-bit key of a probe's sampling streams: blake2b of its name, read little-endian."""
+    digest = hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little")
+
+
 def _plain_ints(value):
     """Seed entropy as JSON-stable Python values: an int, or a list of ints."""
     if value is None or isinstance(value, (int, np.integer)):
@@ -1128,6 +1303,7 @@ def _protocol_difference(a: MonitoredCircuit, b: MonitoredCircuit) -> str | None
     wa, wb = a.edge_weights, b.edge_weights
     if (wa is None) != (wb is None) or (
         wa is not None
+        and wb is not None
         and not all(
             np.array_equal(x, y)
             for x, y in zip(
@@ -1149,6 +1325,22 @@ def _protocol_difference(a: MonitoredCircuit, b: MonitoredCircuit) -> str | None
 def _seed_record(result: EnsembleResult) -> tuple:
     """What identifies the seed of a run: the SeedSequence's entropy, spawn key and pool size."""
     return result.seed_entropy, result.seed_spawn_key, result.seed_pool_size
+
+
+def _cutoff_record(cutoff: tuple) -> dict:
+    """A probe's cutoff as saved, in its JSON probe form: ``{"budget": 100}``, ``{"max_size": {"64": 3}}``."""
+    form, value = cutoff
+    return {form: {str(n): v for n, v in value} if isinstance(value, tuple) else value}
+
+
+def _cutoff_from_record(record: dict | None) -> tuple | None:
+    """The cutoff saved by :func:`_cutoff_record` (None for probes without one, and old files)."""
+    if record is None:
+        return None
+    ((form, value),) = record.items()
+    if isinstance(value, dict):
+        value = {int(n): v for n, v in value.items()}
+    return form, _cutoff_value(value, form)
 
 
 def _json_default(obj):
@@ -1197,10 +1389,15 @@ class EnsembleResult:
     version
         The ``sparsegf2`` version that produced the result (``None`` for
         files saved before versions were recorded).
+    randomness_contract
+        The :data:`RANDOMNESS_CONTRACT` the run was made under (1 for files
+        saved before contracts were recorded). The same seed gives other
+        trajectories under another contract, so :meth:`concatenate` refuses to
+        mix contracts.
     """
 
     spec: MonitoredCircuit
-    seed_entropy: object
+    seed_entropy: int | Sequence[int] | None
     trajectories: np.ndarray
     checkpoint_layers: np.ndarray
     values: dict[str, np.ndarray]
@@ -1212,6 +1409,7 @@ class EnsembleResult:
     seed_pool_size: int = 4
     version: str | None = __version__
     snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+    randomness_contract: int = RANDOMNESS_CONTRACT
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -1219,6 +1417,7 @@ class EnsembleResult:
         self.seed_entropy = _plain_ints(self.seed_entropy)
         self.seed_spawn_key = tuple(int(k) for k in self.seed_spawn_key)
         self.seed_pool_size = int(self.seed_pool_size)
+        self.randomness_contract = _integer(self.randomness_contract, "randomness_contract")
 
     @property
     def num_trajectories(self) -> int:
@@ -1226,7 +1425,11 @@ class EnsembleResult:
 
     @property
     def seed_sequence(self) -> np.random.SeedSequence:
-        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run."""
+        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run.
+
+        The repeat is exact only under the run's :attr:`randomness_contract`;
+        :meth:`replay` checks it.
+        """
         return np.random.SeedSequence(
             self.seed_entropy, spawn_key=self.seed_spawn_key, pool_size=self.seed_pool_size
         )
@@ -1264,6 +1467,43 @@ class EnsembleResult:
             )
         return StabilizerCode.from_packed(
             generators[trajectory, evaluation, :rows], self.spec.num_system
+        )
+
+    def replay(self, trajectory: int, *, probes=None, checkpoints=None) -> EnsembleResult:
+        """Trajectory ``trajectory`` of this run again, with other probes or checkpoints.
+
+        :meth:`MonitoredCircuit.replay` with this result's own spec and seed
+        (``self.spec.replay(trajectory, seed=self.seed_sequence, ...)``): the
+        same circuit and, for the same probe at a layer the run evaluated, the
+        same values, sampled probes included. ``trajectory`` is a trajectory
+        index (an entry of :attr:`trajectories`; it is also the row when the
+        run started at trajectory 0).
+
+        Raises ``ValueError`` if the run was made under another
+        :data:`RANDOMNESS_CONTRACT`: under another contract the same seed gives
+        other circuits and samples, so this version cannot reproduce that run.
+        """
+        trajectory = _integer(trajectory, "trajectory")
+        if self.randomness_contract != RANDOMNESS_CONTRACT:
+            raise ValueError(
+                f"this result was made under randomness contract {self.randomness_contract}; "
+                f"this version uses {RANDOMNESS_CONTRACT}, under which its seed gives other "
+                "circuits and samples, so its trajectories cannot be replayed. Rerun the "
+                "protocol with this version (result.spec.run(...)) and replay that result"
+            )
+        held = np.asarray(self.trajectories, dtype=np.int64)
+        if not np.any(held == trajectory):
+            where = (
+                f"{held.size} trajectories between {held.min()} and {held.max()}"
+                if held.size
+                else "no trajectories"
+            )
+            raise ValueError(
+                f"trajectory {trajectory} is not in this result, which holds {where} (pass a "
+                "trajectory index from result.trajectories, not a row of a chunk)"
+            )
+        return self.spec.replay(
+            trajectory, seed=self.seed_sequence, probes=probes, checkpoints=checkpoints
         )
 
     @property
@@ -1322,6 +1562,7 @@ class EnsembleResult:
         meta = {
             "format": "sparsegf2.EnsembleResult/1",
             "version": self.version,
+            "randomness_contract": self.randomness_contract,
             "seed_entropy": self.seed_entropy,
             "seed_spawn_key": list(self.seed_spawn_key),
             "seed_pool_size": self.seed_pool_size,
@@ -1336,6 +1577,8 @@ class EnsembleResult:
                     "checkpoints": list(p.checkpoints)
                     if isinstance(p.checkpoints, tuple)
                     else p.checkpoints,
+                    # the budget or mapping that chose ``size``, kept for another n
+                    **({"cutoff": _cutoff_record(p.cutoff)} if p.cutoff is not None else {}),
                 }
                 for p in spec.probes
             ],
@@ -1344,7 +1587,7 @@ class EnsembleResult:
             "checkpoints": spec.checkpoints if isinstance(spec.checkpoints, (str, int)) else None,
         }
         sizes = [len(g) for g in spec.graphs]
-        arrays = {
+        arrays: dict[str, Any] = {
             "edges": np.concatenate(spec.graphs),
             "graph_ptr": np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64),
             "gate_set": spec.gate_set,
@@ -1382,6 +1625,7 @@ class EnsembleResult:
                     p["size"],
                     p["samples"],
                     _schedule(p.get("checkpoints")),
+                    _cutoff_from_record(p.get("cutoff")),
                 )
                 for p in meta["probes"]
             ]
@@ -1407,6 +1651,11 @@ class EnsembleResult:
             )
             if not np.array_equal(spec.checkpoint_layers, layers):
                 raise ValueError(f"{path}: the stored checkpoints do not match the stored layers")
+            # The spec resolves a budget or mapping again; it must give the stored size and
+            # name, under which the values are stored.
+            stored = [(p["name"], p["size"]) for p in meta["probes"]]
+            if [(p.name, p.size) for p in spec.probes] != stored:
+                raise ValueError(f"{path}: the stored probe sizes do not match their cutoff")
             return cls(
                 spec=spec,
                 seed_entropy=meta["seed_entropy"],
@@ -1422,6 +1671,8 @@ class EnsembleResult:
                 seed_spawn_key=tuple(meta.get("seed_spawn_key", ())),
                 seed_pool_size=meta.get("seed_pool_size", 4),
                 version=meta.get("version"),
+                # files from before contracts were recorded were made under contract 1
+                randomness_contract=meta.get("randomness_contract", 1),
                 snapshots={
                     p.name: (z[f"snapshot::{p.name}"], z[f"snapshot_counts::{p.name}"])
                     for p in probes
@@ -1433,16 +1684,23 @@ class EnsembleResult:
     def concatenate(results: Sequence[EnsembleResult]) -> EnsembleResult:
         """Merge chunks of the same protocol and seed (e.g. from separate jobs).
 
-        The chunks must have identical specs, seeds and package versions and
-        cover different trajectories (``first_trajectory=``); anything else
-        raises ``ValueError`` rather than mixing protocols or counting a
-        trajectory twice.
+        The chunks must have identical specs, seeds, package versions and
+        randomness contracts and cover different trajectories
+        (``first_trajectory=``); anything else raises ``ValueError`` rather
+        than mixing protocols or counting a trajectory twice.
         """
         if not results:
             raise ValueError("nothing to concatenate")
         first = results[0]
         refuse = "can only concatenate results of the same protocol and seed"
         for r in results[1:]:
+            if r.randomness_contract != first.randomness_contract:
+                raise ValueError(
+                    f"{refuse}: they were made under randomness contracts "
+                    f"{first.randomness_contract} and {r.randomness_contract}, under which the "
+                    "same seed gives other trajectories; rerun the older part with this version "
+                    f"(randomness contract {RANDOMNESS_CONTRACT})"
+                )
             if _seed_record(r) != _seed_record(first):
                 raise ValueError(
                     f"{refuse}: the seeds differ ({_seed_record(first)} vs {_seed_record(r)})"
@@ -1483,6 +1741,7 @@ class EnsembleResult:
             seed_spawn_key=first.seed_spawn_key,
             seed_pool_size=first.seed_pool_size,
             version=first.version,
+            randomness_contract=first.randomness_contract,
             snapshots={
                 name: (
                     np.concatenate([r.snapshots[name][0] for r in results]),

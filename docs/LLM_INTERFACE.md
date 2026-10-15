@@ -219,7 +219,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `scramble_gates`, `scramble_matchings`, `scramble_layers` | ints: random all-to-all gates, layers on random perfect matchings, then gate-only layers on the graph |
 | `gate_set` | list of two-qubit gate names (`["CX", "SWAP"]`) or CLIFFORD_2Q indices |
 | `checkpoints` | `"final"`, `"every_layer"`, an int stride, or a list of layers: where purification is tested and where probes without their own `checkpoints` are evaluated |
-| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` (default 2; key `uncorrectable_region_counts[w]`), `code_snapshot`). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
+| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
 | types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`. Errors name the key |
 | `stop_when_purified`, `system_order`, `periodic`, `random_orientation` | as in the library |
 
@@ -235,7 +235,7 @@ What each probe records per evaluation (n system qubits), and its value after
 | `lost_information` | I(A:R) for the fixed region A | 0 |
 | `erasure_lost_profile` | n + 1 numbers: mean I(A:R) over `samples` random erasures A of each size m = 0..n | 0 |
 | `erasure_first_failure` | `samples` numbers: for each random ordering of the system qubits, the smallest m such that erasing the first m loses logical information (n + 1 if k = 0) | n + 1 |
-| `uncorrectable_region_counts` | w = `max_size` numbers: the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion | 0 |
+| `uncorrectable_region_counts` | w numbers (w = `max_size`, or the cutoff a `budget` allows): the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion | 0 |
 | `code_snapshot` | n - k, the number of stabilizer generators; the generators are stored in the saved result | n (no code stored) |
 
 All probes except the entanglement ones and `code_snapshot` need a reference. Code
@@ -243,13 +243,37 @@ probes are exact after a stop, so their averages need no correction; entanglemen
 and `contiguous_distance` are NaN there and drop out of the means. At most one
 `code_snapshot` per spec; give it its own `"checkpoints": "final"`, since codes are large.
 The cost of `uncorrectable_region_counts` grows like C(n, w): measured one-thread costs
-per evaluation at n = 256 are about 1 ms for w = 2, 40 to 50 ms for w = 3 and about 7 s
-for w = 4, against 3 to 7 ms for `erasure_first_failure` with 100 samples.
+per evaluation at n = 256 are about 1 ms for w = 2, about 20 ms for w = 3 and about 4 s
+for w = 4, against about 2 ms for `erasure_first_failure` with 100 samples
+(`benchmarks/results/erasure_cost.md` has every n and w).
+
+The cutoff w = m*(n) of `uncorrectable_region_counts` separates the exact regime of
+P_C(m), m <= w, from the sampled one. It takes one of these forms (giving both `max_size`
+and `budget` is an error):
+
+| form | w at system size n |
+|---|---|
+| `{"max_size": 3}` | 3 |
+| `{"budget": 50000}` | the largest w with sum_{m=1}^{w} C(n, m) <= B (`analysis.exhaustive_cutoff(n, B)`): 3, 2, 2 and 1 at n = 64, 128, 256 and 512 |
+| `{"max_size": {"64": 3, "128": 2}}` | the entry for n |
+| `{"budget": {"64": 20000, "256": 50000}}` | the cutoff of the entry for n |
+
+The budget counts regions, not seconds (`analysis.exhaustive_region_count(n, w)` is the
+number of regions a cutoff w covers): the time per region depends on n and w. An object
+lets one probe serve a sweep over n. Its keys are system sizes written as integers;
+a spec whose `num_system` has no entry is refused with the sizes the object covers, and
+a budget below n (not even the single-qubit regions) is refused too. The key in the
+results is `uncorrectable_region_counts[w]` for the resolved w, so give a `name` to keep
+one key at every n. `estimate_ensemble` costs the resolved w, and `spec.json` keeps the
+form as given.
 
 The result contains:
 
 * `num_trajectories`, `seed`, `elapsed_seconds` and `trajectories_per_second` (wall clock
   for the whole call, including building the spec and generating its graphs);
+* `randomness_contract`: the `mipt.RANDOMNESS_CONTRACT` the run was made under (1 for
+  results saved before it was recorded). Only a run made under this version's contract
+  can be replayed, resumed or extended;
 * `checkpoints`: the spec's layers shown, the total count, and whether they were
   subsampled;
 * `probes`, each on its own layers:
@@ -382,7 +406,8 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
   `seed` may be omitted (the stored one is used), and a larger `trajectories` extends a
-  finished run. A directory holding a different spec or seed is refused.
+  finished run. A directory holding a different spec or seed, or a run made under
+  another randomness contract or SparseGF2 version, is refused.
 * Graph collections: `trajectories` may be omitted (all `G * circuits_per_graph` run) and
   cannot exceed that count. Changing `circuits_per_graph` changes the spec, so more
   circuits per graph need a new directory.

@@ -107,7 +107,21 @@ NUMBA_NUM_THREADS=2 python -c "import numba; print(numba.get_num_threads())"
 
 `spec.run(..., num_threads=k)` can lower the thread count for one run but not
 raise it above `NUMBA_NUM_THREADS`. Results never depend on the number of
-threads (section 3.6).
+threads (section 3.6); the benchmark checks this at every thread count.
+
+How it scales (`benchmarks/thread_scaling.py`, results in
+`benchmarks/results/thread_scaling.md`; AMD Ryzen 9 9950X3D, 16 cores and 32
+logical processors, Numba's `omp` threading layer): speedup over one thread was
+12.3 to 13.7 at 16 threads and 17.3 to 21.1 at 32, depending on the workload
+(ensembles of erasure probes scale best, the purification-time workload with
+its every-layer probe least). Using all 32
+logical processors beat 16 threads in every workload, by 1.4 to 1.5 times, so
+the default (`NUMBA_NUM_THREADS` equal to the logical processor count) is the
+right setting on a machine you have to yourself. On a shared machine, or
+when running several jobs side by side, set `NUMBA_NUM_THREADS` to each job's
+share of the logical processors. The `omp` and `tbb` layers are safe to call
+from several Python threads at once (as the MCP server's background jobs do);
+`workqueue` is not.
 
 ---
 
@@ -288,16 +302,22 @@ A **trajectory** is one random circuit and its simulation. The contract:
 * Hence `spec.run(count, seed=s, first_trajectory=f)` returns exactly rows
   `f .. f + count - 1` of one big run with the same seed, and
   `EnsembleResult.concatenate` merges such chunks (it refuses chunks with
-  different specs, seeds or package versions, or overlapping trajectories).
-* The circuit's gates and the measurement mask use one random stream, the
-  probes' random orderings another. Adding, removing or rescheduling probes,
+  different specs, seeds, package versions or randomness contracts, or
+  overlapping trajectories).
+* The circuit's gates and the measurement mask use one random stream. Each
+  evaluation of a sampled probe draws its random orderings from a stream of
+  its own under a separate probe key. Adding, removing or rescheduling probes,
   or changing `layers`, does not change the circuits: the state after layer T
-  is the same in every run of the same trajectory that reaches layer T.
+  is the same in every run of the same trajectory that reaches layer T, and
+  `result.replay(t, probes=..., checkpoints=...)` reproduces the sampled
+  probes too.
 * With the same seed, runs at different measurement rates share their gates
   and random numbers (section 3.4).
 * `seed` can be an integer, a sequence of integers, a
   `numpy.random.SeedSequence`, or `None` (fresh entropy). The seed actually
-  used is stored in the result: `result.seed_sequence` repeats the run.
+  used is stored in the result: `result.seed_sequence` repeats the run, as long
+  as `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (a run made under
+  another contract cannot be reproduced by this version).
 * `spec.circuit(trajectory=t, seed=s)` returns the exact circuit trajectory `t`
   ran, as a Stim-language `Circuit` (section 6.3 replays one).
 
@@ -748,23 +768,23 @@ random-circuit codes: a layer of dynamics (n/2 random two-qubit Cliffords plus
 the measurements) costs about 30 µs (at p = 0.05; up to about 60 µs at p = 0.2
 on β = 1 graphs, so a circuit that never purifies at a higher rate costs up to
 twice as much); one evaluation of
-`erasure_first_failure` with M = 100 costs 3–7 ms,
-`uncorrectable_region_counts` costs about 1 ms for w = 2, 40–50 ms for w = 3
-and about 7 s for w = 4, and `code_snapshot` under 1 ms. With about 175 sparse
+`erasure_first_failure` with M = 100 costs about 2 ms,
+`uncorrectable_region_counts` costs about 1 ms for w = 2, about 20 ms for w = 3
+and about 4 s for w = 4 (`benchmarks/results/erasure_cost.md` has every n and w), and `code_snapshot` under 1 ms. With about 175 sparse
 depths (`sparse_depths(depths)` above), one circuit that never purifies costs
 
 | part | cost per circuit (one thread) |
 |---|---|
 | dynamics, 10⁶ layers × 30 µs | 30 s |
-| `erasure_first_failure`, 175 × 3–7 ms | 0.5–1.2 s |
-| `uncorrectable_region_counts(3)`, 175 × 40–50 ms | 7–9 s |
+| `erasure_first_failure`, 175 × 2 ms | 0.35 s |
+| `uncorrectable_region_counts(3)`, 175 × 20 ms | 3.5 s |
 | `code_dimension` at 5957 depths, `code_snapshot` once | well under 1 s |
-| **total** | **about 40 s** |
+| **total** | **about 35 s** |
 
-so a point of 1000 circuits is about 11 core-hours, or about 3 hours on 4
+so a point of 1000 circuits is about 10 core-hours, or about 2.5 hours on 4
 cores. Circuits that purify stop early (`stop_when_purified`), so points deep
 in the pure phase cost far less. w = 4 at the same 175 depths would add
-175 × 7 s ≈ 20 minutes *per circuit*: if you want it, give it a handful of
+175 × 4 s ≈ 12 minutes *per circuit*: if you want it, give it a handful of
 depths of its own.
 
 **Memory** is set by the stored values (float64, 8 bytes each) and codes:
@@ -839,8 +859,8 @@ chunks are *exactly* the single big run. Rules:
   every p of a β): common random numbers across p make the curves smooth;
 * name files by what they hold: `runs/n256_beta1_p0.05/chunk0003.npz`;
 * use the same installed version for every chunk of a point:
-  `concatenate` refuses to mix versions, because different versions need not
-  produce the same trajectories.
+  `concatenate` refuses to mix versions or randomness contracts, because
+  different versions need not produce the same trajectories.
 
 Here is the whole loop at toy size, using `main` from the script above: three
 chunks of one point, merged and compared with a single run.
@@ -1054,8 +1074,8 @@ sparsegf2 results runs/beta1_p0.05
 
 The output directory holds `result.npz` (an `EnsembleResult`, load it with
 `mipt.EnsembleResult.load`), `spec.json` (running `sparsegf2 ensemble` on it
-repeats the run exactly) and `provenance.json` (versions, git commit, seed,
-command). The summary prints means with standard errors per checkpoint and
+repeats the run exactly, under the same randomness contract) and
+`provenance.json` (versions, git commit, seed, randomness contract, command). The summary prints means with standard errors per checkpoint and
 the erasure probes as P_C(m) curves.
 
 For long runs, `--chunk-size` saves the run chunk by chunk and resumes where it

@@ -7,6 +7,41 @@ its own state array, so results never depend on thread scheduling.
 
 State is a length-4 ``uint64`` array. Seed it from a ``numpy.random.SeedSequence``
 with :func:`seed_state` (Python side), never with all zeros.
+
+Streams (randomness contract 2)
+-------------------------------
+Many independent streams come from one 128-bit key ``(key0, key1)`` (from
+:func:`stream_key` or a run's ``SeedSequence``) and a 64-bit stream index. With
+``mix64`` the splitmix64 output function and ``sm(x) = mix64(x + GOLDEN)``, the
+output of one splitmix64 step from state ``x`` (``GOLDEN = 0x9E3779B97F4A7C15``,
+all arithmetic mod 2**64):
+
+* :func:`stream_state`: ``x = key0 ^ sm(index)``, ``gamma = sm(key1)``, and
+  state word ``j`` (``j = 0..3``) is ``mix64(x + (j + 1) * gamma)``: four
+  splitmix64 steps from ``x`` whose increment comes from ``key1``. For a fixed
+  index, distinct keys always give distinct states (``x + gamma`` and
+  ``x + 2 gamma`` are the ``mix64``-inverses of words 0 and 1, and give back
+  the key). A change of ``key0`` or of the index changes ``x`` and so every
+  word; a change of ``key1`` changes every word unless it changes ``gamma``
+  by a multiple of 2**62 (chance about 2**-62, which is why ``key1`` passes
+  through ``sm`` rather than being added as it is: a raw top bit would
+  change only two words). ``gamma = 0`` (one ``key1`` in 2**64) makes the
+  four words equal, a valid state. An all-zero state (never seen) becomes
+  ``[1, 0, 0, 0]``.
+* :func:`mix`: ``mix(a, b, c) = sm(sm(sm(a) ^ b) ^ c)``, a 64-bit stream index
+  from three words (chained splitmix64; one-to-one in each word when the other
+  two are fixed). The ensemble engine gives each sampled-probe evaluation the
+  stream ``mix(trajectory, probe-name hash, layer)``.
+
+Contract 1 used ``x = key0 ^ (index * 0xD1B54A32D192ED03) ^ key1`` and four
+splitmix64 steps from ``x``, so only ``key0 ^ key1`` mattered.
+
+Changing a stream: Numba keys each cached function on a hash of its own
+source file, and a cached caller keeps the callees it was compiled with.
+Importing :mod:`sparsegf2._kernel` stamps the kernels' cache entries with a
+fingerprint of every kernel source (:mod:`sparsegf2._kernel._cache`), so the
+callers in ``ensemble.py``, ``program.py`` and ``entropy.py`` recompile with
+the new streams. Bump ``mipt.RANDOMNESS_CONTRACT`` too.
 """
 
 from __future__ import annotations
@@ -76,13 +111,27 @@ def next_below(s, bound):
     return np.int64(m >> _U(32))
 
 
+_GOLDEN = 0x9E3779B97F4A7C15
+
+
 @njit(cache=True, inline="always")
-def _splitmix64(x):
-    x = x + _U(0x9E3779B97F4A7C15)
-    z = x
+def _mix64(z):
+    """The splitmix64 output function (a bijection of 64-bit words)."""
     z = (z ^ (z >> _U(30))) * _U(0xBF58476D1CE4E5B9)
     z = (z ^ (z >> _U(27))) * _U(0x94D049BB133111EB)
-    return x, z ^ (z >> _U(31))
+    return z ^ (z >> _U(31))
+
+
+@njit(cache=True, inline="always")
+def _sm(x):
+    """The output of one splitmix64 step from state ``x``: ``mix64(x + GOLDEN)``."""
+    return _mix64(x + _U(_GOLDEN))
+
+
+@njit(cache=True)
+def mix(a, b, c):
+    """A 64-bit stream index from three words: ``sm(sm(sm(a) ^ b) ^ c)`` (module docstring)."""
+    return _sm(_sm(_sm(_U(a)) ^ _U(b)) ^ _U(c))
 
 
 @njit(cache=True)
@@ -92,12 +141,14 @@ def stream_state(key, index, out):
     ``key`` is a length-2 uint64 array (from :func:`stream_key`). Streams for
     different indices are independent, and stream ``index`` depends only on
     ``(key, index)``, so trajectory/shot ``i`` is reproducible on its own and
-    regardless of how work is split across threads.
+    regardless of how work is split across threads. The derivation uses all
+    128 bits of the key (module docstring, randomness contract 2).
     """
-    x = key[0] ^ (_U(index) * _U(0xD1B54A32D192ED03)) ^ key[1]
+    x = key[0] ^ _sm(_U(index))
+    gamma = _sm(key[1])
     for j in range(4):
-        x, z = _splitmix64(x)
-        out[j] = z
+        x = x + gamma
+        out[j] = _mix64(x)
     if out[0] == _U(0) and out[1] == _U(0) and out[2] == _U(0) and out[3] == _U(0):
         out[0] = _U(1)  # pragma: no cover
 

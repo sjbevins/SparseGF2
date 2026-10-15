@@ -8,6 +8,7 @@ equivalents on ARM.
 from __future__ import annotations
 
 import llvmlite.ir as ir
+import numba
 import numpy as np
 from numba import njit, types
 from numba.core import cgutils
@@ -19,7 +20,7 @@ ALL = np.uint64(0xFFFFFFFFFFFFFFFF)
 
 
 @intrinsic
-def popcount(typingctx, x):
+def popcount(typingctx, x):  # pragma: no cover (compiled code)
     """Number of set bits in a uint64."""
     sig = types.uint64(types.uint64)
 
@@ -34,7 +35,7 @@ def popcount(typingctx, x):
 
 
 @intrinsic
-def ctz(typingctx, x):
+def ctz(typingctx, x):  # pragma: no cover (compiled code)
     """Index of the lowest set bit of a uint64 (undefined for 0; callers check)."""
     sig = types.uint64(types.uint64)
 
@@ -47,6 +48,22 @@ def ctz(typingctx, x):
         return builder.call(fn, [args[0], ir.Constant(i1, 1)])
 
     return sig, codegen
+
+
+if numba.config.DISABLE_JIT:
+    # Intrinsics cannot run as plain Python. With NUMBA_DISABLE_JIT=1 (used to trace the
+    # kernels for coverage) the kernels run as Python, so these stand in for them.
+
+    def popcount(x):  # noqa: F811
+        """Number of set bits in a uint64."""
+        return np.uint64(int(x).bit_count())
+
+    def ctz(x):  # noqa: F811
+        """Index of the lowest set bit of a uint64; 0 is an error here, as callers check."""
+        x = int(x)
+        if x == 0:
+            raise ValueError("ctz(0) is undefined")
+        return np.uint64((x & -x).bit_length() - 1)
 
 
 @njit(cache=True, inline="always")

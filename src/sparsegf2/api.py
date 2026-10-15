@@ -139,7 +139,7 @@ _PROVENANCE_FILE = "provenance.json"
 # ---------------------------------------------------------------------------
 
 
-def _num(x: float) -> float | None:
+def _num(x: float | np.floating[Any]) -> float | None:
     """A float rounded to 6 significant digits; NaN and infinities become None."""
     x = float(x)
     if not math.isfinite(x):
@@ -979,46 +979,46 @@ def run_circuit(
     if shots == 1:
         if m <= MAX_BITS_SHOWN:
             out["random"] = _bits(random_flags)
-            if phases:
+            if records is not None:
                 out["measurements"] = _bits(records)
         elif m:
             out["num_random"] = int(random_flags.sum())
-            if phases:
+            if records is not None:
                 out["num_ones"] = int(records.sum())
                 out["measurement_mean"] = float(records.mean())
             cut.append(f"the {m}-bit measurement record")
-        if phases and detectors.shape[1]:
+        if detectors is not None and detectors.shape[1]:
             if detectors.shape[1] <= MAX_BITS_SHOWN:
                 out["detectors"] = _bits(detectors)
             else:
                 cut.append(f"the {detectors.shape[1]} detector bits")
             out["detector_fraction"] = float(detectors.mean())
-        if phases and obs_flips.shape[1]:
+        if obs_flips is not None and obs_flips.shape[1]:
             out["observable_flips"] = _bits(obs_flips[:, :MAX_BITS_SHOWN])
             if obs_flips.shape[1] > MAX_BITS_SHOWN:
                 cut.append(f"observable_flips beyond the first {MAX_BITS_SHOWN}")
     else:
-        if phases and m:
+        if records is not None and m:
             out["measurement_mean"] = float(records.mean())
             if m <= MAX_LIST_SHOWN:
                 out["measurement_means"] = records.mean(axis=0)
                 out["first_shots"] = [_bits(r) for r in records[:4]]
             else:
                 cut.append(f"per-measurement means of {m} measurements")
-        if phases and detectors.shape[1]:
+        if detectors is not None and detectors.shape[1]:
             rates = detectors.mean(axis=0)
             out["detector_rate_mean"] = float(rates.mean())
-            out["detector_rate_max"] = float(rates.max())
+            out["detector_rate_max"] = float(np.max(rates))
             out["any_detector_fraction"] = float(detectors.any(axis=1).mean())
             if rates.size <= MAX_LIST_SHOWN:
                 out["detector_rates"] = rates
             else:
                 cut.append(f"per-detector rates of {rates.size} detectors")
-        if phases and obs_flips.shape[1]:
+        if obs_flips is not None and obs_flips.shape[1]:
             out["observable_flip_rates"] = obs_flips.mean(axis=0)[:MAX_LIST_SHOWN]
             if obs_flips.shape[1] > MAX_LIST_SHOWN:
                 cut.append(f"observable_flip_rates beyond the first {MAX_LIST_SHOWN}")
-    if phases:
+    if records is not None and detectors is not None and obs_flips is not None:
         arrays["measurements"] = records
         arrays["detectors"] = detectors
         arrays["observable_flips"] = obs_flips
@@ -1156,7 +1156,7 @@ def _weight_families() -> dict[str, Callable]:
 
 def _probe_kinds() -> dict[str, Callable]:
     """Probe constructors of :mod:`sparsegf2.mipt`: the functions that return a Probe."""
-    kinds = {}
+    kinds: dict[str, Callable] = {}
     for name in mipt.__all__:
         fn = getattr(mipt, name)
         if inspect.isfunction(fn) and inspect.signature(fn).return_annotation in (
@@ -1258,7 +1258,12 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             raise ValueError("graph.realizations needs a random family with its own 'seed'")
         seed = params.pop("seed")
         base = [_require_int(seed, "graph.seed", minimum=0)] if not isinstance(seed, list) else seed
-        return [_build_graph({**params, "seed": [*base, i]}, n) for i in range(realizations)]
+        bank: list[np.ndarray] = []
+        for i in range(realizations):
+            one = _build_graph({**params, "seed": [*base, i]}, n)
+            assert isinstance(one, np.ndarray), "without realizations a family yields one graph"
+            bank.append(one)
+        return bank
     family = params.pop("family")
     if family not in families:
         raise ValueError(f"unknown graph family {family!r}; choose from {sorted(families)}")
@@ -1299,7 +1304,33 @@ def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
     )
 
 
-def _build_probe(spec: Any, index: int) -> mipt.Probe:
+# Probe arguments that may map the system size to a value; JSON object keys are strings,
+# so {"64": 3} means n = 64.
+_SIZE_MAP_ARGS = {"max_size", "budget"}
+
+
+def _size_map(value: dict, what: str) -> dict:
+    """``{"64": 3, ...}`` keyed by num_system, as ``{64: 3, ...}``; the probe checks the values."""
+    out: dict = {}
+    for key, v in value.items():
+        if isinstance(key, str) and re.fullmatch(r"[0-9]+", key):
+            n = int(key)
+        elif isinstance(key, (int, np.integer)) and not isinstance(key, bool):
+            n = int(key)  # from Python callers
+        else:
+            raise ValueError(
+                f'{what}: the keys are system sizes, written as positive integers like "64", '
+                f"got {key!r}"
+            )
+        if n in out:
+            raise ValueError(f"{what} gives the system size {n} twice")
+        out[n] = v
+    return out
+
+
+def _build_probe(spec: Any, index: int, num_system: int) -> mipt.Probe:
+    """One JSON probe as a :class:`~sparsegf2.mipt.Probe`, with its exhaustive size resolved
+    for ``num_system`` so that every error names the probe as ``probes[i]``."""
     kinds = _probe_kinds()
     where = f"probes[{index}]"
     if not isinstance(spec, dict) or "kind" not in spec:
@@ -1313,13 +1344,26 @@ def _build_probe(spec: Any, index: int) -> mipt.Probe:
     name = params.pop("name", None)
     if name is not None and (not isinstance(name, str) or not name.strip()):
         raise ValueError(f"{where}.name must be a non-empty string, got {name!r}")
+    what = f"{where} ({kind})"
+    # unknown keys first: their values may not be what the conversions below expect
+    _check_keys(params, [k for k in _params(kinds[kind]) if k != "name"], what)
     for key, value in list(params.items()):
         if key in _QUBIT_ARGS and value is not None:
             params[key] = _qubit_list(value, f"{where}.{key}")
+        if key in _SIZE_MAP_ARGS and isinstance(value, dict):
+            params[key] = _size_map(value, f"{where}.{key}")
     if params.get("checkpoints") is not None:
         params["checkpoints"] = _checkpoints(params["checkpoints"], f"{where}.checkpoints")
-    probe = _call_with(kinds[kind], params, {"name": None}, f"{where} ({kind})")
-    return dataclasses.replace(probe, name=name) if name is not None else probe
+    probe = _call_with(kinds[kind], params, {"name": None}, what)
+    if name is not None:
+        probe = dataclasses.replace(probe, name=name)
+    if probe.kind == "uncorrectable_counts":
+        # Resolved here so the errors say probes[i]; the spec's own resolution is then a no-op.
+        try:
+            probe = mipt._counts_size(probe, num_system)
+        except ValueError as exc:
+            raise ValueError(f"{what}: {exc}") from None
+    return probe
 
 
 def _gate_set(value: Any) -> np.ndarray | None:
@@ -1339,6 +1383,7 @@ def _gate_set(value: Any) -> np.ndarray | None:
                 raise ValueError(f"gate_set: unknown gate {g!r}") from None
             if info.kind != "unitary" or info.num_qubits != 2:
                 raise ValueError(f"gate_set: {g!r} is not a two-qubit unitary gate")
+            assert info.clifford is not None, "unitary gates carry their Clifford"
             out.append(info.clifford.index())
         else:
             out.append(_require_int(g, "gate_set entries", minimum=0))
@@ -1411,7 +1456,7 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
     if "probes" in spec:
         if not isinstance(spec["probes"], list):
             raise ValueError('probes must be a list like [{"kind": "code_dimension"}]')
-        kwargs["probes"] = [_build_probe(p, i) for i, p in enumerate(spec["probes"])]
+        kwargs["probes"] = [_build_probe(p, i, n) for i, p in enumerate(spec["probes"])]
     try:
         return mipt.MonitoredCircuit(**kwargs)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -1419,7 +1464,8 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
 
 
 def _random_family(graph: Any) -> bool:
-    fn = _graph_families().get(graph.get("family")) if isinstance(graph, dict) else None
+    family: Any = graph.get("family") if isinstance(graph, dict) else None
+    fn = _graph_families().get(family) if isinstance(graph, dict) else None
     return fn is not None and "seed" in _params(fn)
 
 
@@ -1864,6 +1910,7 @@ def _summarize_ensemble(
         "layers": spec.layers,
         "measurement_rate": spec.measurement_rate,
         "seed": result.seed_entropy,
+        "randomness_contract": result.randomness_contract,
         "elapsed_seconds": result.elapsed_seconds,
         "trajectories_per_second": result.trajectories_per_second
         if result.elapsed_seconds > 0
@@ -1992,7 +2039,8 @@ def _output_dir(path: Any) -> Path:
 
 def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
     tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez_compressed(tmp, **arrays)
+    # numpy's stubs type the **arrays of savez_compressed as its allow_pickle flag
+    np.savez_compressed(tmp, **arrays)  # type: ignore[arg-type, unused-ignore]
     os.replace(tmp, path)
 
 
@@ -2024,6 +2072,7 @@ def _provenance(seed: Any, command: str) -> dict[str, Any]:
 
     return {
         "sparsegf2": __version__,
+        "randomness_contract": mipt.RANDOMNESS_CONTRACT,
         "python": platform.python_version(),
         "numpy": np.__version__,
         "numba": numba.__version__,
@@ -2053,6 +2102,10 @@ def _write_run_metadata(
 ) -> dict[str, str]:
     """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
 
+    Replaying ``spec.json`` repeats the run only under the randomness contract
+    that ``provenance.json`` records: this version cannot reproduce a run made
+    under another one (``mipt.RANDOMNESS_CONTRACT``).
+
     For a resumed job (``resumed_from`` set) the original provenance is kept and
     this process's record is appended under ``"resumes"``.
     """
@@ -2081,6 +2134,25 @@ def _read_provenance(out: Path) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return stored if isinstance(stored, dict) else None
+
+
+def _check_contract(out: Path, stored: dict | None, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse to resume or extend a run made under another randomness contract.
+
+    The contract is read from ``provenance.json`` (the original record) and
+    from the saved results. A record without one predates contract 2, so it
+    counts as contract 1, as ``EnsembleResult.load`` does.
+    """
+    made = [] if stored is None else [stored.get("randomness_contract", 1)]
+    if existing is not None:
+        made.append(existing.randomness_contract)
+    for contract in made:
+        if contract != mipt.RANDOMNESS_CONTRACT:
+            raise ValueError(
+                f"output_dir {str(out)!r}: this run was made under randomness contract "
+                f"{contract}; this version uses {mipt.RANDOMNESS_CONTRACT}; start a new "
+                "output_dir"
+            )
 
 
 def _result_parts(out: Path) -> list[Path]:
@@ -2349,7 +2421,8 @@ def start_ensemble_job(
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
     larger ``trajectories`` extends a finished run. A directory holding a
-    different spec or seed is refused. For a collection of graphs
+    different spec or seed, or a run made under another randomness contract
+    or ``sparsegf2`` version, is refused. For a collection of graphs
     ``trajectories`` may be omitted (every graph gets ``circuits_per_graph``
     circuits).
     """
@@ -2376,6 +2449,7 @@ def start_ensemble_job(
             )
         seed = meta["seed"]
         stored = _read_provenance(out)
+        _check_contract(out, stored, existing)
         made_with = None if stored is None else stored.get("sparsegf2")
         if made_with is not None and made_with != __version__:
             raise ValueError(
@@ -2573,6 +2647,26 @@ def _signature_summary(fn: Callable, skip: Sequence[str] = ()) -> dict[str, Any]
 
 _DETAIL_SECTIONS = ("probes", "observables", "instructions", "ensemble_spec", "graph_families")
 
+# What a probe's signature does not show: defaults chosen inside the function, and the
+# argument forms beyond plain numbers.
+_PROBE_EXTRAS: dict[str, dict[str, Any]] = {
+    "uncorrectable_region_counts": {
+        "params": {"max_size": 2},
+        "forms": [
+            {"max_size": 3},
+            {"budget": 50000},
+            {"max_size": {"64": 3, "128": 2}},
+            {"budget": {"64": 20000, "256": 50000}},
+        ],
+        "note": (
+            "w = m*(n), the largest exhaustive size: give max_size (w itself, default 2) or "
+            "budget B (w = max{w : sum_{m=1}^{w} C(n, m) <= B}; B counts regions, not "
+            "seconds), not both; an object maps num_system to a value, so one probe serves a "
+            "sweep over n; the key is uncorrectable_region_counts[w] unless 'name' is given"
+        ),
+    },
+}
+
 
 def _capability_sections() -> dict[str, Any]:
     fields = _spec_fields()
@@ -2618,8 +2712,13 @@ def _capability_sections() -> dict[str, Any]:
         "ensemble_spec": spec_keys,
         "probes": {
             name: {
-                "params": {**_signature_summary(fn, ("name", "checkpoints")), "name": None},
+                "params": {
+                    **_signature_summary(fn, ("name", "checkpoints")),
+                    **_PROBE_EXTRAS.get(name, {}).get("params", {}),
+                    "name": None,
+                },
                 "description": _first_sentence(fn),
+                **{k: v for k, v in _PROBE_EXTRAS.get(name, {}).items() if k != "params"},
             }
             for name, fn in _probe_kinds().items()
         },

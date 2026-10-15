@@ -1,6 +1,7 @@
 """The JSON service layer: validation, bounded output, equivalence with direct library calls."""
 
 import json
+import re
 import time
 
 import numpy as np
@@ -313,9 +314,9 @@ def test_run_ensemble_matches_library():
     tau = direct.purification_layer
     pur = out["purification"]
     assert pur["purified"] == int((tau >= 0).sum())
-    assert pur["censored_fraction"] == pytest.approx((tau < 0).mean())
+    assert pur["censored_fraction"] == pytest.approx((tau < 0).mean(), abs=1e-6)
     if (tau >= 0).any():
-        assert pur["tau_median_purified"] == pytest.approx(np.median(tau[tau >= 0]))
+        assert pur["tau_median_purified"] == pytest.approx(np.median(tau[tau >= 0]), abs=1e-6)
     layers, surviving = direct.survival()
     assert pur["survival"]["fraction_unpurified"] == pytest.approx(surviving, abs=1e-6)
     assert out["checkpoints"]["layers"] == layers.tolist()
@@ -935,6 +936,56 @@ def test_resume_keeps_provenance_and_refuses_another_version(tmp_path, monkeypat
         api.start_ensemble_job(SMALL_SPEC, 60, output_dir=out)
 
 
+def _rewrite_without_contract(path):
+    """Rewrite a saved result as a file from before ``randomness_contract`` was recorded."""
+    with np.load(path, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    del meta["randomness_contract"]
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(path, **arrays)
+
+
+def test_resume_refuses_another_randomness_contract(tmp_path):
+    api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(tmp_path / "sync"))
+    prov = json.loads((tmp_path / "sync" / "provenance.json").read_text(encoding="utf-8"))
+    assert prov["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    out = tmp_path / "contract"
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out), seed=4)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    prov_path = out / "provenance.json"
+    prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    assert prov["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    refused = re.escape(
+        "this run was made under randomness contract 1; this version uses "
+        f"{mipt.RANDOMNESS_CONTRACT}; start a new output_dir"
+    )
+    # a provenance written under contract 1, and one from before the contract was recorded
+    old = {k: v for k, v in prov.items() if k != "randomness_contract"}
+    for record in ({**prov, "randomness_contract": 1}, old):
+        prov_path.write_text(json.dumps(record), encoding="utf-8")
+        for trajectories in (20, 40):  # resume (nothing left to do) and extend
+            with pytest.raises(ValueError, match=refused):
+                api.start_ensemble_job(SMALL_SPEC, trajectories, output_dir=str(out))
+        assert api.load_results(str(out))["num_trajectories"] == 20  # reading is still fine
+    # results saved under contract 1 are refused even beside a current provenance
+    prov_path.write_text(json.dumps(prov), encoding="utf-8")
+    _rewrite_without_contract(out / "result.npz")
+    with pytest.raises(ValueError, match=refused):
+        api.start_ensemble_job(SMALL_SPEC, 40, output_dir=str(out))
+    assert not (out / "chunks").exists()  # nothing was run
+
+
+def test_summaries_show_the_randomness_contract(tmp_path):
+    out = tmp_path / "shown"
+    summary = api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(out))
+    assert summary["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    assert api.load_results(str(out))["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    _rewrite_without_contract(out / "result.npz")  # saved before the contract was recorded
+    assert api.load_results(str(out))["randomness_contract"] == 1
+    assert api.load_results(str(out / "result.npz"))["randomness_contract"] == 1
+
+
 def test_estimate_includes_graph_generation_and_times_are_wall_clock():
     one = dict(SMALL_SPEC, schedule="random_edges", checkpoints="final")
     bank = dict(one, graph={**SMALL_SPEC["graph"], "realizations": 2000})
@@ -1066,3 +1117,132 @@ def test_huge_exhaustive_sizes_give_a_huge_estimate_not_an_error():
     )
     est = api.estimate_ensemble(spec, 1)
     assert not est["fits_sync_limit"] and est["estimated_seconds"] > 1e100
+
+
+# ---------------------------------------------------------------------------
+# the exhaustive cutoff m*(n) in JSON: a budget, or one value per system size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n", "cutoff", "w"),
+    [
+        # m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B}; the sums: n = 64: 64, 2,080, 43,744,
+        # 679,120; n = 128: 128, 8,256, 349,632; n = 256: 256, 32,896, 2,796,416
+        (64, {"budget": 50000}, 3),
+        (256, {"budget": 50000}, 2),
+        (64, {"max_size": {"64": 3, "128": 2}}, 3),
+        (128, {"max_size": {"64": 3, "128": 2}}, 2),
+        (64, {"budget": {"64": 20000, "256": 50000}}, 2),
+        (256, {"budget": {"64": 20000, "256": 50000}}, 2),
+    ],
+)
+def test_json_cutoff_forms_resolve_per_system_size(n, cutoff, w):
+    spec = dict(
+        SMALL_SPEC,
+        num_system=n,
+        graph={"family": "cycle"},
+        reference="purification",
+        stop_when_purified=False,
+        probes=[{"kind": "uncorrectable_region_counts", **cutoff}],
+    )
+    probe = api._build_spec(spec).probes[0]
+    assert (probe.name, probe.size) == (f"uncorrectable_region_counts[{w}]", w)
+    explicit = dict(spec, probes=[{"kind": "uncorrectable_region_counts", "max_size": w}])
+    assert api.estimate_ensemble(spec, 100) == api.estimate_ensemble(explicit, 100)
+
+
+def test_json_cutoff_forms_run_like_their_max_size():
+    base = dict(SMALL_SPEC, reference="purification", stop_when_purified=False, checkpoints=10)
+    explicit = {
+        w: api.run_ensemble(
+            dict(base, probes=[{"kind": "uncorrectable_region_counts", "max_size": w}]), 6, seed=2
+        )["probes"]
+        for w in (1, 2, 3)
+    }
+    # n = 10: C(10, 1) = 10, then 55, then 175 regions
+    for cutoff, w in (
+        ({"budget": 100}, 2),
+        ({"max_size": {"10": 3, "64": 2}}, 3),
+        ({"budget": {"10": 20, "64": 20000}}, 1),
+    ):
+        probe = {"kind": "uncorrectable_region_counts", **cutoff}
+        out = api.run_ensemble(dict(base, probes=[probe]), 6, seed=2)
+        assert out["probes"] == explicit[w], cutoff
+    named = {"kind": "uncorrectable_region_counts", "budget": {"10": 100}, "name": "counts"}
+    out = api.run_ensemble(dict(base, probes=[named]), 6, seed=2)
+    assert out["probes"] == {"counts": explicit[2]["uncorrectable_region_counts[2]"]}
+
+
+RESOLVING = r"probes\[0\] \(uncorrectable_region_counts\): "  # errors at num_system = 10
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "message"),
+    [
+        (
+            {"max_size": {"64": 3, "128": 2}},
+            RESOLVING
+            + r"max_size has no entry for num_system = 10; it covers the system sizes \[64, 128\]",
+        ),
+        (
+            {"budget": 5},
+            RESOLVING
+            + re.escape(
+                "budget 5 allows no exhaustive region size at n = 10 (C(10, 1) = 10 > 5); "
+                "raise the budget or drop the probe"
+            ),
+        ),
+        ({"max_size": 11}, RESOLVING + r"max_size must be in \[1, 10\], got 11"),
+        (  # an entry below its own n fails at once, whatever num_system is
+            {"budget": {"10": 50000, "64": 50}},
+            re.escape("budget 50 allows no exhaustive region size at n = 64 (C(64, 1) = 64 > 50)"),
+        ),
+        ({"max_size": 2, "budget": 100}, "give max_size or budget, not both"),
+        ({"max_size": {"ten": 3}}, r"probes\[0\]\.max_size: .*integers like \"64\", got 'ten'"),
+        ({"budget": {"10.5": 100}}, r"probes\[0\]\.budget: .*integers like \"64\", got '10.5'"),
+        (
+            {"budget": {"-5": 100}},
+            r"probes\[0\]\.budget: .*positive integers like \"64\", got '-5'",
+        ),
+        (
+            {"max_size": {"10": 2, "010": 3}},
+            r"probes\[0\]\.max_size gives the system size 10 twice",
+        ),
+        ({"max_size": {"10": 2.5}}, r"max_size\[10\] must be an integer, got 2.5"),
+        ({"max_size": {"10": 11}}, r"max_size\[10\] must be in \[1, 10\], got 11"),
+        ({"budget": {"10": "100"}}, r"budget\[10\] must be an integer, got '100'"),
+        ({"budget": {"10": True}}, r"budget\[10\] must be an integer, got True"),
+        ({"budget": -1}, "budget must be non-negative"),
+        ({"budget": 2.5}, "budget must be an integer"),
+        ({"max_size": [2, 3]}, "max_size must be an integer"),
+        ({"max_size": {}}, "max_size: give at least one system size"),
+    ],
+)
+def test_json_cutoff_errors_name_the_field(cutoff, message):
+    spec = dict(SMALL_SPEC, probes=[{"kind": "uncorrectable_region_counts", **cutoff}])
+    with pytest.raises(ValueError, match=message) as info:
+        api.run_ensemble(spec, 2, seed=1)
+    assert str(info.value).startswith("probes[0]")  # which probe, like every spec error
+
+
+@pytest.mark.parametrize("extra", [{"budget": {"x": 1}}, {"max_size": 2}, {"region": "bad"}])
+def test_probe_keys_are_checked_before_their_values(extra):
+    spec = dict(SMALL_SPEC, probes=[{"kind": "code_dimension", **extra}])
+    key = re.escape(str([next(iter(extra))]))
+    with pytest.raises(
+        ValueError, match=rf"probes\[0\] \(code_dimension\): unknown key\(s\) {key}"
+    ):
+        api.run_ensemble(spec, 2, seed=1)
+
+
+def test_capabilities_document_the_cutoff_forms():
+    entry = api.capabilities("probes")["probes"]["uncorrectable_region_counts"]
+    assert entry["params"]["max_size"] == 2 and entry["params"]["budget"] is None
+    for form in (
+        {"budget": 50000},
+        {"max_size": {"64": 3, "128": 2}},
+        {"budget": {"64": 20000, "256": 50000}},
+    ):
+        assert form in entry["forms"]
+    assert "sum_{m=1}^{w} C(n, m) <= B" in entry["note"]

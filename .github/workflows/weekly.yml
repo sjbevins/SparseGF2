@@ -1,0 +1,44 @@
+name: Weekly
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # A skipped test (or a module skipped while collected) fails the run.
+  SPARSEGF2_NO_SKIPS: "1"
+
+jobs:
+  jit-free-kernels:
+    # With the JIT off the kernels run as Python, so coverage can trace them. The whole suite
+    # except the documentation examples (about 40 minutes JIT-free) takes about 5 minutes
+    # locally. The kernel coverage settings are in .github/coverage-kernels.toml.
+    name: JIT-free kernels
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      NUMBA_DISABLE_JIT: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,mcp]"
+
+      - name: pytest (JIT off) with kernel coverage
+        run: >
+          python -m pytest --ignore=tests/test_docs.py
+          --cov --cov-config=.github/coverage-kernels.toml --cov-report=term-missing

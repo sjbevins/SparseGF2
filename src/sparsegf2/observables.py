@@ -57,7 +57,7 @@ __all__ = [
 def _qubits(sim: Simulator, qubits: Iterable[int], what: str = "qubits") -> np.ndarray:
     # operator.index, as in Simulator: a fractional index is an error, never truncated
     arr = np.fromiter((operator.index(q) for q in qubits), dtype=np.int64)
-    if arr.size and (arr.min() < 0 or arr.max() >= sim.num_qubits):
+    if arr.size and (np.min(arr) < 0 or np.max(arr) >= sim.num_qubits):
         raise IndexError(f"{what} out of range for a {sim.num_qubits}-qubit simulator")
     if np.unique(arr).size != arr.size:
         raise ValueError(f"{what} contain duplicates: {arr.tolist()}")
@@ -189,7 +189,7 @@ def random_erasure_statistics(
     if np.intersect1d(sys_arr, r_arr).size:
         raise ValueError("system and reference qubits must be disjoint")
     size_arr = np.fromiter((int(m) for m in sizes), dtype=np.int64)
-    if size_arr.size and (size_arr.min() < 0 or size_arr.max() > sys_arr.size):
+    if size_arr.size and (np.min(size_arr) < 0 or np.max(size_arr) > sys_arr.size):
         raise ValueError(f"erasure sizes must be between 0 and {sys_arr.size}")
     if samples < 1:
         raise ValueError("samples must be positive")
