@@ -779,18 +779,26 @@ keys, which JSON writes as strings). Every probe also takes `"name"` and its
 own `"checkpoints"`. `run_ensemble`
 returns a summary, and so does `load_results` after a background job
 (`start_ensemble_job`). For each erasure probe, the summary
-holds a `what` line, the mean $P_C(m)$ curve over trajectories and its
-standard error at the last checkpoint with data (`at_layer`, `count`, `mean`,
-`stderr`), and a `vs_depth` grid of up to 8 checkpoints by 17 sizes:
+holds a `what` line, the mean $P_C(m)$ curve over the trajectories that hold a
+code ($k_C > 0$) and its standard error (`at_layer`, `count`,
+`count_with_code`, `mean`, `stderr`), and a `vs_depth` grid of up to 8
+checkpoints by 17 sizes, with `count_with_code` per row:
 
 * `erasure_first_failure`: each trajectory's $\hat P_C(m)$, $m = 0..n$
-  (`api.py::_vector_stats`);
+  (`api.py::_vector_stats`). A trajectory holds a code when one of its samples
+  is $\le n$ (with $k_C = 0$ every sample is $n + 1$);
 * `uncorrectable_region_counts`: each trajectory's exact $P_C(m)$,
-  $m = 0..w$, with $P_C(0) = 0$ prepended.
+  $m = 0..w$, with $P_C(0) = 0$ prepended. All-zero counts mean either
+  $k_C = 0$ or $d > w$, so the code holders come from a `code_dimension` probe
+  evaluated at each of the counts' layers (the same schedule or a denser one)
+  or, without one, from such an `erasure_first_failure` probe. With neither,
+  the curve averages every trajectory, a trajectory without a code contributing
+  $P_C \equiv 0$ (§6), and its `what` line and a note say so.
 
-At present these means are over **all** trajectories, and a trajectory
-without a code contributes $P_C \equiv 0$ (§6). Conditioning the summaries on
-$k_C > 0$ is planned. With `output_dir`, the full result is saved as
+`at_layer` is the last evaluation at which some trajectory holds a code; where
+none does at any evaluation, `count_with_code` is 0 and the mean is `null`.
+The summary's curves are therefore already conditioned: do not divide them by
+the fraction of codes again. With `output_dir`, the full result is saved as
 `result.npz`, which `mipt.EnsembleResult.load` reads back, together with
 `spec.json` and `provenance.json`. Compute $\Phi$, $e_\delta$, $\mu_C$ and the
 distance bounds from that file with `analysis`.
@@ -1225,9 +1233,12 @@ regime, both on the saved snapshot without rerunning the circuit.
 ## 6. Pitfalls
 
 * **Codes with $k_C = 0$.** They have $P_C \equiv 0$, $D = n + 1$ for every
-  sample, $\Phi_C = 0$ and no distance. Averages over all trajectories (the
-  JSON summaries at present, `EnsembleResult.mean`) mix them in as
-  perfect protection. To condition on a code, select the rows with
+  sample, $\Phi_C = 0$ and no distance. Averages over all trajectories
+  (`EnsembleResult.mean`, the estimators below called on every row, or a
+  counts summary with no probe at its layers that identifies the codes, whose
+  `what` line says so) mix them in as perfect protection. The JSON summaries'
+  $P_C(m)$ curves otherwise leave them out (`count_with_code`). To condition
+  on a code in Python, select the rows with
   $k_C > 0$ (a `code_dimension` probe at the same layers, or any first-failure
   sample $\le n$) before calling `erasure_tolerance`, `mean_first_failure` or
   `distance_bounds`. The fraction with $k_C > 0$ is a result in itself.

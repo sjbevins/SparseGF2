@@ -24,7 +24,10 @@ arrays are summarized:
   ranges, e.g. `entropy[0:1024]`).
 
 The full data can be written to files with `output_dir`. Whenever anything is left out,
-the result carries `"truncated": true` and a note says what and how to get it.
+the result carries `"truncated": true` and a note says what and how to get it, with one
+exception: the default thinning of an ensemble's checkpoints to at most 50 is reported by
+`checkpoints.subsampled` alone (showing fewer than 50 to fit the size cap does set
+`truncated`). A result cut to fit keeps all of its notes.
 
 For the quick version, read [`../AGENTS.md`](../AGENTS.md). To set up the MCP server step
 by step (install, connect a client, a first session), follow
@@ -113,8 +116,11 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `list_jobs()` | | jobs in this process |
 | `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks) |
 
-`trajectories` may be omitted only for a collection of graphs (`graph.realizations`),
-which then runs all of its circuits. The signatures are the MCP tools'. In Python,
+`trajectories` may be omitted for a collection of graphs (`graph.realizations`, or a
+graph file holding several graphs), which then runs all of its circuits, and when
+`start_ensemble_job` resumes a run, which then runs to the target stored in its
+`spec.json`, a collection's included (section 3.5). The signatures are the MCP tools'. In
+Python,
 `api.start_ensemble_job(spec, trajectories=None, output_dir=None, ...)` keeps
 `trajectories` second, and `output_dir` is still required (pass it by keyword).
 
@@ -147,9 +153,9 @@ For a valid circuit it returns `num_qubits`, `num_measurements`, `num_detectors`
 | `shots` | 1 | `1`: one run of `Simulator(n, phases, seed)`. `>1`: `sparsegf2.sample(circuit, shots, seed=seed, phases=phases)`, in parallel |
 | `phases` | `true` | sign tracking |
 | `seed` | `null` | see above |
-| `observables` | none | list of `{"kind": ..., args..., "name"?: ...}`, evaluated on the final state of the single-shot run |
+| `observables` | none | list of `{"kind": ..., args..., "name"?: ...}`, evaluated on the final state of the single-shot run. Each value is keyed by its `name`, else by its kind; repeats get `#2`, `#3`, ..., skipping every key already taken and every name given explicitly, so no value overwrites another |
 | `observe_ticks` | `false` | also evaluate the observables after every `TICK`, giving a time series (circuits with up to 1,000,000 ticks) |
-| `tick_stride` | auto | with `observe_ticks`, evaluate after ticks `0, k, 2k, ...` and the last one; the default is every tick, or the smallest stride that keeps at most 10,000 evaluations |
+| `tick_stride` | auto | with `observe_ticks`, evaluate after ticks `0, k, 2k, ...` and the last one; the default is every tick, or the smallest stride that keeps at most 10,000 evaluations, the last tick included |
 | `num_qubits` | circuit's | simulate extra idle qubits |
 | `output_dir` | none | save `circuit_run.npz` (records, random flags, detectors, observable flips), `circuit.stim`, `observables.json` (every evaluated tick, every profile entry, full precision) and `provenance.json` |
 
@@ -210,7 +216,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | Key | JSON form |
 |---|---|
 | `num_system`, `layers`, `measurement_rate` | required numbers |
-| `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` (at most 100,000) for graph disorder: a collection of `G` independent graphs, graph `i` from seed `[seed, i]` |
+| `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` (at most 100,000) for graph disorder: a collection of `G` independent graphs, graph `i` from seed `[seed, i]`. `{"family": "file", "path": P}` reads a graph file (`.json` or `.npz`, as `graphs.save` writes it); a file with several graphs is a collection |
 | `circuits_per_graph` | int, default 1: random circuits per graph of a collection. Trajectory `t` runs on graph `t // circuits_per_graph`, so the collection has `G * circuits_per_graph` trajectories; omit `trajectories` to run them all (asking for more is an error). Must be 1 for a single graph |
 | `edges` | instead of `graph`: `[[a, b], ...]` |
 | `edge_weights` | list (one per edge, in the order of `edges`; each weight stays with its edge when the edge list is normalised) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"`. A list needs explicit `edges` or a deterministic family (whose edges come sorted, `a < b`); random families and `realizations` take a weight family |
@@ -288,20 +294,42 @@ The result contains:
     `count` (trajectories there), `mean` and `stderr` per size m, and `index` (the sizes
     m) when subsampled; and `vs_depth`, the mean on a grid of at most 8 evaluations
     (`layers`, `count`) by 17 sizes (`index`), which shows how the curve changes with
-    depth;
+    depth. A curve or grid that leaves sizes or evaluations out sets `truncated: true`,
+    with a note (routine for the grid once n + 1 > 17);
   * the erasure probes are shown as P_C(m), the fraction of m-qubit erasures that are
     uncorrectable: `erasure_first_failure` as the fraction of samples with first-failure
     size at most m, for m = 0..n (`analysis.failure_by_size`), and
     `uncorrectable_region_counts` exactly, count / C(n, m), for m = 0..w with
     P_C(0) = 0 (`analysis.exact_failure_by_size`);
+  * both erasure curves are averaged over the trajectories that hold a code (k > 0) at
+    each evaluation, and `count_with_code` (in the entry and in `vs_depth`) says how many
+    there are. `at_layer` is then the last evaluation with `count_with_code` > 0 (with
+    `stop_when_purified` the last ones often have no code left); if no evaluation has a
+    code, it is the last evaluation and the mean and `stderr` are `null`.
+    `erasure_first_failure` tells the code holders from its samples (with k = 0 every
+    sample is n + 1). `uncorrectable_region_counts` cannot (its counts are all 0 both for
+    k = 0 and for a distance above w), so it takes them from a `code_dimension` probe
+    evaluated at each of its layers (the same schedule or a denser one) or, if there is
+    none, from such an `erasure_first_failure` probe (the first one of each kind, found by
+    layer, not by name). With neither, the curve is averaged over every trajectory, the
+    ones without a code counting as P_C = 0, and its `what` line and a note say so;
+  * `erasure_lost_profile` and the scalar `lost_information` are not conditioned on a
+    code: they average every trajectory, the ones without a code counting as 0 bits lost,
+    and the profile's `what` line and a note on each say so;
 * `purification` (with a reference):
   * counts: `trajectories`, `purified`, `censored`, `censored_fraction`, `horizon_layer`;
-  * tau statistics: `tau_median_all` (censoring-aware), `tau_mean_purified`,
-    `tau_median_purified`, `tau_min`, `tau_max`, `tau_quantiles_purified`;
+  * tau statistics: `tau_median_all` (censoring-aware: the first checkpoint layer at which
+    at most half the trajectories are left unpurified, given only when strictly more
+    than half purified within the horizon, else `null`), `tau_mean_purified`,
+    `tau_median_purified`, `tau_min`, `tau_max`, `tau_quantiles_purified` (the 10th,
+    25th, 75th and 90th percentiles of the purified trajectories' tau, interpolated
+    linearly as `numpy.percentile` does);
   * `survival`: `layers` and `fraction_unpurified`;
 * `final_layer_mean`, `measurements_per_trajectory`;
 * `notes` when needed (on `stop_when_purified`, `code_snapshot`, `contiguous_distance`,
-  abbreviated names);
+  erasure and lost-information probes that are not conditioned on a code, subsampled
+  vector probes, abbreviated names); a cut to the size limit keeps every note and adds
+  its own;
 * `files` (with `output_dir`).
 
 The scalar means are `sparsegf2.analysis.mean_and_error` of
@@ -317,7 +345,13 @@ $ sparsegf2 ensemble spec.json --trajectories 2000 --seed 7 --output-dir runs/p0
 ```
 
 `runs/p010/spec.json` stores `{"spec", "trajectories", "seed"}`, so
-`sparsegf2 ensemble runs/p010/spec.json` repeats the run exactly.
+`sparsegf2 ensemble runs/p010/spec.json` repeats the run exactly. For a graph file it
+also stores `graph_file`: the file's resolved absolute path and the sha256 of its bytes,
+with which a resume checks that the file still holds the run's graphs. `load_results`
+returns the stored `spec` exactly (its floats are not rounded for display), so it can be
+passed back to `start_ensemble_job`. A spec longer than about 2000 characters (a long
+explicit edge or weight list) is shown as `"too long to show; see the saved files"`;
+take the exact spec to pass back from the `"spec"` entry of `spec.json` instead.
 
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
@@ -347,9 +381,11 @@ circuits:
  "seed": 1, "output_dir": "runs/erasure"}
 ```
 
-The summary gives k and P_C(m) per checkpoint. The failure probability when every qubit
-is erased independently with probability e, Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m),
-and the tolerance e_delta = sup{e : Phi(e) <= delta} come from the saved arrays:
+The summary gives k per checkpoint and P_C(m) averaged over the trajectories that hold a
+code (k > 0; the `code_dimension` probe lets the exact counts be conditioned too). The
+failure probability when every qubit is erased independently with probability e,
+Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m), and the tolerance
+e_delta = sup{e : Phi(e) <= delta} come from the saved arrays:
 
 ```python
 import numpy as np
@@ -405,11 +441,36 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
-  `seed` may be omitted (the stored one is used), and a larger `trajectories` extends a
-  finished run. A directory holding a different spec or seed, or a run made under
-  another randomness contract or SparseGF2 version, is refused.
-* Graph collections: `trajectories` may be omitted (all `G * circuits_per_graph` run) and
-  cannot exceed that count. Changing `circuits_per_graph` changes the spec, so more
+  `seed` may be omitted (the stored one is used), and so may `trajectories`: the run then
+  resumes to the target stored in `spec.json`, for a graph collection too (a new
+  collection run without `trajectories` stores all of its circuits; one started with
+  fewer is not grown by a resume). Only a larger `trajectories` extends a run.
+  `load_results` returns the stored spec exactly, ready to pass back.
+* What is refused, before anything runs, in this order: a run made under another
+  randomness contract or SparseGF2 version (read from `provenance.json` and from the saved
+  results, so a missing `provenance.json` does not hide it); a graph file whose contents
+  changed; a spec that builds another protocol than the saved run (the message names a
+  differing key path with both values, such as
+  `measurement_rate is 0.3333333333333333 in its spec.json and 0.333333 here`, chosen
+  among the keys that set the protocol field that differs, and that field); another
+  `seed`, or a `spec.json` seed that is not the one the saved results were made with.
+  The protocol, not the spec's text, identifies the run (it is what a merge of saved
+  parts requires), so a spec written differently that builds the same protocol
+  continues the run, with a note, and `spec.json` then stores the new form: a cutoff
+  given as `budget` or as a per-size object that resolves to the same w, a range string
+  for a qubit list, a default written out, another path to the same graphs.
+* Graph files: the sha256 recorded in `spec.json` must still match the file's bytes. If
+  the bytes changed (a regenerated `.npz` differs in its zip timestamps even with the
+  same graphs), the run continues only when its saved results show the same graphs, and
+  `spec.json` records the new sha256; otherwise, or with no results saved yet, it is
+  refused. A `spec.json` written before the hash was recorded is checked against the
+  saved results alone.
+* A merge that still fails (a directory mixed by an earlier version) names the chunk
+  files that do not belong to the run in `result.npz` (or the first chunk); deleting them
+  makes the earlier trajectories readable and resumable again.
+* Graph collections: in a new run `trajectories` may be omitted (all
+  `G * circuits_per_graph` run) and cannot exceed that count. To finish a collection
+  started with fewer, pass that count (`estimate_ensemble(spec)["trajectories"]`). Changing `circuits_per_graph` changes the spec, so more
   circuits per graph need a new directory.
 * Concurrency: compiled kernels run one at a time (a process-wide lock), so jobs and
   interactive calls interleave chunk by chunk. Every function is safe to call from any
@@ -437,9 +498,12 @@ summary and exits with code 130; rerunning the same command resumes it.
 * `-` reads the circuit or spec from stdin. `--observables` takes inline JSON or
   `@file.json`.
 * `sparsegf2 ensemble` needs `--trajectories` (or a `trajectories` entry in SPEC.json),
-  except for a graph collection (`graph.realizations`), which runs all of its circuits by
-  default. Without `--chunk-size` it logs the trajectory count and the runtime estimate to
-  stderr before running.
+  except for a graph collection (`graph.realizations`, or a graph file holding several
+  graphs), which runs all of its circuits by default, and for a `--chunk-size` run
+  resumed in its `--output-dir`, which runs to the stored target. Without a count the
+  spec goes to the API as it is, which refuses a single graph with its own message.
+  Without `--chunk-size` it logs the trajectory count and the runtime estimate to stderr
+  before running.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---

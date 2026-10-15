@@ -80,19 +80,20 @@ Example: {"circuit": "H 0\\nCX 0 1\\nTICK\\nM 0", "shots": 1, "seed": 1,
                  {"kind": "expectation", "pauli": "Z0*Z1"}], "observe_ticks": true}"""
 
 _RUN_ENSEMBLE = """\
-Run many trajectories of a random monitored circuit (MonitoredCircuit) and return probe
-means and standard errors per checkpoint (<= 50 shown), purification statistics (purified
-count, censored_fraction, tau median/quantiles among purified, survival curve) and
-throughput. Refuses runs estimated above max_seconds (default 60): use start_ensemble_job.
-spec keys: <SPEC_KEYS>. graph is {"family": <GRAPHS>, params..., "seed" for random
-graphs} (or give edges); graph "realizations": G gives G graphs with circuits_per_graph
-circuits each (trajectory t on graph t // circuits_per_graph; omit trajectories to run
-all). schedule matching|random_edges|all_edges; reference none|purification|single;
-checkpoints "final"|"every_layer"|stride|list; probes [{"kind": <PROBES>, params...,
-optional "name", optional own "checkpoints"}]. A layer = gates, then each system qubit
-measured with probability measurement_rate. tau=-1 means censored. Vector probes give a
-curve over size m (erasure probes: P_C(m), the uncorrectable fraction of m-qubit
-erasures) at the last checkpoint plus a coarse depth x size grid (vs_depth).
+Run random monitored-circuit trajectories: probe means and standard errors per
+checkpoint (<= 50 shown), purification statistics (censored_fraction, tau quantiles,
+survival) and throughput. Refuses runs estimated above max_seconds (default 60): use
+start_ensemble_job.
+spec keys: <SPEC_KEYS>. graph: {"family": <GRAPHS>, params..., "seed" if random} (or
+give edges); "realizations": G in graph gives G graphs, circuits_per_graph circuits each
+(omit trajectories to run them all). schedule matching|random_edges|all_edges;
+reference none|purification|single; checkpoints "final"|"every_layer"|stride|list;
+probes [{"kind": <PROBES>, params..., "name"?, own "checkpoints"?}]. A layer = gates,
+then each system qubit measured with probability measurement_rate. tau=-1 means
+censored. Vector probes: a curve over m at the last checkpoint and a depth x m grid
+(vs_depth). P_C(m), the uncorrectable fraction of m-qubit erasures, is over trajectories
+with a code (count_with_code); the counts are conditioned only if code_dimension or
+erasure_first_failure covers their layers, else flagged.
 
 Example: {"spec": {"num_system": 32, "graph": {"family": "watts_strogatz", "k": 4,
  "beta": 0.1, "seed": 1}, "layers": 256, "measurement_rate": 0.1, "reference": "single",
@@ -112,8 +113,10 @@ Start a long ensemble as a background job; returns immediately with a job_id. Th
 split into chunks (chunk_size trajectories, default about 10 s each), each saved under
 output_dir as soon as it finishes, then merged into output_dir/result.npz. Results equal
 one run_ensemble call with the same spec and seed. To resume after a cancel or restart,
-or to extend a finished run, call again with the same spec and output_dir (seed may be
-omitted). Poll with job_status, then call load_results(output_dir).
+call again with the same spec and output_dir; seed and trajectories may be omitted (the
+stored seed and target are used, also for a graph collection). Only a larger trajectories
+extends a run. A spec that builds another protocol, or a changed graph file, is refused
+before anything runs. Poll with job_status, then call load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,
@@ -142,7 +145,7 @@ Example: {}"""
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
 cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
-spec.
+spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run.
 
 Example: {"path": "runs/n128_p012"}"""
 
@@ -187,7 +190,8 @@ Steps:
    output_dir.
 2. Report how the code dimension k(t) decays with depth and, at the final checkpoint,
    P_C(m), the fraction of m-qubit erasures that are uncorrectable (from the first-failure
-   samples, and exactly for m <= 2 from the counts). Erasing each qubit independently with
+   samples, and exactly for m <= 2 from the counts), averaged over the trajectories that
+   still hold a code (count_with_code says how many). Erasing each qubit independently with
    probability e fails with probability Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m); in
    Python, sparsegf2.analysis.erasure_failure_probability and erasure_tolerance compute
    Phi(e) and e_delta from the saved result.

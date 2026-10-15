@@ -165,7 +165,10 @@ def _build_parser() -> _Parser:
         "--trajectories",
         type=int,
         default=None,
-        help="number of trajectories (default for a graph collection: all of its circuits)",
+        help=(
+            "number of trajectories (default for a graph collection: all of its circuits; "
+            "for a resumed --chunk-size run: the target stored in its --output-dir)"
+        ),
     )
     p.add_argument(
         "--seed", type=int, default=None, help="random seed (default: from file, else fresh)"
@@ -308,22 +311,21 @@ def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
 
     data = _read_json(_read_text(args.spec), "SPEC.json")
     if isinstance(data, dict) and "spec" in data:
-        unknown = sorted(set(data) - {"spec", "trajectories", "seed"})
+        # graph_file is the record of a graph file that a run writes beside its spec
+        unknown = sorted(set(data) - {"spec", "trajectories", "seed", "graph_file"})
         if unknown:
             raise ValueError(
-                f"SPEC.json: unknown top-level key(s) {unknown}; expected spec, trajectories, seed"
+                f"SPEC.json: unknown top-level key(s) {unknown}; expected spec, trajectories, "
+                "seed (and graph_file, which a run writes beside the spec)"
             )
         spec, trajectories, seed = data["spec"], data.get("trajectories"), data.get("seed")
     else:
         spec, trajectories, seed = data, None, None
     trajectories = args.trajectories if args.trajectories is not None else trajectories
     seed = args.seed if args.seed is not None else seed
-    collection = isinstance(spec, dict) and "realizations" in (spec.get("graph") or {})
-    if trajectories is None and not collection:
-        raise ValueError(
-            "give --trajectories (or a 'trajectories' entry in SPEC.json); only a graph "
-            "collection (graph.realizations) runs all of its circuits by default"
-        )
+    # Without a count the API decides: a graph collection (graph.realizations, or a graph
+    # file holding several graphs) runs all of its circuits, a resumed job runs to its
+    # stored target, and a single graph is refused with a message.
     if args.chunk_size is None:
         estimate = api.estimate_ensemble(spec, trajectories)
         _log(

@@ -4,9 +4,10 @@ import runpy
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from sparsegf2 import mipt
+from sparsegf2 import api, mipt
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -43,7 +44,22 @@ def test_purification_time_mostly_censored_point(tmp_path, monkeypatch, capsys):
     purified = int((res.purification_layer >= 0).sum())
     assert 0 < purified < 20
     assert f"observed purifications: {purified} / 40" in printed
-    assert "> 96 layers (more than half censored)" in printed
+    assert "> last checkpoint (96) (more than half censored)" in printed
+
+
+def test_purification_time_median_needs_a_strict_majority():
+    median_tau = runpy.run_path(str(EXAMPLES / "purification_time.py"))["median_tau"]
+    spec = {"num_system": 8, "graph": {"family": "cycle"}, "layers": 12, "measurement_rate": 0.2,
+            "reference": "single", "checkpoints": "every_layer"}  # fmt: skip
+    half = api._build_spec(spec).run(4, seed=1)
+    assert half.purification_layer.tolist() == [10, -1, 4, -1]  # exactly half purified
+    assert median_tau(half) == ">= 10 layers (not determined: only half purified)"
+    # 13 of 20 purified; survival is exactly 1/2 from layer 11 to 21, then below
+    spec.update(num_system=12, layers=40, measurement_rate=0.15, stop_when_purified=True)
+    most = api._build_spec(spec).run(20, seed=1)
+    tau = np.sort(np.where(most.purification_layer >= 0, most.purification_layer, np.inf))
+    assert tau[9] == 11 and tau[10] == 22
+    assert median_tau(most) == "11 layers"
 
 
 def test_transition_scan(tmp_path, monkeypatch):

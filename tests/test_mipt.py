@@ -1278,3 +1278,60 @@ def test_load_refuses_a_probe_whose_size_disagrees_with_its_cutoff(tmp_path):
     np.testing.assert_array_equal(
         back.values["uncorrectable_region_counts[2]"], res.values["uncorrectable_region_counts[2]"]
     )
+
+
+def _km_spec(checkpoints, **extra):
+    return mipt.MonitoredCircuit(
+        num_system=12, edges=graphs.cycle(12), layers=40, measurement_rate=0.15,
+        reference="single", reference_partner=0, probes=[mipt.code_dimension()],
+        checkpoints=checkpoints, **extra,
+    )  # fmt: skip
+
+
+def test_purification_times_censor_at_the_last_purification_test():
+    # The same seed gives the same trajectories whatever the checkpoints, so the run
+    # tested at every layer is the truth for the run tested only up to layer 10.
+    # Sigma is irrelevant: the comparison is exact (the same trajectories).
+    short = _km_spec(list(range(11))).run(1500, seed=1)
+    truth = _km_spec("every_layer").run(1500, seed=1)
+    time, observed = short.purification_times()
+    assert time.max() <= 10
+    assert (time[~observed] == 10).all()
+    km = analysis.kaplan_meier(time, observed)
+    _, exact = truth.survival()
+
+    def km_at(t):
+        i = np.searchsorted(km["times"], t, side="right") - 1
+        return 1.0 if i < 0 else km["survival"][i]
+
+    for t in range(11):
+        assert km_at(t) == pytest.approx(exact[t], abs=1e-12)
+    # the old recipe censors at final_layer = 40 and so misstates the curve at layer 20
+    tau = short.purification_layer
+    old = analysis.kaplan_meier(np.where(tau >= 0, tau, short.final_layer), tau >= 0)
+    i = np.searchsorted(old["times"], 20, side="right") - 1
+    assert old["survival"][i] != pytest.approx(exact[20], abs=1e-6)
+
+
+def test_censoring_layer_with_stops_lists_and_no_reference():
+    stopped = _km_spec("every_layer", stop_when_purified=True).run(200, seed=3)
+    assert stopped.censoring_layer.dtype == np.int64
+    censored = stopped.purification_layer < 0
+    assert censored.any() and (~censored).any()
+    assert (stopped.censoring_layer[censored] == 40).all()
+    # a stopped trajectory's censoring layer is defined: its last simulated layer
+    np.testing.assert_array_equal(
+        stopped.censoring_layer[~censored], stopped.final_layer[~censored]
+    )
+    listed = _km_spec([0, 5, 17]).run(20, seed=3)
+    np.testing.assert_array_equal(listed.censoring_layer, 17)
+    time, observed = listed.purification_times()
+    np.testing.assert_array_equal(time[~observed], 17)
+    np.testing.assert_array_equal(time[observed], listed.purification_layer[observed])
+    bare = mipt.MonitoredCircuit(
+        num_system=6, edges=graphs.cycle(6), layers=3, measurement_rate=0.1, reference="none"
+    ).run(2, seed=1)
+    with pytest.raises(ValueError, match="needs a reference"):
+        _ = bare.censoring_layer
+    with pytest.raises(ValueError, match="needs a reference"):
+        bare.purification_times()

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import operator
+from fractions import Fraction
 
 import numpy as np
 
@@ -67,8 +68,13 @@ def kaplan_meier(times: np.ndarray, observed: np.ndarray) -> dict[str, np.ndarra
     :meth:`EnsembleResult.survival` gives the same curve directly.
 
     ``EnsembleResult.purification_layer`` marks censored trajectories with -1,
-    which is not a time: pass ``times=np.where(tau >= 0, tau, result.final_layer)``
-    and ``observed=tau >= 0``. Negative or non-finite times raise ``ValueError``.
+    which is not a time: use ``time, observed = result.purification_times()``,
+    which censors at the last layer where purification was tested. Negative or
+    non-finite times raise ``ValueError``.
+
+    ``survival`` is the exact product of (n_j - d_j) / n_j, rounded to float64 once
+    (not a running float product), so a survival of exactly 1/2 is 0.5 and the
+    median rule "first time with survival <= 0.5" does not miss it.
     """
     t = np.asarray(times, dtype=np.float64)
     e = np.asarray(observed, dtype=bool)
@@ -77,19 +83,20 @@ def kaplan_meier(times: np.ndarray, observed: np.ndarray) -> dict[str, np.ndarra
     if not np.all(np.isfinite(t) & (t >= 0)):
         raise ValueError(
             "times must be finite and non-negative; censored entries need their censoring "
-            "time, not a sentinel such as purification_layer = -1 (pass "
-            "np.where(tau >= 0, tau, result.final_layer) with observed=tau >= 0)"
+            "time, not a sentinel such as purification_layer = -1 (use "
+            "time, observed = result.purification_times())"
         )
     event_times = np.unique(t[e])
     survival = np.empty(event_times.size)
     stderr = np.empty(event_times.size)
     at_risk = np.empty(event_times.size, dtype=np.int64)
-    s = 1.0
+    exact = Fraction(1)  # the exact product, rounded once per step by float()
     greenwood = 0.0
     for i, ti in enumerate(event_times):
         n_risk = int(np.sum(t >= ti))
         d = int(np.sum((t == ti) & e))
-        s *= 1.0 - d / n_risk
+        exact *= Fraction(n_risk - d, n_risk)
+        s = float(exact)
         if n_risk > d:
             greenwood += d / (n_risk * (n_risk - d))
         survival[i] = s

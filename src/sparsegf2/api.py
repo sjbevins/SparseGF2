@@ -58,7 +58,7 @@ import traceback
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -112,6 +112,7 @@ MAX_ERRORS_SHOWN = 20
 MAX_STABILIZER_QUBITS = 32
 MAX_NAME_CHARS = 64
 MAX_VECTOR_DEPTHS = 8
+MAX_GRID_SIZES = 17
 MAX_OBSERVED_TICKS = 1_000_000
 MAX_TICK_ROWS = 10_000
 MAX_QUBITS = 65_536
@@ -199,28 +200,47 @@ def _shrink(obj: Any, max_items: int, max_text: int, depth: int = 0) -> Any:
 
 
 def _mark_truncated(out: dict[str, Any], note: str) -> dict[str, Any]:
-    notes = out.get("notes")
-    out["notes"] = [*(notes[:2] if isinstance(notes, list) else []), note]
+    """Set ``truncated`` and append ``note`` (once) after every note ``out`` already has."""
+    notes = list(out["notes"]) if isinstance(out.get("notes"), list) else []
+    if note not in notes:
+        notes.append(note)
+    out["notes"] = notes
     out["truncated"] = True
     return out
 
 
-def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, Any]:
+def _clean(out: dict[str, Any], exact: Sequence[str] = ()) -> dict[str, Any]:
+    """``_jsonable(out)``, except that the top-level fields named in ``exact`` keep their floats."""
+    return {**_jsonable(out), **{k: _jsonable(out[k], exact=True) for k in exact if k in out}}
+
+
+def _bounded(
+    out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS, *, exact: Sequence[str] = ()
+) -> dict[str, Any]:
     """Make ``out`` JSON-clean and, if still too long, cut long lists, strings and keys.
 
     The summaries below are designed to fit already; this is the safety net.
     When it acts, ``truncated`` is set and a note says how to get everything.
-    As a last resort only the top-level scalar fields (seed, counts, ...) and
-    ``files`` are kept, so a caller never loses the run's identity or paths.
+    The notes say how to read the result, so they are kept whole (unless
+    they alone exceed the limit). As a last resort only the top-level scalar
+    fields (seed, counts, ...), ``files`` and the notes are kept, so a caller
+    never loses the run's identity or paths. The top-level fields named in
+    ``exact`` (a stored spec, which a caller passes back) are neither rounded
+    nor cut: they are shown as they are, or (in the last resort) left out.
     """
-    out = _jsonable(out)
+    out = _clean(out, exact)
     if len(json.dumps(out)) <= limit:
         return out
     note = (
         "output cut to fit the size limit; pass output_dir (or read the saved files) for all data"
     )
+    notes = out.get("notes")
+    kept = {k: out[k] for k in exact if k in out}
     for max_items in (32, 16, 8, 4, 2, 1, 0):
-        shrunk = _mark_truncated(_shrink(out, max_items, max(200, 80 * max_items)), note)
+        shrunk = {**_shrink(out, max_items, max(200, 80 * max_items)), **kept}
+        if isinstance(notes, list):
+            shrunk["notes"] = notes
+        shrunk = _mark_truncated(shrunk, note)
         if len(json.dumps(shrunk)) <= limit:
             return shrunk
     essentials = {
@@ -230,8 +250,10 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
     }
     if isinstance(out.get("files"), dict):
         essentials["files"] = out["files"]
+    if isinstance(notes, list):
+        essentials["notes"] = notes
     essentials = _mark_truncated(
-        essentials, "result too large to show; only scalar fields and file paths are kept"
+        essentials, "result too large to show; only scalar fields, file paths and notes are kept"
     )
     if len(json.dumps(essentials)) <= limit:
         return essentials
@@ -584,7 +606,11 @@ def _compile_observables(
             'observables must be a list of objects like {"kind": "entropy", "region": [0, 1]}'
         )
     compiled: list[tuple[str, Callable[[Simulator], Any], Callable[[Any], Any]]] = []
-    names: Counter[str] = Counter()
+    # Every result key is distinct: a name given explicitly is kept (a repeat gets a
+    # suffix), and the automatic ones (the kind, then kind#2, kind#3, ...) skip every
+    # name in use or given explicitly.
+    explicit = {s["name"] for s in specs if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    used: set[str] = set()
     for i, spec in enumerate(specs):
         where = f"observables[{i}]"
         if not isinstance(spec, dict) or "kind" not in spec:
@@ -629,12 +655,14 @@ def _compile_observables(
         if kind in ("random_erasure_statistics", "erasure_profile"):
             args.setdefault("samples", 100 if kind == "random_erasure_statistics" else 10)
             args.setdefault("seed", seed)
-        name = spec.get("name") or kind
+        given = spec.get("name")
+        name = given or kind
         if not isinstance(name, str):
             raise ValueError(f"{where}.name must be a string")
-        names[name] += 1
-        if names[name] > 1:
-            name = f"{name}#{names[name]}"
+        base, copy = name, 2
+        while name in used or (name in explicit and name != given):
+            name, copy = f"{base}#{copy}", copy + 1
+        used.add(name)
 
         def fn(sim: Simulator, _obs=obs, _args=args, _where=where, _kind=kind) -> Any:
             try:
@@ -883,7 +911,7 @@ def run_circuit(
     tick_stride
         With ``observe_ticks``, evaluate after ticks ``0, k, 2k, ...`` and the
         last one. Default: every tick, or the smallest stride that keeps at
-        most :data:`MAX_TICK_ROWS` evaluations.
+        most :data:`MAX_TICK_ROWS` evaluations, the last tick included.
     num_qubits
         Simulate more qubits than the circuit touches (idle qubits).
     output_dir
@@ -1072,14 +1100,17 @@ def _tick_stride(observe_ticks: bool, tick_stride: Any, num_ticks: int, has_obs:
             f"observe_ticks supports circuits with at most {MAX_OBSERVED_TICKS:,} TICKs "
             f"(this one has {num_ticks:,}); split the circuit into segments"
         )
-    needed = max(1, math.ceil(num_ticks / MAX_TICK_ROWS))
+    # Stride s evaluates ticks 0, s, 2s, ... and the last one, ceil((num_ticks - 1) / s) + 1
+    # in all; the smallest s that keeps this within MAX_TICK_ROWS:
+    needed = max(1, -(-(num_ticks - 1) // (MAX_TICK_ROWS - 1)))
     if tick_stride is None:
         return needed
     stride = _require_int(tick_stride, "tick_stride", minimum=1)
     if stride < needed:
+        evaluated = -(-(num_ticks - 1) // stride) + 1
         raise ValueError(
-            f"tick_stride={stride} would evaluate more than {MAX_TICK_ROWS:,} ticks of "
-            f"{num_ticks:,}; use tick_stride >= {needed}"
+            f"tick_stride={stride} would evaluate {evaluated:,} of {num_ticks:,} ticks, more "
+            f"than {MAX_TICK_ROWS:,}; use tick_stride >= {needed}"
         )
     return stride
 
@@ -1226,6 +1257,22 @@ def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any
     if len(gs) == 1:
         return gs[0], (None if ws is None else ws[0])
     return gs, ws
+
+
+def _graph_file_record(spec: dict) -> dict[str, str] | None:
+    """The resolved path and the sha256 of the bytes of a ``{"family": "file"}`` graph.
+
+    Recorded in ``spec.json`` beside the spec, so that a resume can tell
+    whether the file still holds the graphs the run started with. ``spec`` has
+    been built already, so the path names a readable file.
+    """
+    graph = spec.get("graph")
+    if not (isinstance(graph, dict) and graph.get("family") == "file"):
+        return None
+    path = Path(graph["path"]).expanduser().resolve()
+    with path.open("rb") as f:
+        digest = hashlib.file_digest(f, "sha256").hexdigest()
+    return {"path": str(path), "sha256": digest}
 
 
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
@@ -1654,9 +1701,11 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     if trajectories is None:
         if mc.num_trajectories is None:
             raise ValueError(
-                "give trajectories (the number of random circuits); it may be omitted only for "
-                "a collection of graphs (graph.realizations), which runs circuits_per_graph "
-                "circuits on each graph"
+                "give trajectories (the number of random circuits; --trajectories in the CLI); "
+                "it may be omitted only for a collection of graphs (graph.realizations, or a "
+                "graph file holding several graphs), which runs circuits_per_graph circuits on "
+                "each graph, or to resume a job in its output_dir, which runs to the target "
+                "stored there"
             )
         trajectories = mc.num_trajectories
     trajectories = _require_int(trajectories, "trajectories", minimum=1)
@@ -1762,97 +1811,174 @@ def _summary_names(names: Sequence[str]) -> dict[str, str]:
 
 
 def _vector_summary(
-    stats: Callable[[int], tuple[np.ndarray, np.ndarray]],
+    stats: Callable[[int], tuple[np.ndarray, np.ndarray, int | None]],
     alive: np.ndarray,
     layers: np.ndarray,
     sizes_shown: int,
     depths_shown: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """A vector probe: one curve over erasure or region size m = 0, 1, ... per evaluation.
 
     ``stats(c)`` returns the mean and standard error over trajectories of the
-    curve at evaluation ``c``; ``alive`` (trajectories x evaluations) marks
-    the values that exist (with ``stop_when_purified``, entanglement profiles
-    of stopped trajectories do not). ``mean``/``stderr`` are at the last
-    evaluation that has data, and ``vs_depth`` gives the mean on a coarse
-    grid of evaluations x sizes, so the change with circuit depth stays
-    visible. ``index`` lists the sizes m shown when not all are.
+    curve at evaluation ``c``, and for a curve conditioned on a code the
+    number of trajectories that hold one there (else None); ``alive``
+    (trajectories x evaluations) marks the values that exist (with
+    ``stop_when_purified``, entanglement profiles of stopped trajectories do
+    not). ``mean``/``stderr`` are at the last evaluation that has data (for a
+    curve conditioned on a code, the last one at which some trajectory holds
+    one, if any does), and ``vs_depth`` gives the mean on a coarse grid of
+    evaluations x sizes, so the change with circuit depth stays visible.
+    ``index`` lists the sizes m shown when not all are. Returns the entry and
+    whether anything was left out (sizes of the curve, or evaluations or
+    sizes of the grid).
     """
     count = alive.sum(axis=0)
     with_data = np.flatnonzero(count > 0)
     if not with_data.size:
-        return {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
+        empty = {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
+        return empty, False
     last = int(with_data[-1])
-    mean, err = stats(last)
+    if stats(last)[2] == 0:  # no code left there: show the last evaluation that has one
+        last = next((int(c) for c in with_data[::-1] if stats(int(c))[2]), last)
+    mean, err, with_code = stats(last)
     sizes = _subsample(mean.size, sizes_shown)
     entry: dict[str, Any] = {
         "vector": True,
         "at_layer": int(layers[last]),
         "count": int(count[last]),
-        "mean": mean[sizes],
-        "stderr": err[sizes],
     }
-    if len(sizes) < mean.size:
+    if with_code is not None:
+        entry["count_with_code"] = with_code
+    entry["mean"] = mean[sizes]
+    entry["stderr"] = err[sizes]
+    cut = len(sizes) < mean.size
+    if cut:
         entry["index"] = sizes
     if len(with_data) > 1:
         depth_idx = with_data[_subsample(len(with_data), depths_shown)]
-        grid_sizes = _subsample(mean.size, 17)
-        entry["vs_depth"] = {
-            "layers": layers[depth_idx],
-            "count": count[depth_idx],
-            "index": grid_sizes,
-            "mean": np.array([stats(int(c))[0][grid_sizes] for c in depth_idx]),
-        }
-    return entry
+        grid_sizes = _subsample(mean.size, MAX_GRID_SIZES)
+        rows = [stats(int(c)) for c in depth_idx]
+        grid: dict[str, Any] = {"layers": layers[depth_idx], "count": count[depth_idx]}
+        if with_code is not None:
+            grid["count_with_code"] = [row[2] for row in rows]
+        grid["index"] = grid_sizes
+        grid["mean"] = np.array([row[0][grid_sizes] for row in rows])
+        entry["vs_depth"] = grid
+        cut = cut or len(grid_sizes) < mean.size or len(depth_idx) < len(with_data)
+    return entry, cut
 
 
 def _vector_stats(
-    probe: mipt.Probe, values: np.ndarray, n: int, cache: dict
-) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
+    probe: mipt.Probe,
+    values: np.ndarray,
+    n: int,
+    cache: dict,
+    has_code: np.ndarray | None = None,
+) -> Callable[[int], tuple[np.ndarray, np.ndarray, int | None]]:
     """Mean and standard error of a vector probe's curve at one evaluation, memoized in ``cache``.
 
-    Profiles are averaged as stored. First-failure samples become per-trajectory
+    Profiles are averaged as stored. The erasure probes are averaged over the
+    trajectories that hold a code (k > 0) at the evaluation, whose number is
+    returned as well (None for the curves that are not conditioned):
+    first-failure samples show it themselves (some sample <= n; with k = 0
+    every sample is n + 1), exhaustive counts need ``has_code`` (trajectories
+    x the probe's evaluations, from :func:`_code_holders_at`), and without it
+    average every trajectory. First-failure samples become per-trajectory
     P_C(m), m = 0..n (fraction of samples with D <= m), in chunks of
     trajectories so the memory stays bounded whatever the ensemble size;
     exhaustive counts become the exact P_C(m), m = 0..w (P_C(0) = 0).
     """
 
-    def compute(c: int) -> tuple[np.ndarray, np.ndarray]:
+    def holders(c: int) -> np.ndarray | None:
+        """The trajectories that hold a code at evaluation ``c``, or None if not conditioned."""
+        if probe.kind == "erasure_first_failure":
+            return np.flatnonzero(values[:, c, :].min(axis=1) <= n)
+        if probe.kind == "uncorrectable_counts" and has_code is not None:
+            return np.flatnonzero(has_code[:, c])
+        return None
+
+    def compute(c: int, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         if probe.kind == "uncorrectable_counts":
-            exact = analysis.exact_failure_by_size(values[:, c, :], n)
+            counts = values[:, c, :] if rows is None else values[rows, c, :]
+            exact = analysis.exact_failure_by_size(counts, n)
             curves = np.concatenate([np.zeros((exact.shape[0], 1)), exact], axis=1)
             return analysis.mean_and_error(curves, axis=0)
-        if probe.kind != "erasure_first_failure":
+        if rows is None:  # a profile
             return analysis.mean_and_error(values[:, c, :], axis=0)
         total = np.zeros(n + 1)
         squares = np.zeros(n + 1)
         chunk = max(1, (1 << 22) // (n + 2))
-        for start in range(0, values.shape[0], chunk):
-            curves = analysis.failure_by_size(values[start : start + chunk, c, :], n)
+        for start in range(0, rows.size, chunk):
+            curves = analysis.failure_by_size(values[rows[start : start + chunk], c, :], n)
             total += curves.sum(axis=0)
             squares += (curves**2).sum(axis=0)
-        t = values.shape[0]
-        mean = total / t
-        with np.errstate(invalid="ignore", divide="ignore"):
+        t = rows.size
+        with np.errstate(invalid="ignore", divide="ignore"):  # no code (t = 0): NaN, shown as null
+            mean = total / t
             var = np.maximum(squares - t * mean**2, 0.0) / (t - 1)
             err = np.sqrt(var / t)
         return mean, err
 
-    def stats(c: int) -> tuple[np.ndarray, np.ndarray]:
+    def stats(c: int) -> tuple[np.ndarray, np.ndarray, int | None]:
         key = (probe.name, c)
         if key not in cache:
-            cache[key] = compute(c)
+            rows = holders(c)
+            cache[key] = (*compute(c, rows), None if rows is None else int(rows.size))
         return cache[key]
 
     return stats
 
 
+def _code_holders_at(result: mipt.EnsembleResult, layers: np.ndarray) -> np.ndarray | None:
+    """Whether each trajectory holds a code (k > 0) at each of ``layers``, or None.
+
+    The answer (trajectories x layers) comes from the first ``code_dimension``
+    probe evaluated at every one of these layers (on the same schedule or a
+    denser one), or else from the first such ``erasure_first_failure`` probe
+    (a code is held iff some sample is <= n). Probes are found by layer, not by
+    name; None when neither kind covers all of ``layers``.
+    """
+    n = result.spec.num_system
+    for kind in ("code_dimension", "erasure_first_failure"):
+        for p in result.spec.probes:
+            if p.kind != kind:
+                continue
+            own = np.asarray(result.layers(p.name))
+            if not np.isin(layers, own).all():
+                continue
+            values = np.asarray(result.values[p.name])
+            cols = np.searchsorted(own, layers)
+            if kind == "code_dimension":
+                return values[:, cols] > 0
+            return np.stack([values[:, c, :].min(axis=1) <= n for c in cols], axis=1)
+    return None
+
+
+_HOLDS_A_CODE = (
+    ", among trajectories that hold a code (k > 0); count_with_code says how many; at_layer "
+    "is the last evaluation with count_with_code > 0, if there is one"
+)
+_LOSES_NOTHING = (
+    "averaged over all trajectories; trajectories without a code (k = 0) count as 0 bits lost"
+)
+
+
+def _loses_nothing_note(key: str) -> str:
+    """The note on a lost-information probe, which is not conditioned on a code."""
+    return (
+        f"{key}: {_LOSES_NOTHING}, so the mean falls as codes are lost; select k > 0 in the "
+        "saved arrays (output_dir) to average over the codes only"
+    )
+
+
 _VECTOR_MEANING = {
     "entropy_profile": "mean S(first m qubits of system_order) vs m (index)",
-    "erasure_lost_profile": "mean bits of logical information lost vs erasure size m (index)",
+    "erasure_lost_profile": (
+        "mean bits of logical information lost vs erasure size m (index), " + _LOSES_NOTHING
+    ),
     "erasure_first_failure": (
         "P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), "
-        "estimated from the first-failure samples"
+        "estimated from the first-failure samples" + _HOLDS_A_CODE
     ),
     "uncorrectable_counts": (
         "exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index)"
@@ -1865,16 +1991,19 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
 
     When it is too long, fewer checkpoints are shown (evenly spaced, always
     the first and last, the same ones for every probe and the survival curve)
-    before the generic cut of :func:`_bounded` is used as a last resort.
+    before the generic cut of :func:`_bounded` is used as a last resort. A
+    stored ``spec`` in ``extra`` is shown exactly (never rounded or cut), so
+    it can be passed back to resume or extend the run.
     """
     total = max(
         [len(result.checkpoint_layers)] + [len(result.layers(name)) for name in result.values]
     )
+    exact = ("spec",)
     long_extras = [
         key
         for key, value in extra.items()
         if key not in ("files", "path")
-        and len(json.dumps(_jsonable(value))) > MAX_OUTPUT_CHARS // 4
+        and len(json.dumps(_jsonable(value, exact=True))) > MAX_OUTPUT_CHARS // 4
     ]
     if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
         extra = {**extra, **{key: "too long to show; see the saved files" for key in long_extras}}
@@ -1891,9 +2020,9 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
                 "spaced, first and last included) to fit the size limit; pass output_dir or "
                 "read the saved files for all of them",
             )
-        if len(json.dumps(_jsonable(out))) <= MAX_OUTPUT_CHARS:
-            return _bounded(out)
-    return _bounded(out)
+        if len(json.dumps(_clean(out, exact))) <= MAX_OUTPUT_CHARS:
+            return _bounded(out, exact=exact)
+    return _bounded(out, exact=exact)
 
 
 def _summarize_ensemble(
@@ -1935,6 +2064,8 @@ def _summarize_ensemble(
         sizes_shown = min(sizes_shown, max(shown, 4) + 1)
     probes = {p.name: p for p in spec.probes}
     n = spec.num_system
+    depths_shown = min(MAX_VECTOR_DEPTHS, shown)
+    vectors_cut = False
     for name, values in result.values.items():
         values = np.asarray(values, dtype=np.float64)
         probe = probes[name]
@@ -1957,17 +2088,38 @@ def _summarize_ensemble(
                     f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
                     "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
                 )
+            if probe.kind == "lost_information":
+                notes.append(_loses_nothing_note(keys[name]))
         else:
             alive = (
                 ~np.isnan(values[:, :, 0])
                 if mipt._KINDS[probe.kind].after_purification == "nan"
                 else np.ones(values.shape[:2], dtype=bool)
             )
-            stats = _vector_stats(probe, values, n, cache)
-            entry = {
-                "what": _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)"),
-                **_vector_summary(stats, alive, own, sizes_shown, min(MAX_VECTOR_DEPTHS, shown)),
-            }
+            what = _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)")
+            has_code = None
+            if probe.kind == "uncorrectable_counts":
+                # The counts alone cannot tell k = 0 from a distance above w.
+                has_code = _code_holders_at(result, own)
+                if has_code is None:
+                    what += (
+                        ", averaged over all trajectories; trajectories without a code (k = 0) "
+                        "count as P_C = 0"
+                    )
+                    notes.append(
+                        f"{keys[name]}: trajectories without a code (k = 0) count as P_C = 0 in "
+                        "this curve, since the counts alone cannot tell k = 0 from a large "
+                        "distance; add a code_dimension or erasure_first_failure probe evaluated "
+                        "at the same layers to average over the codes (k > 0) only"
+                    )
+                else:
+                    what += _HOLDS_A_CODE
+            if probe.kind == "erasure_lost_profile":
+                notes.append(_loses_nothing_note(keys[name]))
+            stats = _vector_stats(probe, values, n, cache, has_code)
+            summary, cut = _vector_summary(stats, alive, own, sizes_shown, depths_shown)
+            vectors_cut = vectors_cut or cut
+            entry = {"what": what, **summary}
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
         out["purification"] = _purification_summary(result.purification_layer, layers, shown)
@@ -1982,6 +2134,13 @@ def _summarize_ensemble(
             "stop_when_purified: code probes take their exact values for a purified trajectory "
             "(k = 0, nothing lost); entanglement probes average only trajectories still running "
             "(see 'count')"
+        )
+    if vectors_cut:
+        out["truncated"] = True
+        notes.append(
+            f"vector probes are subsampled: curves to at most {sizes_shown} sizes m (listed in "
+            f"'index'), vs_depth grids to at most {depths_shown} evaluations by "
+            f"{MAX_GRID_SIZES} sizes; pass output_dir or read the saved files for every value"
         )
     if notes:
         out["notes"] = notes
@@ -2015,9 +2174,11 @@ def _purification_summary(
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
         surviving = alive.mean(axis=1)
         # The median of tau over all trajectories is well defined despite
-        # censoring whenever more than half purified within the horizon.
+        # censoring only when strictly more than half purified within the
+        # horizon (with exactly half it lies anywhere from the last purification
+        # to beyond the horizon); it is then the first layer with S <= 1/2.
         below = np.flatnonzero(surviving <= 0.5)
-        out["tau_median_all"] = int(layers[below[0]]) if below.size else None
+        out["tau_median_all"] = int(layers[below[0]]) if surviving[-1] < 0.5 else None
         out["survival"] = {"layers": layers[idx], "fraction_unpurified": surviving[idx]}
     return out
 
@@ -2099,19 +2260,28 @@ def _write_run_metadata(
     command: str,
     *,
     resumed_from: int | None = None,
+    graph_file: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
 
     Replaying ``spec.json`` repeats the run only under the randomness contract
     that ``provenance.json`` records: this version cannot reproduce a run made
-    under another one (``mipt.RANDOMNESS_CONTRACT``).
+    under another one (``mipt.RANDOMNESS_CONTRACT``). For a graph file,
+    ``spec.json`` also records its resolved path and the sha256 of its bytes
+    (``graph_file``), with which a resume checks that the file is unchanged.
 
     For a resumed job (``resumed_from`` set) the original provenance is kept and
     this process's record is appended under ``"resumes"``.
     """
+    record_file = {} if graph_file is None else {"graph_file": graph_file}
     try:
         spec_text = json.dumps(
-            {"spec": _jsonable(spec, exact=True), "trajectories": trajectories, "seed": seed},
+            {
+                "spec": _jsonable(spec, exact=True),
+                "trajectories": trajectories,
+                "seed": seed,
+                **record_file,
+            },
             indent=2,
         )
     except (TypeError, ValueError) as exc:
@@ -2155,6 +2325,43 @@ def _check_contract(out: Path, stored: dict | None, existing: mipt.EnsembleResul
             )
 
 
+def _check_version(out: Path, stored: dict | None, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse to resume or extend a run started with another ``sparsegf2`` version.
+
+    The version is read from ``provenance.json`` (the original record) and
+    from the saved results, which a merge requires to match, so a missing or
+    unreadable ``provenance.json`` cannot let another version's results through.
+    """
+    made = [] if stored is None or stored.get("sparsegf2") is None else [stored["sparsegf2"]]
+    if existing is not None:
+        made.append(existing.version)
+    for made_with in made:
+        if made_with != __version__:
+            shown = f"sparsegf2 {made_with}" if made_with else "an unrecorded sparsegf2 version"
+            raise ValueError(
+                f"output_dir {str(out)!r} holds a run started with {shown}, "
+                f"but this is {__version__}; trajectories from different versions need not "
+                "agree, so finish the run with that version or start a new directory"
+            )
+
+
+def _check_saved_seed(out: Path, seed: Any, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse a ``spec.json`` seed that is not the one the saved results were made with.
+
+    New chunks run with ``seed`` from ``spec.json``; a merge requires the seed
+    record of every part to match, so a mismatch is refused before anything runs.
+    """
+    if existing is None:
+        return
+    ss = np.random.SeedSequence(_resolve_seed(seed))
+    if mipt._seed_record(existing) != (ss.entropy, tuple(ss.spawn_key), ss.pool_size):
+        raise ValueError(
+            f"output_dir {str(out)!r}: its spec.json gives seed {seed}, but the saved results "
+            f"were made with seed {existing.seed_entropy}; restore the seed in spec.json, or "
+            "use a new directory"
+        )
+
+
 def _result_parts(out: Path) -> list[Path]:
     """``result.npz`` (if any) followed by the saved chunk files in trajectory order."""
     parts = []
@@ -2194,24 +2401,71 @@ def _load_parts_once(parts: list[Path]) -> mipt.EnsembleResult:
     result.npz; they are redundant, not a conflict.
     """
     results: list[mipt.EnsembleResult] = []
+    paths: list[Path] = []
     covered = 0
     for path in parts:
         part = _load_result_file(path)
         if path.name != _RESULT_FILE and part.num_trajectories and part.trajectories[-1] < covered:
             continue
         results.append(part)
+        paths.append(path)
         if part.num_trajectories:
             covered = max(covered, int(part.trajectories[-1]) + 1)
     try:
         merged = results[0] if len(results) == 1 else mipt.EnsembleResult.concatenate(results)
     except ValueError as exc:
-        raise ValueError(f"saved parts do not belong to the same run: {exc}") from None
+        raise ValueError(
+            f"saved parts do not belong to the same run: {exc}{_strays(results, paths)}"
+        ) from None
     expected = np.arange(merged.num_trajectories)
     if not np.array_equal(np.asarray(merged.trajectories), expected):
         raise ValueError(
             "saved trajectories are not contiguous from 0; the directory mixes different runs"
         )
     return merged
+
+
+_STRAYS_SHOWN = 20
+
+
+def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
+    """The saved parts that cannot be merged with the earliest one, and how to recover.
+
+    The earliest part (``result.npz``, else the first chunk) holds the earlier
+    data; a part of another run (another protocol, seed, version or randomness
+    contract) is named so that deleting it makes the directory readable again.
+    """
+    first = results[0]
+    strays = [
+        path
+        for path, part in zip(paths[1:], results[1:], strict=True)
+        if not _same_run_as(first, part)
+    ]
+    if not strays:
+        return ""
+    names = [p.name for p in strays[:_STRAYS_SHOWN]]
+    if len(strays) > _STRAYS_SHOWN:
+        names.append(f"and {len(strays) - _STRAYS_SHOWN} more")
+    return (
+        f". These files in {str(strays[0].parent)!r} do not belong to the run in "
+        f"{paths[0].name}: {', '.join(names)}; delete them to recover the trajectories saved "
+        "before (load_results then reads them, and start_ensemble_job resumes the run)"
+    )
+
+
+def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
+    """Whether ``part`` could be merged with ``first``: what ``EnsembleResult.concatenate``
+    checks, without copying any data (contract, seed, protocol, probes, layers, version,
+    and no trajectory saved twice)."""
+    return (
+        part.randomness_contract == first.randomness_contract
+        and mipt._seed_record(part) == mipt._seed_record(first)
+        and mipt._protocol_difference(first.spec, part.spec) is None
+        and list(part.values) == list(first.values)
+        and np.array_equal(part.checkpoint_layers, first.checkpoint_layers)
+        and part.version == first.version
+        and not np.intersect1d(first.trajectories, part.trajectories).size
+    )
 
 
 def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
@@ -2265,6 +2519,7 @@ def run_ensemble(
     """
     start = time.perf_counter()
     mc = _build_spec(spec)
+    graph_file = _graph_file_record(spec) if output_dir is not None else None
     trajectories = _trajectory_count(mc, trajectories)
     if max_seconds is not None:
         max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
@@ -2296,7 +2551,14 @@ def run_ensemble(
         _atomic_save_result(result, out_path / _RESULT_FILE)
         files = {"result": str(out_path / _RESULT_FILE)}
         files.update(
-            _write_run_metadata(out_path, spec, trajectories, seed, command or "run_ensemble")
+            _write_run_metadata(
+                out_path,
+                spec,
+                trajectories,
+                seed,
+                command or "run_ensemble",
+                graph_file=graph_file,
+            )
         )
         extra["files"] = files
     return _bounded_summary(result, extra)
@@ -2308,7 +2570,9 @@ def load_results(path: str) -> dict[str, Any]:
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or cancelled
     job. The summary has the same form as :func:`run_ensemble`'s, plus the
-    stored ``spec`` when ``spec.json`` exists.
+    stored ``spec`` when ``spec.json`` exists: exactly as stored (its floats
+    are not rounded for display), so passing it back to
+    :func:`start_ensemble_job` resumes or extends the run.
     """
     if not isinstance(path, (str, os.PathLike)):
         raise ValueError("path must be a string")
@@ -2420,14 +2684,24 @@ def start_ensemble_job(
 
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
-    larger ``trajectories`` extends a finished run. A directory holding a
-    different spec or seed, or a run made under another randomness contract
-    or ``sparsegf2`` version, is refused. For a collection of graphs
-    ``trajectories`` may be omitted (every graph gets ``circuits_per_graph``
-    circuits).
+    larger ``trajectories`` extends a finished run. Without ``trajectories``
+    a resume runs to the target stored in ``spec.json``, for a collection of
+    graphs too: a new collection run without it stores all of its circuits
+    (every graph gets ``circuits_per_graph``), and one started with fewer
+    is extended only by an explicit count. Before anything runs, a directory
+    made under another randomness contract or ``sparsegf2`` version, or with
+    another seed, is refused (the saved results are checked as well as
+    ``provenance.json`` and ``spec.json``), and so is a spec that builds
+    another protocol than the saved run (the error names a differing key
+    and both values) or a graph file whose contents changed since the run
+    started.
     """
     mc = _build_spec(spec)
-    trajectories = _trajectory_count(mc, trajectories)
+    graph_file = _graph_file_record(spec)
+    # Without a count, a resume runs to the target in spec.json, read once the directory is
+    # known to hold this run; otherwise the count is checked before the directory is made.
+    resume_to_target = trajectories is None and _stored_target(output_dir) is not None
+    count = 0 if resume_to_target else _trajectory_count(mc, trajectories)
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     if output_dir is None:
@@ -2438,25 +2712,18 @@ def start_ensemble_job(
     existing, meta = _load_directory(out)
     notes: list[str] = []
     if meta is not None:
-        if _canonical(meta.get("spec")) != _canonical(spec):
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run with a different spec; use a new directory"
-            )
+        # The contract and version first: nothing else can be resumed under another one.
+        stored = _read_provenance(out)
+        _check_contract(out, stored, existing)
+        _check_version(out, stored, existing)
+        notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
         if seed is not None and _resolve_seed(seed) != meta.get("seed"):
             raise ValueError(
                 f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit seed to "
                 "resume it, or use a new directory"
             )
         seed = meta["seed"]
-        stored = _read_provenance(out)
-        _check_contract(out, stored, existing)
-        made_with = None if stored is None else stored.get("sparsegf2")
-        if made_with is not None and made_with != __version__:
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run started with sparsegf2 {made_with}, "
-                f"but this is {__version__}; trajectories from different versions need not "
-                "agree, so finish the run with that version or start a new directory"
-            )
+        _check_saved_seed(out, seed, existing)
         started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
         if started_at and now_at and started_at != now_at:
             notes.append(
@@ -2467,6 +2734,8 @@ def start_ensemble_job(
         raise ValueError(
             f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
         )
+    if resume_to_target:  # the directory holds this run: run to its stored target
+        count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
     seed = _resolve_seed(seed)
     with _JOBS_LOCK:
         for other in _JOBS.values():
@@ -2478,13 +2747,13 @@ def start_ensemble_job(
         job = _Job(
             job_id=uuid.uuid4().hex[:12],
             spec=spec,
-            trajectories=max(trajectories, done),
+            trajectories=max(count, done),
             seed=seed,
             output_dir=out,
             chunk_size=(
                 _require_int(chunk_size, "chunk_size", minimum=1)
                 if chunk_size is not None
-                else _default_chunk_size(mc, trajectories)
+                else _default_chunk_size(mc, count)
             ),
             num_threads=num_threads,
             created=time.time(),
@@ -2500,6 +2769,7 @@ def start_ensemble_job(
             seed,
             command or "start_ensemble_job",
             resumed_from=done if meta is not None else None,
+            graph_file=graph_file,
         )
     except BaseException:
         with _JOBS_LOCK:  # never leave a job that would block this output_dir
@@ -2518,6 +2788,181 @@ def start_ensemble_job(
 def _canonical(obj: Any) -> str:
     """Exact JSON text of a spec, for comparing a stored run with a new request."""
     return json.dumps(_jsonable(obj, exact=True), sort_keys=True)
+
+
+def _stored_target(output_dir: Any) -> Any:
+    """The trajectory target in ``output_dir/spec.json``, or None (nothing is created)."""
+    if not isinstance(output_dir, (str, os.PathLike)) or not str(output_dir):
+        return None
+    try:
+        path = Path(output_dir).expanduser().resolve() / _SPEC_FILE
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return meta.get("trajectories") if isinstance(meta, dict) else None
+
+
+_ABSENT = object()
+
+
+def _shown(value: Any) -> str:
+    """A spec value as JSON for a message (``absent`` for a missing key), shortened."""
+    if value is _ABSENT:
+        return "absent"
+    text = json.dumps(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _spec_differences(saved: Any, given: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """Every key path where two JSON specs differ, as ``(top-level key, message)``.
+
+    Values compare as exact JSON (``1`` and ``1.0`` differ). The keys of
+    ``saved`` come first, in their order, then the keys only ``given`` has.
+    """
+    if isinstance(saved, dict) and isinstance(given, dict):
+        for key in [*saved, *(k for k in given if k not in saved)]:
+            where = f"{path}.{key}" if path else str(key)
+            a, b = saved.get(key, _ABSENT), given.get(key, _ABSENT)
+            if a is _ABSENT or b is _ABSENT:
+                yield _difference(where, a, b)
+            else:
+                yield from _spec_differences(a, b, where)
+    elif isinstance(saved, list) and isinstance(given, list):
+        for i in range(max(len(saved), len(given))):
+            a = saved[i] if i < len(saved) else _ABSENT
+            b = given[i] if i < len(given) else _ABSENT
+            if a is _ABSENT or b is _ABSENT:
+                yield _difference(f"{path}[{i}]", a, b)
+            else:
+                yield from _spec_differences(a, b, f"{path}[{i}]")
+    elif _canonical(saved) != _canonical(given):
+        yield _difference(path, saved, given)
+
+
+def _difference(path: str, saved: Any, given: Any) -> tuple[str, str]:
+    """``(top-level key of path, message naming the path and both values)``."""
+    top = re.split(r"[.\[]", path, maxsplit=1)[0]
+    where = path or "the spec"
+    return top, f"{where} is {_shown(saved)} in its spec.json and {_shown(given)} here"
+
+
+# The spec keys that set each field compared by mipt._protocol_difference, where they
+# are not the field itself.
+_PROTOCOL_KEYS = {
+    "num_system": ("num_system", "graph", "edges"),
+    "edges": ("graph", "edges", "num_system"),
+    "edge_weights": ("edge_weights", "graph", "edges"),
+    "checkpoint_layers": ("checkpoints", "layers"),
+}
+
+
+def _spec_difference(saved: Any, given: Any, protocol: str | None = None) -> str | None:
+    """A key path where two JSON specs differ, with both values, or None.
+
+    With ``protocol`` (what :func:`sparsegf2.mipt._protocol_difference` says
+    differs) the first difference among the keys that set that field is
+    named, so changing it back resolves the refusal; otherwise, and if no
+    such key differs, the first difference.
+    """
+    field = None if protocol is None else protocol.split(" (", 1)[0]
+    keys = _PROTOCOL_KEYS.get(field or "", (field,))
+    first = None
+    for top, message in _spec_differences(saved, given):
+        if top in keys:
+            return message
+        first = first or message
+        if field is None:
+            break
+    return first
+
+
+def _check_same_run(
+    out: Path,
+    spec: dict,
+    mc: mipt.MonitoredCircuit,
+    graph_file: dict[str, str] | None,
+    meta: dict,
+    existing: mipt.EnsembleResult | None,
+) -> list[str]:
+    """Refuse, before anything runs, a resume or extension that would not continue the saved run.
+
+    A run is identified by its protocol (what the spec builds, compared by
+    :func:`sparsegf2.mipt._protocol_difference`, which every merge of saved
+    parts also requires), not by the text of its spec. So a spec written
+    differently that builds the same protocol continues the run: a cutoff
+    given as a budget or per-size mapping that resolves to the same size, a
+    range string for a qubit list, a default written out, another path to
+    the same graphs. The saved protocol is that of the saved results, or,
+    when none are saved yet, the one ``spec.json`` builds.
+
+    A graph file must still hold the bytes recorded in ``spec.json``. If its
+    bytes changed, the resume goes on only when saved results show that it
+    holds the same graphs; with nothing saved there is nothing to compare
+    with, and it is refused. A ``spec.json`` written before the hash was
+    recorded is checked against the saved results alone.
+
+    Returns notes for the job status; raises ``ValueError`` naming what differs.
+    """
+    where = f"output_dir {str(out)!r}"
+    stored_spec, given = meta.get("spec"), _jsonable(spec, exact=True)
+    same_text = _canonical(stored_spec) == _canonical(given)
+    saved: mipt.MonitoredCircuit | None = None
+    if existing is not None:
+        saved = existing.spec
+    elif not same_text:
+        with contextlib.suppress(ValueError):  # e.g. its graph file is gone
+            saved = _build_spec(stored_spec)
+    difference = None if saved is None else mipt._protocol_difference(saved, mc)
+    text = None if same_text else _spec_difference(stored_spec, given, difference)
+    notes = []
+    recorded = meta.get("graph_file")
+    if (
+        graph_file is not None
+        and isinstance(recorded, dict)
+        and recorded.get("sha256") not in (None, graph_file["sha256"])
+    ):
+        if existing is None or difference is not None:
+            then = recorded.get("path")
+            started = f" (then {then!r})" if then and then != graph_file["path"] else ""
+            graphs_differ = (
+                f", and the saved results differ from what the spec builds with it now "
+                f"({difference} differs)"
+                if existing is not None
+                else "; with no results saved yet, its graphs cannot be compared"
+            )
+            raise ValueError(
+                f"{where}: the graph file {graph_file['path']!r} changed since the run "
+                f"started{started} (sha256 {recorded['sha256'][:16]}... in spec.json, "
+                f"{graph_file['sha256'][:16]}... now){graphs_differ}; restore the file the run "
+                "used, or use a new directory"
+            )
+        notes.append(
+            f"the graph file {graph_file['path']!r} has other bytes than when the run started, "
+            "but holds the graphs the saved results used; spec.json now records its new sha256"
+        )
+    if text is not None and (saved is None or difference is not None):
+        protocol = "" if difference is None else f" (the protocol differs in {difference})"
+        raise ValueError(
+            f"{where} holds a run with a different spec: {text}{protocol}; resume with the spec "
+            "in its spec.json (load_results returns it), or use a new directory"
+        )
+    if difference is not None:  # the same spec text, but it builds another protocol now
+        if graph_file is not None:
+            raise ValueError(
+                f"{where}: the graph file {graph_file['path']!r} no longer holds the graphs the "
+                f"saved results used ({difference} differs); restore the file the run used, or "
+                "use a new directory"
+            )
+        raise ValueError(
+            f"{where}: its spec now builds another protocol than the saved results "
+            f"({difference} differs); use a new directory"
+        )
+    if text is not None:
+        notes.append(
+            f"this spec is written differently from the one in spec.json ({text}) but builds "
+            "the same protocol, so it continues the run; spec.json now stores this form"
+        )
+    return notes
 
 
 def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:

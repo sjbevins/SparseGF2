@@ -982,13 +982,15 @@ tau = pres.purification_layer               # -1 = never purified within 8n laye
 print(f"{pres.censored.sum()} of {tau.size} censored at T = {pur.layers}")
 layers, surviving = pres.survival()         # P(tau > layer) at every checkpoint, exact here
 print("P(tau > 16, 32, 64):", surviving[[16, 32, 64]])
-km = analysis.kaplan_meier(np.where(tau >= 0, tau, pres.final_layer), tau >= 0)
+time, observed = pres.purification_times()  # censored at the last purification test
+km = analysis.kaplan_meier(time, observed)
 print("Kaplan-Meier at the first event times:", np.round(km["survival"][:4], 3))
 ```
 
 `survival()` is exact for a single run with one horizon; use
 `analysis.kaplan_meier` to combine runs with different maximum depths (pass
-the censoring time, `final_layer`, for censored entries, never the −1).
+the censoring time, `result.censoring_layer`, for censored entries, never the −1;
+`result.purification_times()` returns both arrays).
 [`examples/purification_time.py`](../examples/purification_time.py) is the full
 study.
 
@@ -1135,7 +1137,7 @@ skip NaN. `contiguous_distance` is also NaN wherever k = 0.
 **What does −1 in `purification_layer` mean?** The reference never became
 pure up to the last checkpoint: the trajectory is right-censored. Never
 average −1 as a time; use `result.survival()` or `analysis.kaplan_meier` with
-`np.where(tau >= 0, tau, result.final_layer)` and `observed = tau >= 0`.
+`time, observed = result.purification_times()`.
 
 **`res.code(t, c)` raises "had stopped".** Circuit `t` purified before that
 evaluation, so there is no code to return; its snapshot count is −1.
