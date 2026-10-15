@@ -79,3 +79,36 @@ def test_no_skip_gate_names_only_the_disallowed_skip(pytester, monkeypatch):
     out = result.stdout.str()
     assert "test_other" in out.split("SPARSEGF2_NO_SKIPS=1")[-1]
     assert "test_allowed" not in out.split("SPARSEGF2_NO_SKIPS=1")[-1]
+
+
+# A module that skips itself while it is collected (as pytest.importorskip does
+# for a missing extra) is reported by pytest_collectreport, not by
+# pytest_runtest_logreport: the whole file vanishes unless the gate sees it too.
+MODULE_SKIP = """
+import pytest
+
+pytest.importorskip("a_module_that_is_not_installed")
+
+def test_a():
+    pass
+"""
+
+
+def _module_skip_session(pytester, monkeypatch, no_skips):
+    # A passing module beside the skipped one: with nothing collected at all,
+    # pytest exits 5 by itself and the gate's verdict could not be seen.
+    pytester.makepyfile(test_passes="def test_ok():\n    pass\n")
+    return _inner(pytester, monkeypatch, MODULE_SKIP, no_skips=no_skips)
+
+
+def test_no_skip_gate_fails_a_module_skipped_at_collection(pytester, monkeypatch):
+    result = _module_skip_session(pytester, monkeypatch, no_skips=True)
+    result.assert_outcomes(passed=1, skipped=1)
+    assert result.ret != 0
+    result.stdout.fnmatch_lines(["*a_module_that_is_not_installed*"])
+
+
+def test_module_skips_pass_without_the_gate(pytester, monkeypatch):
+    result = _module_skip_session(pytester, monkeypatch, no_skips=False)
+    result.assert_outcomes(passed=1, skipped=1)
+    assert result.ret == 0

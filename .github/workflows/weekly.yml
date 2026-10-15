@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # A skipped test (or a module skipped while collected) fails the run.
+  SPARSEGF2_NO_SKIPS: "1"
+
 jobs:
   jit-free-kernels:
     # With the JIT off the kernels run as Python, so coverage can trace them. The whole suite
@@ -18,7 +22,6 @@ jobs:
     timeout-minutes: 150
     env:
       NUMBA_DISABLE_JIT: "1"
-      SPARSEGF2_NO_SKIPS: "1"
     steps:
       - uses: actions/checkout@v6
         with:

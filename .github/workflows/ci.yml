@@ -14,10 +14,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # A skipped test (or a module skipped while collected) fails the run.
+  SPARSEGF2_NO_SKIPS: "1"
+
 jobs:
   test:
-    env:
-      SPARSEGF2_NO_SKIPS: "1"
     # Stim is a required test dependency: the suite fails rather than skips
     # without it.
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -67,8 +69,6 @@ jobs:
     # bounds-checked kernels never mix with normal ones).
     name: test (bounds-checked kernels)
     runs-on: ubuntu-latest
-    env:
-      SPARSEGF2_NO_SKIPS: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -96,8 +96,6 @@ jobs:
     # Compiled kernels are not traced; the weekly JIT-free run covers them.
     name: coverage
     runs-on: ubuntu-latest
-    env:
-      SPARSEGF2_NO_SKIPS: "1"
     steps:
       - uses: actions/checkout@v6
         with:

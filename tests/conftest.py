@@ -49,6 +49,13 @@ def pytest_runtest_logreport(report):
         _skips.append((report.nodeid, _skip_reason(report)))
 
 
+def pytest_collectreport(report):
+    # A module that skips itself while being collected (pytest.importorskip at
+    # module level, for a missing extra) never reaches pytest_runtest_logreport.
+    if report.skipped:
+        _skips.append((report.nodeid, _skip_reason(report)))
+
+
 def pytest_sessionfinish(session, exitstatus):
     if os.environ.get("SPARSEGF2_NO_SKIPS") != "1":
         return
