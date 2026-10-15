@@ -41,6 +41,7 @@ def _blocks(path: Path) -> list[str]:
         "docs/GETTING_STARTED.md",
         "docs/HOW_IT_WORKS.md",
         "docs/observables/code-dimension.md",
+        "docs/observables/entanglement.md",
         "docs/observables/lost-information.md",
         "docs/observables/random-region-erasure.md",
     ],

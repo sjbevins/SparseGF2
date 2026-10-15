@@ -16,6 +16,7 @@ For a shorter tour of the whole simulator, read
 
 | observable | definition | engine probe (`mipt`) | on a state or a saved code | from saved results (`analysis`) | document |
 |---|---|---|---|---|---|
+| entanglement: $S(A)$, half-cut entropy, $I(A:B)$, $I_3(A:B:C)$, entropy profile | $S(A) = -\operatorname{tr}\rho_A \log_2 \rho_A$, and signed sums of it | `entropy(region)`, `half_cut_entropy()`, `mutual_information(a, b)`, `tripartite_information()`, `entropy_profile()` | `observables.entropy` (`Simulator.entropy`), `mutual_information`, `tripartite_information`, `entropy_profile` | `EnsembleResult.mean`, `mean_and_error` (both skip the NaN after `stop_when_purified`) | [entanglement.md](entanglement.md) |
 | code dimension $k_C$ | $S(R)$ | `code_dimension()` | `observables.code_dimension`, `StabilizerCode.num_logical` | `EnsembleResult.survival`, `kaplan_meier` | [code-dimension.md](code-dimension.md) |
 | lost information $\ell_C(A)$ | $I(A:R)$; correctable iff 0 | `lost_information(region)`, `erasure_lost_profile(samples)` | `observables.lost_logical_information`, `erasure_is_correctable`, `recovery_probability`, `erasure_profile`; `StabilizerCode.lost_information`, `is_correctable` | `bernoulli_erasure_curve` | [lost-information.md](lost-information.md) |
 | random-region failure $P_C(m)$ | probability that a uniformly random $m$-qubit erasure is uncorrectable | `erasure_first_failure(samples)` (sampled), `uncorrectable_region_counts(max_size)` (exact), `code_snapshot()` | `StabilizerCode.first_failure_sizes`, `uncorrectable_counts`; `observables.random_erasure_statistics` | `failure_by_size`, `exact_failure_by_size`, `hybrid_failure_by_size`, `junction_dip` | [random-region-erasure.md](random-region-erasure.md) |
@@ -44,14 +45,18 @@ its own.
 
 ## Reading order
 
-1. [code-dimension.md](code-dimension.md): $k_C$, the reference rows, and why
+1. [entanglement.md](entanglement.md): $S(A)$ and the rank formula that every
+   other document builds on, the smaller side and the single-qubit fast path,
+   $I(A:B)$, $I_3(A:B:C)$, profiles in one pass, why sign tracking does not
+   matter, and the NaN after `stop_when_purified`.
+2. [code-dimension.md](code-dimension.md): $k_C$, the reference rows, and why
    the engine never eliminates reference columns.
-2. [lost-information.md](lost-information.md): $\ell_C(A)$ for one region,
+3. [lost-information.md](lost-information.md): $\ell_C(A)$ for one region,
    correctability, complementarity, and formula (1).
-3. [random-region-erasure.md](random-region-erasure.md): $P_C(m)$ in its two
+4. [random-region-erasure.md](random-region-erasure.md): $P_C(m)$ in its two
    regimes (exhaustive below the cutoff $m^{\ast}(n)$, sampled above),
    $\Phi_C(e)$, $e_\delta$, $\mu_C$, the distance bounds, costs, error bars and
    the choice of cutoff.
 
-Documents for the entanglement observables, purification and the contiguous
-distance will follow the same structure.
+Documents for purification and the contiguous distance will follow the same
+structure.
