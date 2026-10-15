@@ -4,10 +4,10 @@
 
 * **Exact erasure counts:** `StabilizerCode.uncorrectable_counts` and the
   `uncorrectable_region_counts` probe add up each count in int64 while
-  C(n, m) < 2**63, so counts above 2**53 are no longer rounded.
-  `uncorrectable_counts` now returns int64 whenever every C(n, m) is below 2**63
-  (before: 2**53). The probe stores float64, so it holds the exact count rounded
-  once, and that value never exceeds C(n, m). Sizes with C(n, m) >= 2**63 use a
+  C(n, m) < 2**63, so counts above 2**53 no longer carry accumulated rounding
+  error. `uncorrectable_counts` now returns int64 whenever every C(n, m) is below
+  2**63 (before: 2**53). The probe stores float64, so it holds the exact count
+  rounded once, and that value never exceeds float(C(n, m)). Sizes with C(n, m) >= 2**63 use a
   compensated float64 sum.
 * **Rounded counts accepted:** `analysis.exact_failure_by_size` accepts float
   counts up to C(n, m) (1 + 1e-12) and clips the ratio to [0, 1]. Counts rounded
