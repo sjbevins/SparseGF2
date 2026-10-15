@@ -112,6 +112,7 @@ def test_chunks_equal_one_run(spec, whole):
 
 def test_thread_count_does_not_matter(spec, whole):
     threads = min(4, numba.config.NUMBA_NUM_THREADS)
+    assert threads > 1, "this machine offers Numba a single thread; the comparison would be vacuous"
     one = spec.run(TRAJECTORIES, seed=SEED, num_threads=1)
     many = spec.run(TRAJECTORIES, seed=SEED, num_threads=threads)
     assert_same(one, many)
@@ -217,6 +218,7 @@ def test_layers_zero_with_stop_when_purified():
     result = spec.run(5, seed=1)
     assert list(spec.checkpoint_layers) == [0]
     np.testing.assert_array_equal(result.final_layer, 0)
+    assert result.values["code_dimension"].shape == (5, 1)
     np.testing.assert_array_equal(result.values["code_dimension"], 6)  # nothing purified yet
     _round_trip(result)
     split = mipt.EnsembleResult.concatenate(
@@ -246,23 +248,37 @@ def test_checkpoint_stride_larger_than_layers():
 
 
 def test_probe_schedule_disjoint_from_specs_under_stop_when_purified():
+    # Purification is tested at 0, 2 and 4 only; the probes run at layers that fall
+    # between those tests and after them, so trajectories that stop at 2 or 4 leave
+    # probe evaluations behind that must hold the documented fill values.
     spec = _cycle_spec(
         reference="single",
         layers=8,
-        checkpoints=[0, 8],
+        checkpoints=[0, 2, 4],
         probes=[
-            mipt.code_dimension(checkpoints=[3, 5]),
+            mipt.code_dimension(checkpoints=[3, 5, 7]),
             mipt.erasure_first_failure(3, checkpoints=[1, 7]),
-            mipt.half_cut_entropy(checkpoints=[2, 4]),
+            mipt.half_cut_entropy(checkpoints=[3, 6]),
         ],
         stop_when_purified=True,
     )
     result = spec.run(20, seed=3)
-    assert list(result.layers("code_dimension")) == [3, 5]
-    assert list(result.layers("half_cut_entropy")) == [2, 4]
+    assert list(result.layers("code_dimension")) == [3, 5, 7]
+    assert list(result.layers("half_cut_entropy")) == [3, 6]
     tau = result.purification_layer
-    # purification is only tested at the spec's checkpoints: 0 or 8, or never
-    assert set(tau.tolist()) <= {-1, 0, 8}
+    # purification is only tested at the spec's checkpoints: 0, 2 or 4, or never
+    assert set(tau.tolist()) <= {-1, 0, 2, 4}
+    stopped = tau >= 0
+    assert stopped.any(), "no trajectory stopped, so nothing after a stop is tested"
+    assert (result.final_layer[stopped] < 8).all()
+    n = spec.num_system
+    for t in np.flatnonzero(stopped):
+        after = result.layers("code_dimension") > tau[t]
+        assert (result.values["code_dimension"][t][after] == 0).all()  # k = 0 once pure
+        late = result.layers("erasure_first_failure") > tau[t]
+        assert (result.values["erasure_first_failure"][t][late] == n + 1).all()
+        gone = result.layers("half_cut_entropy") > tau[t]
+        assert np.isnan(result.values["half_cut_entropy"][t][gone]).all()
     for t in range(result.num_trajectories):
         np.testing.assert_array_equal(
             spec.replay(t, seed=3).values["code_dimension"][0], result.values["code_dimension"][t]
