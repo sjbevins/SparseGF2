@@ -314,7 +314,9 @@ A **trajectory** is one random circuit and its simulation. The contract:
   and random numbers (section 3.4).
 * `seed` can be an integer, a sequence of integers, a
   `numpy.random.SeedSequence`, or `None` (fresh entropy). The seed actually
-  used is stored in the result: `result.seed_sequence` repeats the run.
+  used is stored in the result: `result.seed_sequence` repeats the run, as long
+  as `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (a run made under
+  another contract cannot be reproduced by this version).
 * `spec.circuit(trajectory=t, seed=s)` returns the exact circuit trajectory `t`
   ran, as a Stim-language `Circuit` (section 6.3 replays one).
 
@@ -1071,8 +1073,8 @@ sparsegf2 results runs/beta1_p0.05
 
 The output directory holds `result.npz` (an `EnsembleResult`, load it with
 `mipt.EnsembleResult.load`), `spec.json` (running `sparsegf2 ensemble` on it
-repeats the run exactly) and `provenance.json` (versions, git commit, seed,
-command). The summary prints means with standard errors per checkpoint and
+repeats the run exactly, under the same randomness contract) and
+`provenance.json` (versions, git commit, seed, randomness contract, command). The summary prints means with standard errors per checkpoint and
 the erasure probes as P_C(m) curves.
 
 For long runs, `--chunk-size` saves the run chunk by chunk and resumes where it
