@@ -299,8 +299,9 @@ def eval_probe(
         if s_ref == 0:
             for m in range(size_param[j]):
                 row[m] = 0.0
-        else:
-            uncorrectable_counts_rows(tab, ws, order, ref_rows, size_param[j], row)
+        else:  # the row is float64: the exact int64 counts arrive rounded once
+            exact = np.zeros(size_param[j], dtype=np.int64)
+            uncorrectable_counts_rows(tab, ws, order, ref_rows, size_param[j], row, exact)
     else:  # PROBE_CODE_SNAPSHOT: the generators go to snap_out, the row holds their number
         row[0] = code_snapshot_rows(tab, n_sys, n, ref_rows, snap_out)
 

@@ -623,8 +623,51 @@ def _span_hits(basis, top, length, keys, hashes, slots, after, hits, require, cu
                 hits[c] |= np.uint8(1) << np.uint8(e - 3 * c)
 
 
+INT64_MAX = np.int64(0x7FFFFFFFFFFFFFFF)
+
+
 @njit(cache=True)
-def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
+def _binomial_tables(n, w):
+    """C(a, j) for a = 0..n and j = 0..w, as int64 where it fits and as float64.
+
+    ``exact[a, j]`` is C(a, j) when C(a, j) < 2**63 and -1 otherwise. Pascal's
+    rule never overflows: both terms are at most C(a, j), so they fit whenever
+    C(a, j) does, and their sum is formed only once it is known to stay below
+    2**63. ``approx[a, j]`` is the correctly rounded C(a, j) where it fits;
+    beyond, it is ``approx[a, j - 1] * (a - j + 1) / j``, two roundings per
+    column after the last entry of row a that fits (column 0 always does).
+    """
+    exact = np.zeros((n + 1, w + 1), dtype=np.int64)
+    approx = np.zeros((n + 1, w + 1), dtype=np.float64)
+    for a in range(n + 1):
+        exact[a, 0] = 1
+        approx[a, 0] = 1.0
+        for j in range(1, min(a, w) + 1):
+            x = exact[a - 1, j - 1]
+            y = exact[a - 1, j]  # C(a - 1, a) = 0: never written, still zero
+            if x >= 0 and y >= 0 and x <= INT64_MAX - y:
+                exact[a, j] = x + y
+                approx[a, j] = np.float64(x + y)
+            else:
+                exact[a, j] = -1
+                approx[a, j] = approx[a, j - 1] * (a - j + 1) / j
+    return exact, approx
+
+
+@njit(cache=True)
+def _add_compensated(total, comp, m, x):
+    """``total[m] += x`` (x >= 0) by Neumaier summation: ``comp[m]`` keeps what rounding lost."""
+    s = total[m]
+    t = s + x
+    if s >= x:
+        comp[m] += (s - t) + x
+    else:
+        comp[m] += (x - t) + s
+    total[m] = t
+
+
+@njit(cache=True)
+def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out, out_exact):
     """``out[m - 1]`` = number of m-subsets of ``system`` whose erasure leaks logical information.
 
     Exhaustive over m = 1..``max_size``, on the columns of :func:`code_columns`,
@@ -644,13 +687,24 @@ def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
       X, Z and Y columns finds the few c with ``K_S`` non-empty; only those
       are checked against the N(S)-span.
 
-    The counts are float64: exact while below 2**53 (always when every
-    C(n, m), m <= ``max_size``, is), rounded beyond.
+    Counting: a size m with C(n, m) < 2**63 is accumulated exactly in int64
+    and also returned in ``out_exact[m - 1]`` (the other entries of
+    ``out_exact`` stay 0). Every addend counts m-subsets not counted before,
+    so each partial sum, and each addend C(n - 1 - i, j), is at most the
+    final count <= C(n, m) < 2**63: no overflow, and the int64 table entry
+    read always fits (never its -1 marker). ``out[m - 1]`` is then that count
+    rounded once to float64, so it never exceeds float(C(n, m)), and equals
+    it when every m-subset fails. A size with C(n, m) >= 2**63 is a
+    compensated (Neumaier) float64 sum of the float64 table: each term is off
+    by at most (2 ``max_size`` - 1) 2**-53 relative, the sum adds 2 2**-53
+    plus a term of order (number of terms) 2**-106, so the count is within
+    (2 ``max_size`` + 2) 2**-53 of the truth for any walk that can finish.
     """
     n = system.shape[0]
     w = max_size
     for m in range(w):
         out[m] = 0.0
+        out_exact[m] = 0
     if w <= 0 or n == 0:
         return
     cols, s, r = code_columns(tab, ws, system, ref_rows)
@@ -663,11 +717,11 @@ def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
         fmask = ~ZERO if s % 64 == 0 else (np.uint64(1) << np.uint64(s % 64)) - np.uint64(1)
     skeys, shashes, sslots = _column_table(cols, wf, fmask)
     nkeys, nhashes, nslots = _column_table(cols, wa, ~ZERO)
-    comb = np.zeros((n + 1, w + 1), dtype=np.float64)  # comb[a, j] = C(a, j), exact below 2**53
-    for a in range(n + 1):
-        comb[a, 0] = 1.0
-        for j in range(1, min(a, w) + 1):
-            comb[a, j] = comb[a - 1, j - 1] + (comb[a - 1, j] if j <= a - 1 else 0.0)
+    comb, combf = _binomial_tables(n, w)
+    fits = np.zeros(w, dtype=np.bool_)  # fits[m - 1]: C(n, m) < 2**63, so size m counts in int64
+    for m in range(w):
+        fits[m] = comb[n, m + 1] >= 0
+    comp = np.zeros(w, dtype=np.float64)  # Neumaier compensation of the float64 sizes
     cap = max(2 * (w - 1), 1)
     ab = np.zeros((cap, wa), dtype=np.uint64)
     apw = np.zeros(cap, dtype=np.int64)
@@ -713,7 +767,10 @@ def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
                 _span_hits(ab, atop[lvl], wa, nkeys, nhashes, nslots, after, hits_n, hits_s, avec)
                 for c in range(after + 1, n):
                     if hits_s[c] != hits_n[c]:
-                        out[w - 1] += 1.0
+                        if fits[w - 1]:
+                            out_exact[w - 1] += 1
+                        else:
+                            _add_compensated(out, comp, w - 1, 1.0)
                     hits_s[c] = 0
                     hits_n[c] = 0
             lvl -= 1
@@ -762,11 +819,20 @@ def uncorrectable_counts_rows(tab, ws, system, ref_rows, max_size, out):
         if failed:  # this prefix is uncorrectable, so is every extension
             remaining = n - 1 - i
             for j in range(0, w - size + 1):
-                out[size - 1 + j] += comb[remaining, j]
+                m = size - 1 + j
+                if fits[m]:
+                    out_exact[m] += comb[remaining, j]
+                else:
+                    _add_compensated(out, comp, m, combf[remaining, j])
             cand[lvl] += 1
         else:
             lvl += 1
             cand[lvl] = i + 1
+    for m in range(w):
+        if fits[m]:
+            out[m] = np.float64(out_exact[m])  # correctly rounded: <= float(C(n, m))
+        else:
+            out[m] += comp[m]
 
 
 @njit(cache=True)

@@ -192,18 +192,26 @@ class StabilizerCode:
 
         Entry ``m - 1`` divided by C(n, m) is the exact probability that a
         uniformly random m-qubit erasure is uncorrectable. The code distance
-        exceeds ``max_size`` exactly when every count is 0. The counts are
-        int64 while every C(n, m) is below 2**53 (so the counts are exact);
-        beyond that they are float64, exact to double precision.
+        exceeds ``max_size`` exactly when every count is 0.
+
+        The counts are int64, and exact, while every C(n, m), m <= ``max_size``,
+        is below 2**63. Beyond that they are float64: a count whose C(n, m) is
+        below 2**63 is still computed exactly and rounded once, so it never
+        exceeds float(C(n, m)); a larger one is a compensated float64 sum with
+        relative error below about (2 ``max_size`` + 2) 2**-53, which
+        :func:`sparsegf2.analysis.exact_failure_by_size` tolerates.
         """
         w = operator.index(max_size)
         if not 1 <= w <= self._n:
             raise ValueError(f"max_size must be in [1, {self._n}]")
         out = np.zeros(w, dtype=np.float64)
+        exact = np.zeros(w, dtype=np.int64)
         if self.num_logical > 0:
-            _ent.uncorrectable_counts_rows(self._tab, self._ws, self._system, self._marked, w, out)
-        if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**53:
-            return out.astype(np.int64)
+            _ent.uncorrectable_counts_rows(
+                self._tab, self._ws, self._system, self._marked, w, out, exact
+            )
+        if max(math.comb(self._n, m) for m in range(1, w + 1)) < 2**63:
+            return exact
         return out
 
     def contiguous_distance(self, order=None, *, periodic: bool = True) -> int:
