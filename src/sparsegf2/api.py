@@ -364,6 +364,21 @@ def _resolve_seed(seed: Any) -> int:
     return _require_int(seed, "seed", minimum=0, maximum=None)
 
 
+_BIG_SEED_NOTE = (
+    "seed >= 2**53: a client that reads JSON numbers as doubles (JavaScript, Claude Code) "
+    "may round it; to repeat runs from such a client, use seeds below 2**53"
+)
+
+
+def _seed_notes(seed: Any) -> list[str]:
+    """``[_BIG_SEED_NOTE]`` for a seed that such a client cannot hold exactly, else ``[]``.
+
+    The seed itself is used and reported exactly; the client may already have rounded
+    the one it sent, and cannot read this one back unrounded.
+    """
+    return [_BIG_SEED_NOTE] if isinstance(seed, int) and seed >= 2**53 else []
+
+
 _RANGE_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?::\s*(\d+)\s*)?$")
 
 
@@ -984,7 +999,7 @@ def run_circuit(
         "phases": phases,
         "seed": seed,
     }
-    notes: list[str] = []
+    notes: list[str] = _seed_notes(seed)
     arrays: dict[str, np.ndarray] = {}
     tick_rows: list[tuple[int, dict[str, Any]]] = []
     final_values: dict[str, Any] = {}
@@ -2089,7 +2104,7 @@ def _summarize_ensemble(
         },
         "probes": {},
     }
-    notes = []
+    notes = _seed_notes(result.seed_entropy)
     keys = _summary_names(list(result.values))
     if any(k != name for name, k in keys.items()):
         notes.append(
@@ -2232,6 +2247,12 @@ def _output_dir(path: Any) -> Path:
     out = Path(path).expanduser().resolve()
     if out.exists() and not out.is_dir():
         raise ValueError(f"output_dir {str(out)!r} exists and is not a directory")
+    parent = next((p for p in out.parents if p.exists()), None)  # the nearest that exists
+    if parent is not None and not parent.is_dir():
+        raise ValueError(
+            f"output_dir {str(out)!r} cannot be created: {str(parent)!r} is a file, not a "
+            "directory; choose another output_dir"
+        )
     with _writing_to(out):
         out.mkdir(parents=True, exist_ok=True)
     return out
@@ -2351,9 +2372,11 @@ def _provenance(seed: Any, command: str) -> dict[str, Any]:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
+    """Write a temporary file, then replace ``path``, retried while a reader holds it
+    (Windows; a ``load_results`` reading ``spec.json``, say) as :func:`_replace` does."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def _write_run_metadata(
@@ -2397,9 +2420,26 @@ def _write_run_metadata(
     stored = _read_provenance(out) if resumed_from is not None else None
     if stored is not None:
         resume = {**record, "resumed_from": resumed_from}
-        record = {**stored, "resumes": [*stored.get("resumes", []), resume]}
+        earlier = stored.get("resumes")  # not a list: ignored (_provenance_notes)
+        record = {**stored, "resumes": [*(earlier if isinstance(earlier, list) else []), resume]}
     _atomic_write_text(prov_path, json.dumps(record, indent=2))
     return {"spec": str(spec_path), "provenance": str(prov_path)}
+
+
+def _provenance_notes(stored: dict | None) -> list[str]:
+    """Notes on fields of a stored ``provenance.json`` that a resume reads but that hold
+    another type (a hand edit, say). They are ignored, as an unreadable provenance.json
+    is (the saved results carry the version and contract that a resume checks), never an
+    error: ``resumes`` restarts with this resume, and ``git_commit`` is not compared."""
+    notes = []
+    for key, kind, then in (
+        ("resumes", list, "a list; it restarts with this resume"),
+        ("git_commit", str, "a string; it is not compared with this resume's commit"),
+    ):
+        value = None if stored is None else stored.get(key)
+        if value is not None and not isinstance(value, kind):
+            notes.append(f"provenance.json: {key} is {_shown(value)}, not {then}")
+    return notes
 
 
 def _read_provenance(out: Path) -> dict | None:
@@ -3294,8 +3334,9 @@ def start_ensemble_job(
                 )
             seed = meta["seed"]
             _check_saved_seed(out, seed, existing)
+            notes.extend(_provenance_notes(stored))
             started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
-            if started_at and now_at and started_at != now_at:
+            if isinstance(started_at, str) and started_at and now_at and started_at != now_at:
                 notes.append(
                     f"this resume runs git commit {now_at[:12]}, the run started at "
                     f"{started_at[:12]}; both are recorded in provenance.json"
@@ -3307,6 +3348,7 @@ def start_ensemble_job(
         if resume_to_target:  # the directory holds this run: run to its stored target
             count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
         seed = _resolve_seed(seed)
+        notes.extend(_seed_notes(seed))
         done = existing.num_trajectories if existing is not None else 0
         job = _Job(
             job_id=uuid.uuid4().hex[:12],
@@ -3371,16 +3413,19 @@ def _canonical(obj: Any) -> str:
     return json.dumps(_jsonable(obj, exact=True), sort_keys=True)
 
 
+_UNREADABLE = object()
+
+
 def _stored_target(output_dir: Any) -> Any:
     """The trajectory target in ``output_dir/spec.json``: None if there is none (nothing
-    is created), or ``...`` if the file cannot be read, which the read under the
-    directory's lock then reports."""
+    is created), or :data:`_UNREADABLE` if the file cannot be read, which the read under
+    the directory's lock then reports."""
     if not isinstance(output_dir, (str, os.PathLike)) or not str(output_dir):
         return None
     try:
         meta = _read_meta(Path(output_dir).expanduser().resolve())
     except (OSError, ValueError):
-        return ...
+        return _UNREADABLE
     return None if meta is None else meta.get("trajectories")
 
 
@@ -3948,6 +3993,9 @@ again with the same output_dir to resume or extend.
   never average it as a number. Use censored_fraction and the survival curve.
 * Outputs are summaries. Pass output_dir to keep every array (npz) plus
   spec.json and provenance.json.
+* Errors say what to change: fix the argument and retry. A message ending
+  "(internal error: please report it)" is a bug in SparseGF2: report it, do
+  not retry with other arguments.
 """
 
 

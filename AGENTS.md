@@ -244,7 +244,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around
-  the error.
+  the error. The exception is a message ending `(internal error: please report it)`
+  (over MCP `Error executing tool X: TypeName: message (internal error: ...)`, exit code 1
+  in the CLI): that is a bug in SparseGF2, not in the input, so report it with the
+  message instead of retrying with other arguments.
 
 ## Erasure analysis in Python
 

@@ -349,12 +349,15 @@ def test_internal_errors_exit_1(capsys, monkeypatch, bell_file):
     assert code == 1 and data["error"]["type"] == "RuntimeError"
     assert data["error"]["message"] == "internal error: kaboom"
 
-    def wrong_type(*args, **kwargs):  # a TypeError is an input error, as in the MCP server
-        raise TypeError("regions must be lists")
+    def wrong_type(*args, **kwargs):  # the API raises ValueError for input: this is a bug
+        raise TypeError("'NoneType' object is not subscriptable")
 
     monkeypatch.setattr(api, "run_circuit", wrong_type)
     code, data = run_json(capsys, "run", str(bell_file))
-    assert code == 2 and data["error"] == {"type": "TypeError", "message": "regions must be lists"}
+    assert code == 1 and data["error"] == {
+        "type": "TypeError",
+        "message": "internal error: 'NoneType' object is not subscriptable",
+    }
 
 
 def test_names_that_are_not_strings_exit_2(capsys, bell_file, tmp_path):
@@ -370,15 +373,26 @@ def test_names_that_are_not_strings_exit_2(capsys, bell_file, tmp_path):
 def test_paths_that_cannot_be_read_or_written_exit_2(capsys, monkeypatch, bell_file, spec_file,
                                                       tmp_path):  # fmt: skip
     (tmp_path / "a_file").write_text("", encoding="utf-8")
-    out = str(tmp_path / "a_file" / "out")  # below a regular file: it cannot be created
-    for argv in (
-        ["run", str(bell_file), "--output-dir", out],
-        ["ensemble", str(spec_file), "--trajectories", "2", "--output-dir", out],
-        ["ensemble", str(spec_file), "--trajectories", "2", "--output-dir", out,
-         "--chunk-size", "1"],
-    ):  # fmt: skip
-        code, data = run_json(capsys, *argv)
-        assert code == 2 and "is not writable" in data["error"]["message"], argv
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):  # a directory this process may not create
+        if self.name == "denied":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    for out, expected in (
+        (tmp_path / "a_file" / "out", "is a file, not a directory"),  # below a regular file
+        (tmp_path / "denied", "is not writable: [Errno 13] Permission denied"),
+    ):
+        for argv in (
+            ["run", str(bell_file)],
+            ["ensemble", str(spec_file), "--trajectories", "2"],
+            ["ensemble", str(spec_file), "--trajectories", "2", "--chunk-size", "1"],
+        ):
+            code, data = run_json(capsys, *argv, "--output-dir", str(out))
+            assert code == 2 and expected in data["error"]["message"], argv
+    monkeypatch.undo()
     # a file this process may not read (Windows: one another program holds), or not UTF-8
     real_read_text = Path.read_text
 

@@ -62,7 +62,8 @@ whole-number float such as `4.0` counts as 4), a flag `true` or `false`, and
 flag are refused with a message that names the argument. A fresh seed (`seed` left
 out) is below 2^53, so a client that reads JSON numbers as doubles, as Claude Code does,
 keeps the reported seed exactly. An explicit seed of any size is used and reported
-exactly, but such a client can send and read only seeds below 2^53 without rounding.
+exactly, but such a client can send and read only seeds below 2^53 without rounding;
+a result whose seed is 2^53 or more carries a note that says so.
 
 ### Prompts and resources
 
@@ -779,12 +780,14 @@ the server's working directory. Every result's `files` entry (and every job stat
 (for example `unknown key 'layrs' ... layers`, or `this run is estimated at about N s,
 above max_seconds=60. Use start_ensemble_job ...`). The agent normally fixes the
 argument and retries; if it does not, the message tells you what to change. A directory
-that cannot be written comes back as `output_dir DIR is not writable: ...`, and a saved
+that cannot be written comes back as `output_dir DIR is not writable: ...` (or `cannot
+be created: P is a file, not a directory` when a parent is a file), and a saved
 file that cannot be read (another program holds it, or the permissions forbid it) as
-`could not read results from DIR: ...`, naming the file. A message that starts with an
-exception's name and ends `(internal error: please report it)` is a bug in SparseGF2,
-not a problem with the call: please report it with that message (the traceback is in
-the server's log, on its stderr).
+`could not read results from DIR: ...`, naming the file. A message of the form
+`Error executing tool X: TypeName: message (internal error: please report it)` is a bug
+in SparseGF2, not a problem with the call, so the agent should report it instead of
+retrying with other arguments. Please report it with that message; the traceback is in
+the server's log, on its stderr.
 
 ---
 

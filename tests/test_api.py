@@ -2236,19 +2236,51 @@ def test_num_system_is_bounded_before_any_graph_is_generated(monkeypatch):
             api.estimate_ensemble(big, 2)
         with pytest.raises(ValueError, match=too_large):
             api.run_ensemble(big, 2, seed=1)
+    monkeypatch.undo()
+    # MAX_QUBITS itself is accepted
+    largest = dict(SMALL_SPEC, num_system=api.MAX_QUBITS, graph={"family": "cycle"}, probes=[])
+    assert api.estimate_ensemble(largest, 1)["trajectories"] == 1
+
+
+def _denied_mkdir(monkeypatch, name: str) -> None:
+    """Creating a directory called ``name`` fails as in a directory this process may not
+    write to (permissions cannot be relied on in tests: CI may run as root)."""
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
 
 
 def test_an_output_dir_that_cannot_be_written_is_an_input_error(tmp_path, monkeypatch):
-    # a path below a regular file can never be created, on any system
+    calls = (
+        lambda out: api.run_circuit("H 0\nM 0", seed=1, output_dir=str(out)),
+        lambda out: api.run_ensemble(SMALL_SPEC, 2, seed=1, output_dir=str(out)),
+        lambda out: api.start_ensemble_job(SMALL_SPEC, 2, seed=1, output_dir=str(out)),
+    )
+    # a path below a regular file can never be created: the message says which is the file
     (tmp_path / "a_file").write_text("", encoding="utf-8")
-    out = tmp_path / "a_file" / "out"
-    not_writable = re.escape(f"output_dir {str(out.resolve())!r} is not writable: ")
-    with pytest.raises(ValueError, match=not_writable):
-        api.run_circuit("H 0\nM 0", seed=1, output_dir=str(out))
-    with pytest.raises(ValueError, match=not_writable):
-        api.run_ensemble(SMALL_SPEC, 2, seed=1, output_dir=str(out))
-    with pytest.raises(ValueError, match=not_writable):
-        api.start_ensemble_job(SMALL_SPEC, 2, seed=1, output_dir=str(out))
+    out = tmp_path / "a_file" / "sub" / "out"
+    below_a_file = re.escape(
+        f"output_dir {str(out.resolve())!r} cannot be created: "
+        f"{str((tmp_path / 'a_file').resolve())!r} is a file, not a directory; choose another"
+    )
+    for run in calls:
+        with pytest.raises(ValueError, match=below_a_file):
+            run(out)
+    # a directory this process may not create
+    _denied_mkdir(monkeypatch, "denied")
+    out = tmp_path / "denied"
+    not_writable = re.escape(
+        f"output_dir {str(out.resolve())!r} is not writable: [Errno 13] Permission denied"
+    )
+    for run in calls:
+        with pytest.raises(ValueError, match=not_writable):
+            run(out)
+    monkeypatch.undo()
 
     # a directory whose files cannot be written (a full drive, say)
     def full(*args, **kwargs):
@@ -2340,6 +2372,83 @@ def test_load_results_reads_on_while_a_merge_removes_the_chunks(tmp_path, monkey
     assert len(listings) == 2
 
 
+def test_load_results_finds_the_result_a_first_merge_writes_while_it_lists_chunks(
+    tmp_path, monkeypatch
+):
+    # only chunks are saved; the job's first merge writes result.npz and then deletes
+    # chunks/ while load_results lists it. The chunks are listed before result.npz is
+    # looked for, so one of the two is always seen (the other order saw neither)
+    out = tmp_path / "first_merge"
+    api.run_ensemble(SMALL_SPEC, 20, seed=4, output_dir=str(out))
+    merged = mipt.EnsembleResult.load(out / "result.npz")
+    (out / "result.npz").unlink()
+    (out / "chunks").mkdir()
+    for first in (0, 10):
+        _direct_spec().run(10, seed=4, first_trajectory=first).save(
+            out / "chunks" / f"traj_{first:012d}.npz"
+        )
+    real_iterdir = Path.iterdir
+
+    def merging(self):
+        if self.name == "chunks" and self.exists():
+            merged.save(out / "result.npz")  # a merge replaces result.npz first,
+            for chunk in real_iterdir(self):  # then deletes the chunks and chunks/
+                chunk.unlink()
+            self.rmdir()
+        return real_iterdir(self)  # FileNotFoundError: chunks/ is gone
+
+    monkeypatch.setattr(Path, "iterdir", merging)
+    loaded = api.load_results(str(out))
+    assert loaded["num_trajectories"] == 20
+    assert loaded["purification"] == api.run_ensemble(SMALL_SPEC, 20, seed=4)["purification"]
+
+
+def test_metadata_writes_retry_while_a_reader_holds_spec_json(tmp_path, monkeypatch):
+    # Windows: a reader (an unlocked load_results poll, say) holding spec.json open for a
+    # moment makes os.replace fail; that is retried as for result.npz, not "not writable"
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    real_replace, attempts = os.replace, []
+
+    def replace(src, dst):
+        if Path(dst).name == "spec.json":
+            attempts.append(dst)
+            if len(attempts) <= 2:
+                raise PermissionError(13, "the file is in use by another process", str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    out = tmp_path / "held_spec"
+    api.run_ensemble(SMALL_SPEC, 4, seed=1, output_dir=str(out))
+    assert len(attempts) == 3
+    assert json.loads((out / "spec.json").read_text(encoding="utf-8"))["seed"] == 1
+    assert not list(out.glob("*.tmp"))
+
+
+def test_malformed_provenance_fields_are_ignored_with_a_note(tmp_path):
+    # provenance.json is a record, not an input: a hand-edited field of another type is
+    # ignored with a note, as an unreadable provenance.json is ignored, never a crash
+    out = tmp_path / "provenance"
+    api.run_ensemble(SMALL_SPEC, 10, seed=4, output_dir=str(out))
+    path = out / "provenance.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**stored, "resumes": 5, "git_commit": 5}), encoding="utf-8")
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert job["notes"][:2] == [
+        "provenance.json: resumes is 5, not a list; it restarts with this resume",
+        "provenance.json: git_commit is 5, not a string; it is not compared with this "
+        "resume's commit",
+    ]
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert [r["resumed_from"] for r in record["resumes"]] == [10]
+    assert record["git_commit"] == 5  # kept as it was: only ignored
+    # a provenance written without git (git_commit null) is normal: no note
+    path.write_text(json.dumps({**stored, "git_commit": None}), encoding="utf-8")
+    job = api.start_ensemble_job(SMALL_SPEC, 30, output_dir=str(out))
+    assert "notes" not in job
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+
+
 def test_fresh_seeds_fit_in_a_double(monkeypatch):
     # JavaScript MCP clients (Claude Code among them) read JSON numbers as doubles: a
     # fresh seed above 2**53 would come back rounded, and repeat another run
@@ -2351,18 +2460,28 @@ def test_fresh_seeds_fit_in_a_double(monkeypatch):
 
 
 def test_explicit_seeds_of_any_size_are_used_and_reported_exactly(tmp_path):
+    # used and reported exactly, with a note: a client that reads JSON numbers as doubles
+    # may have rounded the seed it sent, and cannot read this one back unrounded
     direct = _direct_spec()
-    for seed in (2**53 + 1, 2**64 + 3):
-        assert api.run_circuit("H 0\nM 0", seed=seed)["seed"] == seed
+    note = api._BIG_SEED_NOTE
+    assert note.startswith("seed >= 2**53: ") and len(note) < 200
+    for seed in (2**53, 2**64 + 3):
+        circuit = api.run_circuit("H 0\nM 0", seed=seed)
+        assert circuit["seed"] == seed and circuit["notes"] == [note]
         out = tmp_path / f"seed_{seed}"
-        assert api.run_ensemble(SMALL_SPEC, 4, seed=seed, output_dir=str(out))["seed"] == seed
+        summary = api.run_ensemble(SMALL_SPEC, 4, seed=seed, output_dir=str(out))
+        assert summary["seed"] == seed and note in summary["notes"]
         for record in ("spec.json", "provenance.json"):
             assert json.loads((out / record).read_text(encoding="utf-8"))["seed"] == seed
-        assert api.load_results(str(out))["seed"] == seed
+        loaded = api.load_results(str(out))
+        assert loaded["seed"] == seed and note in loaded["notes"]
         job = api.start_ensemble_job(SMALL_SPEC, 8, output_dir=str(out))  # the stored seed
-        assert job["seed"] == seed
+        assert job["seed"] == seed and note in job["notes"]
         assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
         np.testing.assert_array_equal(
             mipt.EnsembleResult.load(out / "result.npz").purification_layer,
             direct.run(8, seed=seed).purification_layer,
         )
+    # the largest seed such a client holds exactly gets none
+    assert note not in api.run_circuit("H 0\nM 0", seed=2**53 - 1).get("notes", [])
+    assert note not in api.run_ensemble(SMALL_SPEC, 4, seed=2**53 - 1).get("notes", [])

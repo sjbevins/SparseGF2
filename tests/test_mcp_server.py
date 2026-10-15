@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -207,7 +208,7 @@ def test_resources_and_prompts():
     assert "erasure" in erasure.messages[0].content.text
 
 
-def test_input_errors_come_back_as_messages_that_name_the_field(tmp_path):
+def test_input_errors_come_back_as_messages_that_name_the_field(tmp_path, monkeypatch):
     # names that are not strings, and a size no graph could be generated for
     spec = dict(SPEC, graph={"family": ["cycle"]})
     text = error_text(call("run_ensemble", {"spec": spec, "trajectories": 2, "seed": 1}))
@@ -218,32 +219,51 @@ def test_input_errors_come_back_as_messages_that_name_the_field(tmp_path):
     spec = dict(SPEC, num_system=10**12)
     text = error_text(call("estimate_ensemble", {"spec": spec, "trajectories": 2}))
     assert "num_system is too large" in text
-    # an output_dir that cannot be created (below a regular file)
+    # an output_dir that cannot be created: below a regular file, or without permission
     (tmp_path / "a_file").write_text("", encoding="utf-8")
-    out = str(tmp_path / "a_file" / "out")
-    for tool, arguments in (
-        ("run_ensemble", {"spec": SPEC, "trajectories": 2, "seed": 1, "output_dir": out}),
-        ("start_ensemble_job", {"spec": SPEC, "trajectories": 2, "seed": 1, "output_dir": out}),
-        ("run_circuit", {"circuit": "H 0\nM 0", "output_dir": out}),
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == "denied":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    for out, expected in (
+        (tmp_path / "a_file" / "out", "is a file, not a directory"),
+        (tmp_path / "denied", "is not writable: [Errno 13] Permission denied"),
     ):
-        assert "is not writable" in error_text(call(tool, arguments)), tool
+        for tool, arguments in (
+            ("run_ensemble", {"spec": SPEC, "trajectories": 2, "seed": 1}),
+            ("start_ensemble_job", {"spec": SPEC, "trajectories": 2, "seed": 1}),
+            ("run_circuit", {"circuit": "H 0\nM 0"}),
+        ):
+            text = error_text(call(tool, {**arguments, "output_dir": str(out)}))
+            assert expected in text and "internal error" not in text, (tool, text)
 
 
-def test_unanticipated_failures_carry_their_type_and_message(monkeypatch):
+def test_unanticipated_failures_carry_their_type_and_message(monkeypatch, caplog):
     def fail(error):
         def raising(*args, **kwargs):
             raise error
 
         monkeypatch.setattr(api, "run_ensemble", raising)
+        caplog.clear()
         return error_text(call("run_ensemble", {"spec": SPEC, "trajectories": 2}))
 
-    text = fail(RuntimeError("kaboom"))
-    assert text.endswith("RuntimeError: kaboom (internal error: please report it)")
-    text = fail(PermissionError(13, "Permission denied", "x"))
-    assert text.endswith("PermissionError: [Errno 13] Permission denied: 'x' (internal error: "
-                         "please report it)")  # fmt: skip
-    # a TypeError is an input error (wrong argument types), not a bug to report
-    assert fail(TypeError("regions must be lists")).endswith("TypeError: regions must be lists")
+    # the API raises ValueError for every input error, so anything else is a bug: a
+    # TypeError too (a None that reaches a subscript, say), never the caller's to fix
+    for error, shown in (
+        (RuntimeError("kaboom"), "RuntimeError: kaboom"),
+        (PermissionError(13, "Permission denied", "x"), "PermissionError: [Errno 13] "
+                                                        "Permission denied: 'x'"),
+        (TypeError("'NoneType' object is not subscriptable"),
+         "TypeError: 'NoneType' object is not subscriptable"),
+    ):  # fmt: skip
+        assert fail(error).endswith(f"{shown} (internal error: please report it)")
+        # and the server's log (stderr) keeps the traceback
+        (logged,) = [r for r in caplog.records if r.name == "sparsegf2.mcp_server"]
+        assert logged.levelname == "ERROR" and logged.exc_info[1] is error
 
 
 @pytest.mark.parametrize(
@@ -309,7 +329,6 @@ def test_stdio_transport_end_to_end():
     """The real server process over stdio: nothing but protocol messages on stdout."""
     import os
     import sys
-    from pathlib import Path
 
     src = str(Path(mcp_server.__file__).resolve().parents[1])
     env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}

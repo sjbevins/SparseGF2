@@ -93,11 +93,11 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | Concept | Rule |
 |---|---|
 | circuits | Stim text format. Every Clifford gate, `M MX MY MR MRX MRY MXX MYY MZZ MPP R RX RY`, Pauli noise channels, `TICK DETECTOR OBSERVABLE_INCLUDE QUBIT_COORDS SHIFT_COORDS`, `REPEAT`, plus the SparseGF2 extensions `CLIFFORD_1Q(i)` and `CLIFFORD_2Q(i)` (Clifford by canonical index) |
-| seeds | a non-negative int reproduces a run; `null` draws a fresh seed below 2^53, reported back as `seed` (53 bits, so a client that reads JSON numbers as doubles, JavaScript and Claude Code among them, keeps it exactly). An explicit seed of any size is used and reported exactly (as a JSON integer); such a client can send and read only seeds below 2^53 without rounding |
+| seeds | a non-negative int reproduces a run; `null` draws a fresh seed below 2^53, reported back as `seed` (53 bits, so a client that reads JSON numbers as doubles, JavaScript and Claude Code among them, keeps it exactly). An explicit seed of any size is used and reported exactly (as a JSON integer); such a client can send and read only seeds below 2^53 without rounding, so a result whose seed is 2^53 or more carries a note saying so |
 | qubit lists | `[0, 1, 2]` or `"0:3"` / `"0:16:2"` (Python slices) |
 | phases | `true` (default): signs tracked, outcomes match Stim. `false`: about 2x faster, no outcomes (only `random` flags), same entanglement |
-| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change. Names that must be strings (a graph or weight `family`, a probe or observable `kind`, a `capabilities` section) are checked before they are looked up; an `output_dir` that cannot be created or written is `output_dir DIR is not writable: ...`; a saved file that cannot be read is `could not read results from DIR: ...`, naming the file. Any other failure still carries its type and message (section 5) |
-| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2` version is refused |
+| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change. Names that must be strings (a graph or weight `family`, a probe or observable `kind`, a `capabilities` section) are checked before they are looked up; an `output_dir` that cannot be created or written is `output_dir DIR is not writable: ...` (or `output_dir DIR cannot be created: P is a file, not a directory` when a parent is a file); a saved file that cannot be read is `could not read results from DIR: ...`, naming the file. Any other failure is a bug, and still carries its type and message (section 5) |
+| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2` version is refused. A field a resume reads that holds another type (`resumes` not a list, `git_commit` not a string; a hand edit, say) is ignored with a note, as an unreadable `provenance.json` is |
 
 ---
 
@@ -528,9 +528,9 @@ process was killed: the rerun takes over the lock the dead process left).
   to stderr. On failure the object is `{"error": {"type", "message"}}`.
 * Exit codes: `0` success, `2` invalid input or usage (bad circuit text, including
   `inspect` of an invalid circuit, unknown spec key, missing file, a file that cannot be
-  read or is not UTF-8, bad JSON, an output directory that cannot be written, a value of
-  the wrong type: `ValidationError`, or `TypeError`), `1` internal error (`internal
-  error: ...`), `130` interrupted (Ctrl-C).
+  read or is not UTF-8, bad JSON, an output directory that cannot be written:
+  `ValidationError`), `1` internal error (`internal error: ...`, any other exception, a
+  `TypeError` included: a bug to report), `130` interrupted (Ctrl-C).
 * `-` reads the circuit or spec from stdin. `--observables` takes inline JSON or
   `@file.json`.
 * `sparsegf2 ensemble` needs `--trajectories` (or a `trajectories` entry in SPEC.json),
@@ -562,10 +562,11 @@ process was killed: the rerun takes over the lock the dead process left).
   estimate and the run.
 * Errors: invalid input becomes an MCP tool error (`isError: true`) whose text is the
   API's message, so the model can correct the call. Every other failure is a tool error
-  too, never the SDK's bare `Error executing tool X`: its text is
-  `TypeName: message`, followed by `(internal error: please report it)` unless it is a
-  `TypeError` (an input error, like `ValueError`); the server logs the traceback of an
-  internal error on its stderr.
+  too, never the SDK's bare `Error executing tool X`: the model reads
+  `Error executing tool X: TypeName: message (internal error: please report it)`, and the
+  server logs the traceback on its stderr. The API raises `ValueError` for every input
+  error (it turns the library's field-naming `TypeError`s into one), so anything else,
+  a `TypeError` included, is a bug: report it rather than retry with other arguments.
 * Argument types are strict, as the API's own checks are, and are reported by the SDK's
   schema validation in the same way, naming the argument: an integer (`trajectories`,
   `seed`, `shots`, `tick_stride`, `num_qubits`, `chunk_size`) must be a JSON integer or a

@@ -47,10 +47,10 @@ def require_mcp() -> None:
 def _failure_text(exc: Exception) -> str:
     """The tool error for an exception other than the API's ``ValueError``: its type and
     message, so the model always reads what failed (the SDK would send only "Error
-    executing tool X"). A ``TypeError`` is an input error (arguments of the wrong type), as
-    a ``ValueError`` is; anything else is a bug, and says so."""
-    text = f"{type(exc).__name__}: {exc}"
-    return text if isinstance(exc, TypeError) else f"{text} (internal error: please report it)"
+    executing tool X"), and that it is a bug to report. The API raises ``ValueError`` for
+    every input error (it turns the library's field-naming ``TypeError`` into one), so
+    whatever else reaches the server, a ``TypeError`` included, is a bug."""
+    return f"{type(exc).__name__}: {exc} (internal error: please report it)"
 
 
 def _whole_number(value: Any) -> Any:
@@ -250,9 +250,8 @@ def build_server() -> Any:
             out = fn(*args, **kwargs)
         except ValueError as exc:  # invalid input: the API's message says what to change
             raise ToolError(str(exc)) from exc
-        except Exception as exc:
-            if not isinstance(exc, TypeError):  # a bug: its traceback stays in the server log
-                _logger.error("%s failed", getattr(fn, "__name__", "tool"), exc_info=exc)
+        except Exception as exc:  # a bug: the model reads what failed, the log keeps where
+            _logger.error("%s failed", getattr(fn, "__name__", "tool"), exc_info=exc)
             raise ToolError(_failure_text(exc)) from exc
         text = json.dumps(out, separators=(",", ":"))
         return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=out)

@@ -3,11 +3,13 @@
 ## Unreleased
 
 * **Every MCP failure carries a message:** the server turns every exception into a tool
-  error the model can read. A `ValueError` keeps the API's message; anything else reads
-  `TypeName: message`, followed by `(internal error: please report it)` unless it is a
-  `TypeError` (an input error too). The SDK used to send only `Error executing tool X`
-  for anything but a `ValueError`. An internal error's traceback goes to the server's
-  log (stderr). The CLI exits with 2 for a `TypeError` as well.
+  error the model can read. A `ValueError` (invalid input) keeps the API's message;
+  anything else, a `TypeError` included, is a bug and reads `TypeName: message (internal
+  error: please report it)`, with its traceback in the server's log (stderr). The API
+  raises `ValueError` for every input error, so nothing else is the caller's to fix. The
+  SDK used to send only `Error executing tool X` for anything but a `ValueError`.
+  AGENTS.md, the sparsegf2 skill and the quickstart resource tell agents to report such
+  an error rather than retry with other arguments.
 * **Names are checked before they are looked up:** a graph `family`, an `edge_weights`
   family, a probe or observable `kind` and a `capabilities` section that is not a string
   raise `ValueError` naming the field (`graph.family must be a string (one of [...]),
@@ -19,14 +21,19 @@
 * **Directories that cannot be written or read are input errors:** an `output_dir` that
   cannot be created or written (no permission, a full or read-only drive, a path below a
   file), its lock included, raises `ValueError("output_dir DIR is not writable: ...")` in
-  `run_circuit`, `run_ensemble` and `start_ensemble_job`. A saved part that stays
+  `run_circuit`, `run_ensemble` and `start_ensemble_job` (`output_dir DIR cannot be
+  created: P is a file, not a directory` when a parent is a file). Replacing `spec.json`
+  or `provenance.json` is retried while a reader holds the file (Windows), as replacing
+  `result.npz` already was. A saved part that stays
   unreadable after the retries (`result.npz` or a chunk that another program holds, or
   that this process may not read) raises `could not read results from DIR: ...`, naming
   the file, in `start_ensemble_job` as in `load_results`; it raised `PermissionError`
   (CLI exit 1, a bare MCP error). A `spec.json` that is not JSON, holds no object or
   records no seed, and a graph file that cannot be read, are refused naming the file. The
   CLI exits with 2 for a circuit, spec or observables file it cannot read or that is not
-  UTF-8.
+  UTF-8. A `provenance.json` field that a resume reads but that holds another type
+  (`resumes` not a list, `git_commit` not a string) is ignored with a note, as an
+  unreadable `provenance.json` already was; it crashed the resume with a `TypeError`.
 * **Strict MCP argument types:** integer, boolean and number tool arguments are checked
   as the API checks them. Pydantic's lax default ran one trajectory for
   `trajectories: true` and three for `"3"`, and took `seed: true` as seed 1; these, and
@@ -36,7 +43,9 @@
 * **Fresh seeds fit in a double:** `seed=None` draws a 53-bit seed (it drew 63 bits), so
   the reported seed survives clients that read JSON numbers as doubles (JavaScript MCP
   clients, Claude Code among them); a larger one came back rounded and repeated another
-  run. An explicit seed of any size is still used and reported exactly.
+  run. An explicit seed of any size is still used and reported exactly, and a result
+  whose seed is 2**53 or more (from `run_circuit`, `run_ensemble`, `load_results` or
+  `start_ensemble_job`) carries a note that such a client may round it.
 * **Lock and merge details:** `load_results` no longer fails when a merge removes
   `chunks/` while it lists it (a missing `chunks/` holds no chunks, and the chunks are
   listed before `result.npz`, which a merge replaces first). The refusal of a lock taken

@@ -455,9 +455,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         _error("ValidationError", str(exc), as_json)
         return EXIT_USAGE
-    except TypeError as exc:  # an input error too (a value of the wrong type), as over MCP
-        _error("TypeError", str(exc), as_json)
-        return EXIT_USAGE
     except KeyboardInterrupt:
         _error("Interrupted", "interrupted", as_json)
         return EXIT_INTERRUPTED
