@@ -192,8 +192,9 @@ def run_many(
 ):  # fmt: skip
     """Run the program once per row of ``records``, each from |0...0>, in parallel.
 
-    Shot ``s`` uses random stream ``first_shot + s`` of ``key``, so results do
-    not depend on the number of threads.
+    Shot ``s`` uses random stream ``first_shot + s`` of ``key`` (randomness
+    contract of :func:`~sparsegf2._kernel.rng.stream_state`), so results do not
+    depend on the number of threads.
     """
     shots = records.shape[0]
     for s in prange(shots):

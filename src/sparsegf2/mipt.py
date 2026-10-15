@@ -84,11 +84,15 @@ trajectories, so ensembles can be split into chunks (``first_trajectory``) and
 merged without changing any result. The measurement mask uses one uniform draw per
 qubit per layer whatever the rate, so runs at different ``measurement_rate``
 with the same seed share their random numbers (the measured set at a lower rate
-is a subset of that at a higher rate).
+is a subset of that at a higher rate). The sampled probes draw their orderings
+from a stream of their own at each evaluation, keyed by the trajectory, the
+probe's name and the layer, so other probes and other checkpoints never change
+them (:data:`RANDOMNESS_CONTRACT`).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import operator
 import time
@@ -143,11 +147,35 @@ assert _H_CLIFFORD is not None and _CX_CLIFFORD is not None, "H and CX are unita
 _H_INDEX = _H_CLIFFORD.index()
 _CX_INDEX = _CX_CLIFFORD.index()
 
-#: Version of the engine's random streams. Trajectory t of run(seed=s) is a
-#: function of (protocol, s, t) only; bump this whenever a change to the
-#: engine changes which circuit or which random numbers a trajectory gets, so
-#: saved trajectory records refuse to replay across the change.
-RANDOMNESS_CONTRACT = 1
+#: Version of the package's random streams: the same contract and seed give the
+#: same random numbers. It covers
+#:
+#: * the generator: xoshiro256** and its draw conventions (``next_u64``,
+#:   ``next_double``, ``next_below``, ``next_bit`` in ``sparsegf2._kernel.rng``);
+#: * the stream derivation ``stream_state(key, index)`` and the index mix
+#:   ``mix(a, b, c)`` (exact formulas in the ``_kernel.rng`` docstring);
+#: * every draw made through ``stream_state``: the ensemble circuit streams
+#:   (trajectory ``t`` uses stream ``t`` of words 0 and 1 of the run's
+#:   ``SeedSequence``, which fixes ``run``, ``replay`` and ``circuit``), the
+#:   ensemble probe streams (one per sampled-probe evaluation: stream
+#:   ``mix(t, name hash, layer)`` of words 2 and 3), the shot streams of
+#:   ``sparsegf2.sample`` (shot ``s`` uses stream ``s`` of ``stream_key(seed)``)
+#:   and the sampled observables ``random_erasure_statistics`` and
+#:   ``erasure_profile`` (stream 0 of ``stream_key(seed)``);
+#: * the order of the draws within a trajectory (``_kernel.ensemble``
+#:   docstring) and within a sampled evaluation.
+#:
+#: Generators seeded directly from a ``SeedSequence`` (``Simulator``'s own
+#: stream, the graph families, ``StabilizerCode.first_failure_sizes``) use the
+#: same generator but not ``stream_state``; contract 2 left them unchanged.
+#: Bump this whenever a change gives any covered draw other random numbers;
+#: results and output directories record it and refuse to merge, resume or
+#: replay (``EnsembleResult.replay``) across the change: this version cannot
+#: reproduce a run made under another contract. Contract 2 mixes all 128 key
+#: bits into every stream and gives each sampled-probe evaluation its own
+#: stream; contract 1 folded the key to ``key0 ^ key1`` and read one probe
+#: stream per trajectory in sequence.
+RANDOMNESS_CONTRACT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +848,7 @@ class MonitoredCircuit:
                 idx=np.array(idx, dtype=np.int64),
                 size=np.array([p.size for p in self.probes], dtype=np.int64),
                 samples=np.array([p.samples for p in self.probes], dtype=np.int64),
+                phash=np.array([_name_hash(p.name) for p in self.probes], dtype=np.uint64),
                 snapshot=snapshot[0] if snapshot else -1,
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
@@ -893,7 +922,8 @@ class MonitoredCircuit:
                     a["detect"], bool(self.stop_when_purified), a["pkind"], a["plen"], a["poff"],
                     a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"], a["idx"],
                     a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
-                    key_probe, first_trajectory, out, snap, snap_rows, tau, final, meas,
+                    key_probe, a["phash"], first_trajectory, out, snap, snap_rows, tau, final,
+                    meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
@@ -920,6 +950,7 @@ class MonitoredCircuit:
             num_measurements=meas,
             elapsed_seconds=elapsed,
             snapshots=snapshots,
+            randomness_contract=RANDOMNESS_CONTRACT,
         )
 
     def replay(self, trajectory: int, *, seed, probes=None, checkpoints=None) -> EnsembleResult:
@@ -928,7 +959,18 @@ class MonitoredCircuit:
         Probes and checkpoints never change a trajectory's circuit or random
         numbers, so this is exactly that trajectory, observed differently: a
         one-row :class:`EnsembleResult`. This is how a trajectory is probed at
-        new depths after the fact.
+        new depths after the fact. The sampled probes are reproduced too: an
+        evaluation's orderings depend only on the trajectory, the probe's name,
+        its ``samples`` and the layer, so the same probe at a layer the original
+        run evaluated gives the same values.
+
+        All of this holds only when the run was made under this version's
+        :data:`RANDOMNESS_CONTRACT` (``result.randomness_contract ==
+        RANDOMNESS_CONTRACT``). This version cannot reproduce the trajectories
+        of a run made under contract 1: the same seed gives other circuits and
+        samples, and nothing here can tell. For a saved run use
+        :meth:`EnsembleResult.replay`, which takes the run's own spec and seed
+        and refuses a result made under another contract.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -946,6 +988,11 @@ class MonitoredCircuit:
         0), then per layer ``CLIFFORD_2Q`` gates, ``M`` measurements and a
         ``TICK``. So tick ``t`` of ``Simulator.run(circuit, observe=...)``
         sees the state after layer ``t``.
+
+        It is the circuit of a run made under this version's
+        :data:`RANDOMNESS_CONTRACT` only: for a result made under contract 1
+        (``result.randomness_contract == 1``) the same seed gives another
+        circuit, and this version cannot rebuild the one that run simulated.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -1091,6 +1138,12 @@ def _keys(ss: np.random.SeedSequence) -> tuple[np.ndarray, np.ndarray]:
     return state[:2].copy(), state[2:].copy()
 
 
+def _name_hash(name: str) -> int:
+    """The 64-bit key of a probe's sampling streams: blake2b of its name, read little-endian."""
+    digest = hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little")
+
+
 def _plain_ints(value):
     """Seed entropy as JSON-stable Python values: an int, or a list of ints."""
     if value is None or isinstance(value, (int, np.integer)):
@@ -1204,6 +1257,11 @@ class EnsembleResult:
     version
         The ``sparsegf2`` version that produced the result (``None`` for
         files saved before versions were recorded).
+    randomness_contract
+        The :data:`RANDOMNESS_CONTRACT` the run was made under (1 for files
+        saved before contracts were recorded). The same seed gives other
+        trajectories under another contract, so :meth:`concatenate` refuses to
+        mix contracts.
     """
 
     spec: MonitoredCircuit
@@ -1219,6 +1277,7 @@ class EnsembleResult:
     seed_pool_size: int = 4
     version: str | None = __version__
     snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+    randomness_contract: int = RANDOMNESS_CONTRACT
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -1226,6 +1285,7 @@ class EnsembleResult:
         self.seed_entropy = _plain_ints(self.seed_entropy)
         self.seed_spawn_key = tuple(int(k) for k in self.seed_spawn_key)
         self.seed_pool_size = int(self.seed_pool_size)
+        self.randomness_contract = _integer(self.randomness_contract, "randomness_contract")
 
     @property
     def num_trajectories(self) -> int:
@@ -1233,7 +1293,11 @@ class EnsembleResult:
 
     @property
     def seed_sequence(self) -> np.random.SeedSequence:
-        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run."""
+        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run.
+
+        The repeat is exact only under the run's :attr:`randomness_contract`;
+        :meth:`replay` checks it.
+        """
         return np.random.SeedSequence(
             self.seed_entropy, spawn_key=self.seed_spawn_key, pool_size=self.seed_pool_size
         )
@@ -1271,6 +1335,43 @@ class EnsembleResult:
             )
         return StabilizerCode.from_packed(
             generators[trajectory, evaluation, :rows], self.spec.num_system
+        )
+
+    def replay(self, trajectory: int, *, probes=None, checkpoints=None) -> EnsembleResult:
+        """Trajectory ``trajectory`` of this run again, with other probes or checkpoints.
+
+        :meth:`MonitoredCircuit.replay` with this result's own spec and seed
+        (``self.spec.replay(trajectory, seed=self.seed_sequence, ...)``): the
+        same circuit and, for the same probe at a layer the run evaluated, the
+        same values, sampled probes included. ``trajectory`` is a trajectory
+        index (an entry of :attr:`trajectories`; it is also the row when the
+        run started at trajectory 0).
+
+        Raises ``ValueError`` if the run was made under another
+        :data:`RANDOMNESS_CONTRACT`: under another contract the same seed gives
+        other circuits and samples, so this version cannot reproduce that run.
+        """
+        trajectory = _integer(trajectory, "trajectory")
+        if self.randomness_contract != RANDOMNESS_CONTRACT:
+            raise ValueError(
+                f"this result was made under randomness contract {self.randomness_contract}; "
+                f"this version uses {RANDOMNESS_CONTRACT}, under which its seed gives other "
+                "circuits and samples, so its trajectories cannot be replayed. Rerun the "
+                "protocol with this version (result.spec.run(...)) and replay that result"
+            )
+        held = np.asarray(self.trajectories, dtype=np.int64)
+        if not np.any(held == trajectory):
+            where = (
+                f"{held.size} trajectories between {held.min()} and {held.max()}"
+                if held.size
+                else "no trajectories"
+            )
+            raise ValueError(
+                f"trajectory {trajectory} is not in this result, which holds {where} (pass a "
+                "trajectory index from result.trajectories, not a row of a chunk)"
+            )
+        return self.spec.replay(
+            trajectory, seed=self.seed_sequence, probes=probes, checkpoints=checkpoints
         )
 
     @property
@@ -1329,6 +1430,7 @@ class EnsembleResult:
         meta = {
             "format": "sparsegf2.EnsembleResult/1",
             "version": self.version,
+            "randomness_contract": self.randomness_contract,
             "seed_entropy": self.seed_entropy,
             "seed_spawn_key": list(self.seed_spawn_key),
             "seed_pool_size": self.seed_pool_size,
@@ -1429,6 +1531,8 @@ class EnsembleResult:
                 seed_spawn_key=tuple(meta.get("seed_spawn_key", ())),
                 seed_pool_size=meta.get("seed_pool_size", 4),
                 version=meta.get("version"),
+                # files from before contracts were recorded were made under contract 1
+                randomness_contract=meta.get("randomness_contract", 1),
                 snapshots={
                     p.name: (z[f"snapshot::{p.name}"], z[f"snapshot_counts::{p.name}"])
                     for p in probes
@@ -1440,16 +1544,23 @@ class EnsembleResult:
     def concatenate(results: Sequence[EnsembleResult]) -> EnsembleResult:
         """Merge chunks of the same protocol and seed (e.g. from separate jobs).
 
-        The chunks must have identical specs, seeds and package versions and
-        cover different trajectories (``first_trajectory=``); anything else
-        raises ``ValueError`` rather than mixing protocols or counting a
-        trajectory twice.
+        The chunks must have identical specs, seeds, package versions and
+        randomness contracts and cover different trajectories
+        (``first_trajectory=``); anything else raises ``ValueError`` rather
+        than mixing protocols or counting a trajectory twice.
         """
         if not results:
             raise ValueError("nothing to concatenate")
         first = results[0]
         refuse = "can only concatenate results of the same protocol and seed"
         for r in results[1:]:
+            if r.randomness_contract != first.randomness_contract:
+                raise ValueError(
+                    f"{refuse}: they were made under randomness contracts "
+                    f"{first.randomness_contract} and {r.randomness_contract}, under which the "
+                    "same seed gives other trajectories; rerun the older part with this version "
+                    f"(randomness contract {RANDOMNESS_CONTRACT})"
+                )
             if _seed_record(r) != _seed_record(first):
                 raise ValueError(
                     f"{refuse}: the seeds differ ({_seed_record(first)} vs {_seed_record(r)})"
@@ -1490,6 +1601,7 @@ class EnsembleResult:
             seed_spawn_key=first.seed_spawn_key,
             seed_pool_size=first.seed_pool_size,
             version=first.version,
+            randomness_contract=first.randomness_contract,
             snapshots={
                 name: (
                     np.concatenate([r.snapshots[name][0] for r in results]),

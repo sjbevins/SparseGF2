@@ -60,6 +60,7 @@ examples:
   sparsegf2 ensemble spec.json --trajectories 1000 --seed 7
   sparsegf2 ensemble spec.json --trajectories 100000 --output-dir runs/a --chunk-size 5000
   sparsegf2 ensemble runs/a/spec.json       # spec.json from a run: repeats it exactly
+                                            # (if made under this randomness contract)
 
 SPEC.json holds MonitoredCircuit parameters, e.g.
   {"num_system": 64, "graph": {"family": "cycle"}, "layers": 256,

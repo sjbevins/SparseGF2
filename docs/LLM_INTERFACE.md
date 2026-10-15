@@ -250,6 +250,9 @@ The result contains:
 
 * `num_trajectories`, `seed`, `elapsed_seconds` and `trajectories_per_second` (wall clock
   for the whole call, including building the spec and generating its graphs);
+* `randomness_contract`: the `mipt.RANDOMNESS_CONTRACT` the run was made under (1 for
+  results saved before it was recorded). Only a run made under this version's contract
+  can be replayed, resumed or extended;
 * `checkpoints`: the spec's layers shown, the total count, and whether they were
   subsampled;
 * `probes`, each on its own layers:
@@ -382,7 +385,8 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
   `seed` may be omitted (the stored one is used), and a larger `trajectories` extends a
-  finished run. A directory holding a different spec or seed is refused.
+  finished run. A directory holding a different spec or seed, or a run made under
+  another randomness contract or SparseGF2 version, is refused.
 * Graph collections: `trajectories` may be omitted (all `G * circuits_per_graph` run) and
   cannot exceed that count. Changing `circuits_per_graph` changes the spec, so more
   circuits per graph need a new directory.

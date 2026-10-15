@@ -1,6 +1,7 @@
 """The JSON service layer: validation, bounded output, equivalence with direct library calls."""
 
 import json
+import re
 import time
 
 import numpy as np
@@ -933,6 +934,56 @@ def test_resume_keeps_provenance_and_refuses_another_version(tmp_path, monkeypat
     monkeypatch.setattr(api, "__version__", "0.0.0.other")
     with pytest.raises(ValueError, match=r"started with sparsegf2 .*need not agree"):
         api.start_ensemble_job(SMALL_SPEC, 60, output_dir=out)
+
+
+def _rewrite_without_contract(path):
+    """Rewrite a saved result as a file from before ``randomness_contract`` was recorded."""
+    with np.load(path, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    del meta["randomness_contract"]
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(path, **arrays)
+
+
+def test_resume_refuses_another_randomness_contract(tmp_path):
+    api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(tmp_path / "sync"))
+    prov = json.loads((tmp_path / "sync" / "provenance.json").read_text(encoding="utf-8"))
+    assert prov["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    out = tmp_path / "contract"
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out), seed=4)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    prov_path = out / "provenance.json"
+    prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    assert prov["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    refused = re.escape(
+        "this run was made under randomness contract 1; this version uses "
+        f"{mipt.RANDOMNESS_CONTRACT}; start a new output_dir"
+    )
+    # a provenance written under contract 1, and one from before the contract was recorded
+    old = {k: v for k, v in prov.items() if k != "randomness_contract"}
+    for record in ({**prov, "randomness_contract": 1}, old):
+        prov_path.write_text(json.dumps(record), encoding="utf-8")
+        for trajectories in (20, 40):  # resume (nothing left to do) and extend
+            with pytest.raises(ValueError, match=refused):
+                api.start_ensemble_job(SMALL_SPEC, trajectories, output_dir=str(out))
+        assert api.load_results(str(out))["num_trajectories"] == 20  # reading is still fine
+    # results saved under contract 1 are refused even beside a current provenance
+    prov_path.write_text(json.dumps(prov), encoding="utf-8")
+    _rewrite_without_contract(out / "result.npz")
+    with pytest.raises(ValueError, match=refused):
+        api.start_ensemble_job(SMALL_SPEC, 40, output_dir=str(out))
+    assert not (out / "chunks").exists()  # nothing was run
+
+
+def test_summaries_show_the_randomness_contract(tmp_path):
+    out = tmp_path / "shown"
+    summary = api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(out))
+    assert summary["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    assert api.load_results(str(out))["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    _rewrite_without_contract(out / "result.npz")  # saved before the contract was recorded
+    assert api.load_results(str(out))["randomness_contract"] == 1
+    assert api.load_results(str(out / "result.npz"))["randomness_contract"] == 1
 
 
 def test_estimate_includes_graph_generation_and_times_are_wall_clock():

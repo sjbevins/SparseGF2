@@ -213,6 +213,13 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
   `output_dir` to resume.
+* Compiled kernels are cached on disk and recompiled automatically whenever any kernel
+  source (or the Numba or Python version) changes, so the first import and run after an
+  update is slower (10 to 30 s). Kernels that a process started before the update saves
+  afterwards are ignored and recompiled. That process itself, such as a running MCP
+  server, keeps the code it loaded: restart it to use the new code. If cached kernels
+  ever look stale, delete the `sparsegf2-kernels.*.sha256` marker next to the cache
+  files (`src/sparsegf2/_kernel/__pycache__` by default) and the next import clears them.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around
@@ -293,8 +300,8 @@ code.contiguous_distance()
 
 # exact states and trajectories
 sim.save("state.npz"); same = Simulator.load("state.npz")   # tableau, signs, random stream
-mc = mipt.MonitoredCircuit(...)                              # the spec of a saved run
-again = mc.replay(17, seed=7, probes=[...], checkpoints=[...])  # trajectory 17 of run(seed=7)
+res = mipt.EnsembleResult.load("runs/a/result.npz")          # a saved run
+again = res.replay(17, probes=[...], checkpoints=[...])      # its trajectory 17, observed anew
 
 # Stim comparison of any circuit, tick by tick
 crosscheck.compare_stabilizers(circuit, seed=0)
@@ -304,10 +311,21 @@ crosscheck.compare_measurements(circuit, seed=0)
 * `distance_bounds` uses `high = min_j D_j` from the orderings. With counts for m = 1..w,
   the smallest m with an uncorrectable m-subset is d exactly; with none, `low = w + 1`.
   A code with k = 0 gets `(n + 1, n + 1)`: it has no distance, so exclude it.
-* `replay` reruns one trajectory with other probes or checkpoints. Probes and checkpoints
-  never change the trajectory, so a replay matches the original run exactly
-  (`mipt.RANDOMNESS_CONTRACT` versions this guarantee). This is how to probe one
-  trajectory at new depths after a run.
+* `result.replay(t, probes=..., checkpoints=...)` reruns trajectory `t` of a saved run
+  with other probes or checkpoints, using the run's own spec and seed. Probes and
+  checkpoints never change the trajectory, so a replay matches the original run exactly.
+  The sampled probes (`erasure_first_failure`, `erasure_lost_profile`) are reproduced too:
+  each evaluation draws from its own stream, keyed by the trajectory, the probe's name and
+  the layer, so the same probe (same name and `samples`) at a layer the run evaluated
+  gives the same samples whatever the other probes and checkpoints. This is how to probe
+  one trajectory at new depths after a run.
+* All of this holds only under the randomness contract the run was made under:
+  `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (now 2). This version cannot
+  reproduce the trajectories of a run made under contract 1 (results saved before it was
+  recorded load as 1). `result.replay` refuses such a result, `start_ensemble_job`
+  refuses to resume or extend its output_dir, and `concatenate` refuses to mix contracts.
+  `spec.replay(t, seed=...)`, `spec.circuit(t, seed=...)` and rerunning a saved
+  `spec.json` do not check, so prefer `result.replay`.
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
   per side).

@@ -124,6 +124,7 @@ sparsegf2/
   clifford.py     Clifford tableaux; canonical 1q/2q Clifford groups and indices
   gates.py        the gate library, Stim names and conventions
   _kernel/        Numba kernels
+    _cache.py     on import, ties cached kernels to the kernel sources (5.5)
     bits.py, rng.py, tables.py   bit tricks, xoshiro256** streams, gate tables
     tableau.py    layout, gates, measurement (both modes), peeks, canonical form
     program.py    the compiled circuit interpreter (one call per run / per shot)
@@ -294,6 +295,38 @@ the pivot into many rows at once tracks the factors of i with a 2-bit counter
 per row, also word-parallel. This is the bit-sliced counting trick Stim uses
 for products of Pauli strings, applied across rows instead of along one row.
 
+### 5.5 Compiled-kernel caches
+
+The kernels use Numba's `cache=True`. Numba keys a function's cache entry on
+its own source file only, but a compiled caller embeds its callees: after an
+edit to `rng.py` alone, `program.run_many` kept running the old `stream_state`
+from a warm cache. So importing `sparsegf2._kernel`, before any kernel module,
+hashes all of `_kernel/*.py` with the Numba and Python versions (the kernel
+fingerprint) and does two things.
+
+* **Stamps.** It puts a cache locator of its own first in Numba's list. For a
+  file in `_kernel/` it asks Numba's standard locators for the cache directory
+  (so `NUMBA_CACHE_DIR` and the fallback for a read-only `__pycache__` still
+  apply) and adds the fingerprint this process imported to their source stamp.
+  Numba ignores and overwrites an index whose stamp differs from its own, so a
+  kernel compiled from other sources is never loaded. That holds even for one
+  saved after an update by a process that had imported the old sources, which
+  deleting files alone cannot prevent.
+* **Deletes.** It compares the fingerprint with a marker file next to the cache
+  files. On a mismatch it deletes the kernels' `.nbi` and `.nbc` files there
+  and writes the new marker. The directory is the one Numba picks for a
+  function in `_kernel/`: a never-compiled `njit(cache=True)` dispatcher
+  reports it as `stats.cache_path`.
+
+The locator uses Numba's private `CacheImpl._locator_classes`. Without it, or
+with `NUMBA_CACHE_LOCATOR_CLASSES` set, only the deletion runs. A kernel that an
+old process saves after the update then stays until the kernels change again,
+or until the `sparsegf2-kernels.*.sha256` marker is deleted by hand. A running
+process keeps the code it loaded in either case. All compiled code lives in
+`_kernel/` and imports only kernel modules, numpy, numba, llvmlite and the
+standard library, which a test checks. The check costs about 1 ms and never
+fails an import (`sparsegf2._kernel._cache`).
+
 ## 6. Circuits
 
 ### 6.1 The language
@@ -362,6 +395,21 @@ inside the compiled engine instead (section 8).
 * `RunResult.random[k]` says whether measurement k was random. It is available
   in both modes; it is a genuine physical property of the trajectory.
   `RunResult.measurements` needs `phases=True` and otherwise raises.
+* **Streams and the randomness contract.** Work that repeats independently
+  draws from streams: shot `s` of `sample(circuit, shots, seed=k)` uses
+  stream `s` of a 128-bit key from `k`, trajectory `t` of an ensemble uses
+  stream `t` of its circuit key, and every sampled-probe evaluation a stream
+  of its own (section 8.2). `stream_state(key, index)` in `_kernel/rng.py`
+  builds a xoshiro256** state from all 128 key bits and the index (the exact
+  formulas are in that module's docstring), so a shot or trajectory does not
+  depend on the thread count or on the other shots.
+  `mipt.RANDOMNESS_CONTRACT` (now 2) versions the generator, the stream
+  derivation and the order of the draws, and its docstring lists what it
+  covers. Saved ensemble results and output directories record it and refuse
+  to merge with, or resume, work made under another contract. Contract 2
+  replaced a derivation that used only `key0 ^ key1`, so `sample()` outputs
+  for a fixed seed changed with it. A `Simulator`'s own stream is seeded
+  from its `SeedSequence` directly and did not change.
 
 ## 7. Observables
 
@@ -509,10 +557,21 @@ How the engine handles them (`_kernel/ensemble.py`):
   dummy slot. A code at n = 256 takes 16 KB per evaluation, which is why the
   snapshot usually gets its own `checkpoints="final"`.
 * **Randomness.** The sampling probes (`erasure_lost_profile`,
-  `erasure_first_failure`) draw from the trajectory's probe stream, a key
-  separate from the circuit's, in probe order at each evaluation. The circuit
-  never depends on the probes; the samples of one sampling probe do depend on
-  which sampling probes come before it.
+  `erasure_first_failure`) draw under the probe key, separate from the
+  circuit's, from a fresh stream at every evaluation: probe `j` at layer `L`
+  of trajectory `t` uses `stream_state(key_probe, mix(t, h_j, L))`, where
+  `h_j` is the probe name's 64-bit hash (blake2b with an 8-byte digest, read
+  little-endian, computed in Python) and `mix(a, b, c) = sm(sm(sm(a) ^ b) ^
+  c)` is chained splitmix64 (`_kernel/rng.py`). Each evaluation starts from
+  the identity ordering and draws its samples in sequence. The circuit never
+  depends on the probes, and a probe's samples at a layer depend only on the
+  seed, the trajectory, the probe's name and `samples`, and the layer: not on
+  other probes, the checkpoints, or the evaluations before it (whether they
+  drew or k was 0). So `replay` with other probes or checkpoints reproduces
+  them, fewer samples are a prefix of more, and renaming a probe gives other
+  orderings. This is randomness contract 2; under contract 1 every sampling
+  evaluation of a trajectory read one probe stream in turn, so the samples
+  depended on the probes before them and on the earlier checkpoints.
 
 ### 8.3 Adding a probe
 
@@ -542,7 +601,9 @@ engine:
    `ref_rows`, `s_ref` (k, read once per checkpoint), its regions (`idx` from
    `ptr[j]`, lengths `region_len[j]`), `size_param[j]`, `sample_param[j]`,
    `order` (the spec's `system_order`), `periodic`, the probe stream `prng` and
-   work buffers.
+   work buffers. The engine seeds `prng` for this evaluation alone whenever
+   `sample_param[j] > 0`, which every kind with `sampled=True` has (section
+   8.2), so a sampled branch only draws from it, from the identity ordering.
 3. **The registry entry**: one line in `_KINDS`; a new length or post-stop
    rule is one more key in `_probe_length` or `_probe_fill`.
 4. **The factory**: a function returning `Probe(kind, default_name, regions,
@@ -581,9 +642,10 @@ first s bits. One array of ⌈r/64⌉-word columns serves both ranks, and the
 two routines below work only on it.
 
 **First-failure sizes (`first_failure_samples`).** For each of M orderings (a
-Fisher-Yates shuffle from the probe stream), qubits are added one at a time to
-an incremental basis of their S-columns. While the S-rank equals 2m the
-prefix is correctable, since `l = rank_N - rank_S` and `rank_N ≤ 2m`, and the
+Fisher-Yates shuffle from the evaluation's probe stream), qubits are added
+one at a time to an incremental basis of their S-columns. While the S-rank
+equals 2m the prefix is correctable, since `l = rank_N - rank_S` and
+`rank_N ≤ 2m`, and the
 N(S) rank is never computed. At the first prefix whose S-rank falls short,
 the N(S) basis is built once, from the whole prefix; S-rank deficiency then
 persists, so from there both bases grow together until `rank_N > rank_S`: the

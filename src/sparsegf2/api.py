@@ -1871,6 +1871,7 @@ def _summarize_ensemble(
         "layers": spec.layers,
         "measurement_rate": spec.measurement_rate,
         "seed": result.seed_entropy,
+        "randomness_contract": result.randomness_contract,
         "elapsed_seconds": result.elapsed_seconds,
         "trajectories_per_second": result.trajectories_per_second
         if result.elapsed_seconds > 0
@@ -2032,6 +2033,7 @@ def _provenance(seed: Any, command: str) -> dict[str, Any]:
 
     return {
         "sparsegf2": __version__,
+        "randomness_contract": mipt.RANDOMNESS_CONTRACT,
         "python": platform.python_version(),
         "numpy": np.__version__,
         "numba": numba.__version__,
@@ -2061,6 +2063,10 @@ def _write_run_metadata(
 ) -> dict[str, str]:
     """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
 
+    Replaying ``spec.json`` repeats the run only under the randomness contract
+    that ``provenance.json`` records: this version cannot reproduce a run made
+    under another one (``mipt.RANDOMNESS_CONTRACT``).
+
     For a resumed job (``resumed_from`` set) the original provenance is kept and
     this process's record is appended under ``"resumes"``.
     """
@@ -2089,6 +2095,25 @@ def _read_provenance(out: Path) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return stored if isinstance(stored, dict) else None
+
+
+def _check_contract(out: Path, stored: dict | None, existing: mipt.EnsembleResult | None) -> None:
+    """Refuse to resume or extend a run made under another randomness contract.
+
+    The contract is read from ``provenance.json`` (the original record) and
+    from the saved results. A record without one predates contract 2, so it
+    counts as contract 1, as ``EnsembleResult.load`` does.
+    """
+    made = [] if stored is None else [stored.get("randomness_contract", 1)]
+    if existing is not None:
+        made.append(existing.randomness_contract)
+    for contract in made:
+        if contract != mipt.RANDOMNESS_CONTRACT:
+            raise ValueError(
+                f"output_dir {str(out)!r}: this run was made under randomness contract "
+                f"{contract}; this version uses {mipt.RANDOMNESS_CONTRACT}; start a new "
+                "output_dir"
+            )
 
 
 def _result_parts(out: Path) -> list[Path]:
@@ -2357,7 +2382,8 @@ def start_ensemble_job(
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
     larger ``trajectories`` extends a finished run. A directory holding a
-    different spec or seed is refused. For a collection of graphs
+    different spec or seed, or a run made under another randomness contract
+    or ``sparsegf2`` version, is refused. For a collection of graphs
     ``trajectories`` may be omitted (every graph gets ``circuits_per_graph``
     circuits).
     """
@@ -2384,6 +2410,7 @@ def start_ensemble_job(
             )
         seed = meta["seed"]
         stored = _read_provenance(out)
+        _check_contract(out, stored, existing)
         made_with = None if stored is None else stored.get("sparsegf2")
         if made_with is not None and made_with != __version__:
             raise ValueError(

@@ -301,16 +301,22 @@ A **trajectory** is one random circuit and its simulation. The contract:
 * Hence `spec.run(count, seed=s, first_trajectory=f)` returns exactly rows
   `f .. f + count - 1` of one big run with the same seed, and
   `EnsembleResult.concatenate` merges such chunks (it refuses chunks with
-  different specs, seeds or package versions, or overlapping trajectories).
-* The circuit's gates and the measurement mask use one random stream, the
-  probes' random orderings another. Adding, removing or rescheduling probes,
+  different specs, seeds, package versions or randomness contracts, or
+  overlapping trajectories).
+* The circuit's gates and the measurement mask use one random stream. Each
+  evaluation of a sampled probe draws its random orderings from a stream of
+  its own under a separate probe key. Adding, removing or rescheduling probes,
   or changing `layers`, does not change the circuits: the state after layer T
-  is the same in every run of the same trajectory that reaches layer T.
+  is the same in every run of the same trajectory that reaches layer T, and
+  `result.replay(t, probes=..., checkpoints=...)` reproduces the sampled
+  probes too.
 * With the same seed, runs at different measurement rates share their gates
   and random numbers (section 3.4).
 * `seed` can be an integer, a sequence of integers, a
   `numpy.random.SeedSequence`, or `None` (fresh entropy). The seed actually
-  used is stored in the result: `result.seed_sequence` repeats the run.
+  used is stored in the result: `result.seed_sequence` repeats the run, as long
+  as `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (a run made under
+  another contract cannot be reproduced by this version).
 * `spec.circuit(trajectory=t, seed=s)` returns the exact circuit trajectory `t`
   ran, as a Stim-language `Circuit` (section 6.3 replays one).
 
@@ -852,8 +858,8 @@ chunks are *exactly* the single big run. Rules:
   every p of a β): common random numbers across p make the curves smooth;
 * name files by what they hold: `runs/n256_beta1_p0.05/chunk0003.npz`;
 * use the same installed version for every chunk of a point:
-  `concatenate` refuses to mix versions, because different versions need not
-  produce the same trajectories.
+  `concatenate` refuses to mix versions or randomness contracts, because
+  different versions need not produce the same trajectories.
 
 Here is the whole loop at toy size, using `main` from the script above: three
 chunks of one point, merged and compared with a single run.
@@ -1067,8 +1073,8 @@ sparsegf2 results runs/beta1_p0.05
 
 The output directory holds `result.npz` (an `EnsembleResult`, load it with
 `mipt.EnsembleResult.load`), `spec.json` (running `sparsegf2 ensemble` on it
-repeats the run exactly) and `provenance.json` (versions, git commit, seed,
-command). The summary prints means with standard errors per checkpoint and
+repeats the run exactly, under the same randomness contract) and
+`provenance.json` (versions, git commit, seed, randomness contract, command). The summary prints means with standard errors per checkpoint and
 the erasure probes as P_C(m) curves.
 
 For long runs, `--chunk-size` saves the run chunk by chunk and resumes where it
