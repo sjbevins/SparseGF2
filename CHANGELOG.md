@@ -52,13 +52,21 @@
   `MonitoredCircuit.replay(t, seed=...)`, `circuit(t, seed=...)` and
   rerunning a saved `spec.json` repeat a run only under the contract it was
   made under, and do not check it.
-* **Compiled kernels are never stale:** importing the package deletes Numba's
-  cached kernels whenever any kernel source, or the Numba or Python version, has
-  changed since they were compiled. Numba checks only each function's own file,
-  so before this a cached caller could keep running an old callee from another
-  file (for example `sample()` with an old `stream_state` after a change to
-  `rng.py`). The first import after an update, including this one, recompiles the
-  kernels once (10 to 30 s).
+* **Cached kernels follow every kernel source:** Numba checks only each
+  function's own file, so before this a cached caller could keep running an old
+  callee from another file (for example `sample()` with an old `stream_state`
+  after a change to `rng.py`). Now every cached kernel is stamped with a
+  fingerprint of all kernel sources and the Numba and Python versions. A
+  kernel compiled from other sources is recompiled rather than loaded, even one
+  saved after an update by a process that had imported the old sources.
+  Importing the package also deletes such stale cache files. The first import
+  after an update, including this one, recompiles the kernels once (10 to 30 s).
+  A process that was already running keeps the code it loaded, so restart it
+  (for example the MCP server) to use the new code. If a Numba version lacks the
+  private locator list this relies on, or `NUMBA_CACHE_LOCATOR_CLASSES` is set,
+  stale files are only deleted. Then an old process can still save a stale
+  kernel after an update; deleting the `sparsegf2-kernels.*.sha256` marker
+  next to the cache files clears them on the next import.
 
 ## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
 

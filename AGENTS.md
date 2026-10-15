@@ -215,8 +215,11 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   `output_dir` to resume.
 * Compiled kernels are cached on disk and recompiled automatically whenever any kernel
   source (or the Numba or Python version) changes, so the first import and run after an
-  update is slower (10 to 30 s). A process that was already running, such as the MCP
-  server, keeps the code it loaded until it is restarted.
+  update is slower (10 to 30 s). Kernels that a process started before the update saves
+  afterwards are ignored and recompiled. That process itself, such as a running MCP
+  server, keeps the code it loaded: restart it to use the new code. If cached kernels
+  ever look stale, delete the `sparsegf2-kernels.*.sha256` marker next to the cache
+  files (`src/sparsegf2/_kernel/__pycache__` by default) and the next import clears them.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around

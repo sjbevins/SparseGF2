@@ -124,7 +124,7 @@ sparsegf2/
   clifford.py     Clifford tableaux; canonical 1q/2q Clifford groups and indices
   gates.py        the gate library, Stim names and conventions
   _kernel/        Numba kernels
-    _cache.py     on import, deletes cached kernels whose sources changed (5.5)
+    _cache.py     on import, ties cached kernels to the kernel sources (5.5)
     bits.py, rng.py, tables.py   bit tricks, xoshiro256** streams, gate tables
     tableau.py    layout, gates, measurement (both modes), peeks, canonical form
     program.py    the compiled circuit interpreter (one call per run / per shot)
@@ -301,15 +301,31 @@ The kernels use Numba's `cache=True`. Numba keys a function's cache entry on
 its own source file only, but a compiled caller embeds its callees: after an
 edit to `rng.py` alone, `program.run_many` kept running the old `stream_state`
 from a warm cache. So importing `sparsegf2._kernel`, before any kernel module,
-hashes all of `_kernel/*.py` with the Numba and Python versions and compares
-the hash with a marker file next to the cache files. On a mismatch it deletes
-the kernels' `.nbi` and `.nbc` files there and writes the new marker, and
-every kernel recompiles on first use. The directory is the one Numba itself
-picks for a function in `_kernel/` (a never-compiled `njit(cache=True)`
-dispatcher reports it as `stats.cache_path`), so `NUMBA_CACHE_DIR` and the
-fallback for a read-only `__pycache__` are covered. All compiled code lives in
-`_kernel/`, which a test checks. The check costs about 1 ms and never fails an
-import (`sparsegf2._kernel._cache`).
+hashes all of `_kernel/*.py` with the Numba and Python versions (the kernel
+fingerprint) and does two things.
+
+* **Stamps.** It puts a cache locator of its own first in Numba's list. For a
+  file in `_kernel/` it asks Numba's standard locators for the cache directory
+  (so `NUMBA_CACHE_DIR` and the fallback for a read-only `__pycache__` still
+  apply) and adds the fingerprint this process imported to their source stamp.
+  Numba ignores and overwrites an index whose stamp differs from its own, so a
+  kernel compiled from other sources is never loaded. That holds even for one
+  saved after an update by a process that had imported the old sources, which
+  deleting files alone cannot prevent.
+* **Deletes.** It compares the fingerprint with a marker file next to the cache
+  files. On a mismatch it deletes the kernels' `.nbi` and `.nbc` files there
+  and writes the new marker. The directory is the one Numba picks for a
+  function in `_kernel/`: a never-compiled `njit(cache=True)` dispatcher
+  reports it as `stats.cache_path`.
+
+The locator uses Numba's private `CacheImpl._locator_classes`. Without it, or
+with `NUMBA_CACHE_LOCATOR_CLASSES` set, only the deletion runs. A kernel that an
+old process saves after the update then stays until the kernels change again,
+or until the `sparsegf2-kernels.*.sha256` marker is deleted by hand. A running
+process keeps the code it loaded in either case. All compiled code lives in
+`_kernel/` and imports only kernel modules, numpy, numba, llvmlite and the
+standard library, which a test checks. The check costs about 1 ms and never
+fails an import (`sparsegf2._kernel._cache`).
 
 ## 6. Circuits
 

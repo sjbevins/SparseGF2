@@ -38,10 +38,10 @@ splitmix64 steps from ``x``, so only ``key0 ^ key1`` mattered.
 
 Changing a stream: Numba keys each cached function on a hash of its own
 source file, and a cached caller keeps the callees it was compiled with.
-Importing :mod:`sparsegf2._kernel` deletes every cached kernel when any kernel
-source has changed (:mod:`sparsegf2._kernel._cache`), so the callers in
-``ensemble.py``, ``program.py`` and ``entropy.py`` recompile with the new
-streams. Bump ``mipt.RANDOMNESS_CONTRACT`` too.
+Importing :mod:`sparsegf2._kernel` stamps the kernels' cache entries with a
+fingerprint of every kernel source (:mod:`sparsegf2._kernel._cache`), so the
+callers in ``ensemble.py``, ``program.py`` and ``entropy.py`` recompile with
+the new streams. Bump ``mipt.RANDOMNESS_CONTRACT`` too.
 """
 
 from __future__ import annotations

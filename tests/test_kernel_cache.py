@@ -1,15 +1,19 @@
-"""Compiled kernels are never stale (:mod:`sparsegf2._kernel._cache`).
+"""Cached kernels follow the kernel sources (:mod:`sparsegf2._kernel._cache`).
 
 Numba keys each cached function on its own source file only, and a cached caller
 embeds the callees it was compiled with: editing ``rng.py`` alone used to leave
 ``program.run_many`` running the old ``stream_state`` from a warm cache. The guard
-clears this package's kernel caches whenever any kernel source changes. The
-end-to-end test edits that callee in a copy of the package and checks that its
-caller picks the change up, in fresh processes with their own Numba cache.
+stamps every kernel cache entry with a fingerprint of all kernel sources and
+deletes this package's kernel caches whenever that fingerprint changes. The
+end-to-end test edits that callee in a copy of the package, with a process that
+imported the old sources saving to the cache after the update, and checks that
+later processes run the new code.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import re
 import shutil
@@ -17,8 +21,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numba
+
 import sparsegf2
-from sparsegf2._kernel import _cache
+from sparsegf2._kernel import _cache, program
 
 PACKAGE = Path(sparsegf2.__file__).resolve().parent
 
@@ -30,6 +36,8 @@ _SAMPLE = (
     "print(sparsegf2.__file__)\n"
     "print(''.join(map(str, r.measurements.ravel())))\n"
 )
+# A process that imports the package, waits (a running MCP server or study), then samples.
+_OLD_PROCESS = "import sparsegf2\nprint('ready', flush=True)\ninput()\n" + _SAMPLE
 
 # A constant inside rng.stream_state (the key word that seeds the increment). The edit
 # replaces one line in place, so every other line of rng.py keeps its content and number.
@@ -45,17 +53,21 @@ def _edit_stream_state(source: bytes) -> bytes:
     return source[: body.start()] + edited + source[body.end() :]
 
 
-def _sample_bits(package_root: Path, numba_cache: Path) -> str:
-    """Run ``sample()`` in a new process that imports ``sparsegf2`` from ``package_root``."""
+def _env(package_root: Path, numba_cache: Path) -> dict[str, str]:
     env = dict(os.environ)
     # The test is about compiled caches, so it compiles even in the JIT-free weekly job.
     env.pop("NUMBA_DISABLE_JIT", None)
     env["NUMBA_CACHE_DIR"] = str(numba_cache)
     env["PYTHONPATH"] = str(package_root)
+    return env
+
+
+def _python(package_root: Path, numba_cache: Path, code: str) -> str:
+    """Run ``code`` in a new process that imports ``sparsegf2`` from ``package_root``."""
     proc = subprocess.run(
-        [sys.executable, "-c", _SAMPLE],
+        [sys.executable, "-c", code],
         cwd=package_root,
-        env=env,
+        env=_env(package_root, numba_cache),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -63,13 +75,24 @@ def _sample_bits(package_root: Path, numba_cache: Path) -> str:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    where, bits = proc.stdout.split()
+    return proc.stdout
+
+
+def _bits(stdout: str, package_root: Path) -> str:
+    where, bits = stdout.split()[-2:]
     assert Path(where).resolve().is_relative_to(package_root.resolve()), where
     assert len(bits) == 256
     return bits
 
 
-def test_editing_a_kernel_callee_recompiles_its_callers(tmp_path):
+def _cache_files(numba_cache: Path) -> dict[str, int]:
+    return {
+        p.relative_to(numba_cache).as_posix(): p.stat().st_mtime_ns
+        for p in numba_cache.rglob("*.nb[ic]")
+    }
+
+
+def test_callers_follow_an_edited_callee_even_after_a_late_save_by_an_old_process(tmp_path):
     root = tmp_path / "src"
     shutil.copytree(PACKAGE, root / "sparsegf2", ignore=shutil.ignore_patterns("__pycache__"))
     numba_cache = tmp_path / "numba-cache"
@@ -78,21 +101,70 @@ def test_editing_a_kernel_callee_recompiles_its_callers(tmp_path):
     original = rng.read_bytes()
     edited = _edit_stream_state(original)
 
-    before = _sample_bits(root, numba_cache)  # compiles and fills the cache
+    # A process imports the original sources and waits (a running MCP server or study).
+    old = subprocess.Popen(
+        [sys.executable, "-c", _OLD_PROCESS],
+        cwd=root,
+        env=_env(root, numba_cache),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        assert old.stdout is not None
+        assert old.stdout.readline().strip() == "ready"
+        rng.write_bytes(edited)  # the update
+        _python(root, numba_cache, "import sparsegf2._kernel")  # a new process: the guard runs
+        # Now the old process compiles sample()'s kernels from the sources it imported
+        # and saves them to the cache. run_many's own file, program.py, is unchanged.
+        out, err = old.communicate("go\n", timeout=300)
+    finally:
+        if old.poll() is None:
+            old.kill()
+            old.communicate()
+    assert old.returncode == 0, err
+    before = _bits(out, root)  # the original sources' result
 
-    rng.write_bytes(edited)
-    after_edit = _sample_bits(root, numba_cache)
+    after_edit = _bits(_python(root, numba_cache, _SAMPLE), root)
     assert after_edit != before, (
-        "sample() ran the stream_state compiled before rng.py changed (stale Numba cache)"
+        "sample() ran a stream_state compiled from the sources before rng.py changed "
+        "(stale Numba cache)"
     )
 
+    # Restoring the file brings the original result back.
     rng.write_bytes(original)
-    assert _sample_bits(root, numba_cache) == before
+    assert _bits(_python(root, numba_cache, _SAMPLE), root) == before
+
+    # The fingerprint is the same in every process: an import with nothing to compile
+    # leaves every cache file as it was.
+    files = _cache_files(numba_cache)
+    assert any(name.endswith(".nbi") for name in files)
+    _python(root, numba_cache, "import sparsegf2._kernel")
+    assert _cache_files(numba_cache) == files
 
     # The marker sits where Numba really wrote the kernels (NUMBA_CACHE_DIR layout).
     markers = list(numba_cache.rglob(f"{_cache.MARKER_PREFIX}*"))
     assert len(markers) == 1, markers
     assert list(markers[0].parent.glob("program.run_many-*.nbi")), markers[0].parent
+
+
+def test_kernel_cache_entries_carry_the_kernel_fingerprint():
+    assert _cache._locator_list()[0] is _cache._KernelLocator
+    func = getattr(program.run_many, "py_func", program.run_many)
+    locator = _cache._KernelLocator.from_function(func, inspect.getfile(func))
+    assert locator is not None
+    standard, stamp = locator.get_source_stamp()
+    assert stamp == _cache.fingerprint(_cache.kernel_sources())
+    assert standard == locator._inner.get_source_stamp()
+    assert locator.get_cache_path() == locator._inner.get_cache_path()
+    assert locator._py_file == inspect.getfile(func)  # read by Numba's warnings
+    # Functions elsewhere keep Numba's own locators.
+    assert _cache._KernelLocator.from_function(_edit_stream_state, __file__) is None
+    if not numba.config.DISABLE_JIT:
+        assert isinstance(program.run_many._cache._impl.locator, _cache._KernelLocator)
+        assert Path(locator.get_cache_path()) == Path(program.run_many.stats.cache_path)
 
 
 def test_only_stale_kernel_cache_files_are_removed(tmp_path):
@@ -173,12 +245,34 @@ def test_the_guard_never_breaks_the_import(tmp_path, monkeypatch, caplog):
         assert _cache.refresh(cache, [sources / "rng.py"]) == 0
     assert (cache / "rng.f-1.py314.nbi").exists()
     assert not (cache / _cache.marker_name()).exists()
-    assert _cache.refresh(cache, [sources / "rng.py"]) == 1
+    with caplog.at_level("DEBUG", logger=_cache.__name__):
+        assert _cache.refresh(cache, [sources / "rng.py"]) == 1
+    assert "no marker: deleted 1 cached kernel files" in caplog.text
     assert (cache / _cache.marker_name()).is_file()
-    # A corrupt marker counts as a mismatch and is replaced.
+    # A corrupt marker counts as missing and is replaced.
     (cache / _cache.marker_name()).write_bytes(b"\xff\xfe")
     assert _cache.refresh(cache, [sources / "rng.py"]) == 0
     assert _cache.refresh(cache, [sources / "rng.py"]) is None
+    caplog.clear()
+
+    # Without Numba's locator list, stale files are still deleted.
+    def broken_list():
+        raise AttributeError("numba moved its locator list")
+
+    kernel_cache = tmp_path / "kernel-cache"
+    kernel_cache.mkdir()
+    (kernel_cache / "program.run_many-1.py314.nbi").write_bytes(b"x")
+    with monkeypatch.context() as m, caplog.at_level("DEBUG", logger=_cache.__name__):
+        m.setattr(_cache, "_locator_list", broken_list)
+        m.setattr(_cache, "_numba_cache_dir", lambda: kernel_cache)
+        _cache.clear_stale_caches()
+        # A kernel module compiled now gets Numba's own locator instead of an error.
+        func = getattr(program.run_many, "py_func", program.run_many)
+        assert _cache._KernelLocator.from_function(func, inspect.getfile(func)) is None
+    assert "numba moved its locator list" in caplog.text
+    assert not (kernel_cache / "program.run_many-1.py314.nbi").exists()
+    assert (kernel_cache / _cache.marker_name()).is_file()
+    caplog.clear()
 
     # The import hook itself swallows everything and logs at debug level only.
     def broken():
@@ -192,32 +286,87 @@ def test_the_guard_never_breaks_the_import(tmp_path, monkeypatch, caplog):
 
 
 def test_the_marker_lives_in_numbas_cache_directory_for_the_kernels():
-    import numba
-
     if numba.config.DISABLE_JIT:
         assert _cache._numba_cache_dir() is None
         return
-    from sparsegf2._kernel.program import run_many
-
-    assert _cache._numba_cache_dir() == Path(run_many.stats.cache_path)
+    assert _cache._numba_cache_dir() == Path(program.run_many.stats.cache_path)
 
 
-_JIT = re.compile(
-    r"@\s*(?:numba\.)?(?:njit|jit|vectorize|guvectorize|cfunc|stencil|jitclass)\b"
-    r"|\b(?:njit|jit|vectorize|guvectorize|cfunc|stencil|jitclass)\s*\("
-    r"|from numba[\w.]* import [^\n]*\b(?:njit|jit|vectorize|guvectorize|cfunc|stencil)\b"
-)
+# numba's compilation API: anything that turns Python into cached machine code.
+_JIT_NAMES = {
+    "cfunc",
+    "generated_jit",
+    "guvectorize",
+    "intrinsic",
+    "jit",
+    "jitclass",
+    "njit",
+    "overload",
+    "overload_attribute",
+    "overload_method",
+    "register_jitable",
+    "stencil",
+    "vectorize",
+}
+
+
+def _compiles(tree: ast.Module) -> bool:
+    """Whether a module uses numba's compilation API (``njit``, ``@intrinsic``, ...)."""
+    numba_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "numba":
+                    numba_names.add(alias.asname or "numba")
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[0] == "numba"
+            and any(alias.name in _JIT_NAMES for alias in node.names)
+        ):
+            return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _JIT_NAMES:
+            base = node.value
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id in numba_names:
+                return True
+    return False
+
+
+def _imported_modules(tree: ast.Module) -> set[str]:
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "kernel modules use absolute imports"
+            names.add(node.module or "")
+    return names
 
 
 def test_only_kernel_modules_define_compiled_code():
-    """The fingerprint covers ``_kernel/*.py``, so compiled code must live there."""
-    outside = [
-        path.relative_to(PACKAGE).as_posix()
+    """The fingerprint covers ``_kernel/*.py``, so compiled code must live there and
+    depend only on modules whose changes the fingerprint (or a version in it) sees."""
+    trees = {
+        path.relative_to(PACKAGE).as_posix(): ast.parse(path.read_text(encoding="utf-8"))
         for path in sorted(PACKAGE.rglob("*.py"))
-        if "_kernel" not in path.relative_to(PACKAGE).parts
-        and _JIT.search(path.read_text(encoding="utf-8"))
-    ]
-    assert outside == []
-    assert _JIT.search((PACKAGE / "_kernel" / "program.py").read_text(encoding="utf-8"))
+    }
+    compiling = {name for name, tree in trees.items() if _compiles(tree)}
+    assert {name for name in compiling if not name.startswith("_kernel/")} == set()
+    assert {"_kernel/bits.py", "_kernel/program.py", "_kernel/rng.py"} <= compiling
+    assert "_parallel.py" not in compiling  # numba's thread controls only
+
+    for name in sorted(compiling):
+        for module in _imported_modules(trees[name]):
+            top = module.split(".")[0]
+            allowed = (
+                module == "sparsegf2._kernel"
+                or module.startswith("sparsegf2._kernel.")
+                or top in {"numpy", "numba", "llvmlite"}
+                or top in sys.stdlib_module_names  # versioned by the Python in the fingerprint
+            )
+            assert allowed, f"{name} imports {module}, which the kernel fingerprint does not cover"
+
     kernel_dir = PACKAGE / "_kernel"
     assert {p.name for p in _cache.kernel_sources()} == {p.name for p in kernel_dir.glob("*.py")}
