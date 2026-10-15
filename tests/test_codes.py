@@ -6,6 +6,7 @@ import math
 import numpy as np
 import pytest
 
+import _gf2_oracle as oracle
 from sparsegf2 import analysis, graphs, mipt
 from sparsegf2.codes import StabilizerCode
 
@@ -129,7 +130,11 @@ def test_invalid_codes_are_refused():
 
 @pytest.mark.parametrize("reference", ["purification", "single"])
 def test_lost_information_and_counts_match_brute_force(reference):
-    for code in _engine_codes(7, 6, seed=11 if reference == "single" else 12, reference=reference):
+    codes = _engine_codes(7, 6, seed=11 if reference == "single" else 12, reference=reference)
+    # some of the codes are k = 0 (nothing to lose): the check must also see codes with k > 0
+    # and uncorrectable erasures, or it would pass for a counter that always returns 0
+    assert any(c.num_logical > 0 and c.uncorrectable_counts(4).any() for c in codes)
+    for code in codes:
         h = code.stabilizer_matrix()
         n = code.num_qubits
         expected = np.zeros(4)
@@ -142,19 +147,17 @@ def test_lost_information_and_counts_match_brute_force(reference):
 
 
 def test_counts_on_codes_wider_than_one_word():
-    """n > 64: columns span several words; a few correctable pairs/triples are checked by hand."""
-    for code in _engine_codes(70, 2, seed=5):
-        counts = code.uncorrectable_counts(2)
-        singles = sum(not code.is_correctable([q]) for q in range(70))
-        assert counts[0] == singles
-        rng = np.random.default_rng(0)
-        pairs = [tuple(rng.choice(70, 2, replace=False)) for _ in range(200)]
-        frac = np.mean([not code.is_correctable(p) for p in pairs])
-        assert abs(frac - counts[1] / math.comb(70, 2)) < 0.15
+    """n = 70: columns span two words; counts equal the brute-force oracle exactly."""
+    codes = _engine_codes(70, 2, seed=5)
+    assert any(c.num_logical > 0 and c.uncorrectable_counts(2).all() for c in codes)
+    for code in codes:
+        gens = code.stabilizer_matrix()
+        assert code.uncorrectable_counts(2).tolist() == oracle.uncorrectable_counts(gens, 70, 2)
 
 
 def test_first_failure_law_matches_exact_failure_by_size():
     code = _engine_codes(8, 1, seed=3)[0]
+    assert code.num_logical > 0 and code.uncorrectable_counts(2).all()
     exact = [
         np.mean([not code.is_correctable(a) for a in itertools.combinations(range(8), m)])
         for m in range(9)
@@ -188,8 +191,16 @@ def test_failure_probability_is_the_binomial_mixture_of_failure_by_size():
 
 
 def test_hybrid_estimator_uses_exact_counts_for_small_regions():
-    code = _engine_codes(10, 1, seed=8)[0]
+    # two [[4,2,2]] blocks and two frozen qubits: k = 4, no single erasure fails, and the
+    # failures at m = 2 and 3 are real (the engine code that was used here had k = 0)
     n = 10
+    code = StabilizerCode(
+        ["XXXX______", "ZZZZ______", "____XXXX__", "____ZZZZ__", "________Z_", "_________Z"]
+    )
+    assert code.num_logical == 4
+    counts = code.uncorrectable_counts(3)
+    assert counts.tolist() == oracle.uncorrectable_counts(code.stabilizer_matrix(), n, 3)
+    assert counts[0] == 0 and counts[1] > 0 and counts[2] > counts[1]
     exact_all = np.array(
         [0.0]
         + [
@@ -198,7 +209,7 @@ def test_hybrid_estimator_uses_exact_counts_for_small_regions():
         ]
     )
     d = code.first_failure_sizes(400, seed=1)
-    counts = code.uncorrectable_counts(3)
+    assert d.min() == 2 and d.max() > 2  # the sampled tail differs from the exact head
     np.testing.assert_allclose(analysis.exact_failure_by_size(counts, n), exact_all[1:4])
     for e in (0.05, 0.2):
         weights = np.array([math.comb(n, m) * e**m * (1 - e) ** (n - m) for m in range(n + 1)])

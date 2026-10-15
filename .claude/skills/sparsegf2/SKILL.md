@@ -89,7 +89,8 @@ connecting the server (Claude Code, Claude Desktop, other clients) is described 
   `run_ensemble` refuses a directory that already holds a run.
 - The first call of each kind of run compiles Numba kernels (about half a minute once,
   then cached); a slow first call is not a hang.
-- On an error, read the message, fix the argument it names, and retry.
+- On an error, read the message, fix the argument it names, and retry. A message ending
+  `(internal error: please report it)` is a bug in SparseGF2: report it, do not retry.
 
 Details: `AGENTS.md`, `docs/LLM_INTERFACE.md` (full JSON reference),
 `docs/MCP_GETTING_STARTED.md` (setup and a worked first session) and

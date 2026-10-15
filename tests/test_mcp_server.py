@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -207,6 +208,118 @@ def test_resources_and_prompts():
     assert "erasure" in erasure.messages[0].content.text
 
 
+def test_input_errors_come_back_as_messages_that_name_the_field(tmp_path, monkeypatch):
+    # names that are not strings, and a size no graph could be generated for
+    spec = dict(SPEC, graph={"family": ["cycle"]})
+    text = error_text(call("run_ensemble", {"spec": spec, "trajectories": 2, "seed": 1}))
+    assert "graph.family must be a string" in text
+    spec = dict(SPEC, probes=[{"kind": ["x"]}])
+    text = error_text(call("estimate_ensemble", {"spec": spec, "trajectories": 2}))
+    assert "probes[0].kind must be a string" in text
+    spec = dict(SPEC, num_system=10**12)
+    text = error_text(call("estimate_ensemble", {"spec": spec, "trajectories": 2}))
+    assert "num_system is too large" in text
+    # an output_dir that cannot be created: below a regular file, or without permission
+    (tmp_path / "a_file").write_text("", encoding="utf-8")
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == "denied":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    for out, expected in (
+        (tmp_path / "a_file" / "out", "is a file, not a directory"),
+        (tmp_path / "denied", "is not writable: [Errno 13] Permission denied"),
+    ):
+        for tool, arguments in (
+            ("run_ensemble", {"spec": SPEC, "trajectories": 2, "seed": 1}),
+            ("start_ensemble_job", {"spec": SPEC, "trajectories": 2, "seed": 1}),
+            ("run_circuit", {"circuit": "H 0\nM 0"}),
+        ):
+            text = error_text(call(tool, {**arguments, "output_dir": str(out)}))
+            assert expected in text and "internal error" not in text, (tool, text)
+
+
+def test_unanticipated_failures_carry_their_type_and_message(monkeypatch, caplog):
+    def fail(error):
+        def raising(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(api, "run_ensemble", raising)
+        caplog.clear()
+        return error_text(call("run_ensemble", {"spec": SPEC, "trajectories": 2}))
+
+    # the API raises ValueError for every input error, so anything else is a bug: a
+    # TypeError too (a None that reaches a subscript, say), never the caller's to fix
+    for error, shown in (
+        (RuntimeError("kaboom"), "RuntimeError: kaboom"),
+        (PermissionError(13, "Permission denied", "x"), "PermissionError: [Errno 13] "
+                                                        "Permission denied: 'x'"),
+        (TypeError("'NoneType' object is not subscriptable"),
+         "TypeError: 'NoneType' object is not subscriptable"),
+    ):  # fmt: skip
+        assert fail(error).endswith(f"{shown} (internal error: please report it)")
+        # and the server's log (stderr) keeps the traceback
+        (logged,) = [r for r in caplog.records if r.name == "sparsegf2.mcp_server"]
+        assert logged.levelname == "ERROR" and logged.exc_info[1] is error
+
+
+@pytest.mark.parametrize(
+    "tool, given, expected",
+    [
+        ("run_ensemble", {"trajectories": "3"}, "valid integer"),
+        ("run_ensemble", {"trajectories": True}, "valid integer"),
+        ("run_ensemble", {"trajectories": 2.5}, "valid integer"),
+        ("run_ensemble", {"seed": True}, "valid integer"),
+        ("run_ensemble", {"seed": "1"}, "valid integer"),
+        ("run_ensemble", {"max_seconds": "inf"}, "valid number"),
+        ("run_ensemble", {"max_seconds": True}, "valid number"),
+        ("estimate_ensemble", {"trajectories": True}, "valid integer"),
+        ("start_ensemble_job", {"chunk_size": True}, "valid integer"),
+        ("start_ensemble_job", {"seed": "3"}, "valid integer"),
+        ("run_circuit", {"shots": "2"}, "valid integer"),
+        ("run_circuit", {"shots": True}, "valid integer"),
+        ("run_circuit", {"phases": "false"}, "valid boolean"),
+        ("run_circuit", {"phases": 0}, "valid boolean"),
+        ("run_circuit", {"observe_ticks": "true"}, "valid boolean"),
+        ("run_circuit", {"tick_stride": True}, "valid integer"),
+        ("run_circuit", {"num_qubits": "4"}, "valid integer"),
+        ("job_status", {"wait_seconds": True}, "valid number"),
+    ],
+)
+def test_integer_and_boolean_arguments_are_strict(tool, given, expected, tmp_path):
+    # true used to run 1 trajectory, and "3" 3 (pydantic's lax mode); the API refuses both
+    base = {
+        "run_ensemble": {"spec": SPEC, "trajectories": 2, "seed": 1},
+        "estimate_ensemble": {"spec": SPEC, "trajectories": 2},
+        "start_ensemble_job": {"spec": SPEC, "trajectories": 2, "output_dir": str(tmp_path)},
+        "run_circuit": {"circuit": "H 0\nTICK\nM 0", "seed": 1,
+                        "observables": [{"kind": "entropy", "region": [0]}]},
+        "job_status": {"job_id": "x"},
+    }[tool]  # fmt: skip
+    text = error_text(call(tool, {**base, **given}))
+    (field,) = given
+    assert f"\n{field}" in text and expected in text, text
+    assert not (tmp_path / "chunks").exists() and not (tmp_path / "result.npz").exists()
+
+
+def test_whole_number_floats_count_as_integers():
+    # as in the API (and JSON Schema's "integer"): 4.0 is 4, but 4.5 is refused above
+    out = ok(call("run_ensemble", {"spec": SPEC, "trajectories": 4.0, "seed": 4.0}))
+    assert (out["num_trajectories"], out["seed"]) == (4, 4)
+    assert ok(call("run_circuit", {"circuit": "H 0\nM 0", "shots": 2.0, "seed": 1}))["shots"] == 2
+    schema = session(lambda c: c.list_tools()).tools
+    ensemble = next(t for t in schema if t.name == "run_ensemble").input_schema["properties"]
+    assert {"type": "integer"} in ensemble["trajectories"]["anyOf"]
+
+
+def test_fresh_seeds_fit_in_a_double():
+    seeds = [ok(call("run_circuit", {"circuit": "H 0\nM 0"}))["seed"] for _ in range(5)]
+    assert all(0 <= seed < 2**53 for seed in seeds)
+
+
 def test_main_help(capsys):
     assert mcp_server.main(["--help"]) == 0
     assert "claude mcp add" in capsys.readouterr().err
@@ -216,7 +329,6 @@ def test_stdio_transport_end_to_end():
     """The real server process over stdio: nothing but protocol messages on stdout."""
     import os
     import sys
-    from pathlib import Path
 
     src = str(Path(mcp_server.__file__).resolve().parents[1])
     env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
@@ -224,9 +336,13 @@ def test_stdio_transport_end_to_end():
         command=sys.executable, args=["-m", "sparsegf2.mcp_server"], env=env
     )
 
+    big = 2**64 + 3  # an explicit seed of any size comes back exactly, through real JSON
+
     async def runner():
         async with mcp.Client(params) as client:
-            return await client.call_tool("run_circuit", {"circuit": "H 0\nM 0", "seed": 1})
+            first = await client.call_tool("run_circuit", {"circuit": "H 0\nM 0", "seed": 1})
+            return first, await client.call_tool("run_circuit", {"circuit": "H 0", "seed": big})
 
-    result = asyncio.run(asyncio.wait_for(runner(), timeout=120))
+    result, seeded = asyncio.run(asyncio.wait_for(runner(), timeout=120))
     assert ok(result)["measurements"] == api.run_circuit("H 0\nM 0", seed=1)["measurements"]
+    assert ok(seeded)["seed"] == big and f'"seed":{big},' in seeded.content[0].text

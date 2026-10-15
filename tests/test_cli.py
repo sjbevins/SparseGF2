@@ -2,8 +2,10 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +220,58 @@ def test_ensemble_ctrl_c_exits_130_with_partial_summary(capsys, spec_file, tmp_p
     assert data["job"]["status"] in ("cancelled", "completed")
     assert data["num_trajectories"] == data["job"]["trajectories_done"] > 0
     assert "rerun the same command to resume" in err
+    assert not (out_dir / ".lock").exists()  # the rerun is not refused
+
+
+def test_ensemble_chunked_shows_the_job_notes(capsys, spec_file, tmp_path, monkeypatch):
+    out_dir = tmp_path / "notes"
+    argv = ["ensemble", str(spec_file), "--trajectories", "10", "--seed", "1",
+            "--output-dir", str(out_dir), "--chunk-size", "5"]  # fmt: skip
+    # a reader holds result.npz through the final merge (and the summary's load)
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst).name == "result.npz":
+            raise PermissionError(13, "the file is in use by another process", str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    code, data = run_json(capsys, *argv)
+    assert code == 0 and data["num_trajectories"] == 10
+    assert data["job"]["notes"] == [api._MERGE_PENDING]
+    monkeypatch.undo()
+    # a resume's notes: a spec written differently that builds the same protocol
+    spec_file.write_text(json.dumps({**SPEC, "schedule": "matching"}), encoding="utf-8")
+    code, data = run_json(capsys, *argv)
+    assert code == 0 and data["job"]["resumed_from"] == 10
+    assert any("written differently" in note for note in data["job"]["notes"])
+    assert not (out_dir / "chunks").exists()  # the pending merge was done
+
+
+def test_ensemble_refuses_an_output_dir_another_process_writes_to(
+    capsys, spec_file, tmp_path, monkeypatch
+):
+    real_state = api._process_state
+    monkeypatch.setattr(
+        api, "_process_state", lambda pid: (True, None) if pid == 4242 else real_state(pid)
+    )
+    out_dir = tmp_path / "held"
+    out_dir.mkdir()
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    holder = {"pid": 4242, "host": socket.gethostname(), "started": started}  # running
+    (out_dir / ".lock").write_text(json.dumps(holder), encoding="utf-8")
+    for extra in ([], ["--chunk-size", "5"]):
+        code, data = run_json(
+            capsys, "ensemble", str(spec_file), "--trajectories", "10", "--seed", "1",
+            "--output-dir", str(out_dir), *extra,
+        )  # fmt: skip
+        assert code == 2, data
+        assert (
+            f"another process (pid 4242 on host {socket.gethostname()}, started {started})"
+            in (data["error"]["message"])
+        )
+    assert [p.name for p in out_dir.iterdir()] == [".lock"]
 
 
 def test_ensemble_graph_file_collection_runs_every_circuit_without_trajectories(capsys, tmp_path):
@@ -293,6 +347,69 @@ def test_internal_errors_exit_1(capsys, monkeypatch, bell_file):
     monkeypatch.setattr(api, "run_circuit", boom)
     code, data = run_json(capsys, "run", str(bell_file))
     assert code == 1 and data["error"]["type"] == "RuntimeError"
+    assert data["error"]["message"] == "internal error: kaboom"
+
+    def wrong_type(*args, **kwargs):  # the API raises ValueError for input: this is a bug
+        raise TypeError("'NoneType' object is not subscriptable")
+
+    monkeypatch.setattr(api, "run_circuit", wrong_type)
+    code, data = run_json(capsys, "run", str(bell_file))
+    assert code == 1 and data["error"] == {
+        "type": "TypeError",
+        "message": "internal error: 'NoneType' object is not subscriptable",
+    }
+
+
+def test_names_that_are_not_strings_exit_2(capsys, bell_file, tmp_path):
+    spec_path = tmp_path / "list_family.json"
+    spec_path.write_text(json.dumps({**SPEC, "graph": {"family": ["cycle"]}}), encoding="utf-8")
+    code, data = run_json(capsys, "ensemble", str(spec_path), "--trajectories", "2")
+    assert code == 2 and "graph.family must be a string" in data["error"]["message"]
+    observables = '[{"kind": ["entropy"]}]'
+    code, data = run_json(capsys, "run", str(bell_file), "--observables", observables)
+    assert code == 2 and "observables[0].kind must be a string" in data["error"]["message"]
+
+
+def test_paths_that_cannot_be_read_or_written_exit_2(capsys, monkeypatch, bell_file, spec_file,
+                                                      tmp_path):  # fmt: skip
+    (tmp_path / "a_file").write_text("", encoding="utf-8")
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):  # a directory this process may not create
+        if self.name == "denied":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    for out, expected in (
+        (tmp_path / "a_file" / "out", "is a file, not a directory"),  # below a regular file
+        (tmp_path / "denied", "is not writable: [Errno 13] Permission denied"),
+    ):
+        for argv in (
+            ["run", str(bell_file)],
+            ["ensemble", str(spec_file), "--trajectories", "2"],
+            ["ensemble", str(spec_file), "--trajectories", "2", "--chunk-size", "1"],
+        ):
+            code, data = run_json(capsys, *argv, "--output-dir", str(out))
+            assert code == 2 and expected in data["error"]["message"], argv
+    monkeypatch.undo()
+    # a file this process may not read (Windows: one another program holds), or not UTF-8
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self.name == "bell.stim":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    code, data = run_json(capsys, "run", str(bell_file))
+    assert code == 2 and data["error"]["type"] == "ValidationError"
+    assert data["error"]["message"].startswith(f"could not read {str(bell_file)!r}: [Errno 13]")
+    monkeypatch.undo()
+    latin1 = tmp_path / "latin1.stim"
+    latin1.write_bytes(b"H 0\n# caf\xe9\n")
+    code, data = run_json(capsys, "run", str(latin1))
+    assert code == 2 and data["error"]["message"].startswith(f"{str(latin1)!r} is not UTF-8")
 
 
 def test_python_m_cli_subprocess(tmp_path):

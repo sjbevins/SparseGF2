@@ -106,3 +106,60 @@ def test_erasure_cost_quick(tmp_path):
     study = data["study"]
     assert study["rows"] and study["cpu_seconds"] > 0
     assert study["wall_seconds_low"] <= study["wall_seconds_high"]
+
+
+def test_probe_cost_quick(tmp_path):
+    out = tmp_path / "pc"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "benchmarks" / "probe_cost.py"), "--quick", "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "probe_cost.json").read_text(encoding="utf-8"))
+    md = (out / "probe_cost.md").read_text(encoding="utf-8")
+    assert md.startswith("# Probe cost against the runtime estimate")
+    assert data["quick"] is True and data["environment"]["threads"] == 1
+    sizes, states = data["settings"]["sizes"], data["settings"]["states"]
+    assert [(b["n"], b["state"]) for b in data["bases"]] == [(n, s) for n in sizes for s in states]
+    for b in data["bases"]:
+        # the states: k = 1 with a single reference, k = n scrambled in the purification picture
+        if b["state"] == "single":
+            assert b["k"] == 1
+        if b["state"] == "purification":
+            assert b["k"] == b["n"]
+        assert b["seconds"] > 0 and b["estimate_seconds"] > 0
+    labels = data["settings"]["labels"]
+    rows = [r for r in data["rows"] if "measured_seconds" in r]
+    assert len(rows) == len(sizes) * len(states) * len(labels)
+    for r in rows:
+        assert r["measured_seconds"] >= 0 and r["estimate_seconds"] > 0 and r["copies"] >= 1
+        assert r["ratio"] == r["estimate_seconds"] / max(r["measured_seconds"], 1e-9)
+    assert "## All threads" in md
+    assert [a["n"] for a in data["all_threads"]] == [16] * 6
+    for a in data["all_threads"]:
+        assert a["threads"] == data["settings"]["all_threads"] >= 1
+        assert a["seconds"] > 0 and a["alone_seconds"] > 0 and a["estimate_seconds"] > 0
+        assert a["speed_under_load"] == a["alone_seconds"] / a["seconds"]
+    # re-pricing the saved measurements reproduces every estimate
+    again = tmp_path / "again"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "benchmarks" / "probe_cost.py"), "--from-json",
+         str(out / "probe_cost.json"), "--out", str(again)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    repriced = json.loads((again / "probe_cost.json").read_text(encoding="utf-8"))
+    assert [r.get("estimate_seconds") for r in repriced["rows"]] == [
+        r.get("estimate_seconds") for r in data["rows"]
+    ]
+    assert [a["estimate_seconds"] for a in repriced["all_threads"]] == [
+        a["estimate_seconds"] for a in data["all_threads"]
+    ]

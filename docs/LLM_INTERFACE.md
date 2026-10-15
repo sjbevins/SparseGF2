@@ -93,11 +93,11 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | Concept | Rule |
 |---|---|
 | circuits | Stim text format. Every Clifford gate, `M MX MY MR MRX MRY MXX MYY MZZ MPP R RX RY`, Pauli noise channels, `TICK DETECTOR OBSERVABLE_INCLUDE QUBIT_COORDS SHIFT_COORDS`, `REPEAT`, plus the SparseGF2 extensions `CLIFFORD_1Q(i)` and `CLIFFORD_2Q(i)` (Clifford by canonical index) |
-| seeds | a non-negative int reproduces a run; `null` draws a fresh 63-bit seed, reported back as `seed` |
+| seeds | a non-negative int reproduces a run; `null` draws a fresh seed below 2^53, reported back as `seed` (53 bits, so a client that reads JSON numbers as doubles, JavaScript and Claude Code among them, keeps it exactly). An explicit seed of any size is used and reported exactly (as a JSON integer); such a client can send and read only seeds below 2^53 without rounding, so a result whose seed is 2^53 or more carries a note saying so |
 | qubit lists | `[0, 1, 2]` or `"0:3"` / `"0:16:2"` (Python slices) |
 | phases | `true` (default): signs tracked, outcomes match Stim. `false`: about 2x faster, no outcomes (only `random` flags), same entanglement |
-| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change |
-| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2` version is refused |
+| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change. Names that must be strings (a graph or weight `family`, a probe or observable `kind`, a `capabilities` section) are checked before they are looked up; an `output_dir` that cannot be created or written is `output_dir DIR is not writable: ...` (or `output_dir DIR cannot be created: P is a file, not a directory` when a parent is a file); a saved file that cannot be read is `could not read results from DIR: ...`, naming the file. Any other failure is a bug, and still carries its type and message (section 5) |
+| provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2` version is refused. A field a resume reads that holds another type (`resumes` not a list, `git_commit` not a string; a hand edit, say) is ignored with a note, as an unreadable `provenance.json` is |
 
 ---
 
@@ -226,7 +226,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `gate_set` | list of two-qubit gate names (`["CX", "SWAP"]`) or CLIFFORD_2Q indices |
 | `checkpoints` | `"final"`, `"every_layer"`, an int stride, or a list of layers: where purification is tested and where probes without their own `checkpoints` are evaluated |
 | `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
-| types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`. Errors name the key |
+| types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`, `num_system` at most `MAX_QUBITS` (65,536, checked before any graph is generated). Errors name the key. The MCP tools check their own arguments the same way (section 5) |
 | `stop_when_purified`, `system_order`, `periodic`, `random_orientation` | as in the library |
 
 What each probe records per evaluation (n system qubits), and its value after
@@ -355,11 +355,39 @@ take the exact spec to pass back from the `"spec"` entry of `spec.json` instead.
 
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
-saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`. `run_ensemble`,
+saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`, and `notes` where
+the estimate can be too low (see below). `run_ensemble`,
 `estimate_ensemble` and `start_ensemble_job` refuse a run whose result would exceed
 `MAX_RESULT_GB` (8 GB); the message suggests giving the large probes
 (`erasure_first_failure` samples, `code_snapshot`, vector probes) fewer checkpoints of
-their own, or splitting the trajectories over several output directories.
+their own, or splitting the trajectories over several output directories. They also
+refuse a `num_system` above `MAX_QUBITS` (65,536) before any graph is generated, and
+graphs that would take more than `MAX_GRAPH_GB` (2 GB), counted from the family's
+parameters: the edges a collection keeps (16 bytes each) and the peak while one graph is
+generated (48 bytes per pair for `complete` and `erdos_renyi`, which build every pair; up
+to 512 bytes per edge for the ring families). A `graph.realizations` collection that is
+too large is refused with how many realizations fit at that `num_system`, and one graph
+that alone is too large with the largest `num_system` that fits and that the family
+accepts (or, if there is none, with advice to choose a smaller degree).
+
+The estimate is deliberately pessimistic. Its probe terms are about 3 times or more the
+one-thread costs measured on an AMD Ryzen 9 9950X3D up to n = 2048, in both reference
+pictures and in the states that make each probe expensive
+([`benchmarks/results/probe_cost.md`](../benchmarks/results/probe_cost.md)), which leaves
+room for a machine about twice as slow per thread. Trajectories on many threads at once are
+priced as if each busy thread ran at 1 / (1 + 0.04 (T - 1)) of the speed of a thread alone,
+0.45 at T = 32: with every logical processor busy (all-core clocks, SMT siblings, shared
+memory bandwidth) each thread ran at 0.35 to 0.66 of that speed. The scans that stop at a
+code's first failure (`contiguous_distance`, `erasure_first_failure`) are priced for the
+worst case of the single-reference picture (k = 1, erasures that fail only at about n / 2
+qubits) and for codes of monitored dynamics in the purification picture, so codes of small
+distance run well within their estimate; a purification code of rate near 0 whose
+erasures fail only near n / 2 would take up to the single-reference price. In the
+purification picture, a spec with either scan therefore gets a note in
+`estimate_ensemble`'s `notes` saying how many times its estimate such a code can make them
+take: the single-reference price over the purification price of those probes at that n
+(for example about 3.9 for `erasure_first_failure` and 27 for `contiguous_distance` at
+n = 256).
 
 ### 3.4 Erasure studies
 
@@ -438,6 +466,36 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * Chunks: `chunk_size` trajectories each (default about 10 estimated seconds, and at
   least 4 per thread). Each chunk is saved atomically to `output_dir/chunks/` when it
   finishes. On completion the chunks are merged into `output_dir/result.npz` and removed.
+  On Windows a file another process holds open cannot be replaced or deleted, so the
+  merge retries for about 5 s while a reader holds `result.npz` (and once more, for all
+  chunks together, while one holds a chunk; a chunk still in use is left, a repeat that
+  loads drop). If `result.npz` is still in use, the job ends `completed` with the note
+  `merge pending: result.npz is in use; the chunk files hold the data, and the next
+  load_results or start_ensemble_job merges them`; nothing is lost, and every read
+  includes the chunks. Chunks that `result.npz` already covers are only deleted. Files
+  are saved under a temporary name of the writer's own first; reads never see them.
+* One writer per directory: a job, and `run_ensemble` with an `output_dir`, hold
+  `output_dir/.lock` while they write and release it when they end (also after an error,
+  a cancel or Ctrl-C). It appears with its whole record: pid, hostname, start time, the
+  system (`platform.system()`, and the pid namespace on Linux) and, on Windows, the
+  process's creation time. Another writer, from this process or another one (the MCP
+  server and the CLI, say), is refused before anything runs: `another process (pid P on
+  host H, started T) is writing to DIR; wait for it to finish or cancel it` (`this
+  process (...)` when the lock is this process's own), or `job ID is already writing to
+  DIR; poll it or cancel it` for a job of the same process. A lock of this machine whose
+  process has ended (a process that was killed, say; on Windows also when its pid now
+  names a process with another creation time) is taken over by the next writer. A lock
+  of another machine always holds: another hostname, or the same hostname under another
+  system (WSL and containers report the Windows or host name, but their pids are
+  others), so a Windows writer and a WSL writer of one directory exclude each other.
+  The refusal then names the lock's system after the host (`pid P on host H (Linux
+  pidns:N)`). A WSL2 distribution, like a container, has a pid namespace of its own,
+  which may be a new one after WSL restarts: a lock that a crashed WSL writer left then
+  counts as another machine's, and must be deleted by hand. A lock that cannot be
+  created (a read-only directory or drive) is `output_dir DIR is not writable: ...`.
+  Readers (`load_results`, `EnsembleResult.load`) take no lock, except that
+  `load_results` takes it to finish a pending merge (below), which for a large run can
+  take minutes.
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
@@ -477,14 +535,17 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   thread.
 * Lifetime: jobs live in the process that started them. After a restart, resume from the
   directory.
-* Crash safety: chunks and `result.npz` are written atomically, and chunks already merged
-  into `result.npz` are ignored, so a directory stays readable and resumable whenever the
-  process dies.
+* Crash safety: chunks and `result.npz` are written atomically, and trajectories saved
+  twice (chunks already merged into `result.npz`, or overlapping chunks of two writers
+  with different chunk sizes) are kept once, so a directory stays readable and resumable
+  whenever the process dies. `load_results` merges the chunks of a finished run whose
+  merge is pending, unless a writer holds the directory.
 
 The CLI runs the same machinery in the foreground:
 `sparsegf2 ensemble spec.json --trajectories 100000 --output-dir runs/big --chunk-size 5000`
 prints progress to stderr. Ctrl-C stops it after the current chunk, prints the partial
-summary and exits with code 130; rerunning the same command resumes it.
+summary and exits with code 130; rerunning the same command resumes it (also after the
+process was killed: the rerun takes over the lock the dead process left).
 
 ---
 
@@ -493,8 +554,10 @@ summary and exits with code 130; rerunning the same command resumes it.
 * `--json` on every command prints exactly one JSON object on stdout. Logs and progress go
   to stderr. On failure the object is `{"error": {"type", "message"}}`.
 * Exit codes: `0` success, `2` invalid input or usage (bad circuit text, including
-  `inspect` of an invalid circuit, unknown spec key, missing file, bad JSON), `1` internal
-  error, `130` interrupted (Ctrl-C).
+  `inspect` of an invalid circuit, unknown spec key, missing file, a file that cannot be
+  read or is not UTF-8, bad JSON, an output directory that cannot be written:
+  `ValidationError`), `1` internal error (`internal error: ...`, any other exception, a
+  `TypeError` included: a bug to report), `130` interrupted (Ctrl-C).
 * `-` reads the circuit or spec from stdin. `--observables` takes inline JSON or
   `@file.json`.
 * `sparsegf2 ensemble` needs `--trajectories` (or a `trajectories` entry in SPEC.json),
@@ -525,8 +588,19 @@ summary and exits with code 130; rerunning the same command resumes it.
   preprocessing (large `realizations` collections), and the spec is built once for the
   estimate and the run.
 * Errors: invalid input becomes an MCP tool error (`isError: true`) whose text is the
-  API's message, so the model can correct the call. Argument-type errors are reported by
-  the SDK's schema validation in the same way.
+  API's message, so the model can correct the call. Every other failure is a tool error
+  too, never the SDK's bare `Error executing tool X`: the model reads
+  `Error executing tool X: TypeName: message (internal error: please report it)`, and the
+  server logs the traceback on its stderr. The API raises `ValueError` for every input
+  error (it turns the library's field-naming `TypeError`s into one), so anything else,
+  a `TypeError` included, is a bug: report it rather than retry with other arguments.
+* Argument types are strict, as the API's own checks are, and are reported by the SDK's
+  schema validation in the same way, naming the argument: an integer (`trajectories`,
+  `seed`, `shots`, `tick_stride`, `num_qubits`, `chunk_size`) must be a JSON integer or a
+  whole-number float (`4.0` is 4; `2.5`, `"3"` and `true` are refused), a flag
+  (`phases`, `observe_ticks`) `true` or `false` (not `"false"` or `0`), and
+  `max_seconds` and `wait_seconds` a number (not `"inf"` or `true`). Pydantic's default
+  lax mode used to turn `true` into 1 and `"3"` into 3. The input schema is unchanged.
 * Resources: `docs://sparsegf2/quickstart` (Markdown guide) and
   `docs://sparsegf2/capabilities` (JSON).
 * Prompts: `study_purification_transition(num_system, graph_family, rates, trajectories)`

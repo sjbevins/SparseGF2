@@ -3,7 +3,8 @@
 Every subcommand prints a readable summary, or with ``--json`` exactly one
 JSON object on stdout (logs and progress go to stderr), so scripts and LLM
 agents can parse it. Exit codes: 0 success, 2 invalid input or usage (including
-``inspect`` of an invalid circuit), 1 internal error, 130 interrupted (Ctrl-C).
+``inspect`` of an invalid circuit, a file that cannot be read and an output
+directory that cannot be written), 1 internal error, 130 interrupted (Ctrl-C).
 """
 
 from __future__ import annotations
@@ -194,12 +195,19 @@ def _build_parser() -> _Parser:
 
 
 def _read_text(path: str) -> str:
+    """The text of a file the user named (``-``: stdin); a file that cannot be read is an
+    input error (exit code 2) that names it."""
     if path == "-":
         return sys.stdin.read()
     p = Path(path)
     if not p.is_file():
         raise ValueError(f"no such file: {path!r}")
-    return p.read_text(encoding="utf-8")
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as exc:  # no permission, or (Windows) held by another program
+        raise ValueError(f"could not read {path!r}: {exc}") from None
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path!r} is not UTF-8 text: {exc}") from None
 
 
 def _read_json(text: str, what: str) -> Any:
@@ -366,6 +374,7 @@ def _run_job_in_foreground(
         command=_command_line(),
     )
     job_id = status["job_id"]
+    start_notes = list(status.get("notes", []))  # the resume's notes, shown by the start only
     if status["resumed_from"]:
         _log(f"resuming: {status['resumed_from']} trajectories already saved")
     interrupted = False
@@ -388,6 +397,10 @@ def _run_job_in_foreground(
     summary["job"] = {
         k: status[k] for k in ("job_id", "status", "trajectories_done", "resumed_from")
     }
+    # the resume's notes and the job's own (a merge left pending, say)
+    notes = [*start_notes, *(n for n in status.get("notes", []) if n not in start_notes)]
+    if notes:
+        summary["job"]["notes"] = notes
     return summary, EXIT_INTERRUPTED if interrupted else EXIT_OK
 
 

@@ -10,6 +10,7 @@ the server is built, so the simulator itself never depends on it.
 """
 
 import json
+import logging
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any
 
@@ -18,6 +19,8 @@ from sparsegf2 import __version__, api
 __all__ = ["SERVER_NAME", "build_server", "main", "require_mcp"]
 
 SERVER_NAME = "sparsegf2"
+
+_logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = """\
 SparseGF2 simulates stabilizer (Clifford) circuits fast, especially monitored random
@@ -39,6 +42,21 @@ def require_mcp() -> None:
         from mcp.server.mcpserver import MCPServer  # noqa: F401
     except ImportError as exc:
         raise ImportError(_INSTALL_HINT) from exc
+
+
+def _failure_text(exc: Exception) -> str:
+    """The tool error for an exception other than the API's ``ValueError``: its type and
+    message, so the model always reads what failed (the SDK would send only "Error
+    executing tool X"), and that it is a bug to report. The API raises ``ValueError`` for
+    every input error (it turns the library's field-naming ``TypeError`` into one), so
+    whatever else reaches the server, a ``TypeError`` included, is a bug."""
+    return f"{type(exc).__name__}: {exc} (internal error: please report it)"
+
+
+def _whole_number(value: Any) -> Any:
+    """A whole-number float as its int, as the API takes it (JSON Schema's "integer"
+    includes 4.0); any other value unchanged, for the strict check that follows."""
+    return int(value) if isinstance(value, float) and value.is_integer() else value
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +134,8 @@ one run_ensemble call with the same spec and seed. To resume after a cancel or r
 call again with the same spec and output_dir; seed and trajectories may be omitted (the
 stored seed and target are used, also for a graph collection). Only a larger trajectories
 extends a run. A spec that builds another protocol, or a changed graph file, is refused
-before anything runs. Poll with job_status, then call load_results(output_dir).
+before anything runs, and so is a directory another job or process is writing to (one
+writer per output_dir). Poll with job_status, then call load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,
@@ -145,7 +164,8 @@ Example: {}"""
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
 cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
-spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run.
+spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run. A
+"merge pending" left by a finished job is completed here.
 
 Example: {"path": "runs/n128_p012"}"""
 
@@ -204,10 +224,16 @@ def build_server() -> Any:
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import CallToolResult, TextContent, ToolAnnotations
+    from pydantic import BeforeValidator, Strict, StrictBool, StrictFloat
 
     # Tools return compact JSON text plus the same dict as structured content;
     # the SDK's default conversion would pretty-print it (about 30% longer).
     Result = Annotated[CallToolResult, dict[str, Any]]
+    # Arguments are checked as strictly as the API checks them: pydantic's lax default
+    # turned true into 1 and "3" into 3 (trajectories: true ran one trajectory). An
+    # integer is a JSON integer or a whole-number float, a boolean is true or false, and
+    # a number is never a string or a boolean. The input schema is unchanged.
+    Int = Annotated[int, Strict(), BeforeValidator(_whole_number)]
 
     server = MCPServer(
         SERVER_NAME,
@@ -219,11 +245,14 @@ def build_server() -> Any:
     computes = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
     def call(fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> CallToolResult:
-        """Run an api function; anticipated failures become tool errors the model can read."""
+        """Run an api function; every failure becomes a tool error the model can read."""
         try:
             out = fn(*args, **kwargs)
-        except ValueError as exc:
+        except ValueError as exc:  # invalid input: the API's message says what to change
             raise ToolError(str(exc)) from exc
+        except Exception as exc:  # a bug: the model reads what failed, the log keeps where
+            _logger.error("%s failed", getattr(fn, "__name__", "tool"), exc_info=exc)
+            raise ToolError(_failure_text(exc)) from exc
         text = json.dumps(out, separators=(",", ":"))
         return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=out)
 
@@ -238,13 +267,13 @@ def build_server() -> Any:
     @server.tool(description=_RUN_CIRCUIT, annotations=computes)
     def run_circuit(
         circuit: str,
-        shots: int = 1,
-        phases: bool = True,
-        seed: int | None = None,
+        shots: Int = 1,
+        phases: StrictBool = True,
+        seed: Int | None = None,
         observables: list[dict[str, Any]] | None = None,
-        observe_ticks: bool = False,
-        tick_stride: int | None = None,
-        num_qubits: int | None = None,
+        observe_ticks: StrictBool = False,
+        tick_stride: Int | None = None,
+        num_qubits: Int | None = None,
         output_dir: str | None = None,
     ) -> Result:
         return call(
@@ -273,10 +302,10 @@ def build_server() -> Any:
     @server.tool(description=run_ensemble_description, annotations=computes)
     def run_ensemble(
         spec: dict[str, Any],
-        trajectories: int | None = None,
-        seed: int | None = None,
+        trajectories: Int | None = None,
+        seed: Int | None = None,
         output_dir: str | None = None,
-        max_seconds: float = api.SYNC_ENSEMBLE_MAX_SECONDS,
+        max_seconds: StrictFloat = api.SYNC_ENSEMBLE_MAX_SECONDS,
     ) -> Result:
         if not max_seconds > 0:
             raise ToolError(f"max_seconds must be positive, got {max_seconds:g}")
@@ -293,16 +322,16 @@ def build_server() -> Any:
         )
 
     @server.tool(description=_ESTIMATE, annotations=read_only)
-    def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> Result:
+    def estimate_ensemble(spec: dict[str, Any], trajectories: Int | None = None) -> Result:
         return call(api.estimate_ensemble, spec, trajectories)
 
     @server.tool(description=_START_JOB, annotations=computes)
     def start_ensemble_job(
         spec: dict[str, Any],
         output_dir: str,
-        trajectories: int | None = None,
-        seed: int | None = None,
-        chunk_size: int | None = None,
+        trajectories: Int | None = None,
+        seed: Int | None = None,
+        chunk_size: Int | None = None,
     ) -> Result:
         return call(
             api.start_ensemble_job,
@@ -315,7 +344,7 @@ def build_server() -> Any:
         )
 
     @server.tool(description=_JOB_STATUS, annotations=read_only)
-    def job_status(job_id: str, wait_seconds: float = 0.0) -> Result:
+    def job_status(job_id: str, wait_seconds: StrictFloat = 0.0) -> Result:
         return call(api.job_status, job_id, wait_seconds)
 
     @server.tool(description=_CANCEL_JOB, annotations=computes)

@@ -230,7 +230,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   shows 17 sizes); the other notes say whether anything else was cut.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
-  `output_dir` to resume.
+  `output_dir` to resume. One process writes to an `output_dir` at a time (it holds
+  `output_dir/.lock`): while a job, or another process such as a CLI run, writes there,
+  the next writer is refused with a message naming it. Wait for it or cancel it; a lock
+  left by a process that has ended on this machine is taken over.
 * Compiled kernels are cached on disk and recompiled automatically whenever any kernel
   source (or the Numba or Python version) changes, so the first import and run after an
   update is slower (10 to 30 s). Kernels that a process started before the update saves
@@ -241,7 +244,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around
-  the error.
+  the error. The exception is a message ending `(internal error: please report it)`
+  (over MCP `Error executing tool X: TypeName: message (internal error: ...)`, exit code 1
+  in the CLI): that is a bug in SparseGF2, not in the input, so report it with the
+  message instead of retrying with other arguments.
 
 ## Erasure analysis in Python
 

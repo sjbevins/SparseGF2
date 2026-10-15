@@ -2,6 +2,100 @@
 
 ## Unreleased
 
+* **Every MCP failure carries a message:** the server turns every exception into a tool
+  error the model can read. A `ValueError` (invalid input) keeps the API's message;
+  anything else, a `TypeError` included, is a bug and reads `TypeName: message (internal
+  error: please report it)`, with its traceback in the server's log (stderr). The API
+  raises `ValueError` for every input error, so nothing else is the caller's to fix. The
+  SDK used to send only `Error executing tool X` for anything but a `ValueError`.
+  AGENTS.md, the sparsegf2 skill and the quickstart resource tell agents to report such
+  an error rather than retry with other arguments.
+* **Names are checked before they are looked up:** a graph `family`, an `edge_weights`
+  family, a probe or observable `kind` and a `capabilities` section that is not a string
+  raise `ValueError` naming the field (`graph.family must be a string (one of [...]),
+  got ['cycle']`) instead of `TypeError: unhashable type`, which the CLI reported as an
+  internal error (exit 1) and MCP as a bare error.
+* **`num_system` is bounded:** at most `MAX_QUBITS` (65,536), checked before any graph
+  is generated, in `estimate_ensemble` too (`num_system: 10**12` ran out of memory
+  generating the graph). `capabilities()["limits"]["max_num_system"]` gives it.
+* **Honest runtime estimates up to n = 2048:** the probe terms of `estimate_ensemble`
+  (and so of `run_ensemble`'s `max_seconds` guard and of the default chunk size of
+  background jobs) are refitted to one-thread measurements up to n = 2048, in both
+  reference pictures and in the states that make each probe expensive
+  (`benchmarks/probe_cost.py`, results in `benchmarks/results/probe_cost.md`). Every
+  probe kind is now priced at about 3 times its cost measured on an AMD Ryzen 9 9950X3D
+  or more. The old terms grew about linearly in n and were up to 100 times too low at
+  n = 2048: `entropy_profile` and `erasure_lost_profile` grow as n² W (W the tableau's
+  words per column), every entropy as m² W for the smaller side m of its region,
+  `contiguous_distance` in the single-reference picture as n³ W, and the elimination that
+  every erasure probe starts with as n W Wc (Wc the words of a code column);
+  `uncorrectable_region_counts` at w <= 2 was priced at 0.25 to 0.8 times its cost, and
+  `erasure_first_failure` with a single reference at 0.14 to 1.30 (below 1 from
+  n = 256). A run estimated at 50 s could take 20 minutes, blocking an MCP call that
+  should have gone to a background job. The scans that stop at a code's first failure
+  (`contiguous_distance`, `erasure_first_failure`) are priced for the worst case of the
+  single-reference picture (k = 1, erasures that fail only at about n / 2 qubits) and for
+  the codes of monitored dynamics in the purification picture, so their estimates for
+  small-distance codes are generous. In the purification picture, a spec with either scan
+  gets a note in `estimate_ensemble`'s result: a code whose first
+  failures are near n / 2 (low rate, large distance) can make them take up to about X
+  times their estimate, with X the single-reference price over the purification price of
+  those probes at that n (about 3.9 for `erasure_first_failure` and 27 for
+  `contiguous_distance` at n = 256). Trajectories on many threads are no longer priced as
+  fast as one thread alone: each of T busy threads counts as 1 / (1 + 0.04 (T - 1)) of one
+  (0.45 at 32 threads; with every logical processor busy, each ran at 0.35 to 0.66 of a
+  thread alone's speed), so one trajectory per thread is estimated longer than one
+  trajectory alone. Graph generation is priced per family: `erdos_renyi` draws a random
+  number for every pair (it was priced 1.4 to 100 times too low) and `random_regular`
+  repeats its pairing until the graph is simple, up to its own `max_tries`.
+* **Graph collections are bounded before they are built:** a spec's graphs may take at
+  most `MAX_GRAPH_GB` (2 GB), computed from the family's parameters before anything is
+  generated: the edges a collection keeps, 16 bytes each (the engine holds them about
+  three times over, so this matches the 8 GB a result may take), and the peak while one
+  graph is generated, measured with tracemalloc: 48 bytes per pair for `complete` and
+  `erdos_renyi`, which build every pair, and up to 512 bytes per edge for the Python
+  generators of the ring families. A larger `graph.realizations` collection is refused by
+  `estimate_ensemble`, `run_ensemble` and `start_ensemble_job` with a message naming
+  `realizations` and `num_system` and how many realizations fit; one graph that alone is
+  too large (`complete` or `erdos_renyi` on about 9,000 qubits or more, or an absurd
+  degree) is refused with the largest `num_system` that fits and that the family accepts,
+  or, when none does, with advice to choose a smaller degree. A Watts–Strogatz collection
+  at n = 4096 with 100,000 realizations (13 GB of edges) used to exhaust the memory of the
+  very call meant to say it was too big.
+* **Directories that cannot be written or read are input errors:** an `output_dir` that
+  cannot be created or written (no permission, a full or read-only drive, a path below a
+  file), its lock included, raises `ValueError("output_dir DIR is not writable: ...")` in
+  `run_circuit`, `run_ensemble` and `start_ensemble_job` (`output_dir DIR cannot be
+  created: P is a file, not a directory` when a parent is a file). Replacing `spec.json`
+  or `provenance.json` is retried while a reader holds the file (Windows), as replacing
+  `result.npz` already was. A saved part that stays
+  unreadable after the retries (`result.npz` or a chunk that another program holds, or
+  that this process may not read) raises `could not read results from DIR: ...`, naming
+  the file, in `start_ensemble_job` as in `load_results`; it raised `PermissionError`
+  (CLI exit 1, a bare MCP error). A `spec.json` that is not JSON, holds no object or
+  records no seed, and a graph file that cannot be read, are refused naming the file. The
+  CLI exits with 2 for a circuit, spec or observables file it cannot read or that is not
+  UTF-8. A `provenance.json` field that a resume reads but that holds another type
+  (`resumes` not a list, `git_commit` not a string) is ignored with a note, as an
+  unreadable `provenance.json` already was; it crashed the resume with a `TypeError`.
+* **Strict MCP argument types:** integer, boolean and number tool arguments are checked
+  as the API checks them. Pydantic's lax default ran one trajectory for
+  `trajectories: true` and three for `"3"`, and took `seed: true` as seed 1; these, and
+  `"false"` for `phases` or `"inf"` for `max_seconds`, are now refused with a message
+  naming the argument. A whole-number float such as `4.0` still counts as 4. The input
+  schema is unchanged.
+* **Fresh seeds fit in a double:** `seed=None` draws a 53-bit seed (it drew 63 bits), so
+  the reported seed survives clients that read JSON numbers as doubles (JavaScript MCP
+  clients, Claude Code among them); a larger one came back rounded and repeated another
+  run. An explicit seed of any size is still used and reported exactly, and a result
+  whose seed is 2**53 or more (from `run_circuit`, `run_ensemble`, `load_results` or
+  `start_ensemble_job`) carries a note that such a client may round it.
+* **Lock and merge details:** `load_results` no longer fails when a merge removes
+  `chunks/` while it lists it (a missing `chunks/` holds no chunks, and the chunks are
+  listed before `result.npz`, which a merge replaces first). The refusal of a lock taken
+  on another system names that system (`pid P on host H (Linux pidns:N)`), since WSL
+  and containers share the Windows or host name. A lock whose `created` is not an integer
+  counts as having none; a malformed one made a live writer's lock look stale.
 * **Kaplan-Meier survival is correctly rounded:** `analysis.kaplan_meier` computes
   `survival` as the exact product of (n_j - d_j) / n_j (`fractions.Fraction`), rounded to
   float64 once, instead of a running float product. A survival of exactly 1/2 used to
@@ -88,6 +182,45 @@
   A single graph is refused with the API's message, which now names `--trajectories`
   and every case where the count may be omitted, still exit code 2; a non-object
   `graph` is now exit 2 instead of an internal error.
+* **One writer per output directory:** `start_ensemble_job`, `run_ensemble` with an
+  `output_dir`, and so the CLI, hold `output_dir/.lock` while they write, and release it
+  when they end, also on an error, a cancel or Ctrl-C. The lock appears with its whole
+  record (written to a file of the writer's own, then hard-linked, which fails if a lock
+  exists; created with `O_CREAT | O_EXCL` where hard links are not supported): pid,
+  hostname, start time, the system (`platform.system()` and, on Linux, the pid
+  namespace) and, on Windows, the process's creation time. A second writer, in another
+  process too, is refused before anything runs: `another process (pid P on host H,
+  started T) is writing to DIR; wait for it to finish or cancel it` (`this process
+  (...)` for a lock of the same process, and a job of the same process is named, as
+  before, also when its lock was deleted by hand). Only jobs of the same process used to
+  be refused, so the MCP server's job and a CLI resume of the same directory could both
+  write, and with different chunk sizes both failed and left the directory unreadable.
+  A lock of this machine (the same hostname and system: WSL and containers share the
+  Windows or host name but not its pids) whose process is gone is taken over: checked
+  with `os.kill(pid, 0)`, or on Windows with `OpenProcess` and `GetExitCodeProcess`,
+  and on Windows also when its pid now names a process with another creation time (the
+  kernel's, so clock steps do not matter). A lock without a record is taken over only
+  when it is older than 10 s. Another machine's lock always holds.
+* **Overlapping chunks merge:** trajectories saved twice (chunks of two writers with
+  different chunk sizes, or chunks a merge could not delete) are kept once when a
+  directory is read or merged, instead of failing the merge. A part of another run is
+  still refused, even when all of its trajectories are covered. Chunks that `result.npz`
+  covers entirely are deleted without writing `result.npz` again.
+* **Merges survive readers (Windows):** replacing `result.npz` while a reader holds it (a
+  notebook calling `EnsembleResult.load`, or `load_results`) is retried with a backoff
+  of about 5 s in total, and so is deleting the merged chunks, with one backoff for all
+  of them (a chunk still in use is left; it repeats `result.npz`). If `result.npz` is
+  still in use, the job ends `completed` with the note `merge pending: result.npz is in
+  use; the chunk files hold the data, and the next load_results or start_ensemble_job
+  merges them`, instead of `failed`, and the next `load_results` (when no writer holds
+  the directory) or `start_ensemble_job` merges them. An error writing the merged file
+  itself still fails the job. `load_results` retries a file that a merge is replacing
+  in the same way instead of failing with "could not read results". The CLI shows the
+  job's notes (this one, and a resume's) under `job.notes`.
+* **Temporary files are each writer's own:** `result.npz` and chunks are saved to a
+  temporary file named after the writer's pid and a random token, so two writers never
+  write into one file; loads never read temporaries, and a merge deletes those that
+  killed writers left.
 
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 

@@ -836,8 +836,8 @@ print(f"about {estimate['estimated_seconds'] / 3600:.1f} h with {estimate['threa
       f"{estimate['result_megabytes']:.0f} MB of results")
 ```
 
-On the 4-core machine used for this guide it printed about 27,600 s (7.7 h)
-and 208 MB; the arithmetic above gives about 3 h, and the estimator is meant to
+With 4 threads it prints about 28,800 s (8.0 h) and 208 MB; the arithmetic
+above gives about 3 h, and the estimator is meant to
 err on the long side (in spot checks at n = 64–128, measured runs took a third
 or less of the estimate).
 The estimator refuses specs whose result would exceed 8 GB.

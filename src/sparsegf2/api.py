@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import inspect
 import json
@@ -49,6 +50,7 @@ import os
 import platform
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import textwrap
@@ -58,10 +60,10 @@ import traceback
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -103,6 +105,14 @@ MAX_GRAPH_REALIZATIONS = 100_000
 MAX_RESULT_GB = 8.0
 """Largest ensemble result (probe values and code snapshots) one run or job may hold in memory."""
 
+MAX_GRAPH_GB = 2.0
+"""Largest memory a spec's graphs may take, checked from the family's parameters before any
+graph is generated: the edges a collection keeps (16 bytes per edge), and the peak while one
+graph is generated (48 bytes per pair for ``complete`` and ``erdos_renyi``, up to 512 per
+edge for the ring families). The engine holds the edges about three times over (the graphs,
+their concatenation and an index per edge), so a collection at this limit needs about as
+much memory as the largest result (:data:`MAX_RESULT_GB`)."""
+
 MAX_CHECKPOINTS_SHOWN = 50
 MAX_BITS_SHOWN = 256
 MAX_LIST_SHOWN = 64
@@ -133,6 +143,19 @@ _RESULT_FILE = "result.npz"
 _CHUNK_DIR = "chunks"
 _SPEC_FILE = "spec.json"
 _PROVENANCE_FILE = "provenance.json"
+_LOCK_FILE = ".lock"  # held by the one process writing to an output directory
+_TAKEOVER_FILE = ".lock.takeover"  # the turn of a process removing a stale lock
+
+# Windows refuses to replace or delete a file that another process holds open (a
+# notebook reading result.npz, say), and to open one that is being replaced; that
+# passes within moments, so these operations are retried with this backoff (seconds,
+# about 5 s in total) before they fail.
+_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 1.6)
+
+_MERGE_PENDING = (
+    "merge pending: result.npz is in use; the chunk files hold the data, and the next "
+    "load_results or start_ensemble_job merges them"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -338,10 +361,30 @@ def _check_type(value: Any, annotation: Any, what: str) -> Any:
 
 
 def _resolve_seed(seed: Any) -> int:
-    """A concrete non-negative int seed; ``None`` draws a fresh 63-bit one."""
+    """A concrete non-negative int seed; ``None`` draws a fresh one below 2**53.
+
+    53 bits, so that the reported seed survives a client that reads JSON numbers as
+    doubles (JavaScript, Claude Code among them): a larger one would come back rounded
+    and repeat another run. An explicit seed of any size is used, and reported, exactly.
+    """
     if seed is None:
-        return secrets.randbits(63)
+        return secrets.randbits(53)
     return _require_int(seed, "seed", minimum=0, maximum=None)
+
+
+_BIG_SEED_NOTE = (
+    "seed >= 2**53: a client that reads JSON numbers as doubles (JavaScript, Claude Code) "
+    "may round it; to repeat runs from such a client, use seeds below 2**53"
+)
+
+
+def _seed_notes(seed: Any) -> list[str]:
+    """``[_BIG_SEED_NOTE]`` for a seed that such a client cannot hold exactly, else ``[]``.
+
+    The seed itself is used and reported exactly; the client may already have rounded
+    the one it sent, and cannot read this one back unrounded.
+    """
+    return [_BIG_SEED_NOTE] if isinstance(seed, int) and seed >= 2**53 else []
 
 
 _RANGE_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?::\s*(\d+)\s*)?$")
@@ -376,6 +419,14 @@ def _check_keys(given: dict, allowed: Sequence[str], what: str) -> None:
     unknown = sorted(set(given) - set(allowed))
     if unknown:
         raise ValueError(f"{what}: unknown key(s) {unknown}; allowed keys are {sorted(allowed)}")
+
+
+def _require_name(value: Any, what: str, choices: Iterable[str]) -> str:
+    """``value``, a user-given key into a table (a family, a kind, a section), if it is a
+    string: checked before the lookup, which a list or a dict would fail with a TypeError."""
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string (one of {sorted(choices)}), got {value!r}")
+    return value
 
 
 def _subsample(count: int, limit: int) -> np.ndarray:
@@ -615,7 +666,7 @@ def _compile_observables(
         where = f"observables[{i}]"
         if not isinstance(spec, dict) or "kind" not in spec:
             raise ValueError(f'{where}: expected an object with a "kind", got {spec!r}')
-        kind = spec["kind"]
+        kind = _require_name(spec["kind"], f"{where}.kind", _OBSERVABLES)
         if kind not in _OBSERVABLES:
             raise ValueError(
                 f"{where}: unknown observable kind {kind!r}; choose from {sorted(_OBSERVABLES)}"
@@ -956,7 +1007,7 @@ def run_circuit(
         "phases": phases,
         "seed": seed,
     }
-    notes: list[str] = []
+    notes: list[str] = _seed_notes(seed)
     arrays: dict[str, np.ndarray] = {}
     tick_rows: list[tuple[int, dict[str, Any]]] = []
     final_values: dict[str, Any] = {}
@@ -1125,29 +1176,24 @@ def _save_circuit_run(
     command: str | None,
 ) -> dict[str, str]:
     out = _output_dir(output_dir)
-    npz = out / "circuit_run.npz"
-    _atomic_savez(npz, {k: v for k, v in arrays.items() if v is not None})
-    stim_path = out / "circuit.stim"
-    stim_path.write_text(str(circuit) + "\n", encoding="utf-8")
-    files = {"arrays": str(npz), "circuit": str(stim_path)}
-    if final_values or tick_rows:
-        obs_path = out / "observables.json"
-        obs_path.write_text(
-            json.dumps(
-                _jsonable(
-                    {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]},
-                    exact=True,
-                ),
-                indent=1,
-            ),
-            encoding="utf-8",
+    with _writing_to(out):
+        npz = out / "circuit_run.npz"
+        _atomic_savez(npz, {k: v for k, v in arrays.items() if v is not None})
+        stim_path = out / "circuit.stim"
+        stim_path.write_text(str(circuit) + "\n", encoding="utf-8")
+        files = {"arrays": str(npz), "circuit": str(stim_path)}
+        if final_values or tick_rows:
+            obs_path = out / "observables.json"
+            values = {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]}
+            obs_path.write_text(
+                json.dumps(_jsonable(values, exact=True), indent=1), encoding="utf-8"
+            )
+            files["observables"] = str(obs_path)
+        prov = out / _PROVENANCE_FILE
+        prov.write_text(
+            json.dumps(_provenance(seed, command or "run_circuit"), indent=2), encoding="utf-8"
         )
-        files["observables"] = str(obs_path)
-    prov = out / _PROVENANCE_FILE
-    prov.write_text(
-        json.dumps(_provenance(seed, command or "run_circuit"), indent=2), encoding="utf-8"
-    )
-    files["provenance"] = str(prov)
+        files["provenance"] = str(prov)
     return files
 
 
@@ -1251,7 +1297,10 @@ def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any
     p = Path(path).expanduser().resolve()
     if not p.is_file():
         raise ValueError(f"graph (file): no such file {str(p)!r}")
-    num_nodes, gs, ws = graphs.load(p)
+    try:
+        num_nodes, gs, ws = graphs.load(p)
+    except OSError as exc:
+        raise _unreadable_graph_file(p, exc) from None
     if num_nodes != n:
         raise ValueError(f"graph (file): {p.name} has num_nodes {num_nodes}, but num_system is {n}")
     if len(gs) == 1:
@@ -1270,9 +1319,20 @@ def _graph_file_record(spec: dict) -> dict[str, str] | None:
     if not (isinstance(graph, dict) and graph.get("family") == "file"):
         return None
     path = Path(graph["path"]).expanduser().resolve()
-    with path.open("rb") as f:
-        digest = hashlib.file_digest(f, "sha256").hexdigest()
+    try:
+        with path.open("rb") as f:
+            digest = hashlib.file_digest(f, "sha256").hexdigest()
+    except OSError as exc:
+        raise _unreadable_graph_file(path, exc) from None
     return {"path": str(path), "sha256": digest}
+
+
+def _unreadable_graph_file(path: Path, exc: OSError) -> ValueError:
+    """An OSError reading a graph file, as the input error it is."""
+    return ValueError(
+        f"graph (file): could not read {str(path)!r}: {exc}; close any program that holds "
+        "it open, or check its permissions"
+    )
 
 
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
@@ -1303,6 +1363,9 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             )
         if "seed" not in params:
             raise ValueError("graph.realizations needs a random family with its own 'seed'")
+        family = params.get("family")
+        if isinstance(family, str):  # any other family value is reported by the first graph
+            _check_graph_memory(family, params, n, realizations)  # before any graph exists
         seed = params.pop("seed")
         base = [_require_int(seed, "graph.seed", minimum=0)] if not isinstance(seed, list) else seed
         bank: list[np.ndarray] = []
@@ -1311,7 +1374,7 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             assert isinstance(one, np.ndarray), "without realizations a family yields one graph"
             bank.append(one)
         return bank
-    family = params.pop("family")
+    family = _require_name(params.pop("family"), "graph.family", families)
     if family not in families:
         raise ValueError(f"unknown graph family {family!r}; choose from {sorted(families)}")
     fn = families[family]
@@ -1328,7 +1391,156 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
         cols = _require_int(cols, "graph (lattice_2d): cols", minimum=1)
         if rows * cols != n:
             raise ValueError(f"graph (lattice_2d): rows * cols must equal num_system = {n}")
+    _check_graph_memory(family, params, n, None)
     return _call_with(fn, params, {"n": n}, f"graph ({family})")
+
+
+_EDGE_BYTES = 16  # one edge of an (m, 2) int64 edge array, as a collection keeps it
+
+# Peak bytes allocated while one graph is generated, per pair drawn (``complete`` and
+# ``erdos_renyi`` build every pair: triu_indices, the stacked pairs and their int64 copy are
+# 48 bytes per pair) or per edge of the bound (the Python tuples and sets of the ring
+# families, about 390 bytes per edge). Measured with tracemalloc at n = 2048 to 8192 and
+# rounded up; plus a fixed allowance per graph for the interpreter's own objects (up to
+# about 8 KB at small n).
+_GENERATION_BYTES = {
+    "cycle": 128,
+    "path": 64,
+    "complete": 48,
+    "erdos_renyi": 48,
+    "lattice_2d": 256,
+    "watts_strogatz": 512,
+    "newman_watts": 512,
+    "random_regular": 128,
+}
+_GENERATION_OVERHEAD = 64 * 1024
+
+
+def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
+    """At most how many edges one graph of ``family`` on ``n`` nodes keeps, and how many
+    pairs or edges generating it materialises, from its parameters alone (before it exists).
+
+    None for a family not listed here, or when the family rejects its parameters at this n
+    (a degree that is not an integer in its range, an odd ``n * d``): the family itself then
+    reports the parameter.
+    """
+    pairs = n * (n - 1) // 2
+
+    def number(key: str) -> float | None:
+        v = params.get(key)
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.number)):
+            return None
+        try:
+            x = float(v)
+        except OverflowError:  # an int beyond any float: out of every family's range
+            return None
+        return x if math.isfinite(x) else None
+
+    if family == "cycle":
+        return n, n
+    if family == "path":
+        return n - 1, n - 1
+    if family == "complete":
+        return pairs, pairs
+    if family == "lattice_2d":
+        return 2 * n, 2 * n
+    if family == "erdos_renyi":
+        # every pair is drawn (so materialised); the edges kept are binomial: mean plus
+        # six standard deviations
+        p = number("p")
+        if p is None or not 0.0 <= p <= 1.0:
+            return None
+        mean = p * pairs
+        return min(pairs, math.ceil(mean + 6.0 * math.sqrt(mean * (1.0 - p)) + 1.0)), pairs
+    if family in ("watts_strogatz", "newman_watts"):
+        k = number("k")  # the ring lattice needs an even k with 2 <= k < n
+        if k is None or k != int(k) or int(k) % 2 or not 2 <= k < n:
+            return None
+        ring = n * int(k) // 2
+        # Newman-Watts keeps the ring and adds at most one shortcut per ring edge
+        edges = min(pairs, 2 * ring if family == "newman_watts" else ring)
+        return edges, edges
+    if family == "random_regular":
+        d = number("d")  # an integer degree 1 <= d < n, with n * d even
+        if d is None or d != int(d) or not 1 <= d < n or (n * int(d)) % 2:
+            return None
+        return n * int(d) // 2, n * int(d) // 2
+    return None
+
+
+def _generation_bytes(family: str, params: dict, n: int) -> int | None:
+    """Peak bytes allocated while one graph of ``family`` on ``n`` nodes is generated."""
+    counts = _graph_edges(family, params, n)
+    if counts is None:
+        return None
+    return _GENERATION_BYTES[family] * counts[1] + _GENERATION_OVERHEAD
+
+
+def _check_graph_memory(family: str, params: dict, n: int, realizations: int | None) -> None:
+    """Refuse graphs that would take more than :data:`MAX_GRAPH_GB`, before generating any.
+
+    Checks generating one graph (what generation allocates at its peak), and keeping
+    ``realizations`` of them (16 bytes per edge; nothing when ``realizations`` is None).
+    """
+    counts = _graph_edges(family, params, n)
+    if counts is None:
+        return
+    kept, drawn = counts
+    limit = MAX_GRAPH_GB * 1e9
+    per = _GENERATION_BYTES[family]
+    generating = per * drawn + _GENERATION_OVERHEAD
+    if generating > limit:
+        what = "pairs drawn" if family in ("complete", "erdos_renyi") else "edges"
+        largest = _largest_fitting_n(family, params, n, limit)
+        fits = (
+            f"at most num_system = {largest:,} fits for this family and these parameters; "
+            "choose a smaller num_system or a sparser graph"
+            if largest is not None
+            else "no num_system fits these parameters; choose a sparser graph (a smaller k or d)"
+        )
+        raise ValueError(
+            f"graph ({family}): one graph on num_system = {n:,} qubits takes about "
+            f"{generating / 1e9:.1f} GB while it is generated ({drawn:,} {what} at about "
+            f"{per} bytes each; limit {MAX_GRAPH_GB:g} GB): {fits}"
+        )
+    if realizations is not None and _EDGE_BYTES * kept * realizations > limit:
+        raise ValueError(
+            f"graph.realizations = {realizations:,} graphs on num_system = {n:,} qubits would "
+            f"take about {_EDGE_BYTES * kept * realizations / 1e9:.1f} GB of edges ({kept:,} "
+            f"edges each at {_EDGE_BYTES} bytes; limit {MAX_GRAPH_GB:g} GB): at most "
+            f"{int(limit // (_EDGE_BYTES * kept)):,} realizations fit at num_system = {n:,}; "
+            "use fewer graphs with more circuits_per_graph each, or a smaller num_system"
+        )
+
+
+def _largest_fitting_n(family: str, params: dict, n: int, limit: float) -> int | None:
+    """The largest num_system below ``n`` that the family accepts with these parameters and
+    at which one graph fits in ``limit``; None if there is none."""
+
+    def accepted(m: int) -> bool:
+        return _graph_edges(family, params, m) is not None
+
+    def small(m: int) -> bool:
+        # A size the family rejects is priced as its neighbour below (random_regular rejects
+        # an odd n * d) or, when that is rejected too, counts as small: below the range.
+        size = _generation_bytes(family, params, m)
+        if size is None:
+            size = _generation_bytes(family, params, m - 1)
+        return size is None or size <= limit
+
+    # Every family's bound grows with n and its range is n above some minimum, so small()
+    # holds up to one size and fails above it.
+    low, high = 2, n
+    while high - low > 1:
+        mid = (low + high) // 2
+        if small(mid):
+            low = mid
+        else:
+            high = mid
+    for m in (low, low - 1):  # an odd n * d is next to an even one
+        if m >= 2 and accepted(m) and small(m):
+            return m
+    return None
 
 
 def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
@@ -1343,7 +1555,7 @@ def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
             f'{{"family": "power_law", "alpha": 2.0}}; families: {sorted(families)}'
         )
     params = dict(weights)
-    family = params.pop("family")
+    family = _require_name(params.pop("family"), "edge_weights.family", families)
     if family not in families:
         raise ValueError(f"unknown edge_weights family {family!r}; choose from {sorted(families)}")
     return _call_with(
@@ -1385,7 +1597,7 @@ def _build_probe(spec: Any, index: int, num_system: int) -> mipt.Probe:
             f'{where}: expected an object like {{"kind": "code_dimension"}}; kinds: {sorted(kinds)}'
         )
     params = dict(spec)
-    kind = params.pop("kind")
+    kind = _require_name(params.pop("kind"), f"{where}.kind", kinds)
     if kind not in kinds:
         raise ValueError(f"{where}: unknown probe kind {kind!r}; choose from {sorted(kinds)}")
     name = params.pop("name", None)
@@ -1457,7 +1669,8 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         for k, v in spec.items()
         if k != "graph"
     }
-    n = _require_int(spec["num_system"], "num_system", minimum=2)
+    # bounded before any graph is generated: 10**12 qubits would exhaust the memory
+    n = _require_int(spec["num_system"], "num_system", minimum=2, maximum=MAX_QUBITS)
     kwargs["num_system"] = n
     kwargs["layers"] = _require_int(spec["layers"], "layers", minimum=0)
     kwargs["measurement_rate"] = _require_number(
@@ -1512,7 +1725,7 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
 
 def _random_family(graph: Any) -> bool:
     family: Any = graph.get("family") if isinstance(graph, dict) else None
-    fn = _graph_families().get(family) if isinstance(graph, dict) else None
+    fn = _graph_families().get(family) if isinstance(family, str) else None
     return fn is not None and "seed" in _params(fn)
 
 
@@ -1587,53 +1800,103 @@ def _edge_list(value: Any) -> np.ndarray:
     return arr
 
 
-def _entropy_us(sizes: Sequence[int], words: int) -> float:
-    """Cost of entropies of regions with the given sizes on a ``words``-word tableau."""
-    return sum(4.0 + 0.1 * size * words for size in sizes)
+# The probe terms of the cost model: one-thread microseconds per evaluation, deliberately
+# pessimistic. Fitted to benchmarks/results/probe_cost.md (AMD Ryzen 9 9950X3D, one thread,
+# 2026-10-15, n = 64..2048, in the states that make each probe expensive) at about 3 times the
+# measured cost or more at every measured point, which leaves room for a machine about twice as
+# slow per thread. How much slower each thread runs while many run at once is priced separately
+# (_parallel_threads). W is the tableau's words per column, ceil(num_qubits / 64);
+# Wc = ceil(2 n / 64), the words of a code column.
 
 
-def _probe_us(p: mipt.Probe, n: int, words: int) -> float:
-    """Microseconds (one thread) to evaluate one probe at one checkpoint, pessimistically."""
-    r = [len(region) for region in p.regions]
+def _elimination_us(m: int, words: int) -> float:
+    """A Gaussian elimination over the 2m stabilizer columns of m qubits: O(m**2 W)."""
+    return 2.0 + 1e-3 * m * m * (32.0 + 1.1 * words)
+
+
+def _entropy_us(sizes: Sequence[int], num_qubits: int, words: int) -> float:
+    """Entropies of regions of the given sizes: each marks the region among all the qubits
+    and eliminates over the smaller side."""
+    return sum(
+        2.0 + 0.01 * num_qubits + _elimination_us(min(size, num_qubits - size), words)
+        for size in sizes
+    )
+
+
+def _code_columns_us(n: int, words: int) -> float:
+    """``code_columns``, which every evaluation of an erasure probe starts with: a bit test
+    per tableau row (64 W of them) and code column (2n), and the row reduction behind it."""
+    code_words = (2 * n + 63) // 64
+    return 1e-3 * (64 * words) * (2 * n) * (24.0 + 0.15 * code_words)
+
+
+def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = None) -> float:
+    """Microseconds (one thread) to evaluate one probe at one checkpoint, pessimistically.
+
+    ``single`` prices the erasure scans as in the single-reference picture (True) or the
+    purification picture (False); by default, as in the picture of ``mc``.
+
+    The erasure scans that stop at the code's first failure (``contiguous_distance``,
+    ``erasure_first_failure``) cost what the code makes them: they are priced for the worst
+    case of the single-reference picture (k = 1 and erasures that fail only at about n / 2
+    qubits, as in the volume-law phase) and for the codes of monitored dynamics measured in
+    the purification picture (benchmarks/results/probe_cost.md and erasure_cost.md). A
+    purification code of rate near 0 whose erasures fail only near n / 2 would cost up to
+    the single-reference price.
+    """
+    n, num_qubits = mc.num_system, mc.num_qubits
+    words = (num_qubits + 63) // 64
+    code_words = (2 * n + 63) // 64
+    sizes = [len(region) for region in p.regions]
+    if single is None:
+        single = mc.reference == "single"
     if p.kind == "code_dimension":
         return 1.0 + 0.06 * n
     if p.kind in ("entropy", "half_cut"):
-        return _entropy_us(r, words)
-    if p.kind == "lost_information":
-        return _entropy_us([2 * size for size in r], words)
+        return _entropy_us(sizes, num_qubits, words)
+    if p.kind == "lost_information":  # two eliminations over the erased qubits themselves
+        return sum(2 * _elimination_us(size, words) for size in sizes)
     if p.kind == "mutual_information":
-        return _entropy_us([*r, sum(r)], words)
+        return _entropy_us([*sizes, sum(sizes)], num_qubits, words)
     if p.kind == "tripartite":
-        a, b, c = r
-        return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], words)
+        a, b, c = sizes
+        return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], num_qubits, words)
     if p.kind == "contiguous_distance":
+        if single:  # n starts, each grown to about n / 2 qubits: O(n**3 W)
+            return 20.0 + 1e-3 * n**3 * (7.8 + 0.6 * words)
         return 50.0 + 0.03 * n**2.25
-    if p.kind == "erasure_lost_profile":
-        return p.samples * (0.8 * n + 0.05 * n * words)
-    # The erasure kernels first row-reduce the code's columns (2n columns of at
-    # most 2n bits); fitted to n = 256..2048 and rounded up.
-    code_words = (2 * n + 63) // 64
-    columns = 0.004 * n**2 * math.sqrt(code_words)
+    if p.kind == "entropy_profile":  # one incremental pass over the n qubits: O(n**2 W)
+        return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
+    if p.kind == "erasure_lost_profile":  # two such passes per sample
+        return 5.0 + p.samples * (2.0 + 1e-3 * n * n * (30.0 + 1.8 * words))
     if p.kind == "erasure_first_failure":
-        return columns + p.samples * 0.03 * n**1.5
+        # with a single reference every ordering is scanned to about n / 2: O(n**2 Wc)
+        ordering = 1e-3 * n * n * (7.8 + 0.3 * code_words) if single else 0.03 * n**1.5
+        return 5.0 + _code_columns_us(n, words) + p.samples * ordering
     if p.kind == "uncorrectable_counts":
-        # C(n, w - 1) prefixes, each with up to 4**(w - 1) hash lookups; in logs,
-        # so an absurd max_size gives a huge estimate rather than an overflow
+        # C(n, w - 1) prefixes, each walking the 4**(w - 1) elements of its span with a hash
+        # lookup of Wc words; in logs, and capped, so that an absurd max_size gives a huge
+        # estimate rather than an overflow, even times many evaluations and trajectories
         w = p.size
         log_prefixes = math.lgamma(n + 1) - math.lgamma(w) - math.lgamma(n - w + 2)
-        log_us = log_prefixes + (w - 1) * math.log(4) + math.log(0.15 + 0.015 * code_words)
-        return columns + math.exp(min(log_us, 700.0))
-    if p.kind == "code_snapshot":
-        return 1.0 + 0.01 * n**2
-    return 10.0 + 0.5 * n + 0.05 * n * words  # entropy_profile, and any newer probe
+        log_us = log_prefixes + (w - 1) * math.log(4) + math.log(1e-3 * (56.0 + 14.0 * code_words))
+        return 5.0 + _code_columns_us(n, words) + math.exp(min(log_us, 400.0))
+    if p.kind == "code_snapshot":  # a bit test per generator (at most n) and system qubit
+        return 2.0 + 0.022 * n * n + 1e-3 * num_qubits
+    # any newer probe: priced as a pass over every qubit
+    return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
 
 
 def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
     """Pessimistic microseconds (one thread) for one trajectory of ``mc``.
 
-    Fitted to measured runs (4-core x86-64, 2026, n = 32..512, both reference
-    pictures) and rounded up; real runs were 1x to 3x faster. Trajectories
-    that stop early (``stop_when_purified``) make real runs faster still.
+    The dynamics and setup terms were fitted to measured runs (4-core x86-64,
+    2026, n = 32..512, both reference pictures) and rounded up; real runs
+    were 1x to 3x faster. On an AMD Ryzen 9 9950X3D (one thread, n = 64 to
+    2048) they are 3.3 to 33 times the measured cost
+    (benchmarks/results/probe_cost.md). The probe terms are
+    :func:`_probe_us`. Trajectories that stop early (``stop_when_purified``)
+    make real runs faster still.
     """
     n, words = mc.num_system, (mc.num_qubits + 63) // 64
     gate_us = 0.2 + 0.04 * words
@@ -1648,7 +1911,7 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
         mc.scramble_gates + mc.scramble_matchings * (n // 2) + mc.scramble_layers * gates_per_layer
     )
     dynamics = mc.layers * layer + scramble_gates * gate_us
-    probes = sum(len(mc.probe_layers(p.name)) * _probe_us(p, n, words) for p in mc.probes)
+    probes = sum(len(mc.probe_layers(p.name)) * _probe_us(p, mc) for p in mc.probes)
     detection = len(mc.checkpoint_layers) * (1.0 + 0.06 * n) if mc.reference != "none" else 0.0
     setup = 5.0 + 0.01 * mc.num_qubits * words
     return setup + dynamics + probes + detection
@@ -1663,15 +1926,56 @@ def _setup_us(spec: dict, mc: mipt.MonitoredCircuit) -> float:
     Graph generation, validation and (for the matching schedule) edge
     colouring run in Python, once per graph, so a large graph bank
     (``realizations``) costs seconds before the first trajectory starts.
-    Fitted to measured runs (WS graphs, n = 32..128) and rounded up.
+    Fitted to measured runs (n = 64..16384, every random family) and rounded
+    up: at least 2 times the cost measured on an AMD Ryzen 9 9950X3D.
     """
     edges = sum(len(g) for g in mc.graphs)
     us = 50.0 * mc.num_graphs + 0.5 * edges  # normalising and validating every graph
-    if "graph" in spec:
-        us += 300.0 * mc.num_graphs + 1.0 * edges  # generating the graphs
+    if "graph" in spec:  # generating the graphs
+        us += mc.num_graphs * _generation_us(spec["graph"], mc.num_system) + 2.5 * edges
     if mc.schedule == "matching":
         us += 2.5 * edges  # edge colouring
     return us
+
+
+def _generation_us(graph: Any, n: int) -> float:
+    """One-thread microseconds to generate one graph of ``graph`` beyond its edges.
+
+    ``erdos_renyi`` draws a random number for every pair, and ``random_regular``
+    redraws its pairing until the graph is simple, about exp((d**2 - 1) / 4)
+    times for degree d, at most ``max_tries`` (default 1000) times.
+    """
+    family = graph.get("family") if isinstance(graph, dict) else None
+    us = 300.0
+    if family == "erdos_renyi":
+        us += 0.6 * (n * (n - 1) // 2)
+    elif family == "random_regular":
+        d = graph.get("d")
+        cap = graph.get("max_tries", 1000)
+        if not isinstance(cap, (int, float)) or isinstance(cap, bool) or not cap >= 1:
+            cap = 1000  # not a count: the family reports it
+        if isinstance(d, (int, float)) and not isinstance(d, bool) and 0 < d < n:
+            exponent = (float(d) ** 2 - 1.0) / 4.0
+            # math.log takes ints of any size; an infinite float cap stays infinite
+            log_cap = math.inf if isinstance(cap, float) and cap == math.inf else math.log(cap)
+            # in logs, and capped, so that absurd degrees and caps stay finite
+            us += 2.0 * math.exp(min(exponent, log_cap, 400.0)) * n * d
+    return us
+
+
+def _parallel_threads(threads: int) -> float:
+    """What ``threads`` busy threads are worth in one-thread speed, pessimistically.
+
+    A trajectory runs slower while others run beside it: all-core clocks are
+    lower than one core's, SMT siblings share a core, and the threads share the
+    memory bandwidth. On an AMD Ryzen 9 9950X3D (16 cores, 32 logical
+    processors) each of 32 busy threads ran probe-heavy trajectories at 0.35 to
+    0.52 of one thread's speed, and dynamics-heavy ones at 0.54 to 0.66
+    (benchmarks/results/probe_cost.md, thread_scaling.md); this model gives
+    0.45 (0.89 at 4 threads), and the margin of the one-thread cost model
+    covers the rest.
+    """
+    return threads / (1.0 + 0.04 * (threads - 1))
 
 
 def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) -> float:
@@ -1680,7 +1984,7 @@ def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) 
     # Trajectories are the unit of parallelism: fewer trajectories than threads
     # leave threads idle.
     parallel = min(numba.get_num_threads(), trajectories)
-    kernel = trajectories * _trajectory_us(mc) * 1e-6 / parallel
+    kernel = trajectories * _trajectory_us(mc) * 1e-6 / _parallel_threads(parallel)
     return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
 
 
@@ -1737,14 +2041,15 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
     :data:`SYNC_ENSEMBLE_MAX_SECONDS`, the trajectory count (every circuit of a
     graph collection when ``trajectories`` is omitted) and the memory the
     result needs. Trajectories that stop early (``stop_when_purified``) make
-    real runs faster.
+    real runs faster. ``notes`` (when present) says where the estimate can be
+    too low.
     """
     import numba
 
     mc = _build_spec(spec)
     trajectories = _trajectory_count(mc, trajectories)
     seconds = _estimate_seconds(spec, mc, trajectories)
-    return {
+    out: dict[str, Any] = {
         "estimated_seconds": _num(seconds),
         "trajectories": trajectories,
         "result_megabytes": _num(_result_bytes(mc, trajectories) / 1e6),
@@ -1752,6 +2057,40 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
     }
+    notes = _estimate_notes(mc)
+    if notes:
+        out["notes"] = notes
+    return out
+
+
+_SCAN_KINDS = ("contiguous_distance", "erasure_first_failure")  # stop at the first failure
+
+
+def _estimate_notes(mc: mipt.MonitoredCircuit) -> list[str]:
+    """Where the estimate of ``mc`` can be too low, one sentence each.
+
+    The scans that stop at a code's first failure are priced for the worst case only with a
+    single reference (:func:`_probe_us`); in the purification picture, a code whose first
+    failures are near n / 2 makes them cost up to their single-reference price.
+    """
+    scans = [p for p in mc.probes if p.kind in _SCAN_KINDS]
+    if not scans or mc.reference == "single":
+        return []
+    priced = worst = 0.0
+    for p in scans:
+        evaluations = len(mc.probe_layers(p.name))
+        priced += evaluations * _probe_us(p, mc)
+        worst += evaluations * _probe_us(p, mc, single=True)
+    factor = worst / priced
+    shown = f"{factor:.0f}" if factor >= 10 else f"{factor:.1f}"
+    kinds = sorted({p.kind for p in scans})
+    return [
+        f"{' and '.join(kinds)} {'is' if len(kinds) == 1 else 'are'} priced for codes whose "
+        "erasures fail well before n / 2 qubits; a code "
+        f"whose first failures are near n / 2 (low rate, large distance) can make "
+        f"{'it' if len(kinds) == 1 else 'them'} take up to about {shown} times "
+        f"{'its' if len(kinds) == 1 else 'their'} estimate"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2051,7 +2390,7 @@ def _summarize_ensemble(
         },
         "probes": {},
     }
-    notes = []
+    notes = _seed_notes(result.seed_entropy)
     keys = _summary_names(list(result.values))
     if any(k != name for name, k in keys.items()):
         notes.append(
@@ -2194,8 +2533,33 @@ def _output_dir(path: Any) -> Path:
     out = Path(path).expanduser().resolve()
     if out.exists() and not out.is_dir():
         raise ValueError(f"output_dir {str(out)!r} exists and is not a directory")
-    out.mkdir(parents=True, exist_ok=True)
+    parent = next((p for p in out.parents if p.exists()), None)  # the nearest that exists
+    if parent is not None and not parent.is_dir():
+        raise ValueError(
+            f"output_dir {str(out)!r} cannot be created: {str(parent)!r} is a file, not a "
+            "directory; choose another output_dir"
+        )
+    with _writing_to(out):
+        out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def _not_writable(out: Path, exc: OSError) -> ValueError:
+    """An OSError creating or writing to an output directory, as the input error it is."""
+    return ValueError(
+        f"output_dir {str(out)!r} is not writable: {exc}; free space or fix its permissions, "
+        "or choose another output_dir"
+    )
+
+
+@contextlib.contextmanager
+def _writing_to(out: Path) -> Iterator[None]:
+    """Report an OSError raised in the block (no permission, a full drive, a path too
+    long) as :func:`_not_writable`."""
+    try:
+        yield
+    except OSError as exc:
+        raise _not_writable(out, exc) from None
 
 
 def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
@@ -2205,10 +2569,57 @@ def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
     os.replace(tmp, path)
 
 
+_T = TypeVar("_T")
+
+
+def _retrying(
+    action: Callable[[], _T], errors: tuple[type[OSError], ...] = (PermissionError,)
+) -> _T:
+    """``action()``, retried with the :data:`_RETRY_DELAYS` backoff while it raises ``errors``."""
+    for delay in _RETRY_DELAYS:
+        try:
+            return action()
+        except errors:
+            time.sleep(delay)
+    return action()
+
+
+def _temporary(path: Path) -> Path:
+    """A temporary file beside ``path`` whose name is this writer's own.
+
+    Two writers never write into one temporary file (their bytes would
+    interleave). Loads never read temporaries (:func:`_result_parts`), and a
+    merge deletes those a killed writer left (:func:`_remove_temporaries`).
+    """
+    return path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp.npz")
+
+
+def _save_temporary(result: mipt.EnsembleResult, path: Path) -> Path:
+    """Save ``result`` to a :func:`_temporary` file for ``path``; returns its path."""
+    tmp = _temporary(path)
+    try:
+        result.save(tmp)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return tmp
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """Move ``tmp`` onto ``path``, retried while a reader holds ``path``; ``tmp`` is
+    deleted if that still fails."""
+    try:
+        _retrying(functools.partial(os.replace, tmp, path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def _atomic_save_result(result: mipt.EnsembleResult, path: Path) -> None:
-    tmp = path.with_name(path.name + ".tmp.npz")
-    result.save(tmp)
-    os.replace(tmp, path)
+    """Save to a temporary file, then replace ``path`` (retried while a reader holds it)."""
+    _replace(_save_temporary(result, path), path)
 
 
 def _git_commit() -> str | None:
@@ -2247,9 +2658,11 @@ def _provenance(seed: Any, command: str) -> dict[str, Any]:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
+    """Write a temporary file, then replace ``path``, retried while a reader holds it
+    (Windows; a ``load_results`` reading ``spec.json``, say) as :func:`_replace` does."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def _write_run_metadata(
@@ -2293,9 +2706,26 @@ def _write_run_metadata(
     stored = _read_provenance(out) if resumed_from is not None else None
     if stored is not None:
         resume = {**record, "resumed_from": resumed_from}
-        record = {**stored, "resumes": [*stored.get("resumes", []), resume]}
+        earlier = stored.get("resumes")  # not a list: ignored (_provenance_notes)
+        record = {**stored, "resumes": [*(earlier if isinstance(earlier, list) else []), resume]}
     _atomic_write_text(prov_path, json.dumps(record, indent=2))
     return {"spec": str(spec_path), "provenance": str(prov_path)}
+
+
+def _provenance_notes(stored: dict | None) -> list[str]:
+    """Notes on fields of a stored ``provenance.json`` that a resume reads but that hold
+    another type (a hand edit, say). They are ignored, as an unreadable provenance.json
+    is (the saved results carry the version and contract that a resume checks), never an
+    error: ``resumes`` restarts with this resume, and ``git_commit`` is not compared."""
+    notes = []
+    for key, kind, then in (
+        ("resumes", list, "a list; it restarts with this resume"),
+        ("git_commit", str, "a string; it is not compared with this resume's commit"),
+    ):
+        value = None if stored is None else stored.get(key)
+        if value is not None and not isinstance(value, kind):
+            notes.append(f"provenance.json: {key} is {_shown(value)}, not {then}")
+    return notes
 
 
 def _read_provenance(out: Path) -> dict | None:
@@ -2362,22 +2792,36 @@ def _check_saved_seed(out: Path, seed: Any, existing: mipt.EnsembleResult | None
         )
 
 
+_CHUNK_NAME = re.compile(r"traj_\d+\.npz")
+
+
 def _result_parts(out: Path) -> list[Path]:
-    """``result.npz`` (if any) followed by the saved chunk files in trajectory order."""
-    parts = []
-    if (out / _RESULT_FILE).exists():
-        parts.append(out / _RESULT_FILE)
-    chunk_dir = out / _CHUNK_DIR
-    if chunk_dir.is_dir():
-        parts.extend(sorted(p for p in chunk_dir.glob("traj_*.npz") if ".tmp" not in p.name))
-    return parts
+    """``result.npz`` (if any) followed by the saved chunk files in trajectory order.
+
+    Only these exact names are parts: a temporary file (``*.tmp.npz``), also one
+    a killed writer left, is never read as one. A ``chunks/`` that is missing, or
+    that a merge removes during the listing, holds no chunks: a merge replaces
+    result.npz before it deletes them, which is why the chunks are listed first.
+    (On Windows a directory being deleted cannot be listed for a moment either;
+    that ``PermissionError`` is raised, and readers retry it.)
+    """
+    try:
+        chunks = sorted(p for p in (out / _CHUNK_DIR).iterdir() if _CHUNK_NAME.fullmatch(p.name))
+    except (FileNotFoundError, NotADirectoryError):
+        chunks = []
+    result = [out / _RESULT_FILE] if (out / _RESULT_FILE).exists() else []
+    return [*result, *chunks]
 
 
 def _load_result_file(path: Path) -> mipt.EnsembleResult:
-    """Load one ``EnsembleResult.save`` file; anything else is reported as not a result."""
+    """Load one ``EnsembleResult.save`` file; anything else is reported as not a result.
+
+    ``FileNotFoundError`` and ``PermissionError`` pass through: a merge deleting
+    or replacing the file meanwhile raises them, and the caller retries.
+    """
     try:
         return mipt.EnsembleResult.load(path)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         raise
     except (
         OSError,
@@ -2394,23 +2838,32 @@ def _load_result_file(path: Path) -> mipt.EnsembleResult:
 
 
 def _load_parts_once(parts: list[Path]) -> mipt.EnsembleResult:
-    """Merge result.npz and chunks, skipping chunks that result.npz already contains.
+    """Merge result.npz and chunks, keeping each trajectory once.
 
-    A merge writes result.npz before deleting the chunks it absorbed, so a
-    crash (or a concurrent read) in between leaves chunks that overlap
-    result.npz; they are redundant, not a conflict.
+    Trajectory ``t`` depends only on ``(spec, seed, t)``, so a part's
+    trajectories that an earlier part already holds are redundant, not a
+    conflict, and are dropped: a merge writes result.npz before deleting the
+    chunks it absorbed (a crash, or a reader holding a chunk, in between
+    leaves chunks that overlap result.npz), and jobs run with different chunk
+    sizes save overlapping ranges. Only a part of the same run is trimmed; a
+    part of another run is refused, even when every trajectory it holds is
+    covered.
     """
     results: list[mipt.EnsembleResult] = []
     paths: list[Path] = []
     covered = 0
     for path in parts:
         part = _load_result_file(path)
-        if path.name != _RESULT_FILE and part.num_trajectories and part.trajectories[-1] < covered:
-            continue
+        if results and _same_run_as(results[0], part, overlap=True):
+            keep = np.asarray(part.trajectories) >= covered
+            if not keep.any():
+                continue
+            if not keep.all():
+                part = _rows(part, keep)
         results.append(part)
         paths.append(path)
         if part.num_trajectories:
-            covered = max(covered, int(part.trajectories[-1]) + 1)
+            covered = max(covered, int(np.max(part.trajectories)) + 1)
     try:
         merged = results[0] if len(results) == 1 else mipt.EnsembleResult.concatenate(results)
     except ValueError as exc:
@@ -2453,10 +2906,12 @@ def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
     )
 
 
-def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
+def _same_run_as(
+    first: mipt.EnsembleResult, part: mipt.EnsembleResult, *, overlap: bool = False
+) -> bool:
     """Whether ``part`` could be merged with ``first``: what ``EnsembleResult.concatenate``
     checks, without copying any data (contract, seed, protocol, probes, layers, version,
-    and no trajectory saved twice)."""
+    and, unless ``overlap``, no trajectory saved twice)."""
     return (
         part.randomness_contract == first.randomness_contract
         and mipt._seed_record(part) == mipt._seed_record(first)
@@ -2464,24 +2919,427 @@ def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
         and list(part.values) == list(first.values)
         and np.array_equal(part.checkpoint_layers, first.checkpoint_layers)
         and part.version == first.version
-        and not np.intersect1d(first.trajectories, part.trajectories).size
+        and (overlap or not np.intersect1d(first.trajectories, part.trajectories).size)
+    )
+
+
+def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
+    """The trajectories of ``result`` that the boolean mask ``keep`` selects."""
+    share = float(np.count_nonzero(keep)) / result.num_trajectories
+    tau = result.purification_layer
+    return dataclasses.replace(
+        result,
+        trajectories=np.asarray(result.trajectories)[keep],
+        values={name: v[keep] for name, v in result.values.items()},
+        purification_layer=None if tau is None else tau[keep],
+        final_layer=result.final_layer[keep],
+        num_measurements=result.num_measurements[keep],
+        elapsed_seconds=result.elapsed_seconds * share,
+        snapshots={name: (g[keep], c[keep]) for name, (g, c) in result.snapshots.items()},
     )
 
 
 def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
-    """Read an output directory, retrying if a running job merges chunks meanwhile."""
-    for attempt in range(5):
+    """Read an output directory, retrying while a running job merges chunks meanwhile.
+
+    A merge deletes the chunks it absorbed (``FileNotFoundError`` for a reader
+    that listed them) and, on Windows, a file being replaced cannot be opened
+    for a moment (``PermissionError``). A file that still cannot be read after
+    the retries (another program holds it, or this process may not read it) is
+    an input error that names it.
+    """
+
+    def read() -> tuple[mipt.EnsembleResult | None, dict | None]:
+        meta = _read_meta(out)
+        parts = _result_parts(out)
+        return (_load_parts_once(parts) if parts else None), meta
+
+    try:
+        return _retrying(read, (FileNotFoundError, PermissionError))
+    except OSError as exc:
+        raise _unreadable(out, exc) from None
+
+
+def _unreadable(where: Path, exc: OSError) -> ValueError:
+    """An OSError reading the saved run in ``where`` (``exc`` names the file), as the input
+    error it is."""
+    return ValueError(
+        f"could not read results from {str(where)!r}: {exc}; close any program that holds "
+        "the file open, or check its permissions"
+    )
+
+
+def _read_meta(out: Path) -> dict | None:
+    """``out/spec.json``, the run's record (None if there is none); a file that holds
+    none is an input error that names it."""
+    path = out / _SPEC_FILE
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except ValueError as exc:  # not JSON, or not UTF-8
+        raise ValueError(
+            f"{str(path)!r} is not valid JSON ({exc}); restore it, or use a new output_dir"
+        ) from None
+    if not isinstance(meta, dict):
+        raise ValueError(
+            f"{str(path)!r} holds no run's record (an object with spec, trajectories and "
+            "seed); restore it, or use a new output_dir"
+        )
+    return meta
+
+
+def _merge_if_pending(out: Path, result: mipt.EnsembleResult, meta: dict | None) -> None:
+    """Merge the chunks of a finished run that its job could not merge (a reader held
+    result.npz), unless a writer holds the directory: a running job merges them itself."""
+    target = None if meta is None else meta.get("trajectories")
+    if not isinstance(target, int) or result.num_trajectories < target:
+        return
+    try:
+        pending = any(p.parent.name == _CHUNK_DIR for p in _result_parts(out))
+    except OSError:  # chunks/ is being deleted (Windows): a merge is under way
+        return
+    if not pending:
+        return
+    try:
+        _refuse_a_running_job(out)
+        lock = _lock_output_dir(out)
+    except (OSError, ValueError):  # another writer, or a directory this process cannot write
+        return
+    try:
+        with contextlib.suppress(OSError):  # still pending: the next call tries again
+            _merge_chunks(out)
+    finally:
+        lock.release()
+
+
+# ---------------------------------------------------------------------------
+# ensembles: one writer per output directory
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _DirLock:
+    """``output_dir/.lock``, held by the one process that writes to the directory."""
+
+    path: Path
+    data: bytes  # this holder's record, as written
+
+    def release(self) -> None:
+        """Delete the lock, if it is still this one (never another writer's)."""
+
+        def remove() -> None:
+            if self.path.read_bytes() == self.data:
+                self.path.unlink()
+
+        with contextlib.suppress(OSError):  # already gone, or still in use after the retries
+            _retrying(remove)
+
+
+@functools.cache
+def _os_identity() -> str:
+    """The operating system whose process ids a lock's pid belongs to.
+
+    The hostname alone does not say it: WSL distributions report the Windows
+    computer name, and containers may share the host's name, but a pid of one
+    means nothing in another. So a lock records this too: the system's name
+    and, on Linux, its pid namespace (``/proc/self/ns/pid``), which tells WSL
+    distributions and containers apart. Unlike the kernel release, it stays
+    the same across reboots and upgrades of a machine whose processes run in
+    the initial pid namespace (Windows, macOS, Linux on bare metal), so a lock
+    that a crash leaves can still be judged after them. A container, and a
+    WSL2 distribution, run in a pid namespace of their own, which may be a new
+    one each time they start (WSL after ``wsl --shutdown``, a reboot or its
+    idle shutdown): a lock that a crashed writer left there then counts as
+    another machine's, so the next writer is refused, and it must be deleted
+    by hand. That fails safe: two writers never share a directory.
+    """
+    identity = platform.system()
+    with contextlib.suppress(OSError):  # no /proc (Windows, macOS)
+        identity += f" pidns:{os.stat('/proc/self/ns/pid').st_ino}"
+    return identity
+
+
+def _process_state(pid: int) -> tuple[bool, int | None]:
+    """Whether process ``pid`` runs on this machine, and its creation time where the
+    system gives it exactly (Windows: the ``FILETIME``, in 100 ns ticks; else None)."""
+    if pid <= 0:  # os.kill(0) and os.kill(-1) would address process groups
+        return False, None
+    if sys.platform == "win32":
+        return _windows_process(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, None
+    except PermissionError:  # it runs, under another user
+        return True, None
+    return True, None
+
+
+def _windows_process(pid: int) -> tuple[bool, int | None]:
+    """Whether process ``pid`` runs, and its creation time, from kernel32 (Windows only)."""
+    if sys.platform != "win32":
+        raise OSError("kernel32 exists on Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ERROR_ACCESS_DENIED: it runs, under an account this one may not query
+        return ctypes.get_last_error() == 5, None
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True, None  # unknown: never take over a lock that may be live
+        times = [wintypes.FILETIME() for _ in range(4)]  # creation, exit, kernel, user
+        created = None
+        if kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            created = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+        return code.value == 259, created  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _holder_alive(holder: dict) -> bool:
+    """Whether the process of this machine that took a lock still runs.
+
+    Its pid must name a running process, and, where the lock records its
+    holder's creation time, the very process: Windows soon gives the pid of
+    a process that ended to another one, whose creation time differs. Both
+    times are the kernel's, so a clock step cannot make them differ.
+    """
+    alive, created = _process_state(holder["pid"])
+    recorded = holder.get("created")
+    return alive and (recorded is None or created is None or created == recorded)
+
+
+def _lock_record(data: bytes) -> dict | None:
+    """The holder written in a lock file, or None if the file holds no complete record.
+
+    A ``created`` that is not an int (a float, a string, a bool) counts as
+    absent, never as another process's creation time: a malformed optional
+    field must not make a live holder's lock look stale.
+    """
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not {"pid", "host", "started"} <= set(record):
+        return None
+    pid = record["pid"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**31:
+        return None
+    created = record.get("created")
+    if "created" in record and (isinstance(created, bool) or not isinstance(created, int)):
+        record = {key: value for key, value in record.items() if key != "created"}
+    return record if isinstance(record["host"], str) else None
+
+
+def _this_machine(holder: dict) -> bool:
+    """Whether a lock was taken on this machine: the same hostname and, where the lock
+    records it (locks written before it was recorded do not), the same
+    :func:`_os_identity`. Another machine's lock never expires."""
+    return holder["host"] == socket.gethostname() and holder.get("os", _os_identity()) == (
+        _os_identity()
+    )
+
+
+def _lock_holder(path: Path) -> tuple[bytes, dict | None] | None:
+    """The bytes of the lock file and the holder they record (None if they record
+    none), or None if there is no lock."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except PermissionError:  # Windows: being deleted
+        data = b""
+    return data, _lock_record(data)
+
+
+def _age(path: Path) -> float:
+    """Seconds since ``path`` was last written (0 if that cannot be read)."""
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+# A lock without a record, or a takeover turn, this old was left by a process that died
+# while writing it.
+_TAKEOVER_ABANDONED_SECONDS = 10.0
+
+
+def _remove_stale_lock(path: Path, seen: bytes) -> None:
+    """Delete a stale lock, but only if it still holds ``seen``, the bytes judged stale.
+
+    Processes that find a stale lock take turns, each creating
+    ``.lock.takeover`` with ``O_CREAT | O_EXCL``, and delete the lock only if
+    it still holds ``seen``. Between that check and the deletion the lock
+    cannot change: its holder is gone, every other process that would delete
+    it waits for its turn, and a new lock can be created only once it is
+    deleted. So a lock that another process has just taken over is never
+    deleted, and of the processes racing for a stale lock exactly one creates
+    the new one. A turn left behind by a process that died in it is freed
+    after :data:`_TAKEOVER_ABANDONED_SECONDS`.
+    """
+    guard = path.with_name(_TAKEOVER_FILE)
+    try:
+        os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        if _age(guard) > _TAKEOVER_ABANDONED_SECONDS:
+            with contextlib.suppress(OSError):
+                guard.unlink()
+        return
+    except PermissionError:  # Windows: the previous turn's file is being deleted
+        return
+    try:
+        if path.read_bytes() == seen:
+            path.unlink()
+    except (FileNotFoundError, PermissionError):  # gone, or in use: try again later
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            guard.unlink()
+
+
+def _running_job(out: Path) -> _Job | None:
+    """A job of this process that is writing to ``out``, if any."""
+    with _JOBS_LOCK:
+        for job in _JOBS.values():
+            if job.output_dir == out and job.status in ("queued", "running"):
+                return job
+    return None
+
+
+def _refuse_a_running_job(out: Path) -> None:
+    """Refuse, naming it, a job of this process that writes to ``out``: the check that
+    holds in this process even if ``.lock`` was deleted by hand."""
+    job = _running_job(out)
+    if job is not None:
+        raise ValueError(
+            f"job {job.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+        )
+
+
+def _held_message(out: Path, holder: dict) -> str:
+    """The refusal for a writer while ``holder`` holds the lock of ``out``."""
+    if holder["pid"] == os.getpid() and _this_machine(holder):
+        job = _running_job(out)
+        if job is not None:  # a job of this process: name it, so it can be polled or cancelled
+            return f"job {job.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+        who = "this process"
+    else:
+        who = "another process"
+    # the lock's system, when it is another one: WSL and containers share the host name,
+    # and their pids name nothing here
+    system = holder.get("os")
+    shown = f" ({system})" if system is not None and system != _os_identity() else ""
+    return (
+        f"{who} (pid {holder['pid']} on host {holder['host']}{shown}, started "
+        f"{holder['started']}) is writing to {str(out)!r}; wait for it to finish or cancel it"
+    )
+
+
+def _create_lock(path: Path, data: bytes) -> bool:
+    """Create ``path`` holding ``data``, unless it exists (then return False).
+
+    The record is written to a file of this writer's own first and then
+    hard-linked to ``path``: ``os.link`` fails if ``path`` exists, and the
+    lock appears with its whole record, so no other process ever reads it
+    half written. Where hard links are not supported (FAT drives, some
+    network shares) it is created with ``O_CREAT | O_EXCL`` and written
+    after; a lock found without a record is then judged by its age
+    (:data:`_TAKEOVER_ABANDONED_SECONDS`).
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp, "xb") as f:
+            f.write(data)
         try:
-            meta = None
-            if (out / _SPEC_FILE).exists():
-                meta = json.loads((out / _SPEC_FILE).read_text(encoding="utf-8"))
-            parts = _result_parts(out)
-            return (_load_parts_once(parts) if parts else None), meta
-        except FileNotFoundError:
-            if attempt == 4:
-                raise
-            time.sleep(0.1)
-    raise AssertionError("unreachable")
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:  # no hard links here
+            pass
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            raise
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def _lock_output_dir(out: Path) -> _DirLock:
+    """Take ``out/.lock`` for this process, or refuse because another writer holds it.
+
+    The lock is created exclusively (:func:`_create_lock`), so of several
+    writers exactly one gets it. It records the holder's pid, host, start
+    time, :func:`_os_identity` and, on Windows, its creation time. A lock of
+    another machine always holds (its process cannot be checked from here).
+    A lock of this machine whose process is gone (:func:`_holder_alive`), or
+    one without a record that is older than
+    :data:`_TAKEOVER_ABANDONED_SECONDS`, is stale and is taken over
+    (:func:`_remove_stale_lock`). The holder releases it with
+    :meth:`_DirLock.release`, in a ``finally``. A lock that cannot be created
+    or read (a read-only directory or drive, a full one) is an input error.
+    """
+    path = out / _LOCK_FILE
+    record: dict[str, Any] = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started": datetime.now(UTC).isoformat(timespec="seconds"),
+        "os": _os_identity(),
+    }
+    created = _process_state(os.getpid())[1]
+    if created is not None:
+        record["created"] = created
+    data = json.dumps(record).encode("utf-8")
+    failure: OSError | None = None
+    for delay in (*_RETRY_DELAYS, None):
+        try:
+            if _create_lock(path, data):
+                return _DirLock(path, data)
+            failure = None
+            held = _lock_holder(path)
+            if held is not None:
+                seen, holder = held
+                if holder is None:  # no record: a writer died writing it, or is writing it
+                    if _age(path) > _TAKEOVER_ABANDONED_SECONDS:
+                        _remove_stale_lock(path, seen)
+                elif not _this_machine(holder) or _holder_alive(holder):
+                    raise ValueError(_held_message(out, holder))
+                else:
+                    _remove_stale_lock(path, seen)
+        except PermissionError as exc:  # Windows: the previous lock is being deleted
+            failure = exc
+        except OSError as exc:  # a read-only or full drive, say: retrying cannot help
+            raise _not_writable(out, exc) from None
+        if delay is None:
+            break
+        time.sleep(delay)
+    if failure is not None:  # no permission to write here
+        raise _not_writable(out, failure) from None
+    raise ValueError(
+        f"could not take the lock {str(path)!r}: other processes keep changing it, or it "
+        "cannot be read (check its permissions); retry, or delete it if no process is "
+        f"writing to {str(out)!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2513,8 +3371,9 @@ def run_ensemble(
     ``trajectories_per_second`` are wall-clock figures for the whole call,
     building the spec and its graphs included. With ``output_dir`` the full
     :class:`~sparsegf2.mipt.EnsembleResult` is saved to
-    ``output_dir/result.npz`` with ``spec.json`` and ``provenance.json``.
-    With ``max_seconds``, a run whose :func:`estimate_ensemble` exceeds it is
+    ``output_dir/result.npz`` with ``spec.json`` and ``provenance.json``,
+    under ``output_dir/.lock`` (a directory another process is writing to is
+    refused). With ``max_seconds``, a run whose :func:`estimate_ensemble` exceeds it is
     refused before anything runs (the MCP tool's guard).
     """
     start = time.perf_counter()
@@ -2535,32 +3394,46 @@ def run_ensemble(
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     out_path = _output_dir(output_dir) if output_dir is not None else None
-    if out_path is not None and (_result_parts(out_path) or (out_path / _SPEC_FILE).exists()):
-        raise ValueError(
-            f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
-            "(or use start_ensemble_job to resume or extend it)"
-        )
-    setup = time.perf_counter() - start
-    with _COMPUTE_LOCK:
-        result = mc.run(trajectories, seed=seed, num_threads=num_threads)
-    # the run's own timer covers graph preprocessing and the kernel; add the
-    # spec construction (graph generation, validation) before it
-    result.elapsed_seconds += setup
-    extra: dict[str, Any] = {}
-    if out_path is not None:
-        _atomic_save_result(result, out_path / _RESULT_FILE)
-        files = {"result": str(out_path / _RESULT_FILE)}
-        files.update(
-            _write_run_metadata(
-                out_path,
-                spec,
-                trajectories,
-                seed,
-                command or "run_ensemble",
-                graph_file=graph_file,
-            )
-        )
-        extra["files"] = files
+    lock = None
+    if out_path is not None:  # one writer per directory
+        _refuse_a_running_job(out_path)
+        lock = _lock_output_dir(out_path)
+    try:
+        if out_path is not None:
+            try:
+                held = bool(_result_parts(out_path)) or (out_path / _SPEC_FILE).exists()
+            except OSError as exc:  # a chunks/ this process may not list
+                raise _unreadable(out_path, exc) from None
+            if held:
+                raise ValueError(
+                    f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
+                    "(or use start_ensemble_job to resume or extend it)"
+                )
+        setup = time.perf_counter() - start
+        with _COMPUTE_LOCK:
+            result = mc.run(trajectories, seed=seed, num_threads=num_threads)
+        # the run's own timer covers graph preprocessing and the kernel; add the
+        # spec construction (graph generation, validation) before it
+        result.elapsed_seconds += setup
+        extra: dict[str, Any] = {}
+        if out_path is not None:
+            with _writing_to(out_path):
+                _atomic_save_result(result, out_path / _RESULT_FILE)
+                files = {"result": str(out_path / _RESULT_FILE)}
+                files.update(
+                    _write_run_metadata(
+                        out_path,
+                        spec,
+                        trajectories,
+                        seed,
+                        command or "run_ensemble",
+                        graph_file=graph_file,
+                    )
+                )
+            extra["files"] = files
+    finally:
+        if lock is not None:
+            lock.release()
     return _bounded_summary(result, extra)
 
 
@@ -2569,9 +3442,11 @@ def load_results(path: str) -> dict[str, Any]:
 
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or cancelled
-    job. The summary has the same form as :func:`run_ensemble`'s, plus the
-    stored ``spec`` when ``spec.json`` exists: exactly as stored (its floats
-    are not rounded for display), so passing it back to
+    job. The chunks of a finished run that its job could not merge (a reader
+    held ``result.npz``) are merged now, unless another writer holds the
+    directory. The summary has the same form as :func:`run_ensemble`'s, plus
+    the stored ``spec`` when ``spec.json`` exists: exactly as stored (its
+    floats are not rounded for display), so passing it back to
     :func:`start_ensemble_job` resumes or extends the run.
     """
     if not isinstance(path, (str, os.PathLike)):
@@ -2584,10 +3459,11 @@ def load_results(path: str) -> dict[str, Any]:
             result, meta = _load_directory(p)
             if result is None:
                 raise ValueError(f"no saved results in {str(p)!r} (expected result.npz or chunks/)")
+            _merge_if_pending(p, result, meta)
         else:
-            result, meta = _load_result_file(p), None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"could not read results from {str(p)!r}: {exc}") from None
+            result, meta = _retrying(functools.partial(_load_result_file, p)), None
+    except OSError as exc:  # still in use after the retries, or not ours to read
+        raise _unreadable(p, exc) from None
     extra: dict[str, Any] = {"path": str(p)}
     if meta is not None:
         extra["spec"] = meta.get("spec")
@@ -2620,6 +3496,7 @@ class _Job:
     started: float | None = None
     finished: float | None = None
     error: str | None = None
+    notes: list[str] = dataclasses.field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -2645,6 +3522,8 @@ class _Job:
             }
             if self.error:
                 out["error"] = self.error
+            if self.notes:
+                out["notes"] = list(self.notes)
             if self.status in ("completed", "cancelled", "failed") and self.done:
                 out["next_step"] = f"load_results({str(self.output_dir)!r}) for the summary"
             return out
@@ -2659,7 +3538,7 @@ def _default_chunk_size(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
     import numba
 
     threads = numba.get_num_threads()
-    per_traj = max(_trajectory_us(mc) * 1e-6 / threads, 1e-9)
+    per_traj = max(_trajectory_us(mc) * 1e-6 / _parallel_threads(threads), 1e-9)
     size = int(10.0 / per_traj)
     return int(min(trajectories, max(size, 4 * threads)))
 
@@ -2695,6 +3574,13 @@ def start_ensemble_job(
     another protocol than the saved run (the error names a differing key
     and both values) or a graph file whose contents changed since the run
     started.
+
+    One writer per directory: the job holds ``output_dir/.lock`` until it
+    ends, and a directory that another job or process is writing to is
+    refused. If a reader keeps ``result.npz`` open through the final merge
+    (Windows), the job still ends ``completed``, with a note that the merge
+    is pending; the next :func:`load_results` or ``start_ensemble_job``
+    merges the chunks.
     """
     mc = _build_spec(spec)
     graph_file = _graph_file_record(spec)
@@ -2709,40 +3595,46 @@ def start_ensemble_job(
             "background jobs need an output_dir (results are saved there chunk by chunk)"
         )
     out = _output_dir(output_dir)
-    existing, meta = _load_directory(out)
-    notes: list[str] = []
-    if meta is not None:
-        # The contract and version first: nothing else can be resumed under another one.
-        stored = _read_provenance(out)
-        _check_contract(out, stored, existing)
-        _check_version(out, stored, existing)
-        notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
-        if seed is not None and _resolve_seed(seed) != meta.get("seed"):
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit seed to "
-                "resume it, or use a new directory"
-            )
-        seed = meta["seed"]
-        _check_saved_seed(out, seed, existing)
-        started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
-        if started_at and now_at and started_at != now_at:
-            notes.append(
-                f"this resume runs git commit {now_at[:12]}, the run started at {started_at[:12]}; "
-                "both are recorded in provenance.json"
-            )
-    elif existing is not None:
-        raise ValueError(
-            f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
-        )
-    if resume_to_target:  # the directory holds this run: run to its stored target
-        count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
-    seed = _resolve_seed(seed)
-    with _JOBS_LOCK:
-        for other in _JOBS.values():
-            if other.output_dir == out and other.status in ("queued", "running"):
+    # One writer per directory: a job of this process is refused by name, and the lock
+    # refuses any other writer, in this process or another. The job releases it when it ends.
+    _refuse_a_running_job(out)
+    lock = _lock_output_dir(out)
+    try:
+        existing, meta = _load_directory(out)
+        notes: list[str] = []
+        if meta is not None:
+            # The contract and version first: nothing else can be resumed under another one.
+            stored = _read_provenance(out)
+            _check_contract(out, stored, existing)
+            _check_version(out, stored, existing)
+            notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
+            if "seed" not in meta:
                 raise ValueError(
-                    f"job {other.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+                    f"output_dir {str(out)!r}: its spec.json records no seed; restore it, or "
+                    "use a new directory"
                 )
+            if seed is not None and _resolve_seed(seed) != meta.get("seed"):
+                raise ValueError(
+                    f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit "
+                    "seed to resume it, or use a new directory"
+                )
+            seed = meta["seed"]
+            _check_saved_seed(out, seed, existing)
+            notes.extend(_provenance_notes(stored))
+            started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
+            if isinstance(started_at, str) and started_at and now_at and started_at != now_at:
+                notes.append(
+                    f"this resume runs git commit {now_at[:12]}, the run started at "
+                    f"{started_at[:12]}; both are recorded in provenance.json"
+                )
+        elif existing is not None:
+            raise ValueError(
+                f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
+            )
+        if resume_to_target:  # the directory holds this run: run to its stored target
+            count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
+        seed = _resolve_seed(seed)
+        notes.extend(_seed_notes(seed))
         done = existing.num_trajectories if existing is not None else 0
         job = _Job(
             job_id=uuid.uuid4().hex[:12],
@@ -2760,29 +3652,46 @@ def start_ensemble_job(
             done=done,
             resumed_from=done,
         )
-        _JOBS[job.job_id] = job
-    try:
-        _write_run_metadata(
-            out,
-            spec,
-            job.trajectories,
-            seed,
-            command or "start_ensemble_job",
-            resumed_from=done if meta is not None else None,
-            graph_file=graph_file,
-        )
+        with _JOBS_LOCK:
+            _JOBS[job.job_id] = job
+        try:
+            with _writing_to(out):
+                _write_run_metadata(
+                    out,
+                    spec,
+                    job.trajectories,
+                    seed,
+                    command or "start_ensemble_job",
+                    resumed_from=done if meta is not None else None,
+                    graph_file=graph_file,
+                )
+        except BaseException:
+            _forget_job(job)
+            raise
     except BaseException:
-        with _JOBS_LOCK:  # never leave a job that would block this output_dir
-            del _JOBS[job.job_id]
+        lock.release()  # not handed over to a job
         raise
+    # The hand-over: from here on the job owns the lock, so an interrupt arriving now (Ctrl-C
+    # in the CLI) must not release it under a running job.
     job.thread = threading.Thread(
-        target=_run_job, args=(job, mc), name=f"sparsegf2-job-{job.job_id}", daemon=True
+        target=_run_job, args=(job, mc, lock), name=f"sparsegf2-job-{job.job_id}", daemon=True
     )
-    job.thread.start()
+    try:
+        job.thread.start()
+    except RuntimeError:  # no thread could be started, so nothing owns the lock
+        _forget_job(job)
+        lock.release()
+        raise
     status = job.snapshot()
     if notes:
-        status["notes"] = notes
+        status["notes"] = [*notes, *status.get("notes", [])]
     return _bounded(status)
+
+
+def _forget_job(job: _Job) -> None:
+    """Remove a job that never started, so it cannot block its output_dir."""
+    with _JOBS_LOCK:
+        _JOBS.pop(job.job_id, None)
 
 
 def _canonical(obj: Any) -> str:
@@ -2790,16 +3699,20 @@ def _canonical(obj: Any) -> str:
     return json.dumps(_jsonable(obj, exact=True), sort_keys=True)
 
 
+_UNREADABLE = object()
+
+
 def _stored_target(output_dir: Any) -> Any:
-    """The trajectory target in ``output_dir/spec.json``, or None (nothing is created)."""
+    """The trajectory target in ``output_dir/spec.json``: None if there is none (nothing
+    is created), or :data:`_UNREADABLE` if the file cannot be read, which the read under
+    the directory's lock then reports."""
     if not isinstance(output_dir, (str, os.PathLike)) or not str(output_dir):
         return None
     try:
-        path = Path(output_dir).expanduser().resolve() / _SPEC_FILE
-        meta = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return meta.get("trajectories") if isinstance(meta, dict) else None
+        meta = _read_meta(Path(output_dir).expanduser().resolve())
+    except (OSError, ValueError):
+        return _UNREADABLE
+    return None if meta is None else meta.get("trajectories")
 
 
 _ABSENT = object()
@@ -2965,11 +3878,12 @@ def _check_same_run(
     return notes
 
 
-def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:
+def _run_job(job: _Job, mc: mipt.MonitoredCircuit, lock: _DirLock) -> None:
     chunk_dir = job.output_dir / _CHUNK_DIR
     with job.lock:
         job.started = time.time()
         job.status = "running"
+    status, error, notes = "failed", None, []  # what the job reports when it ends
     try:
         while True:
             with job.lock:
@@ -2989,32 +3903,83 @@ def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:
                 job.done = first + count
                 job.compute_seconds += seconds
         finished = job.done >= job.trajectories
-        if finished:
-            _merge_chunks(job.output_dir)
-        with job.lock:
-            job.status = "completed" if finished else "cancelled"
-            job.finished = time.time()
+        if finished and not _merge_chunks(job.output_dir):
+            notes.append(_MERGE_PENDING)
+        status = "completed" if finished else "cancelled"
     except Exception as exc:  # reported through job_status
+        error = f"{type(exc).__name__}: {exc}\n" + "".join(traceback.format_exception(exc)[-3:])
+    finally:
+        # The lock first: once the job reports its end, the next writer may start at once.
+        lock.release()
         with job.lock:
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}\n" + "".join(
-                traceback.format_exception(exc)[-3:]
-            )
-            job.finished = time.time()
+            job.status, job.error, job.finished = status, error, time.time()
+            job.notes.extend(notes)
 
 
-def _merge_chunks(out: Path) -> None:
-    """Fold the chunk files into result.npz, then delete them (safe to interrupt anywhere)."""
+def _merge_chunks(out: Path) -> bool:
+    """Fold the chunk files into result.npz, then delete them (safe to interrupt anywhere).
+
+    Run only by the holder of the directory's lock. If every chunk repeats
+    trajectories of result.npz (chunks a held delete left behind), they are
+    only deleted: result.npz is not written again. Replacing result.npz is
+    retried while a reader holds it (Windows); if it stays in use, the chunks
+    are kept and False is returned: the merge is pending, and the next one
+    folds them in. An error writing the merged file itself is raised. The
+    chunks are then deleted (:func:`_delete_files`); one that stays in use is
+    left behind, a repeat of result.npz that a load drops and the next merge
+    deletes. Temporary files that killed writers left are deleted too.
+    """
     parts = _result_parts(out)
     chunk_parts = [p for p in parts if p.parent.name == _CHUNK_DIR]
-    if not chunk_parts:
-        return
-    merged = _load_parts_once(parts)
-    _atomic_save_result(merged, out / _RESULT_FILE)
-    for p in chunk_parts:
-        p.unlink(missing_ok=True)
-    with contextlib.suppress(OSError):  # leftover temporary files of an interrupted save
+    if chunk_parts:
+        result_path = out / _RESULT_FILE
+        merged = _load_parts_once(parts)
+        if merged.num_trajectories > _saved_trajectories(result_path):
+            tmp = _save_temporary(merged, result_path)
+            try:
+                _replace(tmp, result_path)
+            except PermissionError:
+                return False
+        _delete_files(chunk_parts)
+    _remove_temporaries(out)
+    with contextlib.suppress(OSError):  # a chunk still in use
         (out / _CHUNK_DIR).rmdir()
+    return True
+
+
+def _saved_trajectories(path: Path) -> int:
+    """How many trajectories ``path`` (a result.npz) holds, 0 if there is none; reads only
+    that array."""
+    if not path.exists():
+        return 0
+    with np.load(path, allow_pickle=False) as z:
+        return int(z["trajectories"].size)
+
+
+def _delete_files(paths: Sequence[Path]) -> None:
+    """Delete ``paths``, retrying the ones a reader holds (Windows) with one backoff of
+    about 5 s for all of them; the ones still in use after it are left."""
+    left = list(paths)
+    for delay in (*_RETRY_DELAYS, None):
+        in_use = []
+        for p in left:
+            try:
+                p.unlink(missing_ok=True)
+            except PermissionError:
+                in_use.append(p)
+        left = in_use
+        if not left or delay is None:
+            return
+        time.sleep(delay)
+
+
+def _remove_temporaries(out: Path) -> None:
+    """Delete the temporary files of writers that were killed while saving (run by the
+    lock holder, so no other writer's file is among them)."""
+    stale = [*out.glob(f"{_RESULT_FILE}*.tmp.npz"), *(out / _CHUNK_DIR).glob("*.tmp.npz")]
+    for p in stale:
+        with contextlib.suppress(OSError):
+            p.unlink()
 
 
 def _get_job(job_id: Any) -> _Job:
@@ -3184,6 +4149,7 @@ def _capability_sections() -> dict[str, Any]:
             "max_output_chars": MAX_OUTPUT_CHARS,
             "sync_ensemble_max_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
             "max_qubits_run_circuit": MAX_QUBITS,
+            "max_num_system": MAX_QUBITS,
             "max_shot_results": MAX_SHOT_RESULTS,
             "checkpoints_shown": MAX_CHECKPOINTS_SHOWN,
         },
@@ -3232,7 +4198,7 @@ def capabilities(section: str | None = None) -> dict[str, Any]:
     """
     sections = _capability_sections()
     if section is not None:
-        if section not in sections:
+        if _require_name(section, "section", sections) not in sections:
             raise ValueError(f"unknown section {section!r}; choose from {sorted(sections)}")
         return _bounded({section: sections[section]})
     out = _jsonable(sections)
@@ -3313,6 +4279,9 @@ again with the same output_dir to resume or extend.
   never average it as a number. Use censored_fraction and the survival curve.
 * Outputs are summaries. Pass output_dir to keep every array (npz) plus
   spec.json and provenance.json.
+* Errors say what to change: fix the argument and retry. A message ending
+  "(internal error: please report it)" is a bug in SparseGF2: report it, do
+  not retry with other arguments.
 """
 
 
