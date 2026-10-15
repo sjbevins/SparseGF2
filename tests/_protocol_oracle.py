@@ -26,8 +26,8 @@ transcribed here (the equality test pins each of them):
   dynamics (``s ..``) uses class ``L mod C``.
 * Weighted edge: ``u = double()``; the edge is the smallest ``e`` with ``u < cum[e]``,
   where ``cum`` is the running sum of ``w / sum(w)`` with its last entry set to 1. The
-  total is summed here in Python and by the engine in numpy, so the two ``cum`` can differ
-  in the last bit; a draw lands in such a gap with probability about 2**-52.
+  total is numpy's (pairwise) sum, as in the engine: Python's ``sum`` adds naively on
+  3.11 and with compensation from 3.12, and either can differ from it in the last bit.
 * Orientation: a bit of 1 swaps the edge's two qubits (edges are stored ``a < b``).
 * Gate: ``gate_set[below(len(gate_set))]``, with ``gate_set`` as the spec resolved it.
 * Measurement: qubits ``0 .. n - 1`` in order, each measured when ``double() < p``.
@@ -82,12 +82,12 @@ def colour_classes(edges: list[tuple[int, int]], n: int) -> list[list[int]]:
     return classes
 
 
-def cumulative(weights: list[float]) -> list[float]:
+def cumulative(weights) -> list[float]:
     """Running sum of the normalised weights, with the last entry exactly 1."""
-    total = sum(weights)
+    total = float(np.sum(np.asarray(weights, dtype=np.float64)))
     cum: list[float] = []
-    running = 0.0
-    for w in weights:
+    running = 0.0  # added in order, as np.cumsum does
+    for w in (float(x) for x in weights):
         running += w / total
         cum.append(running)
     cum[-1] = 1.0
@@ -104,7 +104,7 @@ def oracle_draws(spec, trajectory: int, seed) -> TrajectoryDraws:
     weights = spec.edge_weights
     if isinstance(weights, tuple):
         weights = weights[graph]
-    cum = None if weights is None else cumulative([float(w) for w in np.asarray(weights)])
+    cum = None if weights is None else cumulative(weights)
     pool = [int(g) for g in np.asarray(spec.gate_set)]
     orient = bool(spec.random_orientation)
     p = float(spec.measurement_rate)

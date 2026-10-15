@@ -10,7 +10,7 @@ import itertools
 import numpy as np
 import pytest
 
-from sparsegf2 import Simulator, analysis, gate, graphs, mipt
+from sparsegf2 import Simulator, StabilizerCode, analysis, gate, graphs, mipt
 from sparsegf2 import observables as ob
 
 RANDOM_KINDS = ("erasure_first_failure", "erasure_lost_profile")  # checked separately
@@ -58,12 +58,35 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
             for p in spec.probes
             if p.kind not in RANDOM_KINDS and tick in probe_layers[p.name]
         }
+        for p in spec.probes:  # the code itself, as a canonical basis of its stabilizer group
+            if p.kind == "code_snapshot" and refs and tick in probe_layers[p.name]:
+                code = StabilizerCode.from_simulator(sim, reference=refs)
+                values[(p.name, "code")] = _row_space(code.stabilizer_matrix())
         pure = sim.entropy(refs) == 0 if refs else False
         return values, pure
 
     sim = Simulator(spec.num_qubits, phases=False, seed=0)
     observations = dict(sim.run(circuit, observe=observe).observations)
     return observations
+
+
+def _row_space(rows: np.ndarray) -> np.ndarray:
+    """The reduced row echelon form of ``rows`` over GF(2) without its zero rows, which is
+    the same matrix for any two generating sets of one group."""
+    m = (np.asarray(rows) % 2).astype(np.uint8)
+    pivot = 0
+    for col in range(m.shape[1]):
+        if pivot == m.shape[0]:
+            break
+        nonzero = np.flatnonzero(m[pivot:, col])
+        if not nonzero.size:
+            continue
+        row = pivot + int(nonzero[0])
+        m[[pivot, row]] = m[[row, pivot]]
+        others = np.flatnonzero(m[:, col])
+        m[others[others != pivot]] ^= m[pivot]
+        pivot += 1
+    return m[:pivot]
 
 
 def _code_probes(region: list[int], layers: int) -> list[mipt.Probe]:
@@ -301,9 +324,18 @@ SPECS = {
     ),
 }
 
-# Trajectories replayed per spec: 6, or fewer for the specs above 64 qubits, whose
-# replays count every 1- and 2-qubit erasure in Python.
-REPLAYED = {name: 3 for name in SPECS if name.startswith(("purification_n", "single_n"))}
+# Specs replayed with 3 trajectories instead of 6: their replays count every 1- and 2-qubit
+# erasure of up to 129 qubits in Python.
+FEW_REPLAYS = {
+    "purification_n40_80_qubits",
+    "single_n70_partner_64",
+    "purification_n63",
+    "purification_n64",
+    "purification_n65",
+    "single_n127_partner_63",
+    "single_n128_partner_64",
+    "single_n129_random_partner",
+}
 
 
 @pytest.mark.parametrize("name", list(SPECS))
@@ -312,11 +344,13 @@ def test_engine_matches_exported_circuits_exactly(name):
 
     After a trajectory stops (stop_when_purified) the engine records the
     probe's exact value for a pure reference: the replay, which keeps
-    simulating, must agree with it; entanglement probes are NaN there.
+    simulating, must agree with it; entanglement probes are NaN there. A
+    saved code (with a reference) must span the same stabilizer group as the
+    replayed state's code.
     """
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
-    trajectories = REPLAYED.get(name, 6)
+    trajectories = 3 if name in FEW_REPLAYS else 6
     result = spec.run(trajectories, seed=seed)
     for t in range(trajectories):
         obs = _replay(spec, t, seed)
@@ -343,6 +377,14 @@ def test_engine_matches_exported_circuits_exactly(name):
                     assert np.all(np.isnan(got)), f"{p.name} t={t} layer={layer}"
                     continue
                 np.testing.assert_allclose(got, expected, err_msg=f"{p.name} t={t} layer={layer}")
+                if p.kind == "code_snapshot" and spec.reference != "none":
+                    if result.snapshots[p.name][1][t, c] < 0:  # stopped: no code was saved
+                        continue
+                    np.testing.assert_array_equal(
+                        _row_space(result.code(t, c, p.name).stabilizer_matrix()),
+                        obs[int(layer)][0][(p.name, "code")],
+                        err_msg=f"{p.name} code t={t} layer={layer}",
+                    )
 
 
 def test_results_independent_of_threads_and_chunking():

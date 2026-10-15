@@ -16,7 +16,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from _protocol_oracle import colour_classes, oracle_circuit_text
+from _protocol_oracle import colour_classes, cumulative, oracle_circuit_text
 from sparsegf2 import graphs, mipt
 
 SEED = 2024
@@ -133,6 +133,19 @@ ORACLE_SPECS = {
         gates_per_layer=5,
         reference="single",
     ),
+    "weighted_scramble_layers_orientation": dict(
+        num_system=8,
+        edges=graphs.complete(8),
+        layers=4,
+        measurement_rate=0.3,
+        schedule="random_edges",
+        gates_per_layer=4,
+        edge_weights=graphs.power_law_weights(graphs.complete(8), 8, 0.5),
+        reference="single",
+        scramble_gates=2,
+        scramble_layers=2,
+        random_orientation=True,
+    ),
     "all_edges_bank_orientation": dict(
         num_system=6,
         edges=[graphs.cycle(6), graphs.complete(6)],
@@ -193,6 +206,7 @@ def test_exported_circuit_equals_the_oracle(name, trajectory):
     [
         "every_scramble_matching_schedule_single_random",
         "weighted_power_law_purification",
+        "weighted_scramble_layers_orientation",
         "word_boundary_65_single_random",
     ],
 )
@@ -200,6 +214,22 @@ def test_oracle_agrees_for_other_seeds_and_far_trajectories(name, trajectory, se
     # first_trajectory-style indices: a trajectory's circuit depends only on (spec, seed, t)
     spec = mipt.MonitoredCircuit(**ORACLE_SPECS[name])
     assert str(spec.circuit(trajectory, seed=seed)) == oracle_circuit_text(spec, trajectory, seed)
+
+
+def test_oracle_weights_are_bit_exact():
+    # The engine normalises with numpy: a pairwise sum, then a sequential cumsum. Python's
+    # sum rounds differently (naively on 3.11, compensated from 3.12): on one or the other,
+    # each total below differs from numpy's in the last bit. The oracle's must not.
+    gen = np.random.default_rng(1)
+    for w in [
+        graphs.power_law_weights(graphs.complete(8), 8, 0.5),
+        graphs.power_law_weights(graphs.complete(10), 10, 3.0),
+        graphs.power_law_weights(graphs.complete(16), 16, 2.0),
+        *(gen.random(m) for m in (200, 2999)),
+    ]:
+        expected = np.cumsum(w / w.sum())
+        expected[-1] = 1.0
+        assert cumulative(w) == expected.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -297,24 +327,28 @@ def test_every_qubit_is_measured_at_the_rate():
     assert abs(counts.sum() - n * trials * p) <= 4.5 * total_sigma
 
 
-def test_random_edges_places_exactly_gates_per_layer_on_graph_edges():
-    edges = graphs.watts_strogatz(10, 4, 0.3, seed=1)
+@pytest.mark.parametrize("gates_per_layer", [7, None])
+def test_random_edges_places_exactly_gates_per_layer_on_graph_edges(gates_per_layer):
+    n = 11
+    edges = graphs.watts_strogatz(n, 4, 0.3, seed=1)
+    count = {} if gates_per_layer is None else {"gates_per_layer": gates_per_layer}
     spec = mipt.MonitoredCircuit(
-        num_system=10,
+        num_system=n,
         edges=edges,
         layers=50,
         measurement_rate=0.2,
         schedule="random_edges",
-        gates_per_layer=7,
         scramble_layers=2,
+        **count,
     )
+    expected = n // 2 if gates_per_layer is None else gates_per_layer  # the default is n // 2
     allowed = set(map(tuple, edges.tolist()))
     for t in range(3):
         segments = _segments(spec.circuit(t, seed=SEED))
         layers = segments[0]["blocks"] + [_layer_gates(s) for s in segments[1:]]
         assert len(layers) == 2 + 50  # scramble layers, then dynamics
         for gates in layers:
-            assert len(gates) == 7
+            assert len(gates) == expected
             assert all((min(a, b), max(a, b)) in allowed for a, b, _ in gates)
 
 
@@ -334,7 +368,9 @@ def test_matching_places_one_colour_class_per_layer():
     edge_list = list(map(tuple, edges.tolist()))
     classes = colour_classes(edge_list, n)
     num_colours = len(classes)
-    assert num_colours == 6  # the cycle does not divide the scramble layers
+    # 3 scramble layers are not a whole number of 6-colour cycles, so the dynamics start
+    # mid-cycle (layer 1 uses colour 3)
+    assert num_colours == 6
     spec = mipt.MonitoredCircuit(
         num_system=n, edges=edges, layers=20, measurement_rate=0.2, scramble_layers=scramble
     )
