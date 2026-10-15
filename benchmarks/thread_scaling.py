@@ -49,11 +49,18 @@ def cpu_info() -> dict:
     """CPU model name and physical core count, best effort per platform."""
     info: dict = {"cpu_model": None, "physical_cores": None}
     try:
+        cores = set()
+        package = None
         with open("/proc/cpuinfo", encoding="utf-8") as fh:
             for line in fh:
-                if line.startswith("model name"):
+                if line.startswith("model name") and info["cpu_model"] is None:
                     info["cpu_model"] = line.split(":", 1)[1].strip()
-                    break
+                elif line.startswith("physical id"):
+                    package = line.split(":", 1)[1].strip()
+                elif line.startswith("core id"):
+                    cores.add((package, line.split(":", 1)[1].strip()))
+        if cores:
+            info["physical_cores"] = len(cores)
     except OSError:
         pass
     if sys.platform == "win32":
@@ -83,6 +90,9 @@ def cpu_info() -> dict:
             )
     if info["cpu_model"] is None:
         info["cpu_model"] = platform.processor() or platform.machine()
+    if info["physical_cores"] is None:
+        info["physical_cores"] = os.cpu_count()
+        info["physical_cores_note"] = "not detected; logical processor count used"
     return info
 
 
@@ -149,7 +159,7 @@ def repetition_memory(distance: int, rounds: int, p: float) -> Circuit:
 
 
 def make_workloads(quick: bool) -> list[dict]:
-    """Each workload: name, description, unit, size and ``run(threads, units) -> digest``."""
+    """Each workload: name, description, unit, size and ``run(threads, units) -> result`` and ``digest(result)``."""
     # units: trajectories for W1 to W3, shots for W4
     w1, w2, w3, w4 = (16, 16, 16, 2000) if quick else (51_200, 9_000, 184_000, 200_000)
     spec64 = erasure_spec(16 if quick else 64)
@@ -160,12 +170,14 @@ def make_workloads(quick: bool) -> list[dict]:
 
     def ensemble(spec):
         def run(threads: int, units: int):
-            return ensemble_digest(spec.run(units, seed=SEED, num_threads=threads))
+            return spec.run(units, seed=SEED, num_threads=threads)
 
         return run
 
     def shots(threads: int, units: int):
-        res = sg.sample(circuit, units, seed=SEED, num_threads=threads)
+        return sg.sample(circuit, units, seed=SEED, num_threads=threads)
+
+    def shots_digest(res) -> str:
         return digest(res.measurements, res.detectors, res.observables, res.random)
 
     return [
@@ -177,6 +189,7 @@ def make_workloads(quick: bool) -> list[dict]:
             unit="trajectories",
             units=w1,
             run=ensemble(spec64),
+            digest=ensemble_digest,
         ),
         dict(
             name="W2",
@@ -184,6 +197,7 @@ def make_workloads(quick: bool) -> list[dict]:
             unit="trajectories",
             units=w2,
             run=ensemble(spec256),
+            digest=ensemble_digest,
         ),
         dict(
             name="W3",
@@ -192,6 +206,7 @@ def make_workloads(quick: bool) -> list[dict]:
             unit="trajectories",
             units=w3,
             run=ensemble(spec_pt),
+            digest=ensemble_digest,
         ),
         dict(
             name="W4",
@@ -200,16 +215,23 @@ def make_workloads(quick: bool) -> list[dict]:
             unit="shots",
             units=w4,
             run=shots,
+            digest=shots_digest,
         ),
     ]
 
 
-def timed(fn, threads: int, units: int, repeats: int):
+def timed(w: dict, threads: int, units: int, repeats: int):
+    """Wall times of ``repeats`` runs (the run call only) and the set of result digests.
+
+    The digest is a serial hash of the whole result, so it is computed after the timer stops.
+    """
     times, digests = [], set()
     for _ in range(repeats):
         t0 = time.perf_counter()
-        digests.add(fn(threads, units))
+        result = w["run"](threads, units)
         times.append(time.perf_counter() - t0)
+        digests.add(w["digest"](result))
+        del result
     return times, digests
 
 
@@ -223,9 +245,11 @@ def render_markdown(results: dict) -> str:
         f"{env['logical_processors']} logical processors). Numba {env['numba']}, "
         f"`NUMBA_NUM_THREADS` = {env['numba_num_threads']}, threading layer "
         f"`{env['threading_layer']}` ({safe} for concurrent calls from several Python threads). "
-        f"Wall time is the median of {results['repeats']} runs after a warm-up (one run at "
-        "fewer than 8 threads, where each run lasts tens of seconds). "
-        "Results were identical at every thread count.",
+        "Wall time covers the run call only (the result digest is computed afterwards). "
+        f"Thread counts run: {results['thread_counts']}. Repeats per row are in the `runs` column; "
+        "the wall time is the median of those runs after a warm-up, and runs of tens of seconds "
+        "on few threads are done once. "
+        f"Results identical at every thread count: {results['identical_across_threads']}. ",
         "",
     ]
     for w in results["workloads"]:
@@ -242,7 +266,14 @@ def render_markdown(results: dict) -> str:
                 f"| {r['threads']} | {r['runs']} | {r['seconds']:.3f} | {r['throughput']:.4g} | "
                 f"{r['speedup']:.2f} | {r['efficiency']:.2f} |"
             )
-        lines += ["", f"Most threads versus 16: {w['beats_16']}.", ""]
+        top = w["rows"][-1]
+        floor = results.get("min_seconds_floor", 5.0)
+        note = (
+            ""
+            if top["seconds"] >= floor
+            else f" The {top['threads']}-thread run is under the {floor:g} s floor, so its speedup is less precise."
+        )
+        lines += ["", f"Most threads versus 16: {w['beats_16']}.{note}", ""]
     return "\n".join(lines)
 
 
@@ -260,8 +291,10 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     repeats = 1 if args.quick else args.repeats
     maximum = numba.config.NUMBA_NUM_THREADS
-    counts = sorted({1, 2, 4, 8, 16, maximum} if not args.quick else {1, min(2, maximum)})
+    counts = sorted({1, 2, 4, 8, 16, maximum} if not args.quick else {1, 2, maximum})
     counts = [t for t in counts if t <= maximum]
+    if args.quick and maximum > 1 and len(counts) < 2:
+        raise SystemExit("quick mode needs at least two thread counts")
 
     workloads = make_workloads(args.quick)
     if args.only:
@@ -271,7 +304,7 @@ def main() -> None:
 
     # Warm-up at the full thread count compiles every kernel; then the layer can be read.
     for w in workloads:
-        w["run"](maximum, 8 if w["unit"] == "trajectories" else 64)
+        w["digest"](w["run"](maximum, 8 if w["unit"] == "trajectories" else 64))
     layer = numba.threading_layer()
     env = {
         "python": platform.python_version(),
@@ -298,7 +331,9 @@ def main() -> None:
         "repeats": repeats,
         "seed": SEED,
         "quick": args.quick,
-        "identical_across_threads": True,
+        "thread_counts": counts,
+        "identical_across_threads": None,
+        "min_seconds_floor": 5.0,
         "workloads": [],
     }
     start = time.perf_counter()
@@ -308,7 +343,7 @@ def main() -> None:
             # Runs of tens of seconds on few threads are steady: one run each keeps the
             # whole benchmark near 20 minutes; every run at 8 or more threads is repeated.
             reps = repeats if t >= 8 or args.quick else 1
-            times, digests = timed(w["run"], t, w["units"], reps)
+            times, digests = timed(w, t, w["units"], reps)
             if len(digests) != 1 or (reference is not None and digests != reference):
                 raise SystemExit(
                     f"{w['name']}: results at {t} threads differ from those at {counts[0]} "
@@ -323,6 +358,7 @@ def main() -> None:
                     "seconds": sec,
                     "runs": reps,
                     "all_seconds": times,
+                    "digests": sorted(digests),
                     "throughput": w["units"] / sec,
                     "speedup": base / sec,
                     "efficiency": base / sec / (t / counts[0]),
@@ -354,10 +390,17 @@ def main() -> None:
                 "beats_16": beats,
             }
         )
+    # Reaching here means every digest matched (a mismatch exits above); compute it anyway.
+    results["identical_across_threads"] = all(
+        len({d for r in w["rows"] for d in r["digests"]}) == 1 for w in results["workloads"]
+    ) and (len(counts) > 1 or maximum == 1)
     results["total_seconds"] = time.perf_counter() - start
     (out / "thread_scaling.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     (out / "thread_scaling.md").write_text(render_markdown(results), encoding="utf-8")
-    print(f"identical at every thread count; total {results['total_seconds']:.0f} s; wrote {out}")
+    identical = results["identical_across_threads"]
+    print(
+        f"identical across threads: {identical}; total {results['total_seconds']:.0f} s; wrote {out}"
+    )
 
 
 if __name__ == "__main__":

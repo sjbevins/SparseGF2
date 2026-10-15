@@ -10,7 +10,7 @@ them directly).
 | [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 (both modes), Stim, Qiskit Aer and Cirq on identical circuits; SparseGF2's ensemble throughput | `results/simulators.json` |
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
 | [`why_data.py`](why_data.py) | the two "why this simulator" figures: the cost of measuring the state after every layer (SparseGF2 vs Stim, same circuits), and the cost of erasure screening per code (SparseGF2 kernels vs a compiled from-scratch baseline) | `results/why.json` |
-| [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
+| [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling (four workloads in all; the run is timed, result digests are not) at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh

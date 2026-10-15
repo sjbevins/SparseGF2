@@ -16,336 +16,417 @@
   "repeats": 3,
   "seed": 2024,
   "quick": false,
+  "thread_counts": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32
+  ],
   "identical_across_threads": true,
+  "min_seconds_floor": 5.0,
   "workloads": [
     {
       "name": "W1",
       "what": "ensemble, Watts-Strogatz n=64 k=4 beta=0.1, purification, p=0.1, 256 layers, random_edges; code_dimension every 32 layers, erasure_first_failure(512) and uncorrectable_region_counts(2) at the end",
       "unit": "trajectories",
       "units": 51200,
-      "digest": "01a3d775c39a670c617bb80235950af6eb38cfc7658cab6aa04044eb80371c11",
+      "digest": "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d",
       "rows": [
         {
           "threads": 1,
-          "seconds": 92.5140279000043,
+          "seconds": 91.81246600000122,
           "runs": 1,
           "all_seconds": [
-            92.5140279000043
+            91.81246600000122
           ],
-          "throughput": 553.4295842717019,
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 557.6584774446568,
           "speedup": 1.0,
           "efficiency": 1.0
         },
         {
           "threads": 2,
-          "seconds": 45.74447510000027,
+          "seconds": 45.915788399999656,
           "runs": 1,
           "all_seconds": [
-            45.74447510000027
+            45.915788399999656
           ],
-          "throughput": 1119.2608481805423,
-          "speedup": 2.022408776092913,
-          "efficiency": 1.0112043880464565
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 1115.0848495503649,
+          "speedup": 1.9995837858683465,
+          "efficiency": 0.9997918929341733
         },
         {
           "threads": 4,
-          "seconds": 27.877935399999842,
+          "seconds": 23.392201699998623,
           "runs": 1,
           "all_seconds": [
-            27.877935399999842
+            23.392201699998623
           ],
-          "throughput": 1836.5778980892642,
-          "speedup": 3.3185394317258092,
-          "efficiency": 0.8296348579314523
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 2188.7636168938734,
+          "speedup": 3.924917678869306,
+          "efficiency": 0.9812294197173265
         },
         {
           "threads": 8,
-          "seconds": 14.893506599997636,
+          "seconds": 12.043509399998584,
           "runs": 3,
           "all_seconds": [
-            14.860516200002166,
-            14.893506599997636,
-            14.948877500006347
+            12.072991800001546,
+            12.043509399998584,
+            12.035907000001316
           ],
-          "throughput": 3437.7397731175092,
-          "speedup": 6.2117022125614785,
-          "efficiency": 0.7764627765701848
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 4251.252546039946,
+          "speedup": 7.62339804376389,
+          "efficiency": 0.9529247554704863
         },
         {
           "threads": 16,
-          "seconds": 7.750463000003947,
+          "seconds": 6.703376199999184,
           "runs": 3,
           "all_seconds": [
-            7.756853200000478,
-            7.750463000003947,
-            7.73242709999613
+            6.703376199999184,
+            6.512726499999189,
+            6.715859700001602
           ],
-          "throughput": 6606.056954271497,
-          "speedup": 11.936580808134583,
-          "efficiency": 0.7460363005084114
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 7637.942205900101,
+          "speedup": 13.696451349397995,
+          "efficiency": 0.8560282093373747
         },
         {
           "threads": 32,
-          "seconds": 4.5614682000014,
+          "seconds": 4.354419499999494,
           "runs": 3,
           "all_seconds": [
-            4.5614682000014,
-            4.533932899998035,
-            4.5907225999981165
+            4.343359000000419,
+            4.354419499999494,
+            4.45711879999908
           ],
-          "throughput": 11224.456195920491,
-          "speedup": 20.281633860776648,
-          "efficiency": 0.6338010581492702
+          "digests": [
+            "997f7b0bcc999cd6aeb657923afcb76eb4da3ed73960eed6ca2b455be119fd8d"
+          ],
+          "throughput": 11758.168913217009,
+          "speedup": 21.08489225716812,
+          "efficiency": 0.6589028830365038
         }
       ],
-      "beats_16": "32 threads take 4.561 s against 7.750 s at 16 (1.70x, faster)"
+      "beats_16": "32 threads take 4.354 s against 6.703 s at 16 (1.54x, faster)"
     },
     {
       "name": "W2",
       "what": "as W1 at n=256",
       "unit": "trajectories",
       "units": 9000,
-      "digest": "a9f0c92c2f2753343a13dfd816c70f8a52f0bc106afea51ee570169b0bfa13ec",
+      "digest": "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c",
       "rows": [
         {
           "threads": 1,
-          "seconds": 100.81979460000002,
+          "seconds": 95.82583970000087,
           "runs": 1,
           "all_seconds": [
-            100.81979460000002
+            95.82583970000087
           ],
-          "throughput": 89.26818424603294,
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 93.92038752987747,
           "speedup": 1.0,
           "efficiency": 1.0
         },
         {
           "threads": 2,
-          "seconds": 61.31869569999981,
+          "seconds": 48.446262299999944,
           "runs": 1,
           "all_seconds": [
-            61.31869569999981
+            48.446262299999944
           ],
-          "throughput": 146.77415912484955,
-          "speedup": 1.6441933972838947,
-          "efficiency": 0.8220966986419473
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 185.7728454729522,
+          "speedup": 1.9779821012115724,
+          "efficiency": 0.9889910506057862
         },
         {
           "threads": 4,
-          "seconds": 30.919823800009908,
+          "seconds": 24.808334299999842,
           "runs": 1,
           "all_seconds": [
-            30.919823800009908
+            24.808334299999842
           ],
-          "throughput": 291.07539739592943,
-          "speedup": 3.2606846420634428,
-          "efficiency": 0.8151711605158607
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 362.7813093440964,
+          "speedup": 3.8626470661515344,
+          "efficiency": 0.9656617665378836
         },
         {
           "threads": 8,
-          "seconds": 16.030919700002414,
+          "seconds": 12.791134999999485,
           "runs": 3,
           "all_seconds": [
-            16.030919700002414,
-            16.02807890000986,
-            16.07921399999759
+            12.769322299998748,
+            12.814197699999568,
+            12.791134999999485
           ],
-          "throughput": 561.4150758922862,
-          "speedup": 6.289083626311523,
-          "efficiency": 0.7861354532889404
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 703.6123064919855,
+          "speedup": 7.491582232538764,
+          "efficiency": 0.9364477790673456
         },
         {
           "threads": 16,
-          "seconds": 8.19937000000209,
+          "seconds": 7.145883400000457,
           "runs": 3,
           "all_seconds": [
-            8.160376100000576,
-            8.19937000000209,
-            8.216156900001806
+            7.208971300000485,
+            7.145883400000457,
+            7.1189190999994025
           ],
-          "throughput": 1097.6453068952499,
-          "speedup": 12.296041598314787,
-          "efficiency": 0.7685025998946742
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 1259.4663943158412,
+          "speedup": 13.409936089916432,
+          "efficiency": 0.838121005619777
         },
         {
           "threads": 32,
-          "seconds": 4.912120199995115,
+          "seconds": 4.889987900000051,
           "runs": 3,
           "all_seconds": [
-            4.807302700006403,
-            5.194726599991554,
-            4.912120199995115
+            4.889987900000051,
+            4.954461399998763,
+            4.808526700000584
           ],
-          "throughput": 1832.2027217511798,
-          "speedup": 20.52470023027944,
-          "efficiency": 0.6413968821962325
+          "digests": [
+            "685d5ddb10e5a75da9a2e13f7bdd6c78a97dcbd86a4e9dc9871e9757dca2331c"
+          ],
+          "throughput": 1840.4953517369452,
+          "speedup": 19.596334727126802,
+          "efficiency": 0.6123854602227126
         }
       ],
-      "beats_16": "32 threads take 4.912 s against 8.199 s at 16 (1.67x, faster)"
+      "beats_16": "32 threads take 4.890 s against 7.146 s at 16 (1.46x, faster)"
     },
     {
       "name": "W3",
       "what": "purification time, cycle n=128, single reference, p=0.1, 1024 layers, stop_when_purified, code_dimension every layer",
       "unit": "trajectories",
       "units": 184000,
-      "digest": "b37047c95c156c5e8d59e093c3680c0a0dd4051e101ecf6d0a266f2a040bf59b",
+      "digest": "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5",
       "rows": [
         {
           "threads": 1,
-          "seconds": 45.3203763999918,
+          "seconds": 41.60886399999981,
           "runs": 1,
           "all_seconds": [
-            45.3203763999918
+            41.60886399999981
           ],
-          "throughput": 4059.983932526061,
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 4422.134668228405,
           "speedup": 1.0,
           "efficiency": 1.0
         },
         {
           "threads": 2,
-          "seconds": 28.53844940000272,
+          "seconds": 21.007835599999453,
           "runs": 1,
           "all_seconds": [
-            28.53844940000272
+            21.007835599999453
           ],
-          "throughput": 6447.442095434326,
-          "speedup": 1.5880462096860624,
-          "efficiency": 0.7940231048430312
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 8758.636706011008,
+          "speedup": 1.9806354539446651,
+          "efficiency": 0.9903177269723326
         },
         {
           "threads": 4,
-          "seconds": 15.176499399996828,
+          "seconds": 10.980907700000898,
           "runs": 1,
           "all_seconds": [
-            15.176499399996828
+            10.980907700000898
           ],
-          "throughput": 12124.007990936201,
-          "speedup": 2.9862206827485704,
-          "efficiency": 0.7465551706871426
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 16756.35612527596,
+          "speedup": 3.7892007780009305,
+          "efficiency": 0.9473001945002326
         },
         {
           "threads": 8,
-          "seconds": 8.78400149999652,
+          "seconds": 5.723060899999837,
           "runs": 3,
           "all_seconds": [
-            8.668366399986553,
-            8.78400149999652,
-            8.906507599996985
+            5.751913800000693,
+            5.702439400000003,
+            5.723060899999837
           ],
-          "throughput": 20947.173107845312,
-          "speedup": 5.159422661757259,
-          "efficiency": 0.6449278327196574
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 32150.627647524292,
+          "speedup": 7.270386376633001,
+          "efficiency": 0.9087982970791251
         },
         {
           "threads": 16,
-          "seconds": 5.305889600000228,
+          "seconds": 3.38795029999892,
           "runs": 3,
           "all_seconds": [
-            5.316516200007754,
-            5.26307369999995,
-            5.305889600000228
+            3.38795029999892,
+            3.388356700001168,
+            3.2989626999988104
           ],
-          "throughput": 34678.44487378556,
-          "speedup": 8.54152268829526,
-          "efficiency": 0.5338451680184537
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 54310.12373471318,
+          "speedup": 12.281426914678494,
+          "efficiency": 0.7675891821674059
         },
         {
           "threads": 32,
-          "seconds": 3.492734300001757,
+          "seconds": 2.407126199999766,
           "runs": 3,
           "all_seconds": [
-            3.492734300001757,
-            3.4628484999993816,
-            3.5807940999948187
+            2.358368999999584,
+            2.407126199999766,
+            2.433740000000398
           ],
-          "throughput": 52680.78937464766,
-          "speedup": 12.975615236455003,
-          "efficiency": 0.40548797613921883
+          "digests": [
+            "66a3e55cd95eb2b8d220f1b42a0d8637a351403cc77ed216ab3a79e38da546b5"
+          ],
+          "throughput": 76439.69809311115,
+          "speedup": 17.285701098681017,
+          "efficiency": 0.5401781593337818
         }
       ],
-      "beats_16": "32 threads take 3.493 s against 5.306 s at 16 (1.52x, faster)"
+      "beats_16": "32 threads take 2.407 s against 3.388 s at 16 (1.41x, faster)"
     },
     {
       "name": "W4",
       "what": "sparsegf2.sample of a noisy bit-flip repetition-code memory (distance 5, 400 rounds, X_ERROR 0.02), phases on",
       "unit": "shots",
       "units": 200000,
-      "digest": "613a0a33b4c4b447f439a89923867ef59df24bca050efc08bf761c47bacb54a0",
+      "digest": "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee",
       "rows": [
         {
           "threads": 1,
-          "seconds": 55.583981899995706,
+          "seconds": 50.83444520000012,
           "runs": 1,
           "all_seconds": [
-            55.583981899995706
+            50.83444520000012
           ],
-          "throughput": 3598.1589149160154,
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 3934.340174524016,
           "speedup": 1.0,
           "efficiency": 1.0
         },
         {
           "threads": 2,
-          "seconds": 35.565117599995574,
+          "seconds": 25.701177299999472,
           "runs": 1,
           "all_seconds": [
-            35.565117599995574
+            25.701177299999472
           ],
-          "throughput": 5623.487661405199,
-          "speedup": 1.562879181931979,
-          "efficiency": 0.7814395909659895
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 7781.74469073851,
+          "speedup": 1.9779033702086932,
+          "efficiency": 0.9889516851043466
         },
         {
           "threads": 4,
-          "seconds": 20.05346309999004,
+          "seconds": 12.98414380000031,
           "runs": 1,
           "all_seconds": [
-            20.05346309999004
+            12.98414380000031
           ],
-          "throughput": 9973.339717073573,
-          "speedup": 2.771789671581629,
-          "efficiency": 0.6929474178954073
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 15403.403033783037,
+          "speedup": 3.915117237071797,
+          "efficiency": 0.9787793092679492
         },
         {
           "threads": 8,
-          "seconds": 12.377569399992353,
+          "seconds": 6.730930600000647,
           "runs": 3,
           "all_seconds": [
-            12.377569399992353,
-            12.429927599994699,
-            11.69481299999461
+            6.721763699999428,
+            6.731727899999896,
+            6.730930600000647
           ],
-          "throughput": 16158.261249589403,
-          "speedup": 4.490702504162897,
-          "efficiency": 0.5613378130203621
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 29713.573335606932,
+          "speedup": 7.552365077125477,
+          "efficiency": 0.9440456346406846
         },
         {
           "threads": 16,
-          "seconds": 8.032923599996138,
+          "seconds": 3.8769220000012865,
           "runs": 3,
           "all_seconds": [
-            7.43002919999708,
-            8.085756999993464,
-            8.032923599996138
+            3.898400899999615,
+            3.8769220000012865,
+            3.83017800000016
           ],
-          "throughput": 24897.535437794548,
-          "speedup": 6.9195207956443685,
-          "efficiency": 0.43247004972777303
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 51587.31591709445,
+          "speedup": 13.112062920013157,
+          "efficiency": 0.8195039325008223
         },
         {
           "threads": 32,
-          "seconds": 6.323216000004322,
+          "seconds": 2.7670791999989888,
           "runs": 3,
           "all_seconds": [
-            6.270231999995303,
-            6.323216000004322,
-            6.471257000011974
+            2.634828300000663,
+            2.7670791999989888,
+            2.790719299999182
           ],
-          "throughput": 31629.47462175312,
-          "speedup": 8.790460724409495,
-          "efficiency": 0.27470189763779673
+          "digests": [
+            "42b5a43f3e26bde4bb32580ddb715ac011bfc46a0ba796b94bf79017625205ee"
+          ],
+          "throughput": 72278.37931060053,
+          "speedup": 18.371156561047727,
+          "efficiency": 0.5740986425327415
         }
       ],
-      "beats_16": "32 threads take 6.323 s against 8.033 s at 16 (1.27x, faster)"
+      "beats_16": "32 threads take 2.767 s against 3.877 s at 16 (1.40x, faster)"
     }
   ],
-  "total_seconds": 860.5897683000076
+  "total_seconds": 757.9233273999998
 }

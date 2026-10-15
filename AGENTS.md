@@ -178,8 +178,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   before Python starts; `num_threads=` lowers it for one call). Every result is identical
   at any thread count. Measured on a 16-core, 32-thread machine (Ryzen 9 9950X3D, `omp`
   layer; [`benchmarks/results/thread_scaling.md`](benchmarks/results/thread_scaling.md)):
-  speedup over one thread was 6.9 to 12.3 at 16 threads and 8.8 to 20.5 at 32, and 32
-  threads beat 16 in every workload (by 1.3 to 1.7 times). So leave the default, one thread
+  speedup over one thread was 12.3 to 13.7 at 16 threads and 17.3 to 21.1 at 32, and 32
+  threads beat 16 in every workload (by 1.4 to 1.5 times). So leave the default, one thread
   per logical processor, unless the machine is shared; shot sampling scales least well
   (8.8 at 32).
 * **Random two-qubit Cliffords** in circuit text: `CLIFFORD_2Q(i) a b` applies Clifford

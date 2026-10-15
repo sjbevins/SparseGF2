@@ -38,6 +38,10 @@ def test_thread_scaling_quick(tmp_path):
         assert key in env
     assert env["threading_layer"] in ("omp", "tbb", "workqueue")
     assert data["identical_across_threads"] is True
+    # the identity check is only meaningful with two or more thread counts
+    assert len(data["thread_counts"]) >= min(2, env["numba_num_threads"])
+    for w in data["workloads"]:
+        assert [r["threads"] for r in w["rows"]] == data["thread_counts"]
     assert [w["name"] for w in data["workloads"]] == ["W1", "W2", "W3", "W4"]
     for w in data["workloads"]:
         assert w["rows"][0]["threads"] == 1 and w["rows"][0]["speedup"] == 1.0
