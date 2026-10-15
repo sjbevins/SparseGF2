@@ -116,8 +116,10 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `list_jobs()` | | jobs in this process |
 | `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks) |
 
-`trajectories` may be omitted only for a collection of graphs (`graph.realizations`),
-which then runs all of its circuits. The signatures are the MCP tools'. In Python,
+`trajectories` may be omitted for a collection of graphs (`graph.realizations`, or a
+graph file holding several graphs), which then runs all of its circuits, and when
+`start_ensemble_job` resumes a single-graph run, which then runs to the target stored in
+its `spec.json` (section 3.5). The signatures are the MCP tools'. In Python,
 `api.start_ensemble_job(spec, trajectories=None, output_dir=None, ...)` keeps
 `trajectories` second, and `output_dir` is still required (pass it by keyword).
 
@@ -213,7 +215,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | Key | JSON form |
 |---|---|
 | `num_system`, `layers`, `measurement_rate` | required numbers |
-| `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` (at most 100,000) for graph disorder: a collection of `G` independent graphs, graph `i` from seed `[seed, i]` |
+| `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` (at most 100,000) for graph disorder: a collection of `G` independent graphs, graph `i` from seed `[seed, i]`. `{"family": "file", "path": P}` reads a graph file (`.json` or `.npz`, as `graphs.save` writes it); a file with several graphs is a collection |
 | `circuits_per_graph` | int, default 1: random circuits per graph of a collection. Trajectory `t` runs on graph `t // circuits_per_graph`, so the collection has `G * circuits_per_graph` trajectories; omit `trajectories` to run them all (asking for more is an error). Must be 1 for a single graph |
 | `edges` | instead of `graph`: `[[a, b], ...]` |
 | `edge_weights` | list (one per edge, in the order of `edges`; each weight stays with its edge when the edge list is normalised) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"`. A list needs explicit `edges` or a deterministic family (whose edges come sorted, `a < b`); random families and `realizations` take a weight family |
@@ -342,7 +344,11 @@ $ sparsegf2 ensemble spec.json --trajectories 2000 --seed 7 --output-dir runs/p0
 ```
 
 `runs/p010/spec.json` stores `{"spec", "trajectories", "seed"}`, so
-`sparsegf2 ensemble runs/p010/spec.json` repeats the run exactly.
+`sparsegf2 ensemble runs/p010/spec.json` repeats the run exactly. For a graph file it
+also stores `graph_file`: the file's resolved absolute path and the sha256 of its bytes,
+with which a resume checks that the file still holds the run's graphs. `load_results`
+returns the stored `spec` exactly (its floats are not rounded for display), so it can be
+passed back to `start_ensemble_job`.
 
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
@@ -432,9 +438,31 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
-  `seed` may be omitted (the stored one is used), and a larger `trajectories` extends a
-  finished run. A directory holding a different spec or seed, or a run made under
-  another randomness contract or SparseGF2 version, is refused.
+  `seed` may be omitted (the stored one is used), and so may `trajectories`: a
+  single-graph run then resumes to the target stored in `spec.json`, and a graph
+  collection runs all of its circuits (so a collection started with fewer can be
+  finished this way). A larger `trajectories` extends a finished run. `load_results`
+  returns the stored spec exactly, ready to pass back.
+* What is refused, before anything runs, in this order: a run made under another
+  randomness contract or SparseGF2 version; a graph file whose contents changed; a spec
+  that builds another protocol than the saved run (the message names the first differing
+  key path with both values, such as
+  `measurement_rate is 0.3333333333333333 in its spec.json and 0.333333 here`, and the
+  protocol field that differs); another `seed`.
+  The protocol, not the spec's text, identifies the run (it is what a merge of saved
+  parts requires), so a spec written differently that builds the same protocol
+  continues the run, with a note, and `spec.json` then stores the new form: a cutoff
+  given as `budget` or as a per-size object that resolves to the same w, a range string
+  for a qubit list, a default written out, another path to the same graphs.
+* Graph files: the sha256 recorded in `spec.json` must still match the file's bytes. If
+  the bytes changed (a regenerated `.npz` differs in its zip timestamps even with the
+  same graphs), the run continues only when its saved results show the same graphs, and
+  `spec.json` records the new sha256; otherwise, or with no results saved yet, it is
+  refused. A `spec.json` written before the hash was recorded is checked against the
+  saved results alone.
+* A merge that still fails (a directory mixed by an earlier version) names the chunk
+  files that do not belong to the run in `result.npz` (or the first chunk); deleting them
+  makes the earlier trajectories readable and resumable again.
 * Graph collections: `trajectories` may be omitted (all `G * circuits_per_graph` run) and
   cannot exceed that count. Changing `circuits_per_graph` changes the spec, so more
   circuits per graph need a new directory.
@@ -464,9 +492,12 @@ summary and exits with code 130; rerunning the same command resumes it.
 * `-` reads the circuit or spec from stdin. `--observables` takes inline JSON or
   `@file.json`.
 * `sparsegf2 ensemble` needs `--trajectories` (or a `trajectories` entry in SPEC.json),
-  except for a graph collection (`graph.realizations`), which runs all of its circuits by
-  default. Without `--chunk-size` it logs the trajectory count and the runtime estimate to
-  stderr before running.
+  except for a graph collection (`graph.realizations`, or a graph file holding several
+  graphs), which runs all of its circuits by default, and for a `--chunk-size` run
+  resumed in its `--output-dir`, which runs to the stored target. Without a count the
+  spec goes to the API as it is, which refuses a single graph with its own message.
+  Without `--chunk-size` it logs the trajectory count and the runtime estimate to stderr
+  before running.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---

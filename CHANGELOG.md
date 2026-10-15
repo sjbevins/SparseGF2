@@ -48,6 +48,39 @@
 * **Exact tick limit:** the default `tick_stride` and the check on a given one count the
   last tick, so at most `MAX_TICK_ROWS` ticks are evaluated (it was one more at exact
   multiples, e.g. 10,001 of 20,000 ticks).
+* **Resume and extend compare the run before computing:** `start_ensemble_job` on an
+  existing `output_dir` builds the spec and compares its protocol with the saved run's
+  (`mipt._protocol_difference`, which a merge of saved parts requires) before anything
+  runs. A spec that only compared equal as text used to be accepted even when its graph
+  file had changed: every new chunk then ran on other graphs, the final merge failed,
+  and the directory could not be read until chunk files were deleted by hand. A spec
+  written differently that builds the same protocol (a cutoff `budget` or per-size
+  object resolving to the same w, a range string, a default written out, another path
+  to the same graphs) now continues the run with a note; `spec.json` stores the new
+  form. The randomness-contract and version refusals still come first.
+* **Graph files are recorded:** for `{"family": "file"}`, `spec.json` records
+  `graph_file`, the resolved absolute path and the sha256 of the file's bytes. A resume
+  whose file has other bytes is refused up front, unless saved results show that it
+  holds the same graphs (a regenerated `.npz` differs in its zip timestamps); with no
+  results saved, it is refused. A `spec.json` from before this change is checked
+  against the saved results alone. The CLI accepts `graph_file` in a run's `spec.json`.
+* **A failed merge says what to delete:** when saved parts cannot be merged, the error
+  names the chunk files that do not belong to the run in `result.npz` (or the first
+  chunk); deleting them makes the earlier trajectories readable and resumable again.
+* **`load_results` returns the exact spec:** the stored `spec` is no longer rounded to 6
+  significant digits for display (1/3 became 0.333333), so passing it back to
+  `start_ensemble_job` extends the run instead of being refused. The refusal of a
+  different spec now names the first differing key path and both values
+  (`measurement_rate is 0.3333333333333333 in its spec.json and 0.333333 here`) and the
+  protocol field that differs.
+* **Resuming needs no `trajectories`:** without it, `start_ensemble_job` resumes a
+  single-graph run to the target stored in `spec.json` (it used to demand the count
+  again). A graph collection still runs all of its circuits.
+* **CLI graph collections from files:** `sparsegf2 ensemble` passes a missing
+  `--trajectories` to the API, so a graph file holding several graphs runs all of its
+  circuits, as the API does, and a resumed `--chunk-size` run uses its stored target.
+  A single graph is refused with the API's message (`give trajectories ...`), still exit
+  code 2; a non-object `graph` is now exit 2 instead of an internal error.
 
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 

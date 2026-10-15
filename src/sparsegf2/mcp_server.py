@@ -113,8 +113,10 @@ Start a long ensemble as a background job; returns immediately with a job_id. Th
 split into chunks (chunk_size trajectories, default about 10 s each), each saved under
 output_dir as soon as it finishes, then merged into output_dir/result.npz. Results equal
 one run_ensemble call with the same spec and seed. To resume after a cancel or restart,
-or to extend a finished run, call again with the same spec and output_dir (seed may be
-omitted). Poll with job_status, then call load_results(output_dir).
+call again with the same spec and output_dir; seed and trajectories may be omitted (the
+stored target is used; a graph collection runs all its circuits). A larger trajectories
+extends a finished run. A spec that builds another protocol, or a changed graph file, is
+refused before anything runs. Poll with job_status, then call load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,
@@ -143,7 +145,7 @@ Example: {}"""
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
 cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
-spec.
+spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run.
 
 Example: {"path": "runs/n128_p012"}"""
 

@@ -209,7 +209,14 @@ def _mark_truncated(out: dict[str, Any], note: str) -> dict[str, Any]:
     return out
 
 
-def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, Any]:
+def _clean(out: dict[str, Any], exact: Sequence[str] = ()) -> dict[str, Any]:
+    """``_jsonable(out)``, except that the top-level fields named in ``exact`` keep their floats."""
+    return {**_jsonable(out), **{k: _jsonable(out[k], exact=True) for k in exact if k in out}}
+
+
+def _bounded(
+    out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS, *, exact: Sequence[str] = ()
+) -> dict[str, Any]:
     """Make ``out`` JSON-clean and, if still too long, cut long lists, strings and keys.
 
     The summaries below are designed to fit already; this is the safety net.
@@ -217,17 +224,20 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
     The notes say how to read the result, so they are kept whole (unless
     they alone exceed the limit). As a last resort only the top-level scalar
     fields (seed, counts, ...), ``files`` and the notes are kept, so a caller
-    never loses the run's identity or paths.
+    never loses the run's identity or paths. The top-level fields named in
+    ``exact`` (a stored spec, which a caller passes back) are neither rounded
+    nor cut: they are shown as they are, or (in the last resort) left out.
     """
-    out = _jsonable(out)
+    out = _clean(out, exact)
     if len(json.dumps(out)) <= limit:
         return out
     note = (
         "output cut to fit the size limit; pass output_dir (or read the saved files) for all data"
     )
     notes = out.get("notes")
+    kept = {k: out[k] for k in exact if k in out}
     for max_items in (32, 16, 8, 4, 2, 1, 0):
-        shrunk = _shrink(out, max_items, max(200, 80 * max_items))
+        shrunk = {**_shrink(out, max_items, max(200, 80 * max_items)), **kept}
         if isinstance(notes, list):
             shrunk["notes"] = notes
         shrunk = _mark_truncated(shrunk, note)
@@ -1249,6 +1259,22 @@ def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any
     return gs, ws
 
 
+def _graph_file_record(spec: dict) -> dict[str, str] | None:
+    """The resolved path and the sha256 of the bytes of a ``{"family": "file"}`` graph.
+
+    Recorded in ``spec.json`` beside the spec, so that a resume can tell
+    whether the file still holds the graphs the run started with. ``spec`` has
+    been built already, so the path names a readable file.
+    """
+    graph = spec.get("graph")
+    if not (isinstance(graph, dict) and graph.get("family") == "file"):
+        return None
+    path = Path(graph["path"]).expanduser().resolve()
+    with path.open("rb") as f:
+        digest = hashlib.file_digest(f, "sha256").hexdigest()
+    return {"path": str(path), "sha256": digest}
+
+
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
     """One edge array, or a collection of graphs (a list) when ``realizations`` is given.
 
@@ -1963,16 +1989,19 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
 
     When it is too long, fewer checkpoints are shown (evenly spaced, always
     the first and last, the same ones for every probe and the survival curve)
-    before the generic cut of :func:`_bounded` is used as a last resort.
+    before the generic cut of :func:`_bounded` is used as a last resort. A
+    stored ``spec`` in ``extra`` is shown exactly (never rounded or cut), so
+    it can be passed back to resume or extend the run.
     """
     total = max(
         [len(result.checkpoint_layers)] + [len(result.layers(name)) for name in result.values]
     )
+    exact = ("spec",)
     long_extras = [
         key
         for key, value in extra.items()
         if key not in ("files", "path")
-        and len(json.dumps(_jsonable(value))) > MAX_OUTPUT_CHARS // 4
+        and len(json.dumps(_jsonable(value, exact=True))) > MAX_OUTPUT_CHARS // 4
     ]
     if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
         extra = {**extra, **{key: "too long to show; see the saved files" for key in long_extras}}
@@ -1989,9 +2018,9 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
                 "spaced, first and last included) to fit the size limit; pass output_dir or "
                 "read the saved files for all of them",
             )
-        if len(json.dumps(_jsonable(out))) <= MAX_OUTPUT_CHARS:
-            return _bounded(out)
-    return _bounded(out)
+        if len(json.dumps(_clean(out, exact))) <= MAX_OUTPUT_CHARS:
+            return _bounded(out, exact=exact)
+    return _bounded(out, exact=exact)
 
 
 def _summarize_ensemble(
@@ -2229,19 +2258,28 @@ def _write_run_metadata(
     command: str,
     *,
     resumed_from: int | None = None,
+    graph_file: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
 
     Replaying ``spec.json`` repeats the run only under the randomness contract
     that ``provenance.json`` records: this version cannot reproduce a run made
-    under another one (``mipt.RANDOMNESS_CONTRACT``).
+    under another one (``mipt.RANDOMNESS_CONTRACT``). For a graph file,
+    ``spec.json`` also records its resolved path and the sha256 of its bytes
+    (``graph_file``), with which a resume checks that the file is unchanged.
 
     For a resumed job (``resumed_from`` set) the original provenance is kept and
     this process's record is appended under ``"resumes"``.
     """
+    record_file = {} if graph_file is None else {"graph_file": graph_file}
     try:
         spec_text = json.dumps(
-            {"spec": _jsonable(spec, exact=True), "trajectories": trajectories, "seed": seed},
+            {
+                "spec": _jsonable(spec, exact=True),
+                "trajectories": trajectories,
+                "seed": seed,
+                **record_file,
+            },
             indent=2,
         )
     except (TypeError, ValueError) as exc:
@@ -2324,24 +2362,56 @@ def _load_parts_once(parts: list[Path]) -> mipt.EnsembleResult:
     result.npz; they are redundant, not a conflict.
     """
     results: list[mipt.EnsembleResult] = []
+    paths: list[Path] = []
     covered = 0
     for path in parts:
         part = _load_result_file(path)
         if path.name != _RESULT_FILE and part.num_trajectories and part.trajectories[-1] < covered:
             continue
         results.append(part)
+        paths.append(path)
         if part.num_trajectories:
             covered = max(covered, int(part.trajectories[-1]) + 1)
     try:
         merged = results[0] if len(results) == 1 else mipt.EnsembleResult.concatenate(results)
     except ValueError as exc:
-        raise ValueError(f"saved parts do not belong to the same run: {exc}") from None
+        raise ValueError(
+            f"saved parts do not belong to the same run: {exc}{_strays(results, paths)}"
+        ) from None
     expected = np.arange(merged.num_trajectories)
     if not np.array_equal(np.asarray(merged.trajectories), expected):
         raise ValueError(
             "saved trajectories are not contiguous from 0; the directory mixes different runs"
         )
     return merged
+
+
+_STRAYS_SHOWN = 20
+
+
+def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
+    """The saved parts that cannot be merged with the earliest one, and how to recover.
+
+    The earliest part (``result.npz``, else the first chunk) holds the earlier
+    data; a part of another run (another protocol, seed, version or randomness
+    contract) is named so that deleting it makes the directory readable again.
+    """
+    strays = []
+    for path, part in zip(paths[1:], results[1:], strict=True):
+        try:
+            mipt.EnsembleResult.concatenate([results[0], part])
+        except ValueError:
+            strays.append(path)
+    if not strays:
+        return ""
+    names = [p.name for p in strays[:_STRAYS_SHOWN]]
+    if len(strays) > _STRAYS_SHOWN:
+        names.append(f"and {len(strays) - _STRAYS_SHOWN} more")
+    return (
+        f". These files in {str(strays[0].parent)!r} do not belong to the run in "
+        f"{paths[0].name}: {', '.join(names)}; delete them to recover the trajectories saved "
+        "before (load_results then reads them, and start_ensemble_job resumes the run)"
+    )
 
 
 def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
@@ -2395,6 +2465,7 @@ def run_ensemble(
     """
     start = time.perf_counter()
     mc = _build_spec(spec)
+    graph_file = _graph_file_record(spec) if output_dir is not None else None
     trajectories = _trajectory_count(mc, trajectories)
     if max_seconds is not None:
         max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
@@ -2426,7 +2497,14 @@ def run_ensemble(
         _atomic_save_result(result, out_path / _RESULT_FILE)
         files = {"result": str(out_path / _RESULT_FILE)}
         files.update(
-            _write_run_metadata(out_path, spec, trajectories, seed, command or "run_ensemble")
+            _write_run_metadata(
+                out_path,
+                spec,
+                trajectories,
+                seed,
+                command or "run_ensemble",
+                graph_file=graph_file,
+            )
         )
         extra["files"] = files
     return _bounded_summary(result, extra)
@@ -2438,7 +2516,9 @@ def load_results(path: str) -> dict[str, Any]:
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or cancelled
     job. The summary has the same form as :func:`run_ensemble`'s, plus the
-    stored ``spec`` when ``spec.json`` exists.
+    stored ``spec`` when ``spec.json`` exists: exactly as stored (its floats
+    are not rounded for display), so passing it back to
+    :func:`start_ensemble_job` resumes or extends the run.
     """
     if not isinstance(path, (str, os.PathLike)):
         raise ValueError("path must be a string")
@@ -2550,13 +2630,19 @@ def start_ensemble_job(
 
     Resuming: call again with the same ``output_dir`` and spec (``seed`` may
     be omitted; the stored one is used). Finished trajectories are kept, and a
-    larger ``trajectories`` extends a finished run. A directory holding a
-    different spec or seed, or a run made under another randomness contract
-    or ``sparsegf2`` version, is refused. For a collection of graphs
-    ``trajectories`` may be omitted (every graph gets ``circuits_per_graph``
-    circuits).
+    larger ``trajectories`` extends a finished run. Without ``trajectories``
+    a single-graph run resumes to the target stored in ``spec.json``; a
+    collection of graphs runs all of its circuits (every graph gets
+    ``circuits_per_graph``). Before anything runs, a directory made under
+    another randomness contract or ``sparsegf2`` version, or holding another
+    seed, is refused, and so is a spec that builds another protocol than the
+    saved run (the error names the first differing key and both values) or a
+    graph file whose contents changed since the run started.
     """
     mc = _build_spec(spec)
+    graph_file = _graph_file_record(spec)
+    if trajectories is None and mc.num_trajectories is None:
+        trajectories = _stored_target(output_dir)  # a resume: the target in spec.json
     trajectories = _trajectory_count(mc, trajectories)
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
@@ -2568,16 +2654,7 @@ def start_ensemble_job(
     existing, meta = _load_directory(out)
     notes: list[str] = []
     if meta is not None:
-        if _canonical(meta.get("spec")) != _canonical(spec):
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run with a different spec; use a new directory"
-            )
-        if seed is not None and _resolve_seed(seed) != meta.get("seed"):
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit seed to "
-                "resume it, or use a new directory"
-            )
-        seed = meta["seed"]
+        # The contract and version first: nothing else can be resumed under another one.
         stored = _read_provenance(out)
         _check_contract(out, stored, existing)
         made_with = None if stored is None else stored.get("sparsegf2")
@@ -2587,6 +2664,13 @@ def start_ensemble_job(
                 f"but this is {__version__}; trajectories from different versions need not "
                 "agree, so finish the run with that version or start a new directory"
             )
+        notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
+        if seed is not None and _resolve_seed(seed) != meta.get("seed"):
+            raise ValueError(
+                f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit seed to "
+                "resume it, or use a new directory"
+            )
+        seed = meta["seed"]
         started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
         if started_at and now_at and started_at != now_at:
             notes.append(
@@ -2630,6 +2714,7 @@ def start_ensemble_job(
             seed,
             command or "start_ensemble_job",
             resumed_from=done if meta is not None else None,
+            graph_file=graph_file,
         )
     except BaseException:
         with _JOBS_LOCK:  # never leave a job that would block this output_dir
@@ -2648,6 +2733,151 @@ def start_ensemble_job(
 def _canonical(obj: Any) -> str:
     """Exact JSON text of a spec, for comparing a stored run with a new request."""
     return json.dumps(_jsonable(obj, exact=True), sort_keys=True)
+
+
+def _stored_target(output_dir: Any) -> Any:
+    """The trajectory target in ``output_dir/spec.json``, or None (nothing is created)."""
+    if not isinstance(output_dir, (str, os.PathLike)) or not str(output_dir):
+        return None
+    try:
+        path = Path(output_dir).expanduser().resolve() / _SPEC_FILE
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return meta.get("trajectories") if isinstance(meta, dict) else None
+
+
+_ABSENT = object()
+
+
+def _shown(value: Any) -> str:
+    """A spec value as JSON for a message (``absent`` for a missing key), shortened."""
+    if value is _ABSENT:
+        return "absent"
+    text = json.dumps(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _spec_difference(saved: Any, given: Any, path: str = "") -> str | None:
+    """The first key path where two JSON specs differ, with both values, or None.
+
+    Values compare as exact JSON (``1`` and ``1.0`` differ). The keys of
+    ``saved`` come first, in their order, then the keys only ``given`` has.
+    """
+    if isinstance(saved, dict) and isinstance(given, dict):
+        for key in [*saved, *(k for k in given if k not in saved)]:
+            where = f"{path}.{key}" if path else str(key)
+            a, b = saved.get(key, _ABSENT), given.get(key, _ABSENT)
+            found = (
+                _spec_difference(a, b, where)
+                if a is not _ABSENT and b is not _ABSENT
+                else f"{where} is {_shown(a)} in its spec.json and {_shown(b)} here"
+            )
+            if found:
+                return found
+        return None
+    if isinstance(saved, list) and isinstance(given, list):
+        for i in range(max(len(saved), len(given))):
+            a = saved[i] if i < len(saved) else _ABSENT
+            b = given[i] if i < len(given) else _ABSENT
+            found = (
+                _spec_difference(a, b, f"{path}[{i}]")
+                if a is not _ABSENT and b is not _ABSENT
+                else f"{path}[{i}] is {_shown(a)} in its spec.json and {_shown(b)} here"
+            )
+            if found:
+                return found
+        return None
+    if _canonical(saved) != _canonical(given):
+        return f"{path or 'the spec'} is {_shown(saved)} in its spec.json and {_shown(given)} here"
+    return None
+
+
+def _check_same_run(
+    out: Path,
+    spec: dict,
+    mc: mipt.MonitoredCircuit,
+    graph_file: dict[str, str] | None,
+    meta: dict,
+    existing: mipt.EnsembleResult | None,
+) -> list[str]:
+    """Refuse, before anything runs, a resume or extension that would not continue the saved run.
+
+    A run is identified by its protocol (what the spec builds, compared by
+    :func:`sparsegf2.mipt._protocol_difference`, which every merge of saved
+    parts also requires), not by the text of its spec. So a spec written
+    differently that builds the same protocol continues the run: a cutoff
+    given as a budget or per-size mapping that resolves to the same size, a
+    range string for a qubit list, a default written out, another path to
+    the same graphs. The saved protocol is that of the saved results, or,
+    when none are saved yet, the one ``spec.json`` builds.
+
+    A graph file must still hold the bytes recorded in ``spec.json``. If its
+    bytes changed, the resume goes on only when saved results show that it
+    holds the same graphs; with nothing saved there is nothing to compare
+    with, and it is refused. A ``spec.json`` written before the hash was
+    recorded is checked against the saved results alone.
+
+    Returns notes for the job status; raises ``ValueError`` naming what differs.
+    """
+    where = f"output_dir {str(out)!r}"
+    text = _spec_difference(meta.get("spec"), _jsonable(spec, exact=True))
+    saved: mipt.MonitoredCircuit | None = None
+    if existing is not None:
+        saved = existing.spec
+    elif text is not None:
+        with contextlib.suppress(ValueError):  # e.g. its graph file is gone
+            saved = _build_spec(meta.get("spec"))
+    difference = None if saved is None else mipt._protocol_difference(saved, mc)
+    notes = []
+    recorded = meta.get("graph_file")
+    if (
+        graph_file is not None
+        and isinstance(recorded, dict)
+        and recorded.get("sha256") not in (None, graph_file["sha256"])
+    ):
+        if existing is None or difference is not None:
+            then = recorded.get("path")
+            started = f" (then {then!r})" if then and then != graph_file["path"] else ""
+            graphs_differ = (
+                f", and the saved results differ from what the spec builds with it now "
+                f"({difference} differs)"
+                if existing is not None
+                else "; with no results saved yet, its graphs cannot be compared"
+            )
+            raise ValueError(
+                f"{where}: the graph file {graph_file['path']!r} changed since the run "
+                f"started{started} (sha256 {recorded['sha256'][:16]}... in spec.json, "
+                f"{graph_file['sha256'][:16]}... now){graphs_differ}; restore the file the run "
+                "used, or use a new directory"
+            )
+        notes.append(
+            f"the graph file {graph_file['path']!r} has other bytes than when the run started, "
+            "but holds the graphs the saved results used; spec.json now records its new sha256"
+        )
+    if text is not None and (saved is None or difference is not None):
+        protocol = "" if difference is None else f" (the protocol differs in {difference})"
+        raise ValueError(
+            f"{where} holds a run with a different spec: {text}{protocol}; resume with the spec "
+            "in its spec.json (load_results returns it), or use a new directory"
+        )
+    if difference is not None:  # the same spec text, but it builds another protocol now
+        if graph_file is not None:
+            raise ValueError(
+                f"{where}: the graph file {graph_file['path']!r} no longer holds the graphs the "
+                f"saved results used ({difference} differs); restore the file the run used, or "
+                "use a new directory"
+            )
+        raise ValueError(
+            f"{where}: its spec now builds another protocol than the saved results "
+            f"({difference} differs); use a new directory"
+        )
+    if text is not None:
+        notes.append(
+            f"this spec is written differently from the one in spec.json ({text}) but builds "
+            "the same protocol, so it continues the run; spec.json now stores this form"
+        )
+    return notes
 
 
 def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:
