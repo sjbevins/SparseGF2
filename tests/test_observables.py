@@ -279,6 +279,44 @@ def test_kaplan_meier_known_answer():
     np.testing.assert_allclose(no_censoring["survival"], [2 / 3, 1 / 3, 0])
 
 
+@pytest.mark.parametrize("n", [2, 7, 10, 11, 100, 101, 999])
+def test_kaplan_meier_without_censoring_is_a_count_over_n(n):
+    from sparsegf2 import analysis
+
+    rng = np.random.default_rng(n)
+    t = rng.integers(0, max(3, n // 3), size=n)
+    km = analysis.kaplan_meier(t, np.ones(n, dtype=bool))
+    # oracle: numpy counting, one float division of two integers
+    expected = np.array([np.count_nonzero(t > x) / n for x in np.unique(t)])
+    np.testing.assert_array_equal(km["survival"], expected)
+
+
+def test_kaplan_meier_survival_one_half_is_exactly_one_half():
+    from sparsegf2 import analysis
+
+    # N = 10: events at 1, 1, 2, 2, 3, 4, 5; censored at 3, 4, 4. Hand arithmetic,
+    # risk set = times >= t:
+    #   t = 1: n = 10, d = 2 -> 8/10
+    #   t = 2: n =  8, d = 2 -> 6/8
+    #   t = 3: n =  6, d = 1 -> 5/6      (the censored entry at 3 is still at risk)
+    # product 4/5 * 3/4 * 5/6 = 60/120 = 1/2 exactly. The float product
+    # ((1 - 0.2) * 0.75) * (1 - 1/6) is not 0.5 (it is one ulp off).
+    t = np.array([4, 1, 4, 2, 5, 3, 1, 3, 2, 4])
+    o = np.array([0, 1, 1, 1, 1, 0, 1, 1, 1, 0], dtype=bool)
+    km = analysis.kaplan_meier(t, o)
+    np.testing.assert_array_equal(km["times"], [1, 2, 3, 4, 5])
+    assert km["survival"][2] == 0.5
+    # no censoring: 5 of 10 have purified by t = 2 -> exactly 1/2
+    clean = analysis.kaplan_meier(np.array([1, 1, 2, 2, 2, 3, 3, 3, 3, 4]), np.ones(10, dtype=bool))
+    assert clean["survival"][1] == 0.5
+    # censoring strictly before the event time: 8 trajectories;
+    # t = 1: the 2 censored at 0 have left, 6 at risk, d = 3 -> 3/6 = 1/2
+    early = analysis.kaplan_meier(
+        np.array([0, 0, 1, 1, 1, 2, 2, 2]), np.array([0, 0, 1, 1, 1, 0, 0, 0], dtype=bool)
+    )
+    assert early["survival"][0] == 0.5
+
+
 def test_bernoulli_erasure_curve():
     from sparsegf2 import analysis
 

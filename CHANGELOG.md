@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* **Kaplan-Meier survival is correctly rounded:** `analysis.kaplan_meier` computes
+  `survival` as the exact product of (n_j - d_j) / n_j (`fractions.Fraction`), rounded to
+  float64 once, instead of a running float product. A survival of exactly 1/2 used to
+  come out as 0.5000000000000001, so the median rule "first time with survival <= 0.5"
+  skipped it; the purification-time example no longer needs a tolerance. `stderr` and
+  `at_risk` are unchanged.
 * **Kaplan-Meier censoring time:** `EnsembleResult.censoring_layer` (the last spec
   checkpoint at which purification was tested, per trajectory) and
   `EnsembleResult.purification_times()` (`(time, observed)` for
