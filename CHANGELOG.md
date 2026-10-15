@@ -18,6 +18,41 @@
 * **`num_system` is bounded:** at most `MAX_QUBITS` (65,536), checked before any graph
   is generated, in `estimate_ensemble` too (`num_system: 10**12` ran out of memory
   generating the graph). `capabilities()["limits"]["max_num_system"]` gives it.
+* **Honest runtime estimates up to n = 2048:** the probe terms of `estimate_ensemble`
+  (and so of `run_ensemble`'s `max_seconds` guard and of the default chunk size of
+  background jobs) are refitted to one-thread measurements up to n = 2048, in both
+  reference pictures and in the states that make each probe expensive
+  (`benchmarks/probe_cost.py`, results in `benchmarks/results/probe_cost.md`). Every
+  probe kind is now priced at about 3 times its cost measured on an AMD Ryzen 9 9950X3D
+  or more. The old terms grew about linearly in n and were up to 100 times too low at
+  n = 2048: `entropy_profile` and `erasure_lost_profile` grow as n² W (W the tableau's
+  words per column), every entropy as m² W for the smaller side m of its region,
+  `contiguous_distance` in the single-reference picture as n³ W, and the elimination that
+  every erasure probe starts with as n W Wc (Wc the words of a code column);
+  `uncorrectable_region_counts` at w <= 2 was priced at 0.25 to 0.8 times its cost, and
+  `erasure_first_failure` with a single reference at 0.1 to 0.9. A run estimated at 50 s
+  could take 20 minutes, blocking an MCP call that should have gone to a background job.
+  The scans that stop at a code's first failure (`contiguous_distance`,
+  `erasure_first_failure`) are priced for the worst case of the single-reference picture
+  (k = 1, erasures that fail only at about n / 2 qubits) and for the codes of monitored
+  dynamics in the purification picture, so their estimates for small-distance codes are
+  generous. Trajectories on many threads are no longer priced as if every thread ran as
+  fast as one thread alone: each of T busy threads counts as 1 / (1 + 0.04 (T - 1)) of one
+  (0.45 at 32 threads; with every logical processor busy, each ran at 0.35 to 0.66 of a
+  thread alone's speed), so one trajectory per thread is estimated longer than one
+  trajectory alone. Graph generation is priced per family: `erdos_renyi` draws a random
+  number for every pair (it was priced 10 to 100 times too low) and `random_regular`
+  repeats its pairing until the graph is simple.
+* **Graph collections are bounded before they are built:** the edges of a spec's graphs
+  may take at most `MAX_GRAPH_GB` (2 GB at 16 bytes per edge; the engine holds them about
+  three times over, so this matches the 8 GB a result may take), computed from the
+  family's edge count before anything is generated. A larger `graph.realizations`
+  collection is refused by `estimate_ensemble`, `run_ensemble` and `start_ensemble_job`
+  with a message naming `realizations` and `num_system` and how many realizations fit;
+  one graph that alone is too large (`complete`, or `erdos_renyi`, which draws every
+  pair, on tens of thousands of qubits) is refused with the largest `num_system` that
+  fits. A Watts–Strogatz collection at n = 4096 with 100,000 realizations (13 GB of edges)
+  used to exhaust the memory of the very call meant to say it was too big.
 * **Directories that cannot be written or read are input errors:** an `output_dir` that
   cannot be created or written (no permission, a full or read-only drive, a path below a
   file), its lock included, raises `ValueError("output_dir DIR is not writable: ...")` in

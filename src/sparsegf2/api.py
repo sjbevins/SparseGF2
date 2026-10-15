@@ -105,6 +105,12 @@ MAX_GRAPH_REALIZATIONS = 100_000
 MAX_RESULT_GB = 8.0
 """Largest ensemble result (probe values and code snapshots) one run or job may hold in memory."""
 
+MAX_GRAPH_GB = 2.0
+"""Largest memory the edges of a spec's graphs (16 bytes per edge) may take, checked from the
+family's edge count before any graph is generated. The engine holds the edges about three
+times over (the graphs, their concatenation and an index per edge), so a collection at this
+limit needs about as much memory as the largest result (:data:`MAX_RESULT_GB`)."""
+
 MAX_CHECKPOINTS_SHOWN = 50
 MAX_BITS_SHOWN = 256
 MAX_LIST_SHOWN = 64
@@ -1355,6 +1361,9 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             )
         if "seed" not in params:
             raise ValueError("graph.realizations needs a random family with its own 'seed'")
+        family = params.get("family")
+        if isinstance(family, str):  # any other family value is reported by the first graph
+            _check_graph_memory(family, params, n, realizations)  # before any graph exists
         seed = params.pop("seed")
         base = [_require_int(seed, "graph.seed", minimum=0)] if not isinstance(seed, list) else seed
         bank: list[np.ndarray] = []
@@ -1380,7 +1389,104 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
         cols = _require_int(cols, "graph (lattice_2d): cols", minimum=1)
         if rows * cols != n:
             raise ValueError(f"graph (lattice_2d): rows * cols must equal num_system = {n}")
+    _check_graph_memory(family, params, n, None)
     return _call_with(fn, params, {"n": n}, f"graph ({family})")
+
+
+_EDGE_BYTES = 16  # one edge of an (m, 2) int64 edge array
+
+
+def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
+    """At most how many edges one graph of ``family`` on ``n`` nodes keeps, and how many
+    pairs generating it materialises, from its parameters alone (before it exists).
+
+    None for a family not listed here, or when a parameter the count needs is not a number
+    in its valid range: the family itself then reports the parameter.
+    """
+    pairs = n * (n - 1) // 2
+
+    def number(key: str) -> float | None:
+        v = params.get(key)
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, float, np.number)):
+            return None
+        try:
+            x = float(v)
+        except OverflowError:  # an int beyond any float: out of every family's range
+            return None
+        return x if math.isfinite(x) else None
+
+    if family == "cycle":
+        return n, n
+    if family == "path":
+        return n - 1, n - 1
+    if family == "complete":
+        return pairs, pairs
+    if family == "lattice_2d":
+        return 2 * n, 2 * n
+    if family == "erdos_renyi":
+        # every pair is drawn (so materialised); the edges kept are binomial: mean plus
+        # six standard deviations
+        p = number("p")
+        if p is None or not 0.0 <= p <= 1.0:
+            return None
+        mean = p * pairs
+        return min(pairs, math.ceil(mean + 6.0 * math.sqrt(mean * (1.0 - p)) + 1.0)), pairs
+    if family in ("watts_strogatz", "newman_watts", "random_regular"):
+        k = number("d" if family == "random_regular" else "k")
+        if k is None or not 0 <= k < n:
+            return None
+        ring = math.ceil(n * k / 2)
+        # Newman-Watts keeps the ring and adds at most one shortcut per ring edge
+        edges = min(pairs, 2 * ring if family == "newman_watts" else ring)
+        return edges, edges
+    return None
+
+
+def _check_graph_memory(family: str, params: dict, n: int, realizations: int | None) -> None:
+    """Refuse graphs whose edges would exceed :data:`MAX_GRAPH_GB`, before generating any.
+
+    Checks generating one graph, and keeping ``realizations`` of them (one graph when None).
+    """
+    counts = _graph_edges(family, params, n)
+    if counts is None:
+        return
+    kept, generated = counts
+    limit = MAX_GRAPH_GB * 1e9
+    one = max(kept, generated)
+    if _EDGE_BYTES * one > limit:
+        what = "pairs drawn" if generated > kept else "edges"
+        raise ValueError(
+            f"graph ({family}): one graph on num_system = {n:,} qubits takes about "
+            f"{_EDGE_BYTES * one / 1e9:.1f} GB ({one:,} {what} at {_EDGE_BYTES} bytes; limit "
+            f"{MAX_GRAPH_GB:g} GB): at most num_system = "
+            f"{_largest_fitting_n(family, params, n, limit):,} fits for this family and these "
+            "parameters; choose a smaller num_system or a sparser graph"
+        )
+    if realizations is not None and _EDGE_BYTES * kept * realizations > limit:
+        raise ValueError(
+            f"graph.realizations = {realizations:,} graphs on num_system = {n:,} qubits would "
+            f"take about {_EDGE_BYTES * kept * realizations / 1e9:.1f} GB of edges ({kept:,} "
+            f"edges each at {_EDGE_BYTES} bytes; limit {MAX_GRAPH_GB:g} GB): at most "
+            f"{int(limit // (_EDGE_BYTES * kept)):,} realizations fit at num_system = {n:,}; "
+            "use fewer graphs with more circuits_per_graph each, or a smaller num_system"
+        )
+
+
+def _largest_fitting_n(family: str, params: dict, n: int, limit: float) -> int:
+    """The largest num_system below ``n`` at which one graph of ``family`` fits in ``limit``."""
+
+    def fits(m: int) -> bool:
+        counts = _graph_edges(family, params, m)
+        return counts is None or _EDGE_BYTES * max(counts) <= limit
+
+    low, high = 2, n  # fits(low) holds: a graph on 2 nodes has at most one edge
+    while high - low > 1:
+        mid = (low + high) // 2
+        if fits(mid):
+            low = mid
+        else:
+            high = mid
+    return low
 
 
 def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
@@ -1640,53 +1746,99 @@ def _edge_list(value: Any) -> np.ndarray:
     return arr
 
 
-def _entropy_us(sizes: Sequence[int], words: int) -> float:
-    """Cost of entropies of regions with the given sizes on a ``words``-word tableau."""
-    return sum(4.0 + 0.1 * size * words for size in sizes)
+# The probe terms of the cost model: one-thread microseconds per evaluation, deliberately
+# pessimistic. Fitted to benchmarks/results/probe_cost.md (AMD Ryzen 9 9950X3D, one thread,
+# 2026-10-15, n = 64..2048, in the states that make each probe expensive) at about 3 times the
+# measured cost or more at every measured point, which leaves room for a machine about twice as
+# slow per thread. How much slower each thread runs while many run at once is priced separately
+# (_parallel_threads). W is the tableau's words per column, ceil(num_qubits / 64);
+# Wc = ceil(2 n / 64), the words of a code column.
 
 
-def _probe_us(p: mipt.Probe, n: int, words: int) -> float:
-    """Microseconds (one thread) to evaluate one probe at one checkpoint, pessimistically."""
-    r = [len(region) for region in p.regions]
+def _elimination_us(m: int, words: int) -> float:
+    """A Gaussian elimination over the 2m stabilizer columns of m qubits: O(m**2 W)."""
+    return 2.0 + 1e-3 * m * m * (32.0 + 1.1 * words)
+
+
+def _entropy_us(sizes: Sequence[int], num_qubits: int, words: int) -> float:
+    """Entropies of regions of the given sizes: each marks the region among all the qubits
+    and eliminates over the smaller side."""
+    return sum(
+        2.0 + 0.01 * num_qubits + _elimination_us(min(size, num_qubits - size), words)
+        for size in sizes
+    )
+
+
+def _code_columns_us(n: int, words: int) -> float:
+    """``code_columns``, which every evaluation of an erasure probe starts with: a bit test
+    per tableau row (64 W of them) and code column (2n), and the row reduction behind it."""
+    code_words = (2 * n + 63) // 64
+    return 1e-3 * (64 * words) * (2 * n) * (24.0 + 0.15 * code_words)
+
+
+def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit) -> float:
+    """Microseconds (one thread) to evaluate one probe at one checkpoint, pessimistically.
+
+    The erasure scans that stop at the code's first failure (``contiguous_distance``,
+    ``erasure_first_failure``) cost what the code makes them: they are priced for the worst
+    case of the single-reference picture (k = 1 and erasures that fail only at about n / 2
+    qubits, as in the volume-law phase) and for the codes of monitored dynamics measured in
+    the purification picture (benchmarks/results/probe_cost.md and erasure_cost.md). A
+    purification code of rate near 0 whose erasures fail only near n / 2 would cost up to
+    the single-reference price.
+    """
+    n, num_qubits = mc.num_system, mc.num_qubits
+    words = (num_qubits + 63) // 64
+    code_words = (2 * n + 63) // 64
+    sizes = [len(region) for region in p.regions]
+    single = mc.reference == "single"
     if p.kind == "code_dimension":
         return 1.0 + 0.06 * n
     if p.kind in ("entropy", "half_cut"):
-        return _entropy_us(r, words)
-    if p.kind == "lost_information":
-        return _entropy_us([2 * size for size in r], words)
+        return _entropy_us(sizes, num_qubits, words)
+    if p.kind == "lost_information":  # two eliminations over the erased qubits themselves
+        return sum(2 * _elimination_us(size, words) for size in sizes)
     if p.kind == "mutual_information":
-        return _entropy_us([*r, sum(r)], words)
+        return _entropy_us([*sizes, sum(sizes)], num_qubits, words)
     if p.kind == "tripartite":
-        a, b, c = r
-        return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], words)
+        a, b, c = sizes
+        return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], num_qubits, words)
     if p.kind == "contiguous_distance":
+        if single:  # n starts, each grown to about n / 2 qubits: O(n**3 W)
+            return 20.0 + 1e-3 * n**3 * (7.8 + 0.6 * words)
         return 50.0 + 0.03 * n**2.25
-    if p.kind == "erasure_lost_profile":
-        return p.samples * (0.8 * n + 0.05 * n * words)
-    # The erasure kernels first row-reduce the code's columns (2n columns of at
-    # most 2n bits); fitted to n = 256..2048 and rounded up.
-    code_words = (2 * n + 63) // 64
-    columns = 0.004 * n**2 * math.sqrt(code_words)
+    if p.kind == "entropy_profile":  # one incremental pass over the n qubits: O(n**2 W)
+        return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
+    if p.kind == "erasure_lost_profile":  # two such passes per sample
+        return 5.0 + p.samples * (2.0 + 1e-3 * n * n * (30.0 + 1.8 * words))
     if p.kind == "erasure_first_failure":
-        return columns + p.samples * 0.03 * n**1.5
+        # with a single reference every ordering is scanned to about n / 2: O(n**2 Wc)
+        ordering = 1e-3 * n * n * (7.8 + 0.3 * code_words) if single else 0.03 * n**1.5
+        return 5.0 + _code_columns_us(n, words) + p.samples * ordering
     if p.kind == "uncorrectable_counts":
-        # C(n, w - 1) prefixes, each with up to 4**(w - 1) hash lookups; in logs,
-        # so an absurd max_size gives a huge estimate rather than an overflow
+        # C(n, w - 1) prefixes, each walking the 4**(w - 1) elements of its span with a hash
+        # lookup of Wc words; in logs, and capped, so that an absurd max_size gives a huge
+        # estimate rather than an overflow, even times many evaluations and trajectories
         w = p.size
         log_prefixes = math.lgamma(n + 1) - math.lgamma(w) - math.lgamma(n - w + 2)
-        log_us = log_prefixes + (w - 1) * math.log(4) + math.log(0.15 + 0.015 * code_words)
-        return columns + math.exp(min(log_us, 700.0))
-    if p.kind == "code_snapshot":
-        return 1.0 + 0.01 * n**2
-    return 10.0 + 0.5 * n + 0.05 * n * words  # entropy_profile, and any newer probe
+        log_us = log_prefixes + (w - 1) * math.log(4) + math.log(1e-3 * (56.0 + 14.0 * code_words))
+        return 5.0 + _code_columns_us(n, words) + math.exp(min(log_us, 400.0))
+    if p.kind == "code_snapshot":  # a bit test per generator (at most n) and system qubit
+        return 2.0 + 0.022 * n * n + 1e-3 * num_qubits
+    # any newer probe: priced as a pass over every qubit
+    return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
 
 
 def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
     """Pessimistic microseconds (one thread) for one trajectory of ``mc``.
 
-    Fitted to measured runs (4-core x86-64, 2026, n = 32..512, both reference
-    pictures) and rounded up; real runs were 1x to 3x faster. Trajectories
-    that stop early (``stop_when_purified``) make real runs faster still.
+    The dynamics and setup terms were fitted to measured runs (4-core x86-64,
+    2026, n = 32..512, both reference pictures) and rounded up; real runs
+    were 1x to 3x faster. On an AMD Ryzen 9 9950X3D (one thread, n = 64 to
+    2048) they are 3.3 to 33 times the measured cost
+    (benchmarks/results/probe_cost.md). The probe terms are
+    :func:`_probe_us`. Trajectories that stop early (``stop_when_purified``)
+    make real runs faster still.
     """
     n, words = mc.num_system, (mc.num_qubits + 63) // 64
     gate_us = 0.2 + 0.04 * words
@@ -1701,7 +1853,7 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
         mc.scramble_gates + mc.scramble_matchings * (n // 2) + mc.scramble_layers * gates_per_layer
     )
     dynamics = mc.layers * layer + scramble_gates * gate_us
-    probes = sum(len(mc.probe_layers(p.name)) * _probe_us(p, n, words) for p in mc.probes)
+    probes = sum(len(mc.probe_layers(p.name)) * _probe_us(p, mc) for p in mc.probes)
     detection = len(mc.checkpoint_layers) * (1.0 + 0.06 * n) if mc.reference != "none" else 0.0
     setup = 5.0 + 0.01 * mc.num_qubits * words
     return setup + dynamics + probes + detection
@@ -1716,15 +1868,51 @@ def _setup_us(spec: dict, mc: mipt.MonitoredCircuit) -> float:
     Graph generation, validation and (for the matching schedule) edge
     colouring run in Python, once per graph, so a large graph bank
     (``realizations``) costs seconds before the first trajectory starts.
-    Fitted to measured runs (WS graphs, n = 32..128) and rounded up.
+    Fitted to measured runs (n = 64..16384, every random family) and rounded
+    up: at least 2 times the cost measured on an AMD Ryzen 9 9950X3D.
     """
     edges = sum(len(g) for g in mc.graphs)
     us = 50.0 * mc.num_graphs + 0.5 * edges  # normalising and validating every graph
-    if "graph" in spec:
-        us += 300.0 * mc.num_graphs + 1.0 * edges  # generating the graphs
+    if "graph" in spec:  # generating the graphs
+        us += mc.num_graphs * _generation_us(spec["graph"], mc.num_system) + 2.5 * edges
     if mc.schedule == "matching":
         us += 2.5 * edges  # edge colouring
     return us
+
+
+def _generation_us(graph: Any, n: int) -> float:
+    """One-thread microseconds to generate one graph of ``graph`` beyond its edges.
+
+    ``erdos_renyi`` draws a random number for every pair, and ``random_regular``
+    redraws its pairing until the graph is simple, about exp((d**2 - 1) / 4)
+    times for degree d (at most 1000).
+    """
+    family = graph.get("family") if isinstance(graph, dict) else None
+    us = 300.0
+    if family == "erdos_renyi":
+        us += 0.6 * (n * (n - 1) // 2)
+    elif family == "random_regular":
+        d = graph.get("d")
+        if isinstance(d, (int, float)) and not isinstance(d, bool) and 0 < d < n:
+            exponent = (float(d) ** 2 - 1.0) / 4.0
+            tries = 1000.0 if exponent > math.log(1000.0) else math.exp(exponent)
+            us += 2.0 * tries * n * d
+    return us
+
+
+def _parallel_threads(threads: int) -> float:
+    """What ``threads`` busy threads are worth in one-thread speed, pessimistically.
+
+    A trajectory runs slower while others run beside it: all-core clocks are
+    lower than one core's, SMT siblings share a core, and the threads share the
+    memory bandwidth. On an AMD Ryzen 9 9950X3D (16 cores, 32 logical
+    processors) each of 32 busy threads ran probe-heavy trajectories at 0.35 to
+    0.52 of one thread's speed, and dynamics-heavy ones at 0.54 to 0.66
+    (benchmarks/results/probe_cost.md, thread_scaling.md); this model gives
+    0.45 (0.89 at 4 threads), and the margin of the one-thread cost model
+    covers the rest.
+    """
+    return threads / (1.0 + 0.04 * (threads - 1))
 
 
 def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) -> float:
@@ -1733,7 +1921,7 @@ def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) 
     # Trajectories are the unit of parallelism: fewer trajectories than threads
     # leave threads idle.
     parallel = min(numba.get_num_threads(), trajectories)
-    kernel = trajectories * _trajectory_us(mc) * 1e-6 / parallel
+    kernel = trajectories * _trajectory_us(mc) * 1e-6 / _parallel_threads(parallel)
     return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
 
 
@@ -3252,7 +3440,7 @@ def _default_chunk_size(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
     import numba
 
     threads = numba.get_num_threads()
-    per_traj = max(_trajectory_us(mc) * 1e-6 / threads, 1e-9)
+    per_traj = max(_trajectory_us(mc) * 1e-6 / _parallel_threads(threads), 1e-9)
     size = int(10.0 / per_traj)
     return int(min(trajectories, max(size, 4 * threads)))
 

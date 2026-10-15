@@ -237,11 +237,12 @@ lost, and the profile's `what` line and a note on each probe say so (§6).
 
 * $\ell_C(A)$ is an exact integer on every path. A fixed region costs two
   eliminations over its $2|A|$ columns of $W$ words, $O(|A|^2 W)$, which
-  `estimate_ensemble` prices at $4 + 0.2|A|W$ µs per evaluation
-  (`api.py::_probe_us`).
-* `erasure_lost_profile` costs one incremental pass per ordering, priced by
-  `estimate_ensemble` at about $M(0.8n + 0.05nW)$ µs per evaluation, a
-  pessimistic fit (`api.py::_probe_us`).
+  `estimate_ensemble` prices at $4 + 2 \cdot 10^{-3}|A|^2(32 + 1.1W)$ µs per
+  evaluation (`api.py::_probe_us`).
+* `erasure_lost_profile` costs one incremental pass per ordering over two bases,
+  $O(n^2 W)$, priced by `estimate_ensemble` at about
+  $M(2 + 10^{-3} n^2 (30 + 1.8W))$ µs per evaluation, a pessimistic fit
+  (`api.py::_probe_us`; measured costs in `benchmarks/results/probe_cost.md`).
 * The profile is a mean over $M$ orderings. Each $\hat\lambda_C(m)$ is
   unbiased, and its sampling error is not stored, since only the mean is.
   Across trajectories, the standard error of the ensemble mean

@@ -12,6 +12,7 @@ them directly).
 | [`why_data.py`](why_data.py) | the two "why this simulator" figures: the cost of measuring the state after every layer (SparseGF2 vs Stim, same circuits), and the cost of erasure screening per code (SparseGF2 kernels vs a compiled from-scratch baseline) | `results/why.json` |
 | [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling (four workloads in all; the run is timed, result digests are not) at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
 | [`erasure_cost.py`](erasure_cost.py) | one-thread seconds per code of the exhaustive erasure counts (w = 1, 2, ... per n and p, through `StabilizerCode` and through the engine probe) and of first-failure orderings (M = 100, 512, 2048), on codes from Watts–Strogatz trajectories, n = 32 to 512; the cutoff m\*(n) and seconds per code of region budgets B; an example study total; levels it does not run are extrapolated and labelled so | `results/erasure_cost.json`, `results/erasure_cost.md` |
+| [`probe_cost.py`](probe_cost.py) | one-thread seconds per evaluation of every probe kind, n = 64 to 2048, in the states that make each expensive (single reference with k = 1 and erasures failing near n / 2; purification, k = n; a monitored purification code), set against `estimate_ensemble`'s cost model (`api._trajectory_us`); `--from-json` prices saved measurements with the current model | `results/probe_cost.json`, `results/probe_cost.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -21,11 +22,12 @@ python benchmarks/physics_data.py
 python benchmarks/why_data.py          # about 4 minutes, one thread
 python benchmarks/thread_scaling.py    # about 15 minutes, all cores; idle machine
 python benchmarks/erasure_cost.py      # about 20 minutes, one thread; idle machine
+python benchmarks/probe_cost.py        # about 6 minutes, one thread; idle machine
 python benchmarks/make_figures.py
 ```
 
 `thread_scaling.py --quick --out <dir>` is its smoke test (a few seconds once compiled), and so
-is `erasure_cost.py --quick --out <dir>`.
+are `erasure_cost.py --quick --out <dir>` and `probe_cost.py --quick --out <dir>`.
 
 `why_data.py --quick --out <file>` is a smoke test (tiny sizes, under a
 minute including compilation); pass that file to `make_figures.py --why <file>

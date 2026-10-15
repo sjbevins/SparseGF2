@@ -360,7 +360,26 @@ saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`. `run_ensemb
 `MAX_RESULT_GB` (8 GB); the message suggests giving the large probes
 (`erasure_first_failure` samples, `code_snapshot`, vector probes) fewer checkpoints of
 their own, or splitting the trajectories over several output directories. They also
-refuse a `num_system` above `MAX_QUBITS` (65,536) before any graph is generated.
+refuse a `num_system` above `MAX_QUBITS` (65,536) before any graph is generated, and
+graphs whose edges would take more than `MAX_GRAPH_GB` (2 GB at 16 bytes per edge,
+counted from the family's parameters): a `graph.realizations` collection that is too
+large is refused with how many realizations fit at that `num_system`, and one graph that
+alone is too large (`complete`, or `erdos_renyi`, which draws every pair) with the largest
+`num_system` that fits.
+
+The estimate is deliberately pessimistic. Its probe terms are about 3 times or more the
+one-thread costs measured on an AMD Ryzen 9 9950X3D up to n = 2048, in both reference
+pictures and in the states that make each probe expensive
+([`benchmarks/results/probe_cost.md`](../benchmarks/results/probe_cost.md)), which leaves
+room for a machine about twice as slow per thread. Trajectories on many threads at once are
+priced as if each busy thread ran at 1 / (1 + 0.04 (T - 1)) of the speed of a thread alone,
+0.45 at T = 32: with every logical processor busy (all-core clocks, SMT siblings, shared
+memory bandwidth) each thread ran at 0.35 to 0.66 of that speed. The scans that stop at a
+code's first failure (`contiguous_distance`, `erasure_first_failure`) are priced for the
+worst case of the single-reference picture (k = 1, erasures that fail only at about n / 2
+qubits) and for codes of monitored dynamics in the purification picture, so codes of small
+distance run well within their estimate; a purification code of rate near 0 whose
+erasures fail only near n / 2 would take up to the single-reference price.
 
 ### 3.4 Erasure studies
 

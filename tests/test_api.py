@@ -818,9 +818,19 @@ def test_estimate_accounts_for_idle_threads():
 
     spec = {"num_system": 64, "graph": {"family": "complete"}, "schedule": "all_edges",
             "layers": 16, "measurement_rate": 0.1}  # fmt: skip
+    threads = numba.get_num_threads()
     one = api.estimate_ensemble(spec, 1)["estimated_seconds"]
-    many = api.estimate_ensemble(spec, numba.get_num_threads())["estimated_seconds"]
-    assert many == pytest.approx(one, rel=1e-3)
+    numba.set_num_threads(1)
+    try:  # idle threads do not make one trajectory faster
+        assert api.estimate_ensemble(spec, 1)["estimated_seconds"] == one
+    finally:
+        numba.set_num_threads(threads)
+    # one trajectory per thread runs in parallel, each slower than a trajectory alone
+    many = api.estimate_ensemble(spec, threads)["estimated_seconds"]
+    if threads == 1:
+        assert many == one
+    else:
+        assert one < many < threads * one
 
 
 def test_graph_realizations_give_a_collection_of_graphs():
