@@ -91,7 +91,11 @@ def complete(n: int) -> np.ndarray:
 
 
 def lattice_2d(rows: int, cols: int, *, periodic: bool = True) -> np.ndarray:
-    """Square lattice; node ``r * cols + c``. ``periodic`` wraps both directions (a torus)."""
+    """Square lattice; node ``r * cols + c``. ``periodic`` wraps both directions (a torus).
+
+    With ``periodic=True`` a direction of length 2 or less is not wrapped (wrapping it
+    would duplicate edges).
+    """
     if rows < 1 or cols < 1:
         raise ValueError("rows and cols must be positive")
     edges = []
@@ -115,7 +119,8 @@ def watts_strogatz(n: int, k: int, beta: float, *, seed) -> np.ndarray:
     """Watts-Strogatz small world (Nature 393, 440): ring lattice, then rewiring.
 
     Start from a ring where each node links to its ``k`` nearest neighbours
-    (``k / 2`` on each side, ``k`` even). Visiting edges ``(i, i + j)`` for
+    (``k / 2`` on each side). ``k`` must be even with ``2 <= k < n``; anything
+    else raises ``ValueError``. Visiting edges ``(i, i + j)`` for
     ``j = 1 .. k/2`` and ``i = 0 .. n-1`` in that order, each is rewired with
     probability ``beta`` to ``(i, w)`` with ``w`` uniform among nodes that are
     not ``i`` and not already adjacent to ``i``. The edge count stays
@@ -146,7 +151,8 @@ def watts_strogatz(n: int, k: int, beta: float, *, seed) -> np.ndarray:
 def newman_watts(n: int, k: int, p: float, *, seed) -> np.ndarray:
     """Newman-Watts small world (Phys. Lett. A 263, 341): ring lattice plus shortcuts.
 
-    Start from the ``k``-nearest-neighbour ring; for each of its edges
+    Start from the ``k``-nearest-neighbour ring (``k`` even with ``2 <= k < n``;
+    anything else raises ``ValueError``); for each of its edges
     ``(i, i + j)`` (same order as :func:`watts_strogatz`), with probability
     ``p`` add a shortcut ``(i, w)`` with ``w`` uniform among nodes not ``i``
     and not already adjacent to ``i``. No edge is removed.
