@@ -434,39 +434,43 @@ run_ensemble {"spec": {...the spec above...}, "seed": 1,
               "output_dir": "~/sparsegf2-runs/erasure/n32_beta1_p0.05"}
 ```
 ```text
-{"num_trajectories":40,"num_system":32,"num_qubits":64,"layers":1000,"measurement_rate":0.05,"seed":1,...,
+{"num_trajectories":40,"num_system":32,"num_qubits":64,"layers":1000,"measurement_rate":0.05,"seed":1,"randomness_contract":2,...,
  "checkpoints":{"layers":[1,2,3,4,5,7,9,...,621,788,1000],"num_total":27,"subsampled":false},
  "probes":{
-  "code_dimension":{"mean":[30.275,28.7,27.7,...,10.5,10.225],"stderr":[0.192778,...,0.149733]},
-  "erasure_first_failure":{"what":"P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), estimated from the first-failure samples, among trajectories that hold a code (k > 0); count_with_code says how many",
+  "code_dimension":{"mean":[30.35,29.025,27.35,...,10.65,10.375],"stderr":[0.197906,...,0.141817]},
+  "erasure_first_failure":{"what":"P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), estimated from the first-failure samples, among trajectories that hold a code (k > 0); count_with_code says how many; at_layer is the last evaluation with count_with_code > 0, if there is one",
     "vector":true,"at_layer":1000,"count":40,"count_with_code":40,
-    "mean":[0.0,0.0015,0.00275,0.00725,0.01575,0.03375,0.0825,0.181,0.3405,0.54725,0.75975,0.9195,0.98075,0.9965,0.99925,1.0,...,1.0],
+    "mean":[0.0,0.0085,0.0205,0.03525,0.05875,0.1025,0.16325,0.265,0.41975,0.6145,0.809,0.93225,0.98575,0.9975,1.0,...,1.0],
     "stderr":[...],
-    "vs_depth":{"layers":[10,100,1000],"count":[40,40,40],"count_with_code":[40,40,40],"index":[0,2,4,...,32],"mean":[[0.0,0.8825,0.99075,...],[0.0,0.1135,0.31575,...],[0.0,0.00275,0.01575,...]]}},
-  "uncorrectable_region_counts[3]":{"what":"exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index), averaged over all trajectories; trajectories without a code (k = 0) count as P_C = 0",
-    "vector":true,"at_layer":1000,"count":40,"mean":[0.0,0.0015625,0.00398185,0.00849294],"stderr":[...],
-    "vs_depth":{"layers":[10,100,1000],...,"mean":[[0.0,0.634375,0.882762,0.967888],[0.0,0.046875,0.112702,0.200192],[0.0,0.0015625,0.00398185,0.00849294]]}},
-  "code_snapshot":{"mean":[21.775],"stderr":[0.149733],"layers":[1000]}},
+    "vs_depth":{"layers":[10,100,1000],"count":[40,40,40],"count_with_code":[40,40,40],"index":[0,2,4,...,32],"mean":[[0.0,0.86125,0.9835,...],[0.0,0.09375,0.2575,...],[0.0,0.0205,0.05875,...]]}},
+  "uncorrectable_region_counts[3]":{"what":"exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index), among trajectories that hold a code (k > 0); count_with_code says how many; at_layer is the last evaluation with count_with_code > 0, if there is one",
+    "vector":true,"at_layer":1000,"count":40,"count_with_code":40,"mean":[0.0,0.00859375,0.0199093,0.0362752],"stderr":[...],
+    "vs_depth":{"layers":[10,100,1000],...,"mean":[[0.0,0.60625,0.858115,0.951482],[0.0,0.0375,0.0859375,0.154703],[0.0,0.00859375,0.0199093,0.0362752]]}},
+  "code_snapshot":{"mean":[21.625],"stderr":[0.141817],"layers":[1000]}},
  "purification":{"trajectories":40,"purified":0,"censored":40,"censored_fraction":1.0,...},
- "notes":["uncorrectable_region_counts[3]: trajectories without a code (k = 0) count as P_C = 0 in this curve, since the counts alone cannot tell k = 0 from a large distance; add a code_dimension probe evaluated at the same layers to average over the codes (k > 0) only",
-          "code_snapshot: the mean number of stabilizer generators (n - k); the codes themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)",
-          "vector probes are subsampled: curves to at most 65 sizes m (listed in 'index'), vs_depth grids to at most 8 evaluations by 17 sizes; pass output_dir or read the saved files for every value"],
+ "final_layer_mean":1000.0,"measurements_per_trajectory":1602.9,
  "truncated":true,
+ "notes":["code_snapshot: the mean number of stabilizer generators (n - k); the codes themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)",
+          "vector probes are subsampled: curves to at most 65 sizes m (listed in 'index'), vs_depth grids to at most 8 evaluations by 17 sizes; pass output_dir or read the saved files for every value"],
  "files":{"result":"/home/you/sparsegf2-runs/erasure/n32_beta1_p0.05/result.npz",...}}
 ```
 
 The two erasure probes are summarized as P_C(m) curves at the last of their
 checkpoints (index = m), with a coarse depth-by-size grid in `vs_depth`; `layers`
-appears in a probe's summary when its schedule differs from the spec's. The
-first-failure curve averages the trajectories that hold a code (`count_with_code`: all
-40 here, since none purified). The exact counts cannot tell k = 0 from a large distance,
-so they are conditioned the same way only through a `code_dimension` probe evaluated at
-each of their layers; here the spec's checkpoints skip depth 10, so the counts curve
-averages every trajectory and a note says so (adding 10 to the checkpoints would
-condition it). `truncated` is set because the grid shows 17 of the 33 sizes. Here the code
-dimension falls from 32 to about 10 over 1000 layers, and the code at depth 1000
-protects against small erasures far better than at depth 10: about 0.16% of 1-qubit
-erasures are uncorrectable at depth 1000 (exact count), against 63% at depth 10.
+appears in a probe's summary when its schedule differs from the spec's. Both curves
+average only the trajectories that hold a code (`count_with_code`: all 40 here, since
+none purified). The first-failure probe tells these from its own samples (a code with
+k = 0 gives D = n + 1). The exact counts cannot tell k = 0 from a large distance, so they
+take the code holders from a `code_dimension` probe evaluated at each of their layers or,
+failing that, from such an `erasure_first_failure` probe. Here `code_dimension` misses
+depths 10 and 100 (the spec's checkpoints skip them), so the first-failure probe on the
+same schedule is used. Without either, the counts curve would average every trajectory
+and a note would say so.
+`truncated` and the "vector probes are subsampled" note are routine here: the grid
+shows 17 of the 33 sizes. The code dimension falls from 32 to about 10 over 1000
+layers, and the code at depth 1000 protects against small erasures far better than at
+depth 10: about 0.86% of 1-qubit erasures are uncorrectable at depth 1000 (exact
+count), against 61% at depth 10.
 
 ### 5.4 Long runs: background jobs
 

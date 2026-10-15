@@ -24,8 +24,10 @@ arrays are summarized:
   ranges, e.g. `entropy[0:1024]`).
 
 The full data can be written to files with `output_dir`. Whenever anything is left out,
-the result carries `"truncated": true` and a note says what and how to get it. A result
-cut to fit keeps all of its notes.
+the result carries `"truncated": true` and a note says what and how to get it, with one
+exception: the default thinning of an ensemble's checkpoints to at most 50 is reported by
+`checkpoints.subsampled` alone (showing fewer than 50 to fit the size cap does set
+`truncated`). A result cut to fit keeps all of its notes.
 
 For the quick version, read [`../AGENTS.md`](../AGENTS.md). To set up the MCP server step
 by step (install, connect a client, a first session), follow
@@ -290,7 +292,7 @@ The result contains:
     m) when subsampled; and `vs_depth`, the mean on a grid of at most 8 evaluations
     (`layers`, `count`) by 17 sizes (`index`), which shows how the curve changes with
     depth. A curve or grid that leaves sizes or evaluations out sets `truncated: true`,
-    with a note;
+    with a note (routine for the grid once n + 1 > 17);
   * the erasure probes are shown as P_C(m), the fraction of m-qubit erasures that are
     uncorrectable: `erasure_first_failure` as the fraction of samples with first-failure
     size at most m, for m = 0..n (`analysis.failure_by_size`), and
@@ -298,13 +300,19 @@ The result contains:
     P_C(0) = 0 (`analysis.exact_failure_by_size`);
   * both erasure curves are averaged over the trajectories that hold a code (k > 0) at
     each evaluation, and `count_with_code` (in the entry and in `vs_depth`) says how many
-    there are; with none, the mean and `stderr` are `null`. `erasure_first_failure`
-    tells this from its samples (with k = 0 every sample is n + 1).
-    `uncorrectable_region_counts` cannot (its counts are all 0 both for k = 0 and for a
-    distance above w), so it uses a `code_dimension` probe evaluated at each of its
-    layers (the same schedule or a denser one; the first such probe, found by layer, not
-    by name). Without one, the curve is averaged over every trajectory, the ones
-    without a code counting as P_C = 0, and its `what` line and a note say so;
+    there are. `at_layer` is then the last evaluation with `count_with_code` > 0 (with
+    `stop_when_purified` the last ones often have no code left); if no evaluation has a
+    code, it is the last evaluation and the mean and `stderr` are `null`.
+    `erasure_first_failure` tells the code holders from its samples (with k = 0 every
+    sample is n + 1). `uncorrectable_region_counts` cannot (its counts are all 0 both for
+    k = 0 and for a distance above w), so it takes them from a `code_dimension` probe
+    evaluated at each of its layers (the same schedule or a denser one) or, if there is
+    none, from such an `erasure_first_failure` probe (the first one of each kind, found by
+    layer, not by name). With neither, the curve is averaged over every trajectory, the
+    ones without a code counting as P_C = 0, and its `what` line and a note say so;
+  * `erasure_lost_profile` and the scalar `lost_information` are not conditioned on a
+    code: they average every trajectory, the ones without a code counting as 0 bits lost,
+    and the profile's `what` line and a note on each say so;
 * `purification` (with a reference):
   * counts: `trajectories`, `purified`, `censored`, `censored_fraction`, `horizon_layer`;
   * tau statistics: `tau_median_all` (censoring-aware: the first checkpoint layer at which
@@ -316,8 +324,9 @@ The result contains:
   * `survival`: `layers` and `fraction_unpurified`;
 * `final_layer_mean`, `measurements_per_trajectory`;
 * `notes` when needed (on `stop_when_purified`, `code_snapshot`, `contiguous_distance`,
-  erasure curves that are not conditioned on a code, subsampled vector probes,
-  abbreviated names); a cut to the size limit keeps every note and adds its own;
+  erasure and lost-information probes that are not conditioned on a code, subsampled
+  vector probes, abbreviated names); a cut to the size limit keeps every note and adds
+  its own;
 * `files` (with `output_dir`).
 
 The scalar means are `sparsegf2.analysis.mean_and_error` of

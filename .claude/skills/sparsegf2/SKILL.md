@@ -58,10 +58,12 @@ connecting the server (Claude Code, Claude Desktop, other clients) is described 
 - Erasure protection of the code after the dynamics (needs `reference`, usually
   `"purification"`):
   - `{"kind": "erasure_first_failure", "samples": M}`: M first-failure sizes per code
-    (one per random qubit ordering; n + 1 if k = 0), summarized as P_C(m);
+    (one per random qubit ordering; n + 1 if k = 0), summarized as P_C(m) over the
+    trajectories that hold a code (`count_with_code` says how many);
   - `{"kind": "uncorrectable_region_counts", "max_size": w}`: exact counts of
     uncorrectable m-qubit erasures, m = 1..w (w = 3 costs tens of ms per code at
-    n = 256, w = 4 seconds);
+    n = 256, w = 4 seconds), summarized the same way when a `code_dimension` or
+    `erasure_first_failure` probe runs at its layers (otherwise the summary says it is not);
   - `{"kind": "code_snapshot", "checkpoints": "final"}`: saves the codes themselves
     (only with `output_dir`; about 16 kB per code at n = 256);
   - Phi(e) and e_delta are computed in Python from the saved `result.npz`:

@@ -93,9 +93,13 @@ def median_tau(result: mipt.EnsembleResult) -> str:
     if not observed.any():
         return "undefined (no trajectory purified)"
     km = analysis.kaplan_meier(time, observed)
-    below = np.flatnonzero(km["survival"] <= 0.5)
+    # The survival is a product of factors, so an exact 1/2 can come out an ulp off.
+    half, eps = 0.5, 1e-9
+    below = np.flatnonzero(km["survival"] <= half + eps)
     if not below.size:  # the survival curve never reaches 1/2 within the last checkpoint
         return f"> last checkpoint ({int(result.checkpoint_layers[-1])}) (more than half censored)"
+    if not np.any(km["survival"] < half - eps):  # it stops at 1/2: the median lies beyond
+        return f">= {km['times'][below[0]]:.0f} layers (not determined: only half purified)"
     return f"{km['times'][below[0]]:.0f} layers"
 
 

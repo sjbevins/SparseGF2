@@ -194,40 +194,102 @@ E15_SPEC = {
 }
 
 
-def test_e15_failure_curves_say_whether_they_condition_on_a_code(tmp_path):
+def test_e15_failure_curves_condition_on_a_code(tmp_path):
     out = api.run_ensemble(E15_SPEC, 40, seed=3, output_dir=str(tmp_path / "run"))
     res = mipt.EnsembleResult.load(tmp_path / "run" / "result.npz")
     first = res.values["erasure_first_failure"]
     code = first.min(axis=2) <= 16
     assert 0 < code[:, -1].sum() < 40  # some trajectories lost every logical qubit
+    # the same trajectories with a code_dimension probe (probes never change a trajectory)
+    k = api._build_spec(dict(E15_SPEC, probes=[{"kind": "code_dimension"}])).run(40, seed=3)
+    assert np.array_equal(code, k.values["code_dimension"] > 0)
     entry = out["probes"]["erasure_first_failure"]
     assert CONDITIONED in entry["what"] and entry["at_layer"] == 48
     assert entry["count"] == 40 and entry["count_with_code"] == code[:, -1].sum()
     assert entry["mean"][-1] == 1.0  # the unconditioned mean would be the fraction with a code
     assert entry["vs_depth"]["count_with_code"] == code.sum(axis=0).tolist()
-    # Counts alone cannot tell k = 0 from a large distance: without a code_dimension probe
-    # the curve is over every trajectory, and the summary says so.
+    # Counts alone cannot tell k = 0 from a large distance. With no code_dimension probe,
+    # the first-failure probe at the same layers tells which trajectories hold a code.
+    counts = out["probes"]["uncorrectable_region_counts[2]"]
+    assert CONDITIONED in counts["what"] and counts["count_with_code"] == code[:, -1].sum()
+    assert counts["vs_depth"]["count_with_code"] == code.sum(axis=0).tolist()
+    exact = res.values["uncorrectable_region_counts[2]"][code[:, -1], -1] / np.array([16, 120])
+    mean, stderr, _ = _mean_and_stderr(np.column_stack([np.zeros(len(exact)), exact]))
+    _close(counts["mean"], mean)
+    _close(counts["stderr"], stderr)
+    assert not any(n.startswith("uncorrectable_region_counts") for n in out.get("notes", []))
+
+
+def test_counts_are_conditioned_only_by_a_probe_at_every_one_of_their_layers(tmp_path):
+    counts_probe = E15_SPEC["probes"][1]
+    # nothing tells which trajectories hold a code: every trajectory is averaged, and said so
+    alone = dict(E15_SPEC, probes=[counts_probe])
+    out = api.run_ensemble(alone, 10, seed=3, output_dir=str(tmp_path / "alone"))
+    res = mipt.EnsembleResult.load(tmp_path / "alone" / "result.npz")
     counts = out["probes"]["uncorrectable_region_counts[2]"]
     assert "count_with_code" not in counts
     assert "trajectories without a code (k = 0) count as P_C = 0" in counts["what"]
     exact = res.values["uncorrectable_region_counts[2]"][:, -1] / np.array([16, 120])
     _close(counts["mean"], [0.0, *exact.mean(axis=0)])
     note = [n for n in out["notes"] if n.startswith("uncorrectable_region_counts[2]:")]
-    assert len(note) == 1 and "code_dimension" in note[0]
-
-
-def test_counts_condition_only_on_a_code_dimension_probe_at_every_one_of_their_layers():
-    # evaluated at layer 48 only: it cannot condition the counts at layer 16
-    late = dict(E15_SPEC, probes=[*E15_SPEC["probes"], {"kind": "code_dimension",
-                                                         "checkpoints": "final"}])  # fmt: skip
+    assert len(note) == 1 and "code_dimension or erasure_first_failure" in note[0]
+    # probes evaluated at layer 48 only cannot condition the counts at layer 16
+    late = dict(E15_SPEC, probes=[counts_probe,
+                                  {"kind": "code_dimension", "checkpoints": "final"},
+                                  {"kind": "erasure_first_failure", "samples": 5,
+                                   "checkpoints": "final"}])  # fmt: skip
     out = api.run_ensemble(late, 10, seed=3)
     assert "count_with_code" not in out["probes"]["uncorrectable_region_counts[2]"]
-    # at the spec's checkpoints (a probe of another name works too)
-    same = dict(E15_SPEC, probes=[*E15_SPEC["probes"], {"kind": "code_dimension", "name": "k"}])
+    # code_dimension at the spec's checkpoints (a probe of another name works too)
+    same = dict(E15_SPEC, probes=[counts_probe, {"kind": "code_dimension", "name": "k"}])
     out = api.run_ensemble(same, 10, seed=3)
     counts = out["probes"]["uncorrectable_region_counts[2]"]
     assert CONDITIONED in counts["what"] and "count_with_code" in counts
     assert not any(n.startswith("uncorrectable_region_counts") for n in out.get("notes", []))
+
+
+def test_conditioned_curves_show_the_last_evaluation_with_a_code(tmp_path):
+    spec = {
+        "num_system": 8, "graph": {"family": "cycle"}, "layers": 30, "measurement_rate": 0.5,
+        "reference": "single", "checkpoints": "every_layer", "stop_when_purified": True,
+        "probes": [{"kind": "code_dimension"}, {"kind": "erasure_first_failure", "samples": 5},
+                   {"kind": "uncorrectable_region_counts", "max_size": 1}],
+    }  # fmt: skip
+    out = api.run_ensemble(spec, 6, seed=1, output_dir=str(tmp_path / "run"))
+    res = mipt.EnsembleResult.load(tmp_path / "run" / "result.npz")
+    code = res.values["code_dimension"] > 0  # (trajectories, layers 0..30)
+    held = code.sum(axis=0)
+    assert held[-1] == 0 and held[0] == 6  # codes at the start, none at the last layer
+    c = int(np.flatnonzero(held)[-1])
+    first = res.values["erasure_first_failure"][code[:, c], c, :]
+    curves = (first[:, :, None] <= np.arange(9)).mean(axis=1)
+    counts = res.values["uncorrectable_region_counts[1]"][code[:, c], c, :] / 8
+    expected = {
+        "erasure_first_failure": curves.mean(axis=0),
+        "uncorrectable_region_counts[1]": [0.0, counts.mean()],
+    }
+    for name, mean in expected.items():
+        entry = out["probes"][name]
+        assert entry["at_layer"] == c and entry["count_with_code"] == held[c] > 0, name
+        assert entry["count"] == 6
+        _close(entry["mean"], mean)
+
+
+def test_lost_information_summaries_say_that_trajectories_without_a_code_lose_nothing(tmp_path):
+    spec = dict(E15_SPEC, probes=[{"kind": "lost_information", "region": "0:4", "name": "lost"},
+                                  {"kind": "erasure_lost_profile", "samples": 4},
+                                  {"kind": "code_dimension"}])  # fmt: skip
+    out = api.run_ensemble(spec, 40, seed=3, output_dir=str(tmp_path / "run"))
+    res = mipt.EnsembleResult.load(tmp_path / "run" / "result.npz")
+    assert (res.values["code_dimension"][:, -1] == 0).any()  # trajectories without a code
+    profile = out["probes"]["erasure_lost_profile"]
+    assert "trajectories without a code (k = 0) count as 0 bits lost" in profile["what"]
+    assert "count_with_code" not in profile  # not conditioned: averaged over every trajectory
+    _close(profile["mean"], res.values["erasure_lost_profile"][:, -1].mean(axis=0))
+    _close(out["probes"]["lost"]["mean"], res.values["lost"].mean(axis=0))
+    for key in ("lost", "erasure_lost_profile"):
+        note = [n for n in out["notes"] if n.startswith(f"{key}:")]
+        assert len(note) == 1 and "count as 0 bits lost" in note[0], key
 
 
 def test_failure_curves_without_any_code_are_null(tmp_path):

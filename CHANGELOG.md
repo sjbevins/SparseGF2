@@ -12,20 +12,30 @@
 * **P_C(m) summaries condition on a code:** the `run_ensemble` / `load_results` curves of
   `erasure_first_failure` average only the trajectories that hold a code at each
   evaluation (some sample <= n), and report their number as `count_with_code` (also in
-  `vs_depth`); with none the mean is `null`. They used to average in the trajectories
-  with k = 0 as P_C = 0, so P_C(n) read below 1 and codes looked better protected the
-  more of them were lost. `uncorrectable_region_counts` is conditioned the same way when
-  the spec has a `code_dimension` probe evaluated at each of its layers (the same
-  schedule or a denser one); otherwise its `what` line and a note say that trajectories
-  without a code count as P_C = 0.
+  `vs_depth`). They used to average in the trajectories with k = 0 as P_C = 0, so
+  P_C(n) read below 1 and codes looked better protected the more of them were lost.
+  `uncorrectable_region_counts` is conditioned the same way when the spec has a
+  `code_dimension` probe, or else an `erasure_first_failure` probe, evaluated at each of
+  its layers (the same schedule or a denser one); otherwise its `what` line and a note
+  say that trajectories without a code count as P_C = 0. A conditioned curve is shown at
+  the last evaluation where some trajectory holds a code (with `stop_when_purified` the
+  last ones often have none); if none ever does, its mean is `null`.
+* **Lost information says it is not conditioned:** the summaries of
+  `erasure_lost_profile` and `lost_information` still average every trajectory, those
+  without a code counting as 0 bits lost, and now say so in the profile's `what` line
+  and a note on each.
 * **`tau_median_all` needs a majority:** it is reported only when strictly more than half
   the trajectories purified within the horizon (`null` at exactly half, where the median
   is not determined), and is then the first checkpoint with at most half left.
+  `examples/purification_time.py` applies the same rule to its Kaplan-Meier median
+  (with a tolerance, since the Kaplan-Meier product can miss 1/2 by an ulp).
 * **Notes survive the size cap:** cutting a result to fit keeps every note (it used to
   keep only the first two) and adds the truncation note once.
 * **Subsampled vector probes are flagged:** an ensemble curve or `vs_depth` grid that
   leaves sizes or evaluations out sets `truncated: true` with a note, as `run_circuit`
-  already did for its profiles.
+  already did for its profiles. This is routine for the grid once n + 1 > 17. The
+  default thinning of checkpoints to 50 is still reported by `checkpoints.subsampled`
+  alone, as LLM_INTERFACE now says.
 * **Unique observable names in `run_circuit`:** automatic names (`entropy#2`, ...) skip
   every name in use or given explicitly, so one value can no longer overwrite another;
   an explicit name is kept unless two observables are given the same one.

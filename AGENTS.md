@@ -156,11 +156,14 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   two erasure probes are shown as P_C(m): `erasure_first_failure` as an estimate for
   m = 0..n, `uncorrectable_region_counts` exactly for m = 0..w. They average only the
   trajectories that hold a code (k > 0); `count_with_code` (also in `vs_depth`) says how
-  many, and the mean is `null` where none does. `erasure_first_failure` finds them itself
-  (k = 0 gives D = n + 1). `uncorrectable_region_counts` needs a `code_dimension` probe
-  evaluated at each of its layers (the same schedule or a denser one); without one, its
-  curve counts the trajectories with k = 0 as P_C = 0, and its `what` line and a note say
-  so. A scalar probe on its own schedule gets a `layers` key in the summary.
+  many, `at_layer` is the last evaluation where some trajectory holds one, and the mean is
+  `null` where none does. `erasure_first_failure` finds them itself (k = 0 gives
+  D = n + 1). `uncorrectable_region_counts` takes them from a `code_dimension` probe, or
+  else an `erasure_first_failure` probe, evaluated at each of its layers (the same
+  schedule or a denser one); with neither, its curve counts the trajectories with k = 0
+  as P_C = 0, and its `what` line and a note say so. `erasure_lost_profile` and
+  `lost_information` are not conditioned: they count k = 0 as 0 bits lost, and say so. A
+  scalar probe on its own schedule gets a `layers` key in the summary.
 * **Purification time tau:** the first of the spec's checkpoints at which the reference
   is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
   never purified within the horizon.
@@ -222,7 +225,9 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means
   something was cut. Pass `output_dir` and read the `.npz` file in Python when you need
-  every number.
+  every number. The note "vector probes are subsampled" and its `truncated: true` are
+  routine when a vector probe has several evaluations and n + 1 > 17 (the `vs_depth` grid
+  shows 17 sizes); the other notes say whether anything else was cut.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
   `output_dir` to resume.

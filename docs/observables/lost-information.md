@@ -227,7 +227,9 @@ range string. For a single circuit, `run_circuit` takes
 `erasure_is_correctable`, `recovery_probability` and
 `{"kind": "erasure_profile", "system": "0:16", "reference": "16:32", "samples": 10}`.
 The ensemble summary shows the profile as a curve over $m$ (`index`) at the
-last checkpoint, plus a `vs_depth` grid.
+last checkpoint, plus a `vs_depth` grid. Neither summary is conditioned on a
+code: both average every trajectory, those without a code counting as 0 bits
+lost, and the profile's `what` line and a note on each probe say so (§6).
 
 ---
 

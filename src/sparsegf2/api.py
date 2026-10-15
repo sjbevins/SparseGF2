@@ -1796,11 +1796,13 @@ def _vector_summary(
     number of trajectories that hold one there (else None); ``alive``
     (trajectories x evaluations) marks the values that exist (with
     ``stop_when_purified``, entanglement profiles of stopped trajectories do
-    not). ``mean``/``stderr`` are at the last evaluation that has data, and
-    ``vs_depth`` gives the mean on a coarse grid of evaluations x sizes, so
-    the change with circuit depth stays visible. ``index`` lists the sizes m
-    shown when not all are. Returns the entry and whether anything was left
-    out (sizes of the curve, or evaluations or sizes of the grid).
+    not). ``mean``/``stderr`` are at the last evaluation that has data (for a
+    curve conditioned on a code, the last one at which some trajectory holds
+    one, if any does), and ``vs_depth`` gives the mean on a coarse grid of
+    evaluations x sizes, so the change with circuit depth stays visible.
+    ``index`` lists the sizes m shown when not all are. Returns the entry and
+    whether anything was left out (sizes of the curve, or evaluations or
+    sizes of the grid).
     """
     count = alive.sum(axis=0)
     with_data = np.flatnonzero(count > 0)
@@ -1808,6 +1810,8 @@ def _vector_summary(
         empty = {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
         return empty, False
     last = int(with_data[-1])
+    if stats(last)[2] == 0:  # no code left there: show the last evaluation that has one
+        last = next((int(c) for c in with_data[::-1] if stats(int(c))[2]), last)
     mean, err, with_code = stats(last)
     sizes = _subsample(mean.size, sizes_shown)
     entry: dict[str, Any] = {
@@ -1841,7 +1845,7 @@ def _vector_stats(
     values: np.ndarray,
     n: int,
     cache: dict,
-    code_dimension: np.ndarray | None = None,
+    has_code: np.ndarray | None = None,
 ) -> Callable[[int], tuple[np.ndarray, np.ndarray, int | None]]:
     """Mean and standard error of a vector probe's curve at one evaluation, memoized in ``cache``.
 
@@ -1849,9 +1853,9 @@ def _vector_stats(
     trajectories that hold a code (k > 0) at the evaluation, whose number is
     returned as well (None for the curves that are not conditioned):
     first-failure samples show it themselves (some sample <= n; with k = 0
-    every sample is n + 1), exhaustive counts need ``code_dimension``, k at
-    each of the probe's evaluations (trajectories x evaluations), and without
-    it average every trajectory. First-failure samples become per-trajectory
+    every sample is n + 1), exhaustive counts need ``has_code`` (trajectories
+    x the probe's evaluations, from :func:`_code_holders_at`), and without it
+    average every trajectory. First-failure samples become per-trajectory
     P_C(m), m = 0..n (fraction of samples with D <= m), in chunks of
     trajectories so the memory stays bounded whatever the ensemble size;
     exhaustive counts become the exact P_C(m), m = 0..w (P_C(0) = 0).
@@ -1861,8 +1865,8 @@ def _vector_stats(
         """The trajectories that hold a code at evaluation ``c``, or None if not conditioned."""
         if probe.kind == "erasure_first_failure":
             return np.flatnonzero(values[:, c, :].min(axis=1) <= n)
-        if probe.kind == "uncorrectable_counts" and code_dimension is not None:
-            return np.flatnonzero(code_dimension[:, c] > 0)
+        if probe.kind == "uncorrectable_counts" and has_code is not None:
+            return np.flatnonzero(has_code[:, c])
         return None
 
     def compute(c: int, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
@@ -1897,26 +1901,53 @@ def _vector_stats(
     return stats
 
 
-def _code_dimension_at(result: mipt.EnsembleResult, layers: np.ndarray) -> np.ndarray | None:
-    """k at each of ``layers`` (trajectories x layers), or None.
+def _code_holders_at(result: mipt.EnsembleResult, layers: np.ndarray) -> np.ndarray | None:
+    """Whether each trajectory holds a code (k > 0) at each of ``layers``, or None.
 
-    It comes from the first ``code_dimension`` probe evaluated at every one of
-    these layers (on the same schedule or a denser one), found by layer, not by name.
+    The answer (trajectories x layers) comes from the first ``code_dimension``
+    probe evaluated at every one of these layers (on the same schedule or a
+    denser one), or else from the first such ``erasure_first_failure`` probe
+    (a code is held iff some sample is <= n). Probes are found by layer, not by
+    name; None when neither kind covers all of ``layers``.
     """
-    for p in result.spec.probes:
-        if p.kind != "code_dimension":
-            continue
-        own = np.asarray(result.layers(p.name))
-        if np.isin(layers, own).all():
-            return np.asarray(result.values[p.name])[:, np.searchsorted(own, layers)]
+    n = result.spec.num_system
+    for kind in ("code_dimension", "erasure_first_failure"):
+        for p in result.spec.probes:
+            if p.kind != kind:
+                continue
+            own = np.asarray(result.layers(p.name))
+            if not np.isin(layers, own).all():
+                continue
+            values = np.asarray(result.values[p.name])
+            cols = np.searchsorted(own, layers)
+            if kind == "code_dimension":
+                return values[:, cols] > 0
+            return np.stack([values[:, c, :].min(axis=1) <= n for c in cols], axis=1)
     return None
 
 
-_HOLDS_A_CODE = ", among trajectories that hold a code (k > 0); count_with_code says how many"
+_HOLDS_A_CODE = (
+    ", among trajectories that hold a code (k > 0); count_with_code says how many; at_layer "
+    "is the last evaluation with count_with_code > 0, if there is one"
+)
+_LOSES_NOTHING = (
+    "averaged over all trajectories; trajectories without a code (k = 0) count as 0 bits lost"
+)
+
+
+def _loses_nothing_note(key: str) -> str:
+    """The note on a lost-information probe, which is not conditioned on a code."""
+    return (
+        f"{key}: {_LOSES_NOTHING}, so the mean falls as codes are lost; select k > 0 in the "
+        "saved arrays (output_dir) to average over the codes only"
+    )
+
 
 _VECTOR_MEANING = {
     "entropy_profile": "mean S(first m qubits of system_order) vs m (index)",
-    "erasure_lost_profile": "mean bits of logical information lost vs erasure size m (index)",
+    "erasure_lost_profile": (
+        "mean bits of logical information lost vs erasure size m (index), " + _LOSES_NOTHING
+    ),
     "erasure_first_failure": (
         "P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), "
         "estimated from the first-failure samples" + _HOLDS_A_CODE
@@ -2026,6 +2057,8 @@ def _summarize_ensemble(
                     f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
                     "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
                 )
+            if probe.kind == "lost_information":
+                notes.append(_loses_nothing_note(keys[name]))
         else:
             alive = (
                 ~np.isnan(values[:, :, 0])
@@ -2033,11 +2066,11 @@ def _summarize_ensemble(
                 else np.ones(values.shape[:2], dtype=bool)
             )
             what = _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)")
-            code_dimension = None
+            has_code = None
             if probe.kind == "uncorrectable_counts":
                 # The counts alone cannot tell k = 0 from a distance above w.
-                code_dimension = _code_dimension_at(result, own)
-                if code_dimension is None:
+                has_code = _code_holders_at(result, own)
+                if has_code is None:
                     what += (
                         ", averaged over all trajectories; trajectories without a code (k = 0) "
                         "count as P_C = 0"
@@ -2045,12 +2078,14 @@ def _summarize_ensemble(
                     notes.append(
                         f"{keys[name]}: trajectories without a code (k = 0) count as P_C = 0 in "
                         "this curve, since the counts alone cannot tell k = 0 from a large "
-                        "distance; add a code_dimension probe evaluated at the same layers to "
-                        "average over the codes (k > 0) only"
+                        "distance; add a code_dimension or erasure_first_failure probe evaluated "
+                        "at the same layers to average over the codes (k > 0) only"
                     )
                 else:
                     what += _HOLDS_A_CODE
-            stats = _vector_stats(probe, values, n, cache, code_dimension)
+            if probe.kind == "erasure_lost_profile":
+                notes.append(_loses_nothing_note(keys[name]))
+            stats = _vector_stats(probe, values, n, cache, has_code)
             summary, cut = _vector_summary(stats, alive, own, sizes_shown, depths_shown)
             vectors_cut = vectors_cut or cut
             entry = {"what": what, **summary}
