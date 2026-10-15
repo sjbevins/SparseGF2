@@ -859,7 +859,7 @@ to within a factor of about 1.5.
 | counts, $w = 1$ | 6 µs | 18–22 µs | 0.10–0.25 ms | 0.85–1.2 ms | 3.6–5.1 ms |
 | counts, $w = 2$ | 10–11 µs | 30–34 µs | 0.17–0.29 ms | 1.0–1.3 ms | 4.1–5.3 ms |
 | counts, $w = 3$ | 0.11 ms | 0.86 ms | 3.7–3.8 ms | 20–21 ms | 117–130 ms |
-| counts, $w = 4$ | 3.1 ms | 33–35 ms | 0.32–0.34 s | 3.7–4.1 s | about 35 s, *extrapolated* |
+| counts, $w = 4$ | 3.1 ms | 33–35 ms | 0.32–0.34 s | 3.7–4.1 s | about 35 s, *extrapolated*; plan on 45–55 s (measured growth into $w = 4$ ran about 1.3× above the model at $n \ge 128$) |
 | counts, $w = 5$ | 56 ms | 1.3 s | 26–27 s | about 10–12 min, *extrapolated* | |
 | counts, $w = 6$ | 0.84–0.99 s | 43–48 s | about 40 min, *extrapolated* | | |
 | counts, $w = 7$ | 7.4–9.7 s | about 30 min, *extrapolated* | | | |
