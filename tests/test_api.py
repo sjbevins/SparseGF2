@@ -1117,3 +1117,107 @@ def test_huge_exhaustive_sizes_give_a_huge_estimate_not_an_error():
     )
     est = api.estimate_ensemble(spec, 1)
     assert not est["fits_sync_limit"] and est["estimated_seconds"] > 1e100
+
+
+# ---------------------------------------------------------------------------
+# the exhaustive cutoff m*(n) in JSON: a budget, or one value per system size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n", "cutoff", "w"),
+    [
+        # m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B}; the sums: n = 64: 64, 2,080, 43,744,
+        # 679,120; n = 128: 128, 8,256, 349,632; n = 256: 256, 32,896, 2,796,416
+        (64, {"budget": 50000}, 3),
+        (256, {"budget": 50000}, 2),
+        (64, {"max_size": {"64": 3, "128": 2}}, 3),
+        (128, {"max_size": {"64": 3, "128": 2}}, 2),
+        (64, {"budget": {"64": 20000, "256": 50000}}, 2),
+        (256, {"budget": {"64": 20000, "256": 50000}}, 2),
+    ],
+)
+def test_json_cutoff_forms_resolve_per_system_size(n, cutoff, w):
+    spec = dict(
+        SMALL_SPEC,
+        num_system=n,
+        graph={"family": "cycle"},
+        reference="purification",
+        stop_when_purified=False,
+        probes=[{"kind": "uncorrectable_region_counts", **cutoff}],
+    )
+    probe = api._build_spec(spec).probes[0]
+    assert (probe.name, probe.size) == (f"uncorrectable_region_counts[{w}]", w)
+    explicit = dict(spec, probes=[{"kind": "uncorrectable_region_counts", "max_size": w}])
+    assert api.estimate_ensemble(spec, 100) == api.estimate_ensemble(explicit, 100)
+
+
+def test_json_cutoff_forms_run_like_their_max_size():
+    base = dict(SMALL_SPEC, reference="purification", stop_when_purified=False, checkpoints=10)
+    explicit = {
+        w: api.run_ensemble(
+            dict(base, probes=[{"kind": "uncorrectable_region_counts", "max_size": w}]), 6, seed=2
+        )["probes"]
+        for w in (1, 2, 3)
+    }
+    # n = 10: C(10, 1) = 10, then 55, then 175 regions
+    for cutoff, w in (
+        ({"budget": 100}, 2),
+        ({"max_size": {"10": 3, "64": 2}}, 3),
+        ({"budget": {"10": 20, "64": 20000}}, 1),
+    ):
+        probe = {"kind": "uncorrectable_region_counts", **cutoff}
+        out = api.run_ensemble(dict(base, probes=[probe]), 6, seed=2)
+        assert out["probes"] == explicit[w], cutoff
+    named = {"kind": "uncorrectable_region_counts", "budget": {"10": 100}, "name": "counts"}
+    out = api.run_ensemble(dict(base, probes=[named]), 6, seed=2)
+    assert out["probes"] == {"counts": explicit[2]["uncorrectable_region_counts[2]"]}
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "message"),
+    [
+        (
+            {"max_size": {"64": 3, "128": 2}},
+            r"max_size has no entry for num_system = 10; it covers the system sizes \[64, 128\]",
+        ),
+        (
+            {"budget": 5},
+            re.escape(
+                "budget 5 allows no exhaustive region size at n = 10 (C(10, 1) = 10 > 5); "
+                "raise the budget or drop the probe"
+            ),
+        ),
+        ({"max_size": 2, "budget": 100}, "give max_size or budget, not both"),
+        ({"max_size": {"ten": 3}}, r"probes\[0\]\.max_size: .*integers like \"64\", got 'ten'"),
+        ({"budget": {"10.5": 100}}, r"probes\[0\]\.budget: .*integers like \"64\", got '10.5'"),
+        (
+            {"max_size": {"10": 2, "010": 3}},
+            r"probes\[0\]\.max_size gives the system size 10 twice",
+        ),
+        ({"max_size": {"10": 2.5}}, r"max_size\[10\] must be an integer, got 2.5"),
+        ({"max_size": {"10": 11}}, r"max_size\[10\] must be in \[1, 10\], got 11"),
+        ({"budget": {"10": "100"}}, r"budget\[10\] must be an integer, got '100'"),
+        ({"budget": {"10": True}}, r"budget\[10\] must be an integer, got True"),
+        ({"budget": -1}, "budget must be non-negative"),
+        ({"budget": 2.5}, "budget must be an integer"),
+        ({"max_size": [2, 3]}, "max_size must be an integer"),
+        ({"max_size": {}}, "max_size: give at least one system size"),
+    ],
+)
+def test_json_cutoff_errors_name_the_field(cutoff, message):
+    spec = dict(SMALL_SPEC, probes=[{"kind": "uncorrectable_region_counts", **cutoff}])
+    with pytest.raises(ValueError, match=message):
+        api.run_ensemble(spec, 2, seed=1)
+
+
+def test_capabilities_document_the_cutoff_forms():
+    entry = api.capabilities("probes")["probes"]["uncorrectable_region_counts"]
+    assert entry["params"]["max_size"] == 2 and entry["params"]["budget"] is None
+    for form in (
+        {"budget": 50000},
+        {"max_size": {"64": 3, "128": 2}},
+        {"budget": {"64": 20000, "256": 50000}},
+    ):
+        assert form in entry["forms"]
+    assert "sum_{m=1}^{w} C(n, m) <= B" in entry["note"]

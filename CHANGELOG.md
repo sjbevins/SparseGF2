@@ -67,6 +67,21 @@
   stale files are only deleted. Then an old process can still save a stale
   kernel after an update; deleting the `sparsegf2-kernels.*.sha256` marker
   next to the cache files clears them on the next import.
+* **The exhaustive cutoff by budget or per system size:**
+  `uncorrectable_region_counts` takes `budget=B`, the number of regions to
+  enumerate per evaluation, as an alternative to `max_size`; the cutoff is then
+  m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B}. Either may be one int or a
+  mapping from the system size n to a value (`max_size={64: 3, 128: 2}`,
+  `budget={64: 20_000, 256: 50_000}`), which the spec resolves for its
+  `num_system`, so one probe definition serves a sweep over n. The JSON forms
+  are `{"budget": 50000}` and objects keyed by n (`{"64": 3, "128": 2}`); a
+  missing n, a budget below n, both arguments, and non-integer keys or values
+  are refused with a message that names the field. The key stays
+  `uncorrectable_region_counts[w]` with the resolved w (give `name` to keep one
+  key at every n), saved results store the resolved w and the input, and
+  `estimate_ensemble` costs the resolved w. New `analysis.exhaustive_cutoff(n, B)`
+  and `analysis.exhaustive_region_count(n, w)` (sum_{m=1}^{w} C(n, m), an exact
+  int). The default is unchanged: `max_size=2`.
 
 ## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
 

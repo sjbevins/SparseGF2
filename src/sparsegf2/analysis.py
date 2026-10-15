@@ -15,12 +15,16 @@ random ordering of the qubits; see :func:`sparsegf2.mipt.erasure_first_failure`)
   with exhaustive counts for m <= w
   (:func:`sparsegf2.mipt.uncorrectable_region_counts`) the m <= w terms are
   exact and the samples cover only m > w;
-* ``erasure_tolerance``: e_delta = sup{e : Phi(e) <= delta} for an ensemble.
+* ``erasure_tolerance``: e_delta = sup{e : Phi(e) <= delta} for an ensemble;
+* ``exhaustive_cutoff``: the cutoff w = m*(n) that an enumeration budget of B
+  regions allows, max{w : sum_{m=1}^{w} C(n, m) <= B}, and
+  ``exhaustive_region_count`` that sum.
 """
 
 from __future__ import annotations
 
 import math
+import operator
 
 import numpy as np
 
@@ -30,6 +34,8 @@ __all__ = [
     "erasure_failure_probability",
     "erasure_tolerance",
     "exact_failure_by_size",
+    "exhaustive_cutoff",
+    "exhaustive_region_count",
     "failure_by_size",
     "hybrid_failure_by_size",
     "junction_dip",
@@ -247,6 +253,65 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
             "counts[..., m - 1] must lie in [0, C(n, m)] (up to a relative 1e-12 of rounding)"
         )
     return np.clip(c / binom, 0.0, 1.0)
+
+
+def _whole(value, what: str) -> int:
+    """``value`` as a Python int: numpy integers and whole-number floats are accepted."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{what} must be an integer, got {value!r}")
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return int(value)
+    try:
+        return operator.index(value)
+    except TypeError:
+        raise TypeError(f"{what} must be an integer, got {value!r}") from None
+
+
+def _qubit_count(num_qubits) -> int:
+    n = _whole(num_qubits, "num_qubits")
+    if n < 0:
+        raise ValueError(f"num_qubits must be non-negative, got {n}")
+    return n
+
+
+def exhaustive_region_count(num_qubits: int, max_size: int) -> int:
+    """N_exact(n, w) = sum_{m=1}^{w} C(n, m): the regions an exhaustive count up to size w covers.
+
+    That is the number of m-subsets with 1 <= m <= w that
+    :func:`sparsegf2.mipt.uncorrectable_region_counts` with ``max_size=w``
+    accounts for, as an exact Python int (it exceeds 2**63 for large n and w).
+    ``max_size`` must lie in [0, n]; 0 gives 0.
+    """
+    n = _qubit_count(num_qubits)
+    w = _whole(max_size, "max_size")
+    if not 0 <= w <= n:
+        raise ValueError(f"max_size must be in [0, {n}], got {w}")
+    return sum(math.comb(n, m) for m in range(1, w + 1))
+
+
+def exhaustive_cutoff(num_qubits: int, budget: int) -> int:
+    """m*(n) = max{w in 0..n : sum_{m=1}^{w} C(n, m) <= budget}: the largest exhaustive size a budget allows.
+
+    P_C(m) is then exact for m <= m*(n) (every m-subset is enumerated) and
+    sampled above. ``budget`` counts regions (:func:`exhaustive_region_count`),
+    not seconds: the time per region depends on n and w, and every evaluation
+    also pays a fixed elimination. 0 means that not even the n single-qubit
+    regions fit; a budget of at least 2**n - 1 (every non-empty subset) gives n.
+    The probe takes the budget directly:
+    ``mipt.uncorrectable_region_counts(budget=B)``.
+    """
+    n = _qubit_count(num_qubits)
+    b = _whole(budget, "budget")
+    if b < 0:
+        raise ValueError(f"budget must be non-negative, got {b}")
+    total, term, w = 0, 1, 0
+    while w < n:
+        term = term * (n - w) // (w + 1)  # C(n, w + 1), exactly
+        if total + term > b:
+            break
+        total += term
+        w += 1
+    return w
 
 
 def hybrid_failure_by_size(first_failure, num_qubits: int, *, exact_counts=None) -> np.ndarray:

@@ -136,11 +136,14 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   * erasure (need a reference): `erasure_first_failure` (`samples`, default 100) records,
     for each of `samples` random orderings of the system qubits, the first-failure size D:
     the smallest m such that erasing the first m qubits loses logical information (n + 1
-    when k = 0). `uncorrectable_region_counts` (`max_size` w, default 2; key
-    `uncorrectable_region_counts[w]`) counts the uncorrectable m-qubit erasures for
-    m = 1..w by exhaustion, so count / C(n, m) is the exact P_C(m), the fraction of
+    when k = 0). `uncorrectable_region_counts` counts the uncorrectable m-qubit erasures
+    for m = 1..w by exhaustion, so count / C(n, m) is the exact P_C(m), the fraction of
     m-qubit erasures that are uncorrectable; all counts are 0 exactly when the distance
-    exceeds w;
+    exceeds w. The cutoff w = m*(n) is `max_size` (default 2) or comes from `budget` B,
+    the number of regions to enumerate: the largest w with sum_{m=1}^{w} C(n, m) <= B.
+    Either may be an object per system size, `{"64": 3, "128": 2}`, so one probe serves a
+    sweep over n. The key is `uncorrectable_region_counts[w]` for the resolved w; give a
+    `name` to keep one key at every n;
   * `code_snapshot`: saves the code's stabilizer generators; its value is their number,
     n - k. At most one per spec; give it its own `"checkpoints": "final"`, since codes are
     large. The summary shows only the generator count; the codes are in the saved result
@@ -273,6 +276,16 @@ select `k > 0` to condition on a code. `[:, -1]` is each probe's last evaluation
 `uncorrectable_counts(w)`.
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole analysis
 versus depth.
+
+P_C(m) is exact for m <= w = m*(n) and sampled above. To set w by an enumeration budget
+B, the number of regions per evaluation, use
+`{"kind": "uncorrectable_region_counts", "budget": 50000}`: w is then
+`analysis.exhaustive_cutoff(n, B)` = max{w : sum_{m=1}^{w} C(n, m) <= B}, which is 3, 2, 2
+and 1 at n = 64, 128, 256 and 512, and `analysis.exhaustive_region_count(n, w)` is that
+sum (32,896 at n = 256, w = 2). B counts regions, not seconds: the time per region
+depends on n and w, and every evaluation also pays a fixed elimination. For a sweep over
+n, give `budget` or `max_size` per size, `{"64": 20000, "256": 50000}`, with a `name`
+such as `"counts"` so the key is the same at every n.
 
 ## Distances, graphs, saved states and cross-checks
 

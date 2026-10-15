@@ -5,7 +5,9 @@ The central test runs each trajectory's exported circuit through the general
 values to match exactly at every checkpoint.
 """
 
+import dataclasses
 import itertools
+import re
 
 import numpy as np
 import pytest
@@ -1052,3 +1054,149 @@ def test_probe_arguments_are_validated_like_the_spec():
         mipt.MonitoredCircuit(
             **base, reference="purification", probes=[mipt.erasure_lost_profile(samples=0)]
         )
+
+
+# -- the exhaustive cutoff m*(n): a budget, or one value per system size --------------------
+
+
+def _counts_spec(n: int, *probes: mipt.Probe) -> mipt.MonitoredCircuit:
+    return mipt.MonitoredCircuit(
+        num_system=n, edges=graphs.cycle(n), layers=6, measurement_rate=0.1,
+        reference="purification", checkpoints=[3, 6], probes=list(probes),
+    )  # fmt: skip
+
+
+def test_uncorrectable_counts_default_cutoff_is_unchanged():
+    p = mipt.uncorrectable_region_counts()
+    assert (p.size, p.name, p.cutoff) == (2, "uncorrectable_region_counts[2]", None)
+    assert mipt.uncorrectable_region_counts(3) == mipt.uncorrectable_region_counts(max_size=3)
+    # a budget is resolved by the spec; until then, different budgets are different probes
+    assert mipt.uncorrectable_region_counts(budget=100) != mipt.uncorrectable_region_counts(
+        budget=200
+    )
+
+
+def test_budget_gives_the_same_probe_and_values_as_its_cutoff():
+    n, budget = 12, 100  # C(12, 1) + C(12, 2) = 78 <= 100 < 78 + C(12, 3) = 298: m* = 2
+    w = analysis.exhaustive_cutoff(n, budget)
+    assert w == 2
+    by_budget = _counts_spec(n, mipt.uncorrectable_region_counts(budget=budget))
+    by_size = _counts_spec(n, mipt.uncorrectable_region_counts(max_size=w))
+    assert by_budget.probes == by_size.probes
+    assert mipt._protocol_difference(by_budget, by_size) is None
+    a, b = by_budget.run(20, seed=4), by_size.run(20, seed=4)
+    assert list(a.values) == list(b.values) == ["uncorrectable_region_counts[2]"]
+    counts = a.values["uncorrectable_region_counts[2]"]
+    np.testing.assert_array_equal(counts, b.values["uncorrectable_region_counts[2]"])
+    assert counts.shape == (20, 2, 2) and counts.max() > 0  # some codes have small failures
+    again = by_budget.replay(7, seed=4)  # replaying resolves the budget again, identically
+    np.testing.assert_array_equal(again.values["uncorrectable_region_counts[2]"][0], counts[7])
+
+
+def test_cutoff_mappings_resolve_for_each_system_size():
+    sizes = {12: 3, 16: 2}
+    # m*(12) = 1 (12 <= 20 < 12 + 66); m*(16) = 2 (16 + 120 = 136 <= 200 < 136 + 560)
+    budgets = {12: 20, 16: 200}
+    for n, w_size, w_budget in ((12, 3, 1), (16, 2, 2)):
+        spec = _counts_spec(
+            n,
+            mipt.uncorrectable_region_counts(sizes),
+            mipt.uncorrectable_region_counts(budget=budgets, name="counts"),
+        )
+        by_size, by_budget = spec.probes
+        assert (by_size.name, by_size.size) == (f"uncorrectable_region_counts[{w_size}]", w_size)
+        assert (by_budget.name, by_budget.size) == ("counts", w_budget)  # one key for every n
+        res = spec.run(5, seed=1)
+        assert res.values["counts"].shape == (5, 2, w_budget)
+        # both count the uncorrectable m-subsets, so they agree on the sizes they share
+        np.testing.assert_array_equal(
+            res.values["counts"], res.values[by_size.name][..., :w_budget]
+        )
+
+
+def test_resolved_cutoff_probes_resolve_again_for_another_size():
+    probes = [
+        mipt.uncorrectable_region_counts(budget={12: 100, 16: 20}),
+        mipt.uncorrectable_region_counts(max_size={12: 3, 16: 1}, name="pc"),
+        # renamed after construction (as the JSON layer does): the name is kept
+        dataclasses.replace(mipt.uncorrectable_region_counts(budget=20), name="renamed"),
+    ]
+    spec12 = _counts_spec(12, *probes)
+    assert [(p.name, p.size) for p in spec12.probes] == [
+        ("uncorrectable_region_counts[2]", 2),
+        ("pc", 3),
+        ("renamed", 1),
+    ]
+    # the resolved probes keep their cutoff, so a spec for another n resolves them again
+    spec16 = _counts_spec(16, *spec12.probes)
+    assert [(p.name, p.size) for p in spec16.probes] == [
+        ("uncorrectable_region_counts[1]", 1),
+        ("pc", 1),
+        ("renamed", 1),
+    ]
+
+
+def test_cutoff_arguments_are_validated():
+    with pytest.raises(ValueError, match="give max_size or budget, not both"):
+        mipt.uncorrectable_region_counts(2, budget=100)
+    with pytest.raises(ValueError, match=r"no entry for num_system = 12.*\[16, 32\]"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(max_size={32: 2, 16: 2}))
+    with pytest.raises(ValueError, match=r"no entry for num_system = 12.*\[16\]"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(budget={16: 100}))
+    for budget in (11, {12: 11}):
+        message = (
+            "budget 11 allows no exhaustive region size at n = 12 (C(12, 1) = 12 > 11); "
+            "raise the budget or drop the probe"
+        )
+        with pytest.raises(ValueError, match=re.escape(message)):
+            _counts_spec(12, mipt.uncorrectable_region_counts(budget=budget))
+    with pytest.raises(ValueError, match=r"max_size must be in \[1, 12\], got 13"):
+        _counts_spec(12, mipt.uncorrectable_region_counts(max_size=13))
+    with pytest.raises(ValueError, match=r"max_size\[12\] must be in \[1, 12\], got 13"):
+        mipt.uncorrectable_region_counts(max_size={12: 13})
+    with pytest.raises(ValueError, match=r"max_size\[12\] must be in \[1, 12\], got 0"):
+        mipt.uncorrectable_region_counts(max_size={12: 0})
+    with pytest.raises(ValueError, match="budget must be non-negative"):
+        mipt.uncorrectable_region_counts(budget=-1)
+    with pytest.raises(ValueError, match=r"budget\[12\] must be non-negative"):
+        mipt.uncorrectable_region_counts(budget={12: -1})
+    with pytest.raises(ValueError, match="at least one system size"):
+        mipt.uncorrectable_region_counts(max_size={})
+    with pytest.raises(ValueError, match="system sizes .* at least 2, got 1"):
+        mipt.uncorrectable_region_counts(budget={1: 100})
+    # non-integer keys and values are errors, never truncated or parsed
+    for bad in ({"12": 2}, {12.5: 2}, {True: 2}):
+        with pytest.raises(TypeError, match="system sizes"):
+            mipt.uncorrectable_region_counts(max_size=bad)
+    with pytest.raises(TypeError, match=r"max_size\[12\] must be an integer, got 2.5"):
+        mipt.uncorrectable_region_counts(max_size={12: 2.5})
+    with pytest.raises(TypeError, match=r"budget\[12\] must be an integer, got '100'"):
+        mipt.uncorrectable_region_counts(budget={12: "100"})
+    with pytest.raises(TypeError, match="budget must be an integer"):
+        mipt.uncorrectable_region_counts(budget=100.5)
+    with pytest.raises(TypeError, match="max_size must be an integer"):
+        mipt.uncorrectable_region_counts(max_size=[2, 3])
+    # whole numbers of other types are accepted, as everywhere in the spec
+    probe = mipt.uncorrectable_region_counts(budget={12.0: 1e2})
+    assert _counts_spec(12, probe).probes[0].size == 2
+
+
+def test_cutoff_probes_survive_save_and_load(tmp_path):
+    spec = _counts_spec(
+        12,
+        mipt.uncorrectable_region_counts(budget=100),
+        mipt.uncorrectable_region_counts(max_size={12: 3, 64: 2}, checkpoints=[6]),
+        mipt.uncorrectable_region_counts(budget={12: 20, 64: 50_000}, name="pc"),
+    )
+    res = spec.run(6, seed=3)
+    res.save(tmp_path / "cutoff.npz")
+    back = mipt.EnsembleResult.load(tmp_path / "cutoff.npz")
+    names = ["uncorrectable_region_counts[2]", "uncorrectable_region_counts[3]", "pc"]
+    assert list(back.values) == list(res.values) == names
+    for name in names:
+        np.testing.assert_array_equal(back.values[name], res.values[name])
+    assert back.spec.probes == spec.probes
+    assert [p.cutoff for p in back.spec.probes] == [p.cutoff for p in spec.probes]
+    more = spec.run(2, seed=3, first_trajectory=6)
+    merged = mipt.EnsembleResult.concatenate([back, more])  # the same protocol
+    assert merged.num_trajectories == 8

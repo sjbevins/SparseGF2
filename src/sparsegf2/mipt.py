@@ -97,7 +97,7 @@ import json
 import operator
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -108,6 +108,7 @@ from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
 from sparsegf2._parallel import threads
 from sparsegf2._version import __version__
+from sparsegf2.analysis import exhaustive_cutoff
 from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
@@ -201,6 +202,15 @@ class Probe:
     size: int = 0
     samples: int = 0
     checkpoints: str | int | tuple[int, ...] | None = None
+    # uncorrectable_region_counts given a budget or a mapping from n: the input as
+    # ("max_size" or "budget", one int or sorted (n, value) pairs). The spec resolves it
+    # into ``size`` (and the default name) for its num_system; it stays on the resolved
+    # probe so that a spec of another size resolves it again. It is not compared: probes
+    # that record the same sizes under the same name are the same probe, however w was
+    # chosen.
+    cutoff: tuple[str, int | tuple[tuple[int, int], ...]] | None = field(
+        default=None, compare=False
+    )
 
     @property
     def is_vector(self) -> bool:
@@ -352,26 +362,126 @@ def erasure_first_failure(
 
 
 def uncorrectable_region_counts(
-    max_size: int = 2, name: str | None = None, *, checkpoints=None
+    max_size: int | Mapping[int, int] | None = None,
+    name: str | None = None,
+    *,
+    budget: int | Mapping[int, int] | None = None,
+    checkpoints=None,
 ) -> Probe:
-    """Vector: the number of uncorrectable m-qubit erasures for m = 1..``max_size``, by exhaustion.
+    """Vector: the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion.
 
     Entry ``m - 1`` counts the m-subsets A of the system with I(A:R) > 0, so
     ``count / C(n, m)`` is the exact P_C(m), and all counts are zero exactly
-    when every erasure of at most ``max_size`` qubits is correctable (code
-    distance > ``max_size``). The cost grows like C(n, max_size - 1): for
-    n = 256 (one thread), about 1 ms for 2, 40 to 50 ms for 3 and about 7 s for 4
-    per evaluation, so give larger sizes their own sparse ``checkpoints``.
+    when every erasure of at most w qubits is correctable (code distance > w).
+
+    The cutoff w = m*(n) splits P_C(m) into an exact regime, m <= w, and a
+    sampled one above (:func:`erasure_first_failure`). Give at most one of
+
+    * ``max_size``: w itself (default 2);
+    * ``budget``: the number B of regions to enumerate per evaluation, which
+      gives w = max{w : sum_{m=1}^{w} C(n, m) <= B}
+      (:func:`sparsegf2.analysis.exhaustive_cutoff`). B counts regions, not
+      seconds: the time per region depends on n and w.
+
+    Either may be one int or a mapping from the system size n to a value, so
+    one probe serves a sweep over n: ``max_size={64: 3, 128: 2, 256: 2}`` or
+    ``budget={64: 20_000, 256: 50_000}``. A budget or a mapping is resolved by
+    :class:`MonitoredCircuit` for its ``num_system``. The default name is
+    ``uncorrectable_region_counts[w]`` with the resolved w; pass ``name`` to
+    keep one key at every n.
+
+    The cost grows like C(n, w - 1): for n = 256 (one thread), about 1 ms for
+    w = 2, 40 to 50 ms for 3 and about 7 s for 4 per evaluation, so give
+    larger sizes their own sparse ``checkpoints``.
     """
-    w = _integer(max_size, "max_size")
+    if max_size is not None and budget is not None:
+        raise ValueError("give max_size or budget, not both")
+    if budget is None and not isinstance(max_size, Mapping):
+        w = _integer(2 if max_size is None else max_size, "max_size")
+        return Probe(
+            "uncorrectable_counts",
+            name or f"uncorrectable_region_counts[{w}]",
+            (),
+            w,
+            0,
+            _schedule(checkpoints),
+        )
+    form = "max_size" if budget is None else "budget"
+    cutoff = (form, _cutoff_value(max_size if budget is None else budget, form))
     return Probe(
         "uncorrectable_counts",
-        name or f"uncorrectable_region_counts[{w}]",
+        name or _unresolved_name(cutoff),
         (),
-        w,
+        0,
         0,
         _schedule(checkpoints),
+        cutoff,
     )
+
+
+def _cutoff_value(value, form: str) -> int | tuple[tuple[int, int], ...]:
+    """A budget (an int) or a mapping {n: value} as sorted ``(n, value)`` pairs, validated.
+
+    A budget must be non-negative. A mapping's entries are checked against
+    their own n: a ``max_size`` must lie in [1, n].
+    """
+    if not isinstance(value, Mapping):  # one budget (one max_size needs no resolving)
+        b = _integer(value, form)
+        if b < 0:
+            raise ValueError(f"{form} must be non-negative, got {b}")
+        return b
+    if not value:
+        raise ValueError(f"{form}: give at least one system size")
+    pairs = []
+    for key, v in value.items():
+        try:
+            n = _integer(key, form)
+        except TypeError:
+            raise TypeError(
+                f"the system sizes (keys) of {form} must be integers, got {key!r}"
+            ) from None
+        if n < 2:
+            raise ValueError(f"the system sizes (keys) of {form} must be at least 2, got {n}")
+        x = _integer(v, f"{form}[{n}]")
+        if form == "max_size" and not 1 <= x <= n:
+            raise ValueError(f"max_size[{n}] must be in [1, {n}], got {x}")
+        if form == "budget" and x < 0:
+            raise ValueError(f"budget[{n}] must be non-negative, got {x}")
+        pairs.append((n, x))
+    return tuple(sorted(pairs))
+
+
+def _unresolved_name(cutoff: tuple) -> str:
+    """The default name of a counts probe before its size is known: its cutoff, as given."""
+    form, value = cutoff
+    shown = dict(value) if isinstance(value, tuple) else value
+    return f"uncorrectable_region_counts({form}={shown})"
+
+
+def _resolve_cutoff(p: Probe, n: int) -> Probe:
+    """``p`` with ``size`` (and a default name) set from its budget or mapping for ``n`` qubits."""
+    assert p.cutoff is not None, "only probes with a cutoff are resolved"
+    form, value = p.cutoff
+    if isinstance(value, tuple):
+        given = dict(value)
+        if n not in given:
+            raise ValueError(
+                f"probe {p.name!r}: {form} has no entry for num_system = {n}; it covers the "
+                f"system sizes {sorted(given)}"
+            )
+        value = given[n]
+    if form == "budget":
+        w = exhaustive_cutoff(n, value)
+        if w == 0:
+            raise ValueError(
+                f"probe {p.name!r}: budget {value} allows no exhaustive region size at n = {n} "
+                f"(C({n}, 1) = {n} > {value}); raise the budget or drop the probe"
+            )
+    else:
+        w = value
+    # A default name follows the resolved size; a name the user chose stays.
+    default = p.name in (_unresolved_name(p.cutoff), f"uncorrectable_region_counts[{p.size}]")
+    return replace(p, size=w, name=f"uncorrectable_region_counts[{w}]" if default else p.name)
 
 
 def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
@@ -629,7 +739,7 @@ class MonitoredCircuit:
             raise ValueError("stop_when_purified needs a reference")
 
     def _resolve_probe(self, p: Probe) -> Probe:
-        """Validate a probe and fill in default regions."""
+        """Validate a probe and fill in default regions and the exhaustive size for this n."""
         if not isinstance(p, Probe):
             raise TypeError("probes must be created with the mipt probe functions")
         if p.kind not in _KINDS:
@@ -664,8 +774,11 @@ class MonitoredCircuit:
                 )
         if _KINDS[p.kind].sampled and p.samples < 1:
             raise ValueError(f"probe {p.name!r}: samples must be at least 1")
-        if p.kind == "uncorrectable_counts" and not 1 <= p.size <= n:
-            raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}]")
+        if p.kind == "uncorrectable_counts":
+            if p.cutoff is not None:  # a budget or a mapping: its size at this n
+                p = _resolve_cutoff(p, n)
+            if not 1 <= p.size <= n:
+                raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}], got {p.size}")
         return p
 
     def _resolve_checkpoints(self, spec) -> tuple[str | int | np.ndarray, np.ndarray]:
@@ -1211,6 +1324,22 @@ def _seed_record(result: EnsembleResult) -> tuple:
     return result.seed_entropy, result.seed_spawn_key, result.seed_pool_size
 
 
+def _cutoff_record(cutoff: tuple) -> dict:
+    """A probe's cutoff as saved, in its JSON probe form: ``{"budget": 100}``, ``{"max_size": {"64": 3}}``."""
+    form, value = cutoff
+    return {form: {str(n): v for n, v in value} if isinstance(value, tuple) else value}
+
+
+def _cutoff_from_record(record: dict | None) -> tuple | None:
+    """The cutoff saved by :func:`_cutoff_record` (None for probes without one, and old files)."""
+    if record is None:
+        return None
+    ((form, value),) = record.items()
+    if isinstance(value, dict):
+        value = {int(n): v for n, v in value.items()}
+    return form, _cutoff_value(value, form)
+
+
 def _json_default(obj):
     """``json.dumps`` fallback: numpy scalars and arrays become plain Python values."""
     if isinstance(obj, np.generic):
@@ -1445,6 +1574,8 @@ class EnsembleResult:
                     "checkpoints": list(p.checkpoints)
                     if isinstance(p.checkpoints, tuple)
                     else p.checkpoints,
+                    # the budget or mapping that chose ``size``, kept for another n
+                    **({"cutoff": _cutoff_record(p.cutoff)} if p.cutoff is not None else {}),
                 }
                 for p in spec.probes
             ],
@@ -1491,6 +1622,7 @@ class EnsembleResult:
                     p["size"],
                     p["samples"],
                     _schedule(p.get("checkpoints")),
+                    _cutoff_from_record(p.get("cutoff")),
                 )
                 for p in meta["probes"]
             ]

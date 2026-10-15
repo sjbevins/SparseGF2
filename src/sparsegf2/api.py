@@ -1304,6 +1304,29 @@ def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
     )
 
 
+# Probe arguments that may map the system size to a value; JSON object keys are strings,
+# so {"64": 3} means n = 64.
+_SIZE_MAP_ARGS = {"max_size", "budget"}
+
+
+def _size_map(value: dict, what: str) -> dict:
+    """``{"64": 3, ...}`` keyed by num_system, as ``{64: 3, ...}``; the probe checks the values."""
+    out: dict = {}
+    for key, v in value.items():
+        if isinstance(key, str) and re.fullmatch(r"[0-9]+", key):
+            n = int(key)
+        elif isinstance(key, (int, np.integer)) and not isinstance(key, bool):
+            n = int(key)  # from Python callers
+        else:
+            raise ValueError(
+                f'{what}: the keys are system sizes, written as integers like "64", got {key!r}'
+            )
+        if n in out:
+            raise ValueError(f"{what} gives the system size {n} twice")
+        out[n] = v
+    return out
+
+
 def _build_probe(spec: Any, index: int) -> mipt.Probe:
     kinds = _probe_kinds()
     where = f"probes[{index}]"
@@ -1321,6 +1344,8 @@ def _build_probe(spec: Any, index: int) -> mipt.Probe:
     for key, value in list(params.items()):
         if key in _QUBIT_ARGS and value is not None:
             params[key] = _qubit_list(value, f"{where}.{key}")
+        if key in _SIZE_MAP_ARGS and isinstance(value, dict):
+            params[key] = _size_map(value, f"{where}.{key}")
     if params.get("checkpoints") is not None:
         params["checkpoints"] = _checkpoints(params["checkpoints"], f"{where}.checkpoints")
     probe = _call_with(kinds[kind], params, {"name": None}, f"{where} ({kind})")
@@ -2608,6 +2633,26 @@ def _signature_summary(fn: Callable, skip: Sequence[str] = ()) -> dict[str, Any]
 
 _DETAIL_SECTIONS = ("probes", "observables", "instructions", "ensemble_spec", "graph_families")
 
+# What a probe's signature does not show: defaults chosen inside the function, and the
+# argument forms beyond plain numbers.
+_PROBE_EXTRAS: dict[str, dict[str, Any]] = {
+    "uncorrectable_region_counts": {
+        "params": {"max_size": 2},
+        "forms": [
+            {"max_size": 3},
+            {"budget": 50000},
+            {"max_size": {"64": 3, "128": 2}},
+            {"budget": {"64": 20000, "256": 50000}},
+        ],
+        "note": (
+            "w = m*(n), the largest exhaustive size: give max_size (w itself, default 2) or "
+            "budget B (w = max{w : sum_{m=1}^{w} C(n, m) <= B}; B counts regions, not "
+            "seconds), not both; an object maps num_system to a value, so one probe serves a "
+            "sweep over n; the key is uncorrectable_region_counts[w] unless 'name' is given"
+        ),
+    },
+}
+
 
 def _capability_sections() -> dict[str, Any]:
     fields = _spec_fields()
@@ -2653,8 +2698,13 @@ def _capability_sections() -> dict[str, Any]:
         "ensemble_spec": spec_keys,
         "probes": {
             name: {
-                "params": {**_signature_summary(fn, ("name", "checkpoints")), "name": None},
+                "params": {
+                    **_signature_summary(fn, ("name", "checkpoints")),
+                    **_PROBE_EXTRAS.get(name, {}).get("params", {}),
+                    "name": None,
+                },
                 "description": _first_sentence(fn),
+                **{k: v for k, v in _PROBE_EXTRAS.get(name, {}).items() if k != "params"},
             }
             for name, fn in _probe_kinds().items()
         },

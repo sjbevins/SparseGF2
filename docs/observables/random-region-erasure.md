@@ -166,34 +166,55 @@ $$
 For example $B = 50{,}000$ gives $m^{\ast}(64) = 3$, $m^{\ast}(128) = 2$,
 $m^{\ast}(256) = 2$ and $m^{\ast}(512) = 1$. $B$ counts regions, not
 seconds: the time per region is not constant, and every evaluation also pays
-a fixed elimination (§4.2). In the code, $m^{\ast}(n)$ is the
-`max_size` of the probe `mipt.uncorrectable_region_counts` and of
-`StabilizerCode.uncorrectable_counts`; it is written $w$ below. A `budget=`
-argument on the probe is planned; until then, compute $w$ from the budget
-yourself:
+a fixed elimination (§4.2).
+
+In the code, $m^{\ast}(n)$ is written $w$ below. It is the `max_size` of
+`StabilizerCode.uncorrectable_counts`, and the probe
+`mipt.uncorrectable_region_counts` takes it in one of two forms
+(`mipt.py::uncorrectable_region_counts`; giving both is an error):
+
+* `max_size=w`, the cutoff itself (default 2);
+* `budget=B`, the cutoff of formula (4), which
+  `analysis.exhaustive_cutoff(n, B)` evaluates
+  (`analysis.py::exhaustive_cutoff`). `analysis.exhaustive_region_count(n, w)`
+  is $N_{\mathrm{exact}}(n)$ of formula (3) for the cutoff $w$, as an exact
+  integer.
+
+Either may be one integer or a mapping from the system size $n$ to a value,
+such as `max_size={64: 3, 128: 2}` or `budget={64: 20_000, 256: 50_000}`, so
+one probe definition serves a sweep over $n$. `MonitoredCircuit` resolves the
+probe for its own `num_system` (`mipt.py::MonitoredCircuit._resolve_probe`,
+which calls `mipt.py::_resolve_cutoff`). A mapping without an entry for $n$
+is an error that lists the sizes it covers. So is a budget below $n$: then
+not even the $n$ single-qubit regions fit, and no $w \ge 1$ does. The default
+name of the probe, `uncorrectable_region_counts[w]`, carries the resolved
+$w$; give a `name` to keep one key at every $n$.
 
 ```python
-import math
+from sparsegf2 import analysis, graphs, mipt
 
+assert analysis.exhaustive_region_count(256, 2) == 32_896
+assert [analysis.exhaustive_cutoff(n, 50_000) for n in (64, 128, 256, 512)] == [3, 2, 2, 1]
 
-def exhaustive_regions(n, w):
-    """N_exact(n) of formula (3) for the cutoff w = m*(n)."""
-    return sum(math.comb(n, m) for m in range(1, w + 1))
-
-
-def cutoff_from_budget(n, budget):
-    """m*(n) of formula (4): the largest w whose N_exact(n) fits the budget (0 if none)."""
-    w = 0
-    while w < n and exhaustive_regions(n, w + 1) <= budget:
-        w += 1
-    return w
-
-
-assert exhaustive_regions(256, 2) == 32_896
-assert [cutoff_from_budget(n, 50_000) for n in (64, 128, 256, 512)] == [3, 2, 2, 1]
+probes = [
+    mipt.uncorrectable_region_counts(budget=50_000),  # w = m*(n) of formula (4)
+    mipt.uncorrectable_region_counts(max_size={64: 3, 128: 2}, name="counts"),
+]
+for n, w in ((64, 3), (128, 2)):
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=0,
+        measurement_rate=0.0,
+        reference="purification",
+        probes=probes,
+    )
+    resolved = [(p.name, p.size) for p in spec.probes]
+    assert resolved == [(f"uncorrectable_region_counts[{w}]", w), ("counts", w)]
 ```
 
-and pass it on, for example `mipt.uncorrectable_region_counts(max_size=cutoff_from_budget(n, 50_000))`.
+The resolved $w$ is what the engine runs and what a saved result stores, with
+the budget or mapping kept beside it.
 
 ---
 
@@ -665,7 +686,7 @@ this.
 | layer | function | what it gives |
 |---|---|---|
 | `mipt` probes | `erasure_first_failure(samples=100)` | $D_1, \dots, D_M$ per evaluation |
-| | `uncorrectable_region_counts(max_size=2)` | $N_1, \dots, N_w$ per evaluation |
+| | `uncorrectable_region_counts(max_size=2)`, or `budget=B`; either may map $n$ to a value | $N_1, \dots, N_w$ per evaluation |
 | | `code_snapshot()` | the code itself; `EnsembleResult.code(t, c)` returns it as a `StabilizerCode` |
 | `codes.StabilizerCode` | `uncorrectable_counts(w)`, `first_failure_sizes(M, seed=...)`, `lost_information(A)`, `is_correctable(A)` | the same kernels on a saved code, with any $w$ or $M$ later |
 | | `from_simulator(sim, reference)` | the code held by a `Simulator`'s system |
@@ -747,7 +768,11 @@ arguments:
             {"kind": "code_snapshot", "checkpoints": "final"}]}
 ```
 
-Every probe also takes `"name"` and its own `"checkpoints"`. `run_ensemble`
+The cutoff may also be `{"budget": 50000}`, or an object keyed by the system
+size, `{"max_size": {"64": 3, "128": 2}}` or
+`{"budget": {"64": 20000, "256": 50000}}` (`api.py::_size_map` reads the
+keys, which JSON writes as strings). Every probe also takes `"name"` and its
+own `"checkpoints"`. `run_ensemble`
 returns a summary, and so does `load_results` after a background job
 (`start_ensemble_job`). For each erasure probe, the summary
 holds a `what` line, the mean $P_C(m)$ curve over trajectories and its
@@ -771,8 +796,9 @@ final state (or at every `TICK`):
 `{"kind": "random_erasure_statistics", "system": "0:16", "reference": "16:32", "sizes": [1, 2, 4], "samples": 50}`
 and `{"kind": "erasure_profile", "system": "0:16", "reference": "16:32", "samples": 10}`.
 `estimate_ensemble` prices the erasure probes pessimistically
-(`api.py::_probe_us`). The counts are priced in logarithms, so an absurd
-`max_size` gives a huge estimate instead of an overflow.
+(`api.py::_probe_us`), the counts at the resolved $w$. They are priced in
+logarithms, so an absurd `max_size` gives a huge estimate instead of an
+overflow.
 
 ---
 
@@ -887,7 +913,7 @@ A practical way to choose $m^{\ast}(n)$:
    at your $n$: §4.2 at $n = 256$, the planned benchmark otherwise. It
    includes the fixed elimination. Multiply by trajectories and evaluations,
    divide by cores, and keep the largest $w$ that fits your time. A region
-   budget $B$ (formula (4), `cutoff_from_budget` above) is not a time budget:
+   budget $B$ (formula (4), `budget=B`, `analysis.exhaustive_cutoff`) is not a time budget:
    use it only after checking what that $B$ costs at your $n$.
 2. **Accuracy.** The sampled regime is informative where $M P_C(m) \gg 1$. If
    $\hat P_C(w+1)$ is 0 or rests on a handful of orderings, either raise $w$

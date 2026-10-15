@@ -1,5 +1,6 @@
-"""mu_D, distance bounds and the hybrid P_C(m) curve (analysis.py)."""
+"""mu_D, distance bounds, the hybrid P_C(m) curve and the exhaustive cutoff m*(n) (analysis.py)."""
 
+import itertools
 import math
 
 import numpy as np
@@ -185,3 +186,64 @@ def test_erasure_tolerance_inverts_the_hybrid_curve_with_samples_below_w():
         e = analysis.erasure_tolerance(first, n, delta, exact_counts=counts)
         i = int(np.flatnonzero(phi <= delta)[-1])  # last grid point with Phi <= delta
         assert grid[i] - 1e-9 <= e <= grid[i + 1], delta
+
+
+# -- the exhaustive cutoff m*(n) ------------------------------------------------------------
+
+
+def _regions_by_enumeration(n: int, w: int) -> int:
+    """N_exact(n, w), the number of non-empty subsets of at most w of n qubits, by listing
+    them (independent of math.comb and of analysis)."""
+    return sum(1 for m in range(1, w + 1) for _ in itertools.combinations(range(n), m))
+
+
+def test_exhaustive_cutoff_owner_examples():
+    # m*(n) = max{w : sum_{m=1}^{w} C(n, m) <= B} with B = 50,000, worked by hand:
+    # n = 64: 64 + 2,016 + 41,664 = 43,744 <= B, and + C(64, 4) = 635,376 is not;
+    # n = 128: 128 + 8,128 = 8,256 <= B < 8,256 + 341,376; n = 256: 256 + 32,640 = 32,896;
+    # n = 512: 512 <= B < 512 + 130,816
+    assert [analysis.exhaustive_cutoff(n, 50_000) for n in (64, 128, 256, 512)] == [3, 2, 2, 1]
+    assert analysis.exhaustive_region_count(256, 2) == 32_896
+
+
+def test_exhaustive_region_count_matches_enumeration():
+    for n in range(11):
+        for w in range(n + 1):
+            assert analysis.exhaustive_region_count(n, w) == _regions_by_enumeration(n, w)
+    # every non-empty subset, as an exact Python int far beyond int64
+    assert analysis.exhaustive_region_count(200, 200) == 2**200 - 1
+
+
+def test_exhaustive_cutoff_is_the_largest_size_within_the_budget():
+    for n in range(1, 11):
+        totals = [_regions_by_enumeration(n, w) for w in range(n + 1)]
+        for budget in range(2**n + 2):
+            expected = max(w for w in range(n + 1) if totals[w] <= budget)
+            assert analysis.exhaustive_cutoff(n, budget) == expected, (n, budget)
+
+
+def test_exhaustive_cutoff_edge_cases():
+    for n in (1, 2, 64, 257):
+        assert analysis.exhaustive_cutoff(n, 0) == 0  # not even the n single-qubit regions
+        assert analysis.exhaustive_cutoff(n, n - 1) == 0
+        assert analysis.exhaustive_cutoff(n, n) == 1  # exactly C(n, 1)
+        assert analysis.exhaustive_cutoff(n, 2**n - 2) == n - 1  # all but the full set
+        assert analysis.exhaustive_cutoff(n, 2**n - 1) == n  # every non-empty subset
+        assert analysis.exhaustive_cutoff(n, 2**n + 10**9) == n
+
+
+def test_exhaustive_cutoff_arguments_are_checked():
+    assert analysis.exhaustive_cutoff(np.int64(64), 5e4) == 3  # numpy ints, whole floats
+    with pytest.raises(ValueError, match="budget must be non-negative"):
+        analysis.exhaustive_cutoff(64, -1)
+    with pytest.raises(TypeError, match="budget must be an integer"):
+        analysis.exhaustive_cutoff(64, 2.5)
+    with pytest.raises(TypeError, match="num_qubits must be an integer"):
+        analysis.exhaustive_cutoff(64.5, 100)
+    with pytest.raises(ValueError, match="num_qubits must be non-negative"):
+        analysis.exhaustive_region_count(-1, 0)
+    for bad in (-1, 9):
+        with pytest.raises(ValueError, match=r"max_size must be in \[0, 8\]"):
+            analysis.exhaustive_region_count(8, bad)
+    with pytest.raises(TypeError, match="max_size must be an integer"):
+        analysis.exhaustive_region_count(8, True)
