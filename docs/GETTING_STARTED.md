@@ -113,7 +113,8 @@ How it scales (`benchmarks/thread_scaling.py`, results in
 `benchmarks/results/thread_scaling.md`; AMD Ryzen 9 9950X3D, 16 cores and 32
 logical processors, Numba's `omp` threading layer): speedup over one thread was
 12.3 to 13.7 at 16 threads and 17.3 to 21.1 at 32, depending on the workload
-(ensembles of erasure probes scale best, shot sampling least). Using all 32
+(ensembles of erasure probes scale best, the purification-time workload with
+its every-layer probe least). Using all 32
 logical processors beat 16 threads in every workload, by 1.4 to 1.5 times, so
 the default (`NUMBA_NUM_THREADS` equal to the logical processor count) is the
 right setting on a machine you have to yourself. On a shared machine, or
