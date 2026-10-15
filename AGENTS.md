@@ -204,10 +204,11 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   code (it is NaN wherever the code dimension is 0).
 * Results that would need more than 8 GB of memory are refused. `erasure_first_failure`
   stores `samples` numbers per evaluation and `code_snapshot` a whole code, so give them
-  few checkpoints of their own. Measured one-thread costs per evaluation at n = 256:
-  `erasure_first_failure` with 100 samples 3 to 7 ms; `uncorrectable_region_counts` about
-  1 ms for w = 2, 40 to 50 ms for w = 3, about 7 s for w = 4 (practical only at a few
-  depths).
+  few checkpoints of their own. Measured one-thread costs per evaluation in an ensemble at
+  n = 256 (AMD Ryzen 9 9950X3D, 2026-10-15): `erasure_first_failure` with 100 samples about
+  2 ms; `uncorrectable_region_counts` about 1 ms for w = 2, 20 ms for w = 3 and 4 s for
+  w = 4 (practical only at a few depths). Every n from 32 to 512, and what a region budget
+  costs, are in `benchmarks/results/erasure_cost.md`.
 * `stabilizers` lists generators only up to 32 qubits. For large states use
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means

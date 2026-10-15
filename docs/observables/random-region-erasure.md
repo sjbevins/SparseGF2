@@ -832,47 +832,77 @@ $$
 * $T_{\mathrm{cols}}$ is the `code_columns` elimination (§3.2). It is paid on
   every evaluation whatever $w$ is, and by `erasure_first_failure` too. Its
   operation count is $O(N r \lceil 2n/64\rceil)$, up to about $n^3/8$ word
-  operations in the purification picture, so it grows about eightfold when
-  $n$ doubles (derived from the operation count).
+  operations in the purification picture, so by the operation count it grows
+  about eightfold when $n$ doubles; measured, it grew 3 to 8 times per
+  doubling between $n = 32$ and $512$.
 * $T_{\mathrm{walk}}$ is the walk of §3.3, about
   $\binom{n}{w-1}(4^{w-1}\lceil r/64\rceil + n)$ word operations (a model).
   Per region its cost depends on $n$ and grows with $w$, so there is no
   constant time per region.
 
-Measured on one thread, through `StabilizerCode` (the same kernels as the
-engine), on codes from Watts–Strogatz trajectories at $n = 256$ (degree 4,
-$\beta = 0.1$, purification picture, `random_edges`, 64 to 1024 layers at
-$p = 0.05$ or $0.1$, $k_C$ between 59 and 134), on the development machine
-(AMD Ryzen 9 9950X3D), nine codes (two for $w = 4$):
+The benchmark `benchmarks/erasure_cost.py` measures both on one thread; its
+results, per $(n, p, w)$ with medians and maxima over codes, are in
+[`benchmarks/results/erasure_cost.md`](../../benchmarks/results/erasure_cost.md)
+(recorded 2026-10-15 on the development machine, an AMD Ryzen 9 9950X3D). The
+codes come from Watts–Strogatz trajectories: degree 4, $\beta = 0.1$,
+purification picture, `random_edges`, $4n$ layers at $p = 0.05$ and $0.1$,
+eight codes with $k_C > 0$ per $(n, p)$ (two to four at the slowest levels).
+Each cell below is the range of the two rates' medians for the engine probe at
+a checkpoint, which is what an ensemble pays per evaluation. A level the
+benchmark did not run is marked *extrapolated*: the walk model of §3.3 scaled
+from the measured level below. Where the model could be checked ($n \ge 64$,
+growth from $w - 1$ to $w \ge 4$), it matched the measured growth of each code
+to within a factor of about 1.5.
 
-| work per evaluation | $N_{\mathrm{exact}}$ | time |
-|---|---|---|
-| `code_columns` alone | | 0.3 to 0.6 ms |
-| counts, $w = 1$ | 256 | 0.3 to 0.6 ms (almost all `code_columns`) |
-| counts, $w = 2$ | 32,896 | 0.4 to 0.7 ms |
-| counts, $w = 3$ | 2,796,416 | 18 to 22 ms |
-| counts, $w = 4$ | 177,589,056 | 4.3 to 4.7 s |
-| first failure, $M = 100$ | | 0.6 to 1.8 ms |
+| work per evaluation | $n = 32$ | $64$ | $128$ | $256$ | $512$ |
+|---|---|---|---|---|---|
+| counts, $w = 1$ | 6 µs | 18–22 µs | 0.10–0.25 ms | 0.85–1.2 ms | 3.6–5.1 ms |
+| counts, $w = 2$ | 10–11 µs | 30–34 µs | 0.17–0.29 ms | 1.0–1.3 ms | 4.1–5.3 ms |
+| counts, $w = 3$ | 0.11 ms | 0.86 ms | 3.7–3.8 ms | 20–21 ms | 117–130 ms |
+| counts, $w = 4$ | 3.1 ms | 33–35 ms | 0.32–0.34 s | 3.7–4.1 s | about 35 s, *extrapolated* |
+| counts, $w = 5$ | 56 ms | 1.3 s | 26–27 s | about 10–12 min, *extrapolated* | |
+| counts, $w = 6$ | 0.84–0.99 s | 43–48 s | about 40 min, *extrapolated* | | |
+| counts, $w = 7$ | 7.4–9.7 s | about 30 min, *extrapolated* | | | |
+| counts, $w = 8$ | about 2 min, *extrapolated* | | | | |
+| first failure, $M = 100$ | 0.09–0.11 ms | 0.21–0.26 ms | 0.56–0.67 ms | 1.9–2.0 ms | 5.9–6.3 ms |
+| first failure, $M = 512$ | 0.44–0.57 ms | 0.96–1.2 ms | 2.1–2.3 ms | 4.4–6.3 ms | 12–15 ms |
+| first failure, $M = 2048$ | 1.8–2.3 ms | 3.4–4.7 ms | 8.1–8.2 ms | 14–22 ms | 33–51 ms |
 
-AGENTS.md and the `mipt.uncorrectable_region_counts` docstring quote an
-earlier, slower measurement (40 to 50 ms for $w = 3$, about 7 s for $w = 4$,
-3 to 7 ms for 100 orderings). Plan with those if you want to be pessimistic.
-Derived from the table, not measured separately:
-
-* the time per region is 1 to 2 µs at $w = 1$ (the fixed elimination
-  dominates), 12 to 21 ns at $w = 2$, 6 to 8 ns at $w = 3$ and about 25 ns at
-  $w = 4$;
-* $w = 5$ at $n = 256$ would visit about 63 times more prefixes than $w = 4$,
-  each with up to four times more lookups: by the model, roughly 10 to 20
-  minutes per code.
+* **Saved codes are cheaper at small $w$.** `StabilizerCode` runs the same
+  kernels, and the counts agree exactly (the benchmark checks every code).
+  From $w = 4$ on its times match the engine's to within 4%. At $w \le 2$ and
+  $n \ge 128$ it is 2 to 4 times faster, because its fixed elimination starts
+  from a normalizer basis that `symplectic_complement` has already reduced,
+  while the engine eliminates the trajectory's tableau rows as they are.
+  `code_columns` alone on a saved code took 0.36–0.44 ms at $n = 256$ and
+  1.6–1.9 ms at $n = 512$.
+* **Time per region** (seconds per code divided by $N_{\mathrm{exact}}$,
+  saved codes): 0.2 to 3.8 µs at $w = 1$, where the fixed elimination is
+  nearly everything; 9 to 17 ns at $w = 2$; 5 to 17 ns at $w = 3$; 21 to 72 ns
+  at $w = 4$; 92 to 228 ns at $w = 5$; 0.5 to 0.9 µs at $w = 6$; 1.6 to
+  2.2 µs at $w = 7$ ($n = 32$). At fixed $w$ it falls as $n$ grows, and at
+  fixed $n$ it rises with $w$, as the per-region model of §3.3 says.
+* **Orderings are cheap.** Each ordering adds 0.8 to 1.1 µs at $n = 32$, up
+  to 14 to 23 µs at $n = 512$, on top of the elimination. At $n = 512$,
+  2048 orderings cost less than half as much as the $w = 3$ counts.
 
 So a budget $B$ in formula (4) counts regions, not seconds. The same $B$
-costs different times at different $n$ and $w$, and every evaluation pays
-$T_{\mathrm{cols}}$ on top. A dedicated benchmark, `benchmarks/erasure_cost.py`
-(planned), will publish measured times per $(n, w)$; choose $m^{\ast}(n)$ from
-those measured times, then set it as `max_size` (or as the budget that gives
-it). For a study, multiply the time per code by trajectories and evaluations,
-and divide by the cores in use: the engine runs trajectories in parallel.
+costs very different times at different $n$: $B = 10^7$ gives
+$m^{\ast}(32) = 7$, at 7 to 10 s per code, but $m^{\ast}(512) = 2$, at 4 to
+5 ms. The results list $m^{\ast}(n)$ and the seconds per code for
+$B \in \lbrace 10^4, 5 \cdot 10^4, 10^5, 10^6, 10^7\rbrace$ at every $n$
+measured. Choose $m^{\ast}(n)$ from the measured times, then set it as
+`max_size` (or as the budget that gives it). For a study, multiply the time
+per code by trajectories and evaluations, add the evolution, and divide by
+the effective number of threads. The engine runs trajectories in parallel,
+and on the development machine 32 threads ran ensembles 19.6 to 21.1 times
+faster than one
+([`thread_scaling.md`](../../benchmarks/results/thread_scaling.md)). For
+example, $n \in \lbrace 64, 128, 256, 512\rbrace$ at both rates, 1,000
+trajectories each, 8 checkpoints, with the counts at the cutoff of
+$B = 5 \cdot 10^4$ and $M = 512$ orderings at every checkpoint, comes to
+about 12 minutes of CPU time, under 40 s of wall time on 32 threads (the last
+table of the results).
 
 ### 4.3 Error bars
 
@@ -914,8 +944,9 @@ rare the failures are.
 A practical way to choose $m^{\ast}(n)$:
 
 1. **Time.** For each candidate $w$, take the measured time per evaluation
-   at your $n$: §4.2 at $n = 256$, the planned benchmark otherwise. It
-   includes the fixed elimination. Multiply by trajectories and evaluations,
+   at your $n$ from §4.2, or per rate with maxima from
+   [`benchmarks/results/erasure_cost.md`](../../benchmarks/results/erasure_cost.md).
+   It includes the fixed elimination. Multiply by trajectories and evaluations,
    divide by cores, and keep the largest $w$ that fits your time. A region
    budget $B$ (formula (4), `budget=B`, `analysis.exhaustive_cutoff`) is not a time budget:
    use it only after checking what that $B$ costs at your $n$.

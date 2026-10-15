@@ -390,9 +390,11 @@ def uncorrectable_region_counts(
     ``uncorrectable_region_counts[w]`` with the resolved w; pass ``name`` to
     keep one key at every n.
 
-    The cost grows like C(n, w - 1): for n = 256 (one thread), about 1 ms for
-    w = 2, 40 to 50 ms for 3 and about 7 s for 4 per evaluation, so give
-    larger sizes their own sparse ``checkpoints``.
+    The cost grows steeply with w, roughly like C(n, w - 1) 4**(w - 1): for
+    n = 256, on one thread of an AMD Ryzen 9 9950X3D (measured 2026-10-15,
+    ``benchmarks/results/erasure_cost.md``), about 1 ms for w = 2, 20 ms for
+    3 and 4 s for 4 per evaluation, so give larger sizes their own sparse
+    ``checkpoints``.
     """
     if max_size is not None and budget is not None:
         raise ValueError("give max_size or budget, not both")
