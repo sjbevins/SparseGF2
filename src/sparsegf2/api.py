@@ -112,6 +112,7 @@ MAX_ERRORS_SHOWN = 20
 MAX_STABILIZER_QUBITS = 32
 MAX_NAME_CHARS = 64
 MAX_VECTOR_DEPTHS = 8
+MAX_GRID_SIZES = 17
 MAX_OBSERVED_TICKS = 1_000_000
 MAX_TICK_ROWS = 10_000
 MAX_QUBITS = 65_536
@@ -199,8 +200,11 @@ def _shrink(obj: Any, max_items: int, max_text: int, depth: int = 0) -> Any:
 
 
 def _mark_truncated(out: dict[str, Any], note: str) -> dict[str, Any]:
-    notes = out.get("notes")
-    out["notes"] = [*(notes[:2] if isinstance(notes, list) else []), note]
+    """Set ``truncated`` and append ``note`` (once) after every note ``out`` already has."""
+    notes = list(out["notes"]) if isinstance(out.get("notes"), list) else []
+    if note not in notes:
+        notes.append(note)
+    out["notes"] = notes
     out["truncated"] = True
     return out
 
@@ -210,8 +214,10 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
 
     The summaries below are designed to fit already; this is the safety net.
     When it acts, ``truncated`` is set and a note says how to get everything.
-    As a last resort only the top-level scalar fields (seed, counts, ...) and
-    ``files`` are kept, so a caller never loses the run's identity or paths.
+    The notes say how to read the result, so they are kept whole (unless
+    they alone exceed the limit). As a last resort only the top-level scalar
+    fields (seed, counts, ...), ``files`` and the notes are kept, so a caller
+    never loses the run's identity or paths.
     """
     out = _jsonable(out)
     if len(json.dumps(out)) <= limit:
@@ -219,8 +225,12 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
     note = (
         "output cut to fit the size limit; pass output_dir (or read the saved files) for all data"
     )
+    notes = out.get("notes")
     for max_items in (32, 16, 8, 4, 2, 1, 0):
-        shrunk = _mark_truncated(_shrink(out, max_items, max(200, 80 * max_items)), note)
+        shrunk = _shrink(out, max_items, max(200, 80 * max_items))
+        if isinstance(notes, list):
+            shrunk["notes"] = notes
+        shrunk = _mark_truncated(shrunk, note)
         if len(json.dumps(shrunk)) <= limit:
             return shrunk
     essentials = {
@@ -230,8 +240,10 @@ def _bounded(out: dict[str, Any], limit: int = MAX_OUTPUT_CHARS) -> dict[str, An
     }
     if isinstance(out.get("files"), dict):
         essentials["files"] = out["files"]
+    if isinstance(notes, list):
+        essentials["notes"] = notes
     essentials = _mark_truncated(
-        essentials, "result too large to show; only scalar fields and file paths are kept"
+        essentials, "result too large to show; only scalar fields, file paths and notes are kept"
     )
     if len(json.dumps(essentials)) <= limit:
         return essentials
@@ -584,7 +596,11 @@ def _compile_observables(
             'observables must be a list of objects like {"kind": "entropy", "region": [0, 1]}'
         )
     compiled: list[tuple[str, Callable[[Simulator], Any], Callable[[Any], Any]]] = []
-    names: Counter[str] = Counter()
+    # Every result key is distinct: a name given explicitly is kept (a repeat gets a
+    # suffix), and the automatic ones (the kind, then kind#2, kind#3, ...) skip every
+    # name in use or given explicitly.
+    explicit = {s["name"] for s in specs if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    used: set[str] = set()
     for i, spec in enumerate(specs):
         where = f"observables[{i}]"
         if not isinstance(spec, dict) or "kind" not in spec:
@@ -629,12 +645,14 @@ def _compile_observables(
         if kind in ("random_erasure_statistics", "erasure_profile"):
             args.setdefault("samples", 100 if kind == "random_erasure_statistics" else 10)
             args.setdefault("seed", seed)
-        name = spec.get("name") or kind
+        given = spec.get("name")
+        name = given or kind
         if not isinstance(name, str):
             raise ValueError(f"{where}.name must be a string")
-        names[name] += 1
-        if names[name] > 1:
-            name = f"{name}#{names[name]}"
+        base, copy = name, 2
+        while name in used or (name in explicit and name != given):
+            name, copy = f"{base}#{copy}", copy + 1
+        used.add(name)
 
         def fn(sim: Simulator, _obs=obs, _args=args, _where=where, _kind=kind) -> Any:
             try:
@@ -883,7 +901,7 @@ def run_circuit(
     tick_stride
         With ``observe_ticks``, evaluate after ticks ``0, k, 2k, ...`` and the
         last one. Default: every tick, or the smallest stride that keeps at
-        most :data:`MAX_TICK_ROWS` evaluations.
+        most :data:`MAX_TICK_ROWS` evaluations, the last tick included.
     num_qubits
         Simulate more qubits than the circuit touches (idle qubits).
     output_dir
@@ -1072,14 +1090,17 @@ def _tick_stride(observe_ticks: bool, tick_stride: Any, num_ticks: int, has_obs:
             f"observe_ticks supports circuits with at most {MAX_OBSERVED_TICKS:,} TICKs "
             f"(this one has {num_ticks:,}); split the circuit into segments"
         )
-    needed = max(1, math.ceil(num_ticks / MAX_TICK_ROWS))
+    # Stride s evaluates ticks 0, s, 2s, ... and the last one, ceil((num_ticks - 1) / s) + 1
+    # in all; the smallest s that keeps this within MAX_TICK_ROWS:
+    needed = max(1, -(-(num_ticks - 1) // (MAX_TICK_ROWS - 1)))
     if tick_stride is None:
         return needed
     stride = _require_int(tick_stride, "tick_stride", minimum=1)
     if stride < needed:
+        evaluated = -(-(num_ticks - 1) // stride) + 1
         raise ValueError(
-            f"tick_stride={stride} would evaluate more than {MAX_TICK_ROWS:,} ticks of "
-            f"{num_ticks:,}; use tick_stride >= {needed}"
+            f"tick_stride={stride} would evaluate {evaluated:,} of {num_ticks:,} ticks, more "
+            f"than {MAX_TICK_ROWS:,}; use tick_stride >= {needed}"
         )
     return stride
 
@@ -1762,97 +1783,143 @@ def _summary_names(names: Sequence[str]) -> dict[str, str]:
 
 
 def _vector_summary(
-    stats: Callable[[int], tuple[np.ndarray, np.ndarray]],
+    stats: Callable[[int], tuple[np.ndarray, np.ndarray, int | None]],
     alive: np.ndarray,
     layers: np.ndarray,
     sizes_shown: int,
     depths_shown: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """A vector probe: one curve over erasure or region size m = 0, 1, ... per evaluation.
 
     ``stats(c)`` returns the mean and standard error over trajectories of the
-    curve at evaluation ``c``; ``alive`` (trajectories x evaluations) marks
-    the values that exist (with ``stop_when_purified``, entanglement profiles
-    of stopped trajectories do not). ``mean``/``stderr`` are at the last
-    evaluation that has data, and ``vs_depth`` gives the mean on a coarse
-    grid of evaluations x sizes, so the change with circuit depth stays
-    visible. ``index`` lists the sizes m shown when not all are.
+    curve at evaluation ``c``, and for a curve conditioned on a code the
+    number of trajectories that hold one there (else None); ``alive``
+    (trajectories x evaluations) marks the values that exist (with
+    ``stop_when_purified``, entanglement profiles of stopped trajectories do
+    not). ``mean``/``stderr`` are at the last evaluation that has data, and
+    ``vs_depth`` gives the mean on a coarse grid of evaluations x sizes, so
+    the change with circuit depth stays visible. ``index`` lists the sizes m
+    shown when not all are. Returns the entry and whether anything was left
+    out (sizes of the curve, or evaluations or sizes of the grid).
     """
     count = alive.sum(axis=0)
     with_data = np.flatnonzero(count > 0)
     if not with_data.size:
-        return {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
+        empty = {"vector": True, "count": 0, "notes": ["no trajectory reached any checkpoint"]}
+        return empty, False
     last = int(with_data[-1])
-    mean, err = stats(last)
+    mean, err, with_code = stats(last)
     sizes = _subsample(mean.size, sizes_shown)
     entry: dict[str, Any] = {
         "vector": True,
         "at_layer": int(layers[last]),
         "count": int(count[last]),
-        "mean": mean[sizes],
-        "stderr": err[sizes],
     }
-    if len(sizes) < mean.size:
+    if with_code is not None:
+        entry["count_with_code"] = with_code
+    entry["mean"] = mean[sizes]
+    entry["stderr"] = err[sizes]
+    cut = len(sizes) < mean.size
+    if cut:
         entry["index"] = sizes
     if len(with_data) > 1:
         depth_idx = with_data[_subsample(len(with_data), depths_shown)]
-        grid_sizes = _subsample(mean.size, 17)
-        entry["vs_depth"] = {
-            "layers": layers[depth_idx],
-            "count": count[depth_idx],
-            "index": grid_sizes,
-            "mean": np.array([stats(int(c))[0][grid_sizes] for c in depth_idx]),
-        }
-    return entry
+        grid_sizes = _subsample(mean.size, MAX_GRID_SIZES)
+        rows = [stats(int(c)) for c in depth_idx]
+        grid: dict[str, Any] = {"layers": layers[depth_idx], "count": count[depth_idx]}
+        if with_code is not None:
+            grid["count_with_code"] = [row[2] for row in rows]
+        grid["index"] = grid_sizes
+        grid["mean"] = np.array([row[0][grid_sizes] for row in rows])
+        entry["vs_depth"] = grid
+        cut = cut or len(grid_sizes) < mean.size or len(depth_idx) < len(with_data)
+    return entry, cut
 
 
 def _vector_stats(
-    probe: mipt.Probe, values: np.ndarray, n: int, cache: dict
-) -> Callable[[int], tuple[np.ndarray, np.ndarray]]:
+    probe: mipt.Probe,
+    values: np.ndarray,
+    n: int,
+    cache: dict,
+    code_dimension: np.ndarray | None = None,
+) -> Callable[[int], tuple[np.ndarray, np.ndarray, int | None]]:
     """Mean and standard error of a vector probe's curve at one evaluation, memoized in ``cache``.
 
-    Profiles are averaged as stored. First-failure samples become per-trajectory
+    Profiles are averaged as stored. The erasure probes are averaged over the
+    trajectories that hold a code (k > 0) at the evaluation, whose number is
+    returned as well (None for the curves that are not conditioned):
+    first-failure samples show it themselves (some sample <= n; with k = 0
+    every sample is n + 1), exhaustive counts need ``code_dimension``, k at
+    each of the probe's evaluations (trajectories x evaluations), and without
+    it average every trajectory. First-failure samples become per-trajectory
     P_C(m), m = 0..n (fraction of samples with D <= m), in chunks of
     trajectories so the memory stays bounded whatever the ensemble size;
     exhaustive counts become the exact P_C(m), m = 0..w (P_C(0) = 0).
     """
 
-    def compute(c: int) -> tuple[np.ndarray, np.ndarray]:
+    def holders(c: int) -> np.ndarray | None:
+        """The trajectories that hold a code at evaluation ``c``, or None if not conditioned."""
+        if probe.kind == "erasure_first_failure":
+            return np.flatnonzero(values[:, c, :].min(axis=1) <= n)
+        if probe.kind == "uncorrectable_counts" and code_dimension is not None:
+            return np.flatnonzero(code_dimension[:, c] > 0)
+        return None
+
+    def compute(c: int, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         if probe.kind == "uncorrectable_counts":
-            exact = analysis.exact_failure_by_size(values[:, c, :], n)
+            counts = values[:, c, :] if rows is None else values[rows, c, :]
+            exact = analysis.exact_failure_by_size(counts, n)
             curves = np.concatenate([np.zeros((exact.shape[0], 1)), exact], axis=1)
             return analysis.mean_and_error(curves, axis=0)
-        if probe.kind != "erasure_first_failure":
+        if rows is None:  # a profile
             return analysis.mean_and_error(values[:, c, :], axis=0)
         total = np.zeros(n + 1)
         squares = np.zeros(n + 1)
         chunk = max(1, (1 << 22) // (n + 2))
-        for start in range(0, values.shape[0], chunk):
-            curves = analysis.failure_by_size(values[start : start + chunk, c, :], n)
+        for start in range(0, rows.size, chunk):
+            curves = analysis.failure_by_size(values[rows[start : start + chunk], c, :], n)
             total += curves.sum(axis=0)
             squares += (curves**2).sum(axis=0)
-        t = values.shape[0]
-        mean = total / t
-        with np.errstate(invalid="ignore", divide="ignore"):
+        t = rows.size
+        with np.errstate(invalid="ignore", divide="ignore"):  # no code (t = 0): NaN, shown as null
+            mean = total / t
             var = np.maximum(squares - t * mean**2, 0.0) / (t - 1)
             err = np.sqrt(var / t)
         return mean, err
 
-    def stats(c: int) -> tuple[np.ndarray, np.ndarray]:
+    def stats(c: int) -> tuple[np.ndarray, np.ndarray, int | None]:
         key = (probe.name, c)
         if key not in cache:
-            cache[key] = compute(c)
+            rows = holders(c)
+            cache[key] = (*compute(c, rows), None if rows is None else int(rows.size))
         return cache[key]
 
     return stats
 
+
+def _code_dimension_at(result: mipt.EnsembleResult, layers: np.ndarray) -> np.ndarray | None:
+    """k at each of ``layers`` (trajectories x layers), or None.
+
+    It comes from the first ``code_dimension`` probe evaluated at every one of
+    these layers (on the same schedule or a denser one), found by layer, not by name.
+    """
+    for p in result.spec.probes:
+        if p.kind != "code_dimension":
+            continue
+        own = np.asarray(result.layers(p.name))
+        if np.isin(layers, own).all():
+            return np.asarray(result.values[p.name])[:, np.searchsorted(own, layers)]
+    return None
+
+
+_HOLDS_A_CODE = ", among trajectories that hold a code (k > 0); count_with_code says how many"
 
 _VECTOR_MEANING = {
     "entropy_profile": "mean S(first m qubits of system_order) vs m (index)",
     "erasure_lost_profile": "mean bits of logical information lost vs erasure size m (index)",
     "erasure_first_failure": (
         "P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), "
-        "estimated from the first-failure samples"
+        "estimated from the first-failure samples" + _HOLDS_A_CODE
     ),
     "uncorrectable_counts": (
         "exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index)"
@@ -1935,6 +2002,8 @@ def _summarize_ensemble(
         sizes_shown = min(sizes_shown, max(shown, 4) + 1)
     probes = {p.name: p for p in spec.probes}
     n = spec.num_system
+    depths_shown = min(MAX_VECTOR_DEPTHS, shown)
+    vectors_cut = False
     for name, values in result.values.items():
         values = np.asarray(values, dtype=np.float64)
         probe = probes[name]
@@ -1963,11 +2032,28 @@ def _summarize_ensemble(
                 if mipt._KINDS[probe.kind].after_purification == "nan"
                 else np.ones(values.shape[:2], dtype=bool)
             )
-            stats = _vector_stats(probe, values, n, cache)
-            entry = {
-                "what": _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)"),
-                **_vector_summary(stats, alive, own, sizes_shown, min(MAX_VECTOR_DEPTHS, shown)),
-            }
+            what = _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)")
+            code_dimension = None
+            if probe.kind == "uncorrectable_counts":
+                # The counts alone cannot tell k = 0 from a distance above w.
+                code_dimension = _code_dimension_at(result, own)
+                if code_dimension is None:
+                    what += (
+                        ", averaged over all trajectories; trajectories without a code (k = 0) "
+                        "count as P_C = 0"
+                    )
+                    notes.append(
+                        f"{keys[name]}: trajectories without a code (k = 0) count as P_C = 0 in "
+                        "this curve, since the counts alone cannot tell k = 0 from a large "
+                        "distance; add a code_dimension probe evaluated at the same layers to "
+                        "average over the codes (k > 0) only"
+                    )
+                else:
+                    what += _HOLDS_A_CODE
+            stats = _vector_stats(probe, values, n, cache, code_dimension)
+            summary, cut = _vector_summary(stats, alive, own, sizes_shown, depths_shown)
+            vectors_cut = vectors_cut or cut
+            entry = {"what": what, **summary}
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
         out["purification"] = _purification_summary(result.purification_layer, layers, shown)
@@ -1982,6 +2068,13 @@ def _summarize_ensemble(
             "stop_when_purified: code probes take their exact values for a purified trajectory "
             "(k = 0, nothing lost); entanglement probes average only trajectories still running "
             "(see 'count')"
+        )
+    if vectors_cut:
+        out["truncated"] = True
+        notes.append(
+            f"vector probes are subsampled: curves to at most {sizes_shown} sizes m (listed in "
+            f"'index'), vs_depth grids to at most {depths_shown} evaluations by "
+            f"{MAX_GRID_SIZES} sizes; pass output_dir or read the saved files for every value"
         )
     if notes:
         out["notes"] = notes
@@ -2015,9 +2108,11 @@ def _purification_summary(
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
         surviving = alive.mean(axis=1)
         # The median of tau over all trajectories is well defined despite
-        # censoring whenever more than half purified within the horizon.
+        # censoring only when strictly more than half purified within the
+        # horizon (with exactly half it lies anywhere from the last purification
+        # to beyond the horizon); it is then the first layer with S <= 1/2.
         below = np.flatnonzero(surviving <= 0.5)
-        out["tau_median_all"] = int(layers[below[0]]) if below.size else None
+        out["tau_median_all"] = int(layers[below[0]]) if surviving[-1] < 0.5 else None
         out["survival"] = {"layers": layers[idx], "fraction_unpurified": surviving[idx]}
     return out
 

@@ -152,9 +152,15 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   Every probe takes an optional `"name"`, its key in the results. The summary shows a
   vector probe as a curve over m (`index`) at the last checkpoint with data, with a `what`
   line saying what the curve is, plus `vs_depth`, a grid of up to 8 checkpoints by 17
-  sizes. The two erasure probes are shown as P_C(m): `erasure_first_failure` as an
-  estimate for m = 0..n, `uncorrectable_region_counts` exactly for m = 0..w. A scalar
-  probe on its own schedule gets a `layers` key in the summary.
+  sizes; a curve or grid that leaves sizes or checkpoints out sets `truncated: true`. The
+  two erasure probes are shown as P_C(m): `erasure_first_failure` as an estimate for
+  m = 0..n, `uncorrectable_region_counts` exactly for m = 0..w. They average only the
+  trajectories that hold a code (k > 0); `count_with_code` (also in `vs_depth`) says how
+  many, and the mean is `null` where none does. `erasure_first_failure` finds them itself
+  (k = 0 gives D = n + 1). `uncorrectable_region_counts` needs a `code_dimension` probe
+  evaluated at each of its layers (the same schedule or a denser one); without one, its
+  curve counts the trajectories with k = 0 as P_C = 0, and its `what` line and a note say
+  so. A scalar probe on its own schedule gets a `layers` key in the summary.
 * **Purification time tau:** the first of the spec's checkpoints at which the reference
   is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
   never purified within the horizon.
@@ -189,7 +195,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 ## Pitfalls
 
 * Never average tau with the `-1` (censored) entries included. Use `censored_fraction`,
-  `tau_median_all` (defined when more than half the trajectories purified), the survival
+  `tau_median_all` (defined only when strictly more than half the trajectories purified
+  within the horizon; `null` otherwise, also when exactly half did), the survival
   curve `purification.survival`, or `sparsegf2.analysis.kaplan_meier` on the saved
   arrays. `-1` is a marker, not a time: call
   `time, observed = result.purification_times()` and then
@@ -233,7 +240,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 
 ## Erasure analysis in Python
 
-The summaries show P_C(m). The failure probability under independent erasure,
+The summaries show P_C(m) over the trajectories that hold a code. The failure
+probability under independent erasure,
 Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m), and the tolerance
 e_delta = sup{e : Phi(e) <= delta} are computed from the saved arrays. A run that
 records what they need (50 graphs with 4 circuits each, 200 trajectories):
@@ -272,10 +280,10 @@ StabilizerCode(["XXXX", "ZZZZ"]).uncorrectable_counts(2)      # [0, 6]: the [[4,
 
 With `exact_counts` the terms m <= w are exact and the samples cover m > w. A code with
 k = 0 (D = n + 1) has Phi = 0, so the first mean counts purified circuits as protected;
-select `k > 0` to condition on a code. `[:, -1]` is each probe's last evaluation
-(`res.layers(name)` lists them). `StabilizerCode` takes generators as Pauli strings or an
-(s, 2n) 0/1 array (X bits, then Z bits), and has `num_logical`, `lost_information(A)`,
-`is_correctable(A)`, `first_failure_sizes(samples, seed=...)` and
+select `k > 0` to condition on a code, as the summaries do. `[:, -1]` is each probe's last
+evaluation (`res.layers(name)` lists them). `StabilizerCode` takes generators as Pauli
+strings or an (s, 2n) 0/1 array (X bits, then Z bits), and has `num_logical`,
+`lost_information(A)`, `is_correctable(A)`, `first_failure_sizes(samples, seed=...)` and
 `uncorrectable_counts(w)`.
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole analysis
 versus depth.

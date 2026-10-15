@@ -9,6 +9,29 @@
   which censored at the last layer simulated and so misstated the curve whenever the
   checkpoints ended before `layers`. AGENTS.md, GETTING_STARTED, the example and the
   `kaplan_meier` error message use the new methods. `final_layer` is unchanged.
+* **P_C(m) summaries condition on a code:** the `run_ensemble` / `load_results` curves of
+  `erasure_first_failure` average only the trajectories that hold a code at each
+  evaluation (some sample <= n), and report their number as `count_with_code` (also in
+  `vs_depth`); with none the mean is `null`. They used to average in the trajectories
+  with k = 0 as P_C = 0, so P_C(n) read below 1 and codes looked better protected the
+  more of them were lost. `uncorrectable_region_counts` is conditioned the same way when
+  the spec has a `code_dimension` probe evaluated at each of its layers (the same
+  schedule or a denser one); otherwise its `what` line and a note say that trajectories
+  without a code count as P_C = 0.
+* **`tau_median_all` needs a majority:** it is reported only when strictly more than half
+  the trajectories purified within the horizon (`null` at exactly half, where the median
+  is not determined), and is then the first checkpoint with at most half left.
+* **Notes survive the size cap:** cutting a result to fit keeps every note (it used to
+  keep only the first two) and adds the truncation note once.
+* **Subsampled vector probes are flagged:** an ensemble curve or `vs_depth` grid that
+  leaves sizes or evaluations out sets `truncated: true` with a note, as `run_circuit`
+  already did for its profiles.
+* **Unique observable names in `run_circuit`:** automatic names (`entropy#2`, ...) skip
+  every name in use or given explicitly, so one value can no longer overwrite another;
+  an explicit name is kept unless two observables are given the same one.
+* **Exact tick limit:** the default `tick_stride` and the check on a given one count the
+  last tick, so at most `MAX_TICK_ROWS` ticks are evaluated (it was one more at exact
+  multiples, e.g. 10,001 of 20,000 ticks).
 
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 

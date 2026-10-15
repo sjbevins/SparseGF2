@@ -80,19 +80,19 @@ Example: {"circuit": "H 0\\nCX 0 1\\nTICK\\nM 0", "shots": 1, "seed": 1,
                  {"kind": "expectation", "pauli": "Z0*Z1"}], "observe_ticks": true}"""
 
 _RUN_ENSEMBLE = """\
-Run many trajectories of a random monitored circuit (MonitoredCircuit) and return probe
-means and standard errors per checkpoint (<= 50 shown), purification statistics (purified
-count, censored_fraction, tau median/quantiles among purified, survival curve) and
-throughput. Refuses runs estimated above max_seconds (default 60): use start_ensemble_job.
+Run many trajectories of a random monitored circuit and return probe means and standard
+errors per checkpoint (<= 50 shown), purification statistics (censored_fraction, tau
+median/quantiles among purified, survival curve) and throughput. Refuses runs estimated above max_seconds (default 60): use start_ensemble_job.
 spec keys: <SPEC_KEYS>. graph is {"family": <GRAPHS>, params..., "seed" for random
 graphs} (or give edges); graph "realizations": G gives G graphs with circuits_per_graph
 circuits each (trajectory t on graph t // circuits_per_graph; omit trajectories to run
 all). schedule matching|random_edges|all_edges; reference none|purification|single;
 checkpoints "final"|"every_layer"|stride|list; probes [{"kind": <PROBES>, params...,
 optional "name", optional own "checkpoints"}]. A layer = gates, then each system qubit
-measured with probability measurement_rate. tau=-1 means censored. Vector probes give a
-curve over size m (erasure probes: P_C(m), the uncorrectable fraction of m-qubit
-erasures) at the last checkpoint plus a coarse depth x size grid (vs_depth).
+measured with probability measurement_rate. tau=-1 means censored. Vector probes: a curve
+over size m at the last checkpoint and a depth x size grid (vs_depth); erasure probes:
+P_C(m) among trajectories with a code (count_with_code; exact counts need code_dimension
+at their layers).
 
 Example: {"spec": {"num_system": 32, "graph": {"family": "watts_strogatz", "k": 4,
  "beta": 0.1, "seed": 1}, "layers": 256, "measurement_rate": 0.1, "reference": "single",
@@ -187,7 +187,8 @@ Steps:
    output_dir.
 2. Report how the code dimension k(t) decays with depth and, at the final checkpoint,
    P_C(m), the fraction of m-qubit erasures that are uncorrectable (from the first-failure
-   samples, and exactly for m <= 2 from the counts). Erasing each qubit independently with
+   samples, and exactly for m <= 2 from the counts), averaged over the trajectories that
+   still hold a code (count_with_code says how many). Erasing each qubit independently with
    probability e fails with probability Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m); in
    Python, sparsegf2.analysis.erasure_failure_probability and erasure_tolerance compute
    Phi(e) and e_delta from the saved result.

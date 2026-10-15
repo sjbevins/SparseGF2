@@ -438,23 +438,32 @@ run_ensemble {"spec": {...the spec above...}, "seed": 1,
  "checkpoints":{"layers":[1,2,3,4,5,7,9,...,621,788,1000],"num_total":27,"subsampled":false},
  "probes":{
   "code_dimension":{"mean":[30.275,28.7,27.7,...,10.5,10.225],"stderr":[0.192778,...,0.149733]},
-  "erasure_first_failure":{"what":"P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), estimated from the first-failure samples",
-    "vector":true,"at_layer":1000,"count":40,
+  "erasure_first_failure":{"what":"P_C(m): fraction of random m-qubit erasures that are uncorrectable vs m (index), estimated from the first-failure samples, among trajectories that hold a code (k > 0); count_with_code says how many",
+    "vector":true,"at_layer":1000,"count":40,"count_with_code":40,
     "mean":[0.0,0.0015,0.00275,0.00725,0.01575,0.03375,0.0825,0.181,0.3405,0.54725,0.75975,0.9195,0.98075,0.9965,0.99925,1.0,...,1.0],
     "stderr":[...],
-    "vs_depth":{"layers":[10,100,1000],"count":[40,40,40],"index":[0,2,4,...,32],"mean":[[0.0,0.8825,0.99075,...],[0.0,0.1135,0.31575,...],[0.0,0.00275,0.01575,...]]}},
-  "uncorrectable_region_counts[3]":{"what":"exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index)",
+    "vs_depth":{"layers":[10,100,1000],"count":[40,40,40],"count_with_code":[40,40,40],"index":[0,2,4,...,32],"mean":[[0.0,0.8825,0.99075,...],[0.0,0.1135,0.31575,...],[0.0,0.00275,0.01575,...]]}},
+  "uncorrectable_region_counts[3]":{"what":"exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index), averaged over all trajectories; trajectories without a code (k = 0) count as P_C = 0",
     "vector":true,"at_layer":1000,"count":40,"mean":[0.0,0.0015625,0.00398185,0.00849294],"stderr":[...],
     "vs_depth":{"layers":[10,100,1000],...,"mean":[[0.0,0.634375,0.882762,0.967888],[0.0,0.046875,0.112702,0.200192],[0.0,0.0015625,0.00398185,0.00849294]]}},
   "code_snapshot":{"mean":[21.775],"stderr":[0.149733],"layers":[1000]}},
  "purification":{"trajectories":40,"purified":0,"censored":40,"censored_fraction":1.0,...},
- "notes":["code_snapshot: the mean number of stabilizer generators (n - k); the codes themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"],
+ "notes":["uncorrectable_region_counts[3]: trajectories without a code (k = 0) count as P_C = 0 in this curve, since the counts alone cannot tell k = 0 from a large distance; add a code_dimension probe evaluated at the same layers to average over the codes (k > 0) only",
+          "code_snapshot: the mean number of stabilizer generators (n - k); the codes themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)",
+          "vector probes are subsampled: curves to at most 65 sizes m (listed in 'index'), vs_depth grids to at most 8 evaluations by 17 sizes; pass output_dir or read the saved files for every value"],
+ "truncated":true,
  "files":{"result":"/home/you/sparsegf2-runs/erasure/n32_beta1_p0.05/result.npz",...}}
 ```
 
 The two erasure probes are summarized as P_C(m) curves at the last of their
 checkpoints (index = m), with a coarse depth-by-size grid in `vs_depth`; `layers`
-appears in a probe's summary when its schedule differs from the spec's. Here the code
+appears in a probe's summary when its schedule differs from the spec's. The
+first-failure curve averages the trajectories that hold a code (`count_with_code`: all
+40 here, since none purified). The exact counts cannot tell k = 0 from a large distance,
+so they are conditioned the same way only through a `code_dimension` probe evaluated at
+each of their layers; here the spec's checkpoints skip depth 10, so the counts curve
+averages every trajectory and a note says so (adding 10 to the checkpoints would
+condition it). `truncated` is set because the grid shows 17 of the 33 sizes. Here the code
 dimension falls from 32 to about 10 over 1000 layers, and the code at depth 1000
 protects against small erasures far better than at depth 10: about 0.16% of 1-qubit
 erasures are uncorrectable at depth 1000 (exact count), against 63% at depth 10.

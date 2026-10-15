@@ -24,7 +24,8 @@ arrays are summarized:
   ranges, e.g. `entropy[0:1024]`).
 
 The full data can be written to files with `output_dir`. Whenever anything is left out,
-the result carries `"truncated": true` and a note says what and how to get it.
+the result carries `"truncated": true` and a note says what and how to get it. A result
+cut to fit keeps all of its notes.
 
 For the quick version, read [`../AGENTS.md`](../AGENTS.md). To set up the MCP server step
 by step (install, connect a client, a first session), follow
@@ -147,9 +148,9 @@ For a valid circuit it returns `num_qubits`, `num_measurements`, `num_detectors`
 | `shots` | 1 | `1`: one run of `Simulator(n, phases, seed)`. `>1`: `sparsegf2.sample(circuit, shots, seed=seed, phases=phases)`, in parallel |
 | `phases` | `true` | sign tracking |
 | `seed` | `null` | see above |
-| `observables` | none | list of `{"kind": ..., args..., "name"?: ...}`, evaluated on the final state of the single-shot run |
+| `observables` | none | list of `{"kind": ..., args..., "name"?: ...}`, evaluated on the final state of the single-shot run. Each value is keyed by its `name`, else by its kind; repeats get `#2`, `#3`, ..., skipping every key already taken and every name given explicitly, so no value overwrites another |
 | `observe_ticks` | `false` | also evaluate the observables after every `TICK`, giving a time series (circuits with up to 1,000,000 ticks) |
-| `tick_stride` | auto | with `observe_ticks`, evaluate after ticks `0, k, 2k, ...` and the last one; the default is every tick, or the smallest stride that keeps at most 10,000 evaluations |
+| `tick_stride` | auto | with `observe_ticks`, evaluate after ticks `0, k, 2k, ...` and the last one; the default is every tick, or the smallest stride that keeps at most 10,000 evaluations, the last tick included |
 | `num_qubits` | circuit's | simulate extra idle qubits |
 | `output_dir` | none | save `circuit_run.npz` (records, random flags, detectors, observable flips), `circuit.stim`, `observables.json` (every evaluated tick, every profile entry, full precision) and `provenance.json` |
 
@@ -288,20 +289,35 @@ The result contains:
     `count` (trajectories there), `mean` and `stderr` per size m, and `index` (the sizes
     m) when subsampled; and `vs_depth`, the mean on a grid of at most 8 evaluations
     (`layers`, `count`) by 17 sizes (`index`), which shows how the curve changes with
-    depth;
+    depth. A curve or grid that leaves sizes or evaluations out sets `truncated: true`,
+    with a note;
   * the erasure probes are shown as P_C(m), the fraction of m-qubit erasures that are
     uncorrectable: `erasure_first_failure` as the fraction of samples with first-failure
     size at most m, for m = 0..n (`analysis.failure_by_size`), and
     `uncorrectable_region_counts` exactly, count / C(n, m), for m = 0..w with
     P_C(0) = 0 (`analysis.exact_failure_by_size`);
+  * both erasure curves are averaged over the trajectories that hold a code (k > 0) at
+    each evaluation, and `count_with_code` (in the entry and in `vs_depth`) says how many
+    there are; with none, the mean and `stderr` are `null`. `erasure_first_failure`
+    tells this from its samples (with k = 0 every sample is n + 1).
+    `uncorrectable_region_counts` cannot (its counts are all 0 both for k = 0 and for a
+    distance above w), so it uses a `code_dimension` probe evaluated at each of its
+    layers (the same schedule or a denser one; the first such probe, found by layer, not
+    by name). Without one, the curve is averaged over every trajectory, the ones
+    without a code counting as P_C = 0, and its `what` line and a note say so;
 * `purification` (with a reference):
   * counts: `trajectories`, `purified`, `censored`, `censored_fraction`, `horizon_layer`;
-  * tau statistics: `tau_median_all` (censoring-aware), `tau_mean_purified`,
-    `tau_median_purified`, `tau_min`, `tau_max`, `tau_quantiles_purified`;
+  * tau statistics: `tau_median_all` (censoring-aware: the first checkpoint layer at which
+    at most half the trajectories are left unpurified, given only when strictly more
+    than half purified within the horizon, else `null`), `tau_mean_purified`,
+    `tau_median_purified`, `tau_min`, `tau_max`, `tau_quantiles_purified` (the 10th,
+    25th, 75th and 90th percentiles of the purified trajectories' tau, interpolated
+    linearly as `numpy.percentile` does);
   * `survival`: `layers` and `fraction_unpurified`;
 * `final_layer_mean`, `measurements_per_trajectory`;
 * `notes` when needed (on `stop_when_purified`, `code_snapshot`, `contiguous_distance`,
-  abbreviated names);
+  erasure curves that are not conditioned on a code, subsampled vector probes,
+  abbreviated names); a cut to the size limit keeps every note and adds its own;
 * `files` (with `output_dir`).
 
 The scalar means are `sparsegf2.analysis.mean_and_error` of
@@ -347,9 +363,11 @@ circuits:
  "seed": 1, "output_dir": "runs/erasure"}
 ```
 
-The summary gives k and P_C(m) per checkpoint. The failure probability when every qubit
-is erased independently with probability e, Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m),
-and the tolerance e_delta = sup{e : Phi(e) <= delta} come from the saved arrays:
+The summary gives k per checkpoint and P_C(m) averaged over the trajectories that hold a
+code (k > 0; the `code_dimension` probe lets the exact counts be conditioned too). The
+failure probability when every qubit is erased independently with probability e,
+Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m), and the tolerance
+e_delta = sup{e : Phi(e) <= delta} come from the saved arrays:
 
 ```python
 import numpy as np

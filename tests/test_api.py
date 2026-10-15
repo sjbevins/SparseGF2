@@ -684,9 +684,11 @@ def test_erasure_probe_summaries_give_failure_by_size():
     out = api.run_ensemble(spec, 12, seed=3)
     direct = api._build_spec(spec).run(12, seed=3)
     first = out["probes"]["erasure_first_failure"]
-    expected = analysis.failure_by_size(direct.values["erasure_first_failure"][:, -1], 10).mean(0)
+    samples = direct.values["erasure_first_failure"][:, -1]
+    code = samples.min(axis=1) <= 10  # the curve averages the trajectories that hold a code
+    expected = analysis.failure_by_size(samples[code], 10).mean(0)
     assert first["mean"] == pytest.approx(expected, abs=1e-5) and first["at_layer"] == 30
-    assert "uncorrectable" in first["what"]
+    assert first["count_with_code"] == code.sum() and "uncorrectable" in first["what"]
     counts = out["probes"]["uncorrectable_region_counts[2]"]
     exact = analysis.exact_failure_by_size(
         direct.values["uncorrectable_region_counts[2]"][:, -1], 10
