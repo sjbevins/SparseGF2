@@ -7,6 +7,7 @@ packing bug would hide.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 
@@ -70,7 +71,7 @@ def test_oracle_identities_agree_with_enumeration_of_the_group():
     rng = np.random.default_rng(3)
     n = 6
     for _ in range(4):
-        t = stim.Tableau.random(n)
+        t = _seeded_tableau(n, 17 + _)
         s = int(rng.integers(2, 6))
         gens = [np.concatenate(t.z_output(i).to_numpy()).astype(np.uint8) for i in range(s)]
         elements = oracle.all_stabilizer_elements(gens, n)
@@ -97,6 +98,20 @@ def test_oracle_identities_agree_with_enumeration_of_the_group():
 # -- fixtures spanning several words --------------------------------------------------------
 
 
+def _seeded_tableau(num_qubits: int, seed: int) -> stim.Tableau:
+    """A reproducible, well-scrambled Clifford: stim 1.16 has no seed for Tableau.random.
+
+    A numpy generator with a fixed seed draws 12 n random gates on random qubit pairs.
+    """
+    rng = np.random.default_rng([seed, num_qubits])
+    circuit = stim.Circuit()
+    for _ in range(12 * num_qubits):
+        a, b = (int(q) for q in rng.choice(num_qubits, 2, replace=False))
+        circuit.append(("CX", "CZ", "SWAP")[int(rng.integers(3))], [a, b])
+        circuit.append(("H", "S", "SQRT_X")[int(rng.integers(3))], [int(rng.integers(num_qubits))])
+    return stim.Tableau.from_circuit(circuit)
+
+
 def _block_tail(n_blocks: int, frozen: int, tail: int, tail_s: int, seed: int):
     """Generators of [[4,2,2]] blocks, frozen qubits and a random-Clifford code, permuted."""
     n = 4 * n_blocks + frozen + tail
@@ -113,7 +128,7 @@ def _block_tail(n_blocks: int, frozen: int, tail: int, tail_s: int, seed: int):
         row[n + 4 * n_blocks + f] = 1  # Z on a frozen qubit
         rows.append(row)
     if tail:
-        t = stim.Tableau.random(tail)
+        t = _seeded_tableau(tail, seed)
         off = 4 * n_blocks + frozen
         for i in range(tail_s):
             x, z = t.z_output(i).to_numpy()
@@ -133,33 +148,41 @@ def _block_tail(n_blocks: int, frozen: int, tail: int, tail_s: int, seed: int):
 _FIXTURES = [
     (70, 18, 2, 3),  # k = 52
     (70, 63, 0, 0),  # k = 7, pure random: large distance
-    (70, 64, 0, 0),  # s a multiple of 64
+    (70, 64, 1, 2),  # s a multiple of 64; the block makes the m = 3 counts nonzero
     (70, 65, 1, 2),
     (130, 64, 3, 5),  # s a multiple of 64
     (130, 128, 1, 0),  # s a multiple of 64
 ]
 
 
-@pytest.fixture(scope="module", params=_FIXTURES, ids=lambda p: f"n{p[0]}_s{p[1]}")
-def fixture(request):
-    n, s, blocks, frozen = request.param
+@functools.cache
+def _fixture_gens(n: int, s: int) -> np.ndarray:
+    """The (n, s) fixture, built once; every test sees the same code."""
+    (blocks, frozen) = next((b, f) for nn, ss, b, f in _FIXTURES if (nn, ss) == (n, s))
     tail = n - 4 * blocks - frozen
     tail_s = s - 2 * blocks - frozen
-    if tail_s > tail:  # more tail generators than tail qubits: fewer blocks would be needed
-        raise AssertionError("bad fixture parameters")
-    seed = 1000 * n + s
-    gens = _block_tail(blocks, frozen, tail, tail_s, seed)
+    assert 0 <= tail_s <= tail, "bad fixture parameters"
+    gens = _block_tail(blocks, frozen, tail, tail_s, 1000 * n + s)
+    gens.setflags(write=False)
+    return gens
+
+
+@pytest.fixture(scope="module", params=_FIXTURES, ids=lambda p: f"n{p[0]}_s{p[1]}")
+def fixture(request):
+    n, s, _, _ = request.param
+    gens = _fixture_gens(n, s)
     code = StabilizerCode(gens)
     assert code.num_qubits == n and code.num_stabilizers == s
     assert code.num_logical == n - s > 0
     return n, s, gens, code
 
 
-def test_fixtures_are_not_trivial():
+def test_fixtures_are_reproducible_and_not_trivial():
     counts = []
     for n, s, blocks, frozen in _FIXTURES:
         tail = n - 4 * blocks - frozen
         gens = _block_tail(blocks, frozen, tail, s - 2 * blocks - frozen, 1000 * n + s)
+        np.testing.assert_array_equal(gens, _fixture_gens(n, s))
         assert StabilizerCode(gens).num_logical > 0
         counts.append(oracle.uncorrectable_counts(gens, n, 2))
     assert any(c[1] == 0 for c in counts)
@@ -173,11 +196,13 @@ def test_counts_equal_the_oracle_exactly(fixture):
 
 
 def test_counts_to_three_on_the_word_aligned_fixture():
-    n, s, blocks, frozen = 70, 64, 0, 0
-    gens = _block_tail(blocks, frozen, n, s, 1000 * n + s)
+    n, s = 70, 64
+    gens = _fixture_gens(n, s)
     code = StabilizerCode(gens)
     assert code.num_logical == 6
-    assert code.uncorrectable_counts(3).tolist() == oracle.uncorrectable_counts(gens, n, 3)
+    counts = code.uncorrectable_counts(3)
+    assert counts.any() and counts[2] > 0  # not the all-zero comparison
+    assert counts.tolist() == oracle.uncorrectable_counts(gens, n, 3)
 
 
 def test_lost_information_and_correctability_on_random_regions(fixture):
@@ -185,12 +210,15 @@ def test_lost_information_and_correctability_on_random_regions(fixture):
     rng = np.random.default_rng(n * 7919 + len(gens))
     sizes = [*range(1, 9), *range(n - 8, n + 1)]
     reference = oracle.Code(gens, n)
+    seen = set()
     for _ in range(200):
         m = int(rng.choice(sizes))
         region = sorted(int(q) for q in rng.choice(n, m, replace=False))
         expected = reference.lost(region)
+        seen.add(expected > 0)
         assert code.lost_information(region) == expected
         assert code.is_correctable(region) == (expected == 0)
+    assert seen == {False, True}  # both correctable and uncorrectable regions were compared
 
 
 # -- the first-failure law on block codes with closed forms ---------------------------------
@@ -227,7 +255,9 @@ def test_first_failure_law_is_exact_on_block_codes(blocks, frozen):
     assert (code.num_qubits, code.num_stabilizers, code.num_logical) == (n, s, 2 * blocks)
     samples = 20_000
     d = code.first_failure_sizes(samples, seed=blocks * 1000 + frozen)
-    assert d.min() >= 2 and d.max() <= blocks + 1  # pigeonhole: D <= blocks + 1
+    # m erased qubits avoid every two-in-a-block failure only if they are one per block or
+    # frozen: at most blocks + frozen of them, so D <= blocks + frozen + 1
+    assert d.min() >= 2 and d.max() <= blocks + frozen + 1
     p = _exact_failure(blocks, frozen)
     hat = analysis.failure_by_size(d, n)
     # sigma of a binomial proportion at each m, computed here: sqrt(p (1 - p) / samples);
