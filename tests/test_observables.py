@@ -340,9 +340,9 @@ def test_kaplan_meier_refuses_the_censoring_marker():
     r = spec.run(300, seed=5)
     tau = r.purification_layer
     assert (tau < 0).any() and (tau >= 0).any()
-    with pytest.raises(ValueError, match=r"np\.where\(tau >= 0, tau, result\.final_layer\)"):
+    with pytest.raises(ValueError, match=r"result\.purification_times\(\)"):
         analysis.kaplan_meier(tau, tau >= 0)
-    km = analysis.kaplan_meier(np.where(tau >= 0, tau, r.final_layer), tau >= 0)
+    km = analysis.kaplan_meier(*r.purification_times())
     layers, surviving = r.survival()
     assert km["survival"][-1] == pytest.approx(surviving[-1])
     with pytest.raises(ValueError, match="non-negative"):

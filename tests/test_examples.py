@@ -43,7 +43,7 @@ def test_purification_time_mostly_censored_point(tmp_path, monkeypatch, capsys):
     purified = int((res.purification_layer >= 0).sum())
     assert 0 < purified < 20
     assert f"observed purifications: {purified} / 40" in printed
-    assert "> 96 layers (more than half censored)" in printed
+    assert "> last checkpoint (96) (more than half censored)" in printed
 
 
 def test_transition_scan(tmp_path, monkeypatch):

@@ -192,9 +192,11 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   `tau_median_all` (defined when more than half the trajectories purified), the survival
   curve `purification.survival`, or `sparsegf2.analysis.kaplan_meier` on the saved
   arrays. `-1` is a marker, not a time: call
-  `kaplan_meier(np.where(tau >= 0, tau, final_layer), tau >= 0)` with
-  `tau = result.purification_layer` and `final_layer = result.final_layer` (passing tau
-  itself raises an error).
+  `time, observed = result.purification_times()` and then
+  `analysis.kaplan_meier(time, observed)`. A censored trajectory is censored at
+  `result.censoring_layer`, the last spec checkpoint at which purification was tested,
+  which can be below `final_layer` when the checkpoints end before `layers` (passing
+  `purification_layer` itself raises an error).
 * With `stop_when_purified`, code probes record their exact values for a pure reference
   after a trajectory stops (`code_dimension`, `lost_information`, `erasure_lost_profile`
   and `uncorrectable_region_counts` 0, `erasure_first_failure` n + 1, `code_snapshot` n

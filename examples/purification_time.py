@@ -84,18 +84,18 @@ def main() -> None:
     print(
         f"observed purifications: {observed.sum()} / {tau.size}  (censored at T_max = {spec.layers})"
     )
-    print(f"median tau (Kaplan-Meier): {median_tau(tau, result.final_layer)}")
+    print(f"median tau (Kaplan-Meier): {median_tau(result)}")
 
 
-def median_tau(tau: np.ndarray, final_layer: np.ndarray) -> str:
+def median_tau(result: mipt.EnsembleResult) -> str:
     """The Kaplan-Meier median of tau, or why there is none (censored entries are tau = -1)."""
-    observed = tau >= 0
+    time, observed = result.purification_times()  # censored at the last purification test
     if not observed.any():
         return "undefined (no trajectory purified)"
-    km = analysis.kaplan_meier(np.where(observed, tau, final_layer), observed)
+    km = analysis.kaplan_meier(time, observed)
     below = np.flatnonzero(km["survival"] <= 0.5)
-    if not below.size:  # the survival curve never reaches 1/2 within T_max
-        return f"> {int(final_layer.max())} layers (more than half censored)"
+    if not below.size:  # the survival curve never reaches 1/2 within the last checkpoint
+        return f"> last checkpoint ({int(result.checkpoint_layers[-1])}) (more than half censored)"
     return f"{km['times'][below[0]]:.0f} layers"
 
 

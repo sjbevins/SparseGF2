@@ -1548,6 +1548,42 @@ class EnsembleResult:
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
         return layers.copy(), alive.mean(axis=1)
 
+    @property
+    def censoring_layer(self) -> np.ndarray:
+        """The last layer at which purification was tested, per trajectory (int64).
+
+        Purification is tested only at the spec's checkpoints, so a trajectory
+        that never purified is right-censored at the largest checkpoint layer
+        not beyond its :attr:`final_layer`; that can be well below
+        ``final_layer`` when the checkpoints end before ``layers``. For a
+        trajectory that did purify (for instance one stopped by
+        ``stop_when_purified``) the value is defined but not needed.
+
+        Raises ``ValueError`` without a reference.
+        """
+        if self.purification_layer is None:
+            raise ValueError("censoring_layer needs a reference (purification or single)")
+        layers = np.asarray(self.checkpoint_layers, dtype=np.int64)
+        at = np.searchsorted(layers, self.final_layer, side="right") - 1
+        # a trajectory that stopped before its first checkpoint was never tested
+        return layers[np.maximum(at, 0)].astype(np.int64)
+
+    def purification_times(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(time, observed)`` for :func:`sparsegf2.analysis.kaplan_meier`.
+
+        ``time`` is the purification layer where the reference purified and
+        otherwise the censoring time :attr:`censoring_layer`; ``observed`` is
+        True where it purified. Use
+        ``analysis.kaplan_meier(*result.purification_times())``, not
+        ``final_layer``, which can lie beyond the last purification test.
+        Raises ``ValueError`` without a reference.
+        """
+        if self.purification_layer is None:
+            raise ValueError("purification_times needs a reference (purification or single)")
+        tau = self.purification_layer
+        observed = tau >= 0
+        return np.where(observed, tau, self.censoring_layer), observed
+
     def __repr__(self) -> str:
         return (
             f"EnsembleResult(trajectories={self.num_trajectories}, checkpoints={len(self.checkpoint_layers)}, "

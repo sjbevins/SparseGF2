@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+* **Kaplan-Meier censoring time:** `EnsembleResult.censoring_layer` (the last spec
+  checkpoint at which purification was tested, per trajectory) and
+  `EnsembleResult.purification_times()` (`(time, observed)` for
+  `analysis.kaplan_meier`) replace the recipe `np.where(tau >= 0, tau, final_layer)`,
+  which censored at the last layer simulated and so misstated the curve whenever the
+  checkpoints ended before `layers`. AGENTS.md, GETTING_STARTED, the example and the
+  `kaplan_meier` error message use the new methods. `final_layer` is unchanged.
+
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 
 * **Exact erasure counts:** `StabilizerCode.uncorrectable_counts` and the
