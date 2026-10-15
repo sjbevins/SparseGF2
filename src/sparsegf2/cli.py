@@ -3,7 +3,8 @@
 Every subcommand prints a readable summary, or with ``--json`` exactly one
 JSON object on stdout (logs and progress go to stderr), so scripts and LLM
 agents can parse it. Exit codes: 0 success, 2 invalid input or usage (including
-``inspect`` of an invalid circuit), 1 internal error, 130 interrupted (Ctrl-C).
+``inspect`` of an invalid circuit, a file that cannot be read and an output
+directory that cannot be written), 1 internal error, 130 interrupted (Ctrl-C).
 """
 
 from __future__ import annotations
@@ -194,12 +195,19 @@ def _build_parser() -> _Parser:
 
 
 def _read_text(path: str) -> str:
+    """The text of a file the user named (``-``: stdin); a file that cannot be read is an
+    input error (exit code 2) that names it."""
     if path == "-":
         return sys.stdin.read()
     p = Path(path)
     if not p.is_file():
         raise ValueError(f"no such file: {path!r}")
-    return p.read_text(encoding="utf-8")
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as exc:  # no permission, or (Windows) held by another program
+        raise ValueError(f"could not read {path!r}: {exc}") from None
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path!r} is not UTF-8 text: {exc}") from None
 
 
 def _read_json(text: str, what: str) -> Any:
@@ -446,6 +454,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         result, code = _COMMANDS[args.command](args)
     except ValueError as exc:
         _error("ValidationError", str(exc), as_json)
+        return EXIT_USAGE
+    except TypeError as exc:  # an input error too (a value of the wrong type), as over MCP
+        _error("TypeError", str(exc), as_json)
         return EXIT_USAGE
     except KeyboardInterrupt:
         _error("Interrupted", "interrupted", as_json)

@@ -805,7 +805,7 @@ def test_failed_metadata_write_does_not_leave_a_stuck_job(tmp_path, monkeypatch)
         raise OSError("disk full")
 
     monkeypatch.setattr(api, "_write_run_metadata", fail)
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(ValueError, match="is not writable: disk full"):
         api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(tmp_path / "m"), seed=1)
     assert all(j["output_dir"] != str(tmp_path / "m") for j in api.list_jobs()["jobs"])
     monkeypatch.undo()
@@ -1598,9 +1598,12 @@ def _write_lock(out: Path, pid: int, host: str | None = None, **fields) -> dict:
 
 
 def _held(out: Path, record: dict, who: str = "another process") -> str:
-    """The refusal for a lock held by ``record``, as a regular expression."""
+    """The refusal for a lock held by ``record``, as a regular expression (it names the
+    lock's system when that is not this one)."""
+    system = record.get("os")
+    shown = f" ({system})" if system not in (None, api._os_identity()) else ""
     return re.escape(
-        f"{who} (pid {record['pid']} on host {record['host']}, started "
+        f"{who} (pid {record['pid']} on host {record['host']}{shown}, started "
         f"{record['started']}) is writing to {str(out.resolve())!r}; wait for it to finish "
         "or cancel it"
     )
@@ -1785,15 +1788,27 @@ def test_lock_records_are_validated_and_a_lock_that_cannot_be_taken_says_so(tmp_
     _write_lock(out, 4242)
     with pytest.raises(ValueError, match="could not take the lock .*retry, or delete it if no"):
         api._lock_output_dir(out)
-    # a directory this process may not write to: the error of the last attempt
+    # a directory this process may not write to: an input error, with the last attempt's
+    # error (a PermissionError is retried: on Windows a lock being deleted gives one too)
     (out / ".lock").unlink()
+    attempts = []
 
-    def denied(path, data):
-        raise PermissionError(13, "Permission denied", str(path))
+    def denied(path, data, error=None):
+        attempts.append(path)
+        raise error or PermissionError(13, "Permission denied", str(path))
 
     monkeypatch.setattr(api, "_create_lock", denied)
-    with pytest.raises(PermissionError, match="Permission denied"):
+    not_writable = re.escape(f"output_dir {str(out)!r} is not writable: [Errno 13] Permission")
+    with pytest.raises(ValueError, match=not_writable):
         api._lock_output_dir(out)
+    assert len(attempts) == len(api._RETRY_DELAYS) + 1
+    # any other error (a read-only or full drive) at once: retrying cannot help
+    attempts.clear()
+    read_only = OSError(errno.EROFS, "Read-only file system")
+    monkeypatch.setattr(api, "_create_lock", lambda path, data: denied(path, data, read_only))
+    with pytest.raises(ValueError, match=re.escape(f"{str(out)!r} is not writable: [Errno")):
+        api._lock_output_dir(out)
+    assert len(attempts) == 1
 
 
 def test_a_running_job_is_named_to_a_second_writer_in_the_same_process(tmp_path):
@@ -2129,3 +2144,225 @@ def test_temporary_files_are_each_writers_own_and_never_read(tmp_path):
     np.testing.assert_array_equal(
         saved.purification_layer, _direct_spec().run(20, seed=4).purification_layer
     )
+
+
+def test_the_refusal_names_the_system_of_a_lock_taken_on_another(tmp_path, monkeypatch):
+    # WSL and containers report the Windows (or host) name, so the pid alone would send a
+    # Windows user to Task Manager for a Linux process
+    _processes(monkeypatch, {9999: (False, None)})
+    out = tmp_path / "wsl"
+    record = _write_lock(out, 9999, os="Linux pidns:4026532396")
+    shown = f"(pid 9999 on host {record['host']} (Linux pidns:4026532396), started "
+    with pytest.raises(ValueError, match=re.escape(shown)):
+        api._lock_output_dir(out)
+    # a lock of this system, or one written before the system was recorded, says no more
+    for fields in ({"os": api._os_identity()}, {}):
+        record = _write_lock(out, os.getpid(), **fields)
+        with pytest.raises(ValueError, match=re.escape(f"on host {record['host']}, started")):
+            api._lock_output_dir(out)
+
+
+def test_a_lock_with_a_malformed_creation_time_is_never_taken_over(tmp_path, monkeypatch):
+    # a creation time that is not an int counts as absent, never as another process's
+    created = 133_000_000_000_000_001  # a Windows FILETIME; as a float it is another number
+    _processes(monkeypatch, {4242: (True, created)})
+    out = tmp_path / "malformed"
+    for bad in (float(created), str(created), True, None, [created]):
+        record = _write_lock(out, 4242, os=api._os_identity(), created=bad)
+        held = api._lock_record((out / ".lock").read_bytes())
+        assert held is not None and "created" not in held, bad
+        with pytest.raises(ValueError, match=_held(out, record)):
+            api._lock_output_dir(out)
+    record = _write_lock(out, 4242, os=api._os_identity(), created=created)
+    assert api._lock_record((out / ".lock").read_bytes())["created"] == created
+
+
+def test_a_lock_that_cannot_be_read_is_refused_and_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    out = tmp_path / "unreadable_lock"
+    _write_lock(out, 4242)
+    old = time.time() - 60  # old enough to be judged stale, if it could be read
+    os.utime(out / ".lock", (old, old))
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == ".lock":  # another account's lock, say
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    unreadable = r"could not take the lock .*cannot be read \(check its permissions\); retry"
+    with pytest.raises(ValueError, match=unreadable):
+        api._lock_output_dir(out)
+    monkeypatch.undo()
+    assert api._lock_record((out / ".lock").read_bytes())["pid"] == 4242  # never deleted unread
+
+
+# ---------------------------------------------------------------------------
+# every failure carries a message: names that are not strings, sizes, directories that
+# cannot be written or read, seeds that survive JSON
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [["cycle"], {"name": "cycle"}, 3])
+def test_names_that_are_not_strings_are_input_errors_naming_the_field(bad):
+    spec = dict(SMALL_SPEC, probes=[{"kind": "code_dimension"}])
+    collection = {"family": bad, "seed": 1, "realizations": 2}
+    cases = [
+        (lambda: api.estimate_ensemble(dict(spec, graph={"family": bad}), 2), r"graph\.family"),
+        (lambda: api.estimate_ensemble(dict(spec, graph=collection), 2), r"graph\.family"),
+        (lambda: api.estimate_ensemble(dict(spec, edge_weights={"family": bad}), 2),
+         r"edge_weights\.family"),
+        (lambda: api.estimate_ensemble(dict(spec, probes=[{"kind": bad}]), 2),
+         r"probes\[0\]\.kind"),
+        (lambda: api.run_circuit("H 0", observables=[{"kind": bad}]), r"observables\[0\]\.kind"),
+        (lambda: api.capabilities(bad), "section"),
+    ]  # fmt: skip
+    for run, field in cases:
+        message = f"{field} must be a string .*, got {re.escape(repr(bad))}"
+        with pytest.raises(ValueError, match=message):
+            run()
+
+
+def test_num_system_is_bounded_before_any_graph_is_generated(monkeypatch):
+    def generated(*args, **kwargs):
+        raise AssertionError("a graph was generated")
+
+    monkeypatch.setattr(api, "_build_graph", generated)
+    too_large = re.escape(f"num_system is too large (at most {api.MAX_QUBITS:,})")
+    for n in (10**12, api.MAX_QUBITS + 1):  # 10**12 qubits once ran out of memory
+        big = dict(SMALL_SPEC, num_system=n)
+        with pytest.raises(ValueError, match=too_large):
+            api.estimate_ensemble(big, 2)
+        with pytest.raises(ValueError, match=too_large):
+            api.run_ensemble(big, 2, seed=1)
+
+
+def test_an_output_dir_that_cannot_be_written_is_an_input_error(tmp_path, monkeypatch):
+    # a path below a regular file can never be created, on any system
+    (tmp_path / "a_file").write_text("", encoding="utf-8")
+    out = tmp_path / "a_file" / "out"
+    not_writable = re.escape(f"output_dir {str(out.resolve())!r} is not writable: ")
+    with pytest.raises(ValueError, match=not_writable):
+        api.run_circuit("H 0\nM 0", seed=1, output_dir=str(out))
+    with pytest.raises(ValueError, match=not_writable):
+        api.run_ensemble(SMALL_SPEC, 2, seed=1, output_dir=str(out))
+    with pytest.raises(ValueError, match=not_writable):
+        api.start_ensemble_job(SMALL_SPEC, 2, seed=1, output_dir=str(out))
+
+    # a directory whose files cannot be written (a full drive, say)
+    def full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(api, "_atomic_savez", full)
+    full_dir = tmp_path / "full"
+    message = f"output_dir {str(full_dir.resolve())!r} is not writable: [Errno {errno.ENOSPC}] "
+    with pytest.raises(ValueError, match=re.escape(message + "No space left on device")):
+        api.run_circuit("H 0\nM 0", seed=1, output_dir=str(full_dir))
+    monkeypatch.setattr(mipt.EnsembleResult, "save", full)
+    with pytest.raises(ValueError, match="is not writable: .*No space left on device"):
+        api.run_ensemble(SMALL_SPEC, 2, seed=1, output_dir=str(tmp_path / "full2"))
+    assert not (tmp_path / "full2" / ".lock").exists()
+
+
+def test_saved_parts_that_cannot_be_read_are_input_errors_naming_the_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    out = tmp_path / "unreadable"
+    api.run_ensemble(SMALL_SPEC, 10, seed=4, output_dir=str(out))
+
+    def denied(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(mipt.EnsembleResult, "load", staticmethod(denied))
+    reads = (
+        lambda: api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out)),
+        lambda: api.start_ensemble_job(SMALL_SPEC, output_dir=str(out)),  # to the stored target
+        lambda: api.load_results(str(out)),
+    )
+    unreadable = (
+        re.escape(f"could not read results from {str(out.resolve())!r}: [Errno 13] Permission")
+        + ".*result.npz.*; close any program that holds the file open, or check its permissions"
+    )
+    for read in reads:
+        with pytest.raises(ValueError, match=unreadable):
+            read()
+    assert not (out / ".lock").exists()
+    assert all(j["output_dir"] != str(out.resolve()) for j in api.list_jobs()["jobs"])
+    monkeypatch.undo()
+    # a spec.json that holds no run's record
+    spec_json = out.resolve() / "spec.json"
+    for text, problem in (("{not json", "is not valid JSON"), ("[1, 2]", "holds no run's record")):
+        spec_json.write_text(text, encoding="utf-8")
+        for read in reads:
+            with pytest.raises(ValueError, match=re.escape(f"{str(spec_json)!r} {problem}")):
+                read()
+    spec_json.write_text(json.dumps({"spec": SMALL_SPEC, "trajectories": 10}), encoding="utf-8")
+    with pytest.raises(ValueError, match="its spec.json records no seed; restore it"):
+        api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert not (out / ".lock").exists()
+    # run_ensemble's check that a directory holds no run reads it too
+    fresh = tmp_path / "fresh"
+
+    def unlistable(path):
+        raise PermissionError(13, "Permission denied", str(path / "chunks"))
+
+    monkeypatch.setattr(api, "_result_parts", unlistable)
+    with pytest.raises(ValueError, match="could not read results from .*Permission denied"):
+        api.run_ensemble(SMALL_SPEC, 2, seed=1, output_dir=str(fresh))
+    assert not (fresh / ".lock").exists()
+
+
+def test_load_results_reads_on_while_a_merge_removes_the_chunks(tmp_path, monkeypatch):
+    # a merge replaces result.npz before it deletes chunks/, so a chunks/ that is gone, or
+    # (Windows) being deleted, while load_results lists it holds nothing result.npz lacks
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    out = tmp_path / "vanishing"
+    api.run_ensemble(SMALL_SPEC, 10, seed=4, output_dir=str(out))
+    (out / "chunks").mkdir()
+    real_iterdir = Path.iterdir
+    listings: list = []
+
+    def listing(self, error=None, after=0):
+        if self.name == "chunks":
+            listings.append(self)
+            if error is not None and len(listings) > after:
+                raise error
+        return real_iterdir(self)
+
+    gone = FileNotFoundError(errno.ENOENT, "No such file or directory")
+    monkeypatch.setattr(Path, "iterdir", lambda self: listing(self, gone))
+    assert api.load_results(str(out))["num_trajectories"] == 10
+    # being deleted: the read retries, the check for a pending merge leaves it
+    listings.clear()
+    deleted = PermissionError(13, "Access is denied")
+    monkeypatch.setattr(Path, "iterdir", lambda self: listing(self, deleted, after=1))
+    assert api.load_results(str(out))["num_trajectories"] == 10
+    assert len(listings) == 2
+
+
+def test_fresh_seeds_fit_in_a_double(monkeypatch):
+    # JavaScript MCP clients (Claude Code among them) read JSON numbers as doubles: a
+    # fresh seed above 2**53 would come back rounded, and repeat another run
+    monkeypatch.setattr(api.secrets, "randbits", lambda bits: 2**bits - 1)  # the largest draw
+    assert api._resolve_seed(None) == 2**53 - 1
+    monkeypatch.undo()
+    seeds = [api.run_circuit("H 0\nM 0")["seed"] for _ in range(20)]
+    assert all(0 <= seed < 2**53 and float(seed) == seed for seed in seeds)
+
+
+def test_explicit_seeds_of_any_size_are_used_and_reported_exactly(tmp_path):
+    direct = _direct_spec()
+    for seed in (2**53 + 1, 2**64 + 3):
+        assert api.run_circuit("H 0\nM 0", seed=seed)["seed"] == seed
+        out = tmp_path / f"seed_{seed}"
+        assert api.run_ensemble(SMALL_SPEC, 4, seed=seed, output_dir=str(out))["seed"] == seed
+        for record in ("spec.json", "provenance.json"):
+            assert json.loads((out / record).read_text(encoding="utf-8"))["seed"] == seed
+        assert api.load_results(str(out))["seed"] == seed
+        job = api.start_ensemble_job(SMALL_SPEC, 8, output_dir=str(out))  # the stored seed
+        assert job["seed"] == seed
+        assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+        np.testing.assert_array_equal(
+            mipt.EnsembleResult.load(out / "result.npz").purification_layer,
+            direct.run(8, seed=seed).purification_layer,
+        )

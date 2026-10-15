@@ -93,10 +93,10 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | Concept | Rule |
 |---|---|
 | circuits | Stim text format. Every Clifford gate, `M MX MY MR MRX MRY MXX MYY MZZ MPP R RX RY`, Pauli noise channels, `TICK DETECTOR OBSERVABLE_INCLUDE QUBIT_COORDS SHIFT_COORDS`, `REPEAT`, plus the SparseGF2 extensions `CLIFFORD_1Q(i)` and `CLIFFORD_2Q(i)` (Clifford by canonical index) |
-| seeds | a non-negative int reproduces a run; `null` draws a fresh 63-bit seed, reported back as `seed` |
+| seeds | a non-negative int reproduces a run; `null` draws a fresh seed below 2^53, reported back as `seed` (53 bits, so a client that reads JSON numbers as doubles, JavaScript and Claude Code among them, keeps it exactly). An explicit seed of any size is used and reported exactly (as a JSON integer); such a client can send and read only seeds below 2^53 without rounding |
 | qubit lists | `[0, 1, 2]` or `"0:3"` / `"0:16:2"` (Python slices) |
 | phases | `true` (default): signs tracked, outcomes match Stim. `false`: about 2x faster, no outcomes (only `random` flags), same entanglement |
-| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change |
+| errors | invalid input raises `ValueError` (API), exits with code 2 (CLI), or returns a tool error (MCP). The message says what to change. Names that must be strings (a graph or weight `family`, a probe or observable `kind`, a `capabilities` section) are checked before they are looked up; an `output_dir` that cannot be created or written is `output_dir DIR is not writable: ...`; a saved file that cannot be read is `could not read results from DIR: ...`, naming the file. Any other failure still carries its type and message (section 5) |
 | provenance | every `output_dir` gets `provenance.json`: package, Python, numpy and numba versions, git commit, platform, seed, UTC timestamp, command. Resuming a job keeps that record and appends one entry per resume under `resumes`; a resume with another `sparsegf2` version is refused |
 
 ---
@@ -226,7 +226,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `gate_set` | list of two-qubit gate names (`["CX", "SWAP"]`) or CLIFFORD_2Q indices |
 | `checkpoints` | `"final"`, `"every_layer"`, an int stride, or a list of layers: where purification is tested and where probes without their own `checkpoints` are evaluated |
 | `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
-| types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`. Errors name the key |
+| types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`, `num_system` at most `MAX_QUBITS` (65,536, checked before any graph is generated). Errors name the key. The MCP tools check their own arguments the same way (section 5) |
 | `stop_when_purified`, `system_order`, `periodic`, `random_orientation` | as in the library |
 
 What each probe records per evaluation (n system qubits), and its value after
@@ -359,7 +359,8 @@ saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`. `run_ensemb
 `estimate_ensemble` and `start_ensemble_job` refuse a run whose result would exceed
 `MAX_RESULT_GB` (8 GB); the message suggests giving the large probes
 (`erasure_first_failure` samples, `code_snapshot`, vector probes) fewer checkpoints of
-their own, or splitting the trajectories over several output directories.
+their own, or splitting the trajectories over several output directories. They also
+refuse a `num_system` above `MAX_QUBITS` (65,536) before any graph is generated.
 
 ### 3.4 Erasure studies
 
@@ -460,6 +461,11 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   of another machine always holds: another hostname, or the same hostname under another
   system (WSL and containers report the Windows or host name, but their pids are
   others), so a Windows writer and a WSL writer of one directory exclude each other.
+  The refusal then names the lock's system after the host (`pid P on host H (Linux
+  pidns:N)`). A WSL2 distribution, like a container, has a pid namespace of its own,
+  which may be a new one after WSL restarts: a lock that a crashed WSL writer left then
+  counts as another machine's, and must be deleted by hand. A lock that cannot be
+  created (a read-only directory or drive) is `output_dir DIR is not writable: ...`.
   Readers (`load_results`, `EnsembleResult.load`) take no lock, except that
   `load_results` takes it to finish a pending merge (below), which for a large run can
   take minutes.
@@ -521,8 +527,10 @@ process was killed: the rerun takes over the lock the dead process left).
 * `--json` on every command prints exactly one JSON object on stdout. Logs and progress go
   to stderr. On failure the object is `{"error": {"type", "message"}}`.
 * Exit codes: `0` success, `2` invalid input or usage (bad circuit text, including
-  `inspect` of an invalid circuit, unknown spec key, missing file, bad JSON), `1` internal
-  error, `130` interrupted (Ctrl-C).
+  `inspect` of an invalid circuit, unknown spec key, missing file, a file that cannot be
+  read or is not UTF-8, bad JSON, an output directory that cannot be written, a value of
+  the wrong type: `ValidationError`, or `TypeError`), `1` internal error (`internal
+  error: ...`), `130` interrupted (Ctrl-C).
 * `-` reads the circuit or spec from stdin. `--observables` takes inline JSON or
   `@file.json`.
 * `sparsegf2 ensemble` needs `--trajectories` (or a `trajectories` entry in SPEC.json),
@@ -553,8 +561,18 @@ process was killed: the rerun takes over the lock the dead process left).
   preprocessing (large `realizations` collections), and the spec is built once for the
   estimate and the run.
 * Errors: invalid input becomes an MCP tool error (`isError: true`) whose text is the
-  API's message, so the model can correct the call. Argument-type errors are reported by
-  the SDK's schema validation in the same way.
+  API's message, so the model can correct the call. Every other failure is a tool error
+  too, never the SDK's bare `Error executing tool X`: its text is
+  `TypeName: message`, followed by `(internal error: please report it)` unless it is a
+  `TypeError` (an input error, like `ValueError`); the server logs the traceback of an
+  internal error on its stderr.
+* Argument types are strict, as the API's own checks are, and are reported by the SDK's
+  schema validation in the same way, naming the argument: an integer (`trajectories`,
+  `seed`, `shots`, `tick_stride`, `num_qubits`, `chunk_size`) must be a JSON integer or a
+  whole-number float (`4.0` is 4; `2.5`, `"3"` and `true` are refused), a flag
+  (`phases`, `observe_ticks`) `true` or `false` (not `"false"` or `0`), and
+  `max_seconds` and `wait_seconds` a number (not `"inf"` or `true`). Pydantic's default
+  lax mode used to turn `true` into 1 and `"3"` into 3. The input schema is unchanged.
 * Resources: `docs://sparsegf2/quickstart` (Markdown guide) and
   `docs://sparsegf2/capabilities` (JSON).
 * Prompts: `study_purification_transition(num_system, graph_family, rates, trajectories)`

@@ -55,6 +55,15 @@ Each tool's description, which the model reads, contains a worked example of its
 arguments. The lists of spec keys, probe kinds and graph families inside the
 `run_ensemble` description are generated from the library, so they cannot go stale.
 
+Tool arguments are checked as strictly as the Python API checks them. An integer
+(`trajectories`, `seed`, `shots`, `chunk_size`, ...) must be a JSON integer (a
+whole-number float such as `4.0` counts as 4), a flag `true` or `false`, and
+`max_seconds` or `wait_seconds` a number: `"3"`, `true` as a count and `"false"` as a
+flag are refused with a message that names the argument. A fresh seed (`seed` left
+out) is below 2^53, so a client that reads JSON numbers as doubles, as Claude Code does,
+keeps the reported seed exactly. An explicit seed of any size is used and reported
+exactly, but such a client can send and read only seeds below 2^53 without rounding.
+
 ### Prompts and resources
 
 * Prompts (ready-made study plans; how a client shows them varies, see section 5.5):
@@ -744,13 +753,18 @@ directory, or `start_ensemble_job` to resume or extend the run that is there.
 to an output directory at a time, and another one (a CLI run, a script, a second server)
 is writing there now (`this process (...)`: another call to the same server is). Wait
 for it to finish, or stop it, then repeat the call. A lock left by a process that has
-ended on this machine is taken over automatically. A lock from another machine is not: one written over a shared drive, or from WSL or a
-container when you work in Windows or on the host (and the other way round), since
-their process ids cannot be checked from here. If the message persists, look up pid P
-(Task Manager, or `tasklist /FI "PID eq P"` on Windows; `ps -p P` elsewhere, on the
-machine that wrote the lock). If it is not a SparseGF2 run writing to DIR, no writer
-runs, and you can delete `DIR/.lock` by hand. Do that only then: two writers in one
-directory can lose each other's work.
+ended on this machine is taken over automatically. A lock from another machine is not:
+one written over a shared drive, or from WSL or a container when you work in Windows or
+on the host (and the other way round), since their process ids cannot be checked from
+here. The message then names the lock's system after the host, as in `pid P on host H
+(Linux pidns:N)`, because WSL and containers report the Windows or host name. A WSL2
+distribution, like a container, runs in a pid namespace of its own, which may be a new
+one after WSL restarts (`wsl --shutdown`, a reboot, or its idle shutdown): a lock left
+by a WSL writer that crashed then looks foreign even from WSL, and must be deleted by
+hand. If the message persists, look up pid P on the system that wrote the lock (Task
+Manager, or `tasklist /FI "PID eq P"` on Windows; `ps -p P` in Linux, WSL or macOS). If
+it is not a SparseGF2 run writing to DIR, no writer runs, and you can delete `DIR/.lock`
+by hand. Do that only then: two writers in one directory can lose each other's work.
 
 **A job ends `completed` with `merge pending: result.npz is in use`.** Something (a
 notebook, say) held `result.npz` open for more than about 5 s when the job merged its
@@ -764,7 +778,13 @@ the server's working directory. Every result's `files` entry (and every job stat
 **A tool call fails with a message.** Tool errors are written for the model to act on
 (for example `unknown key 'layrs' ... layers`, or `this run is estimated at about N s,
 above max_seconds=60. Use start_ensemble_job ...`). The agent normally fixes the
-argument and retries; if it does not, the message tells you what to change.
+argument and retries; if it does not, the message tells you what to change. A directory
+that cannot be written comes back as `output_dir DIR is not writable: ...`, and a saved
+file that cannot be read (another program holds it, or the permissions forbid it) as
+`could not read results from DIR: ...`, naming the file. A message that starts with an
+exception's name and ends `(internal error: please report it)` is a bug in SparseGF2,
+not a problem with the call: please report it with that message (the traceback is in
+the server's log, on its stderr).
 
 ---
 

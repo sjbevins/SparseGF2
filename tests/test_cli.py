@@ -347,6 +347,55 @@ def test_internal_errors_exit_1(capsys, monkeypatch, bell_file):
     monkeypatch.setattr(api, "run_circuit", boom)
     code, data = run_json(capsys, "run", str(bell_file))
     assert code == 1 and data["error"]["type"] == "RuntimeError"
+    assert data["error"]["message"] == "internal error: kaboom"
+
+    def wrong_type(*args, **kwargs):  # a TypeError is an input error, as in the MCP server
+        raise TypeError("regions must be lists")
+
+    monkeypatch.setattr(api, "run_circuit", wrong_type)
+    code, data = run_json(capsys, "run", str(bell_file))
+    assert code == 2 and data["error"] == {"type": "TypeError", "message": "regions must be lists"}
+
+
+def test_names_that_are_not_strings_exit_2(capsys, bell_file, tmp_path):
+    spec_path = tmp_path / "list_family.json"
+    spec_path.write_text(json.dumps({**SPEC, "graph": {"family": ["cycle"]}}), encoding="utf-8")
+    code, data = run_json(capsys, "ensemble", str(spec_path), "--trajectories", "2")
+    assert code == 2 and "graph.family must be a string" in data["error"]["message"]
+    observables = '[{"kind": ["entropy"]}]'
+    code, data = run_json(capsys, "run", str(bell_file), "--observables", observables)
+    assert code == 2 and "observables[0].kind must be a string" in data["error"]["message"]
+
+
+def test_paths_that_cannot_be_read_or_written_exit_2(capsys, monkeypatch, bell_file, spec_file,
+                                                      tmp_path):  # fmt: skip
+    (tmp_path / "a_file").write_text("", encoding="utf-8")
+    out = str(tmp_path / "a_file" / "out")  # below a regular file: it cannot be created
+    for argv in (
+        ["run", str(bell_file), "--output-dir", out],
+        ["ensemble", str(spec_file), "--trajectories", "2", "--output-dir", out],
+        ["ensemble", str(spec_file), "--trajectories", "2", "--output-dir", out,
+         "--chunk-size", "1"],
+    ):  # fmt: skip
+        code, data = run_json(capsys, *argv)
+        assert code == 2 and "is not writable" in data["error"]["message"], argv
+    # a file this process may not read (Windows: one another program holds), or not UTF-8
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self.name == "bell.stim":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    code, data = run_json(capsys, "run", str(bell_file))
+    assert code == 2 and data["error"]["type"] == "ValidationError"
+    assert data["error"]["message"].startswith(f"could not read {str(bell_file)!r}: [Errno 13]")
+    monkeypatch.undo()
+    latin1 = tmp_path / "latin1.stim"
+    latin1.write_bytes(b"H 0\n# caf\xe9\n")
+    code, data = run_json(capsys, "run", str(latin1))
+    assert code == 2 and data["error"]["message"].startswith(f"{str(latin1)!r} is not UTF-8")
 
 
 def test_python_m_cli_subprocess(tmp_path):

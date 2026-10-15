@@ -60,7 +60,7 @@ import traceback
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -353,9 +353,14 @@ def _check_type(value: Any, annotation: Any, what: str) -> Any:
 
 
 def _resolve_seed(seed: Any) -> int:
-    """A concrete non-negative int seed; ``None`` draws a fresh 63-bit one."""
+    """A concrete non-negative int seed; ``None`` draws a fresh one below 2**53.
+
+    53 bits, so that the reported seed survives a client that reads JSON numbers as
+    doubles (JavaScript, Claude Code among them): a larger one would come back rounded
+    and repeat another run. An explicit seed of any size is used, and reported, exactly.
+    """
     if seed is None:
-        return secrets.randbits(63)
+        return secrets.randbits(53)
     return _require_int(seed, "seed", minimum=0, maximum=None)
 
 
@@ -391,6 +396,14 @@ def _check_keys(given: dict, allowed: Sequence[str], what: str) -> None:
     unknown = sorted(set(given) - set(allowed))
     if unknown:
         raise ValueError(f"{what}: unknown key(s) {unknown}; allowed keys are {sorted(allowed)}")
+
+
+def _require_name(value: Any, what: str, choices: Iterable[str]) -> str:
+    """``value``, a user-given key into a table (a family, a kind, a section), if it is a
+    string: checked before the lookup, which a list or a dict would fail with a TypeError."""
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string (one of {sorted(choices)}), got {value!r}")
+    return value
 
 
 def _subsample(count: int, limit: int) -> np.ndarray:
@@ -630,7 +643,7 @@ def _compile_observables(
         where = f"observables[{i}]"
         if not isinstance(spec, dict) or "kind" not in spec:
             raise ValueError(f'{where}: expected an object with a "kind", got {spec!r}')
-        kind = spec["kind"]
+        kind = _require_name(spec["kind"], f"{where}.kind", _OBSERVABLES)
         if kind not in _OBSERVABLES:
             raise ValueError(
                 f"{where}: unknown observable kind {kind!r}; choose from {sorted(_OBSERVABLES)}"
@@ -1140,29 +1153,24 @@ def _save_circuit_run(
     command: str | None,
 ) -> dict[str, str]:
     out = _output_dir(output_dir)
-    npz = out / "circuit_run.npz"
-    _atomic_savez(npz, {k: v for k, v in arrays.items() if v is not None})
-    stim_path = out / "circuit.stim"
-    stim_path.write_text(str(circuit) + "\n", encoding="utf-8")
-    files = {"arrays": str(npz), "circuit": str(stim_path)}
-    if final_values or tick_rows:
-        obs_path = out / "observables.json"
-        obs_path.write_text(
-            json.dumps(
-                _jsonable(
-                    {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]},
-                    exact=True,
-                ),
-                indent=1,
-            ),
-            encoding="utf-8",
+    with _writing_to(out):
+        npz = out / "circuit_run.npz"
+        _atomic_savez(npz, {k: v for k, v in arrays.items() if v is not None})
+        stim_path = out / "circuit.stim"
+        stim_path.write_text(str(circuit) + "\n", encoding="utf-8")
+        files = {"arrays": str(npz), "circuit": str(stim_path)}
+        if final_values or tick_rows:
+            obs_path = out / "observables.json"
+            values = {"final": final_values, "ticks": [{"tick": t, **v} for t, v in tick_rows]}
+            obs_path.write_text(
+                json.dumps(_jsonable(values, exact=True), indent=1), encoding="utf-8"
+            )
+            files["observables"] = str(obs_path)
+        prov = out / _PROVENANCE_FILE
+        prov.write_text(
+            json.dumps(_provenance(seed, command or "run_circuit"), indent=2), encoding="utf-8"
         )
-        files["observables"] = str(obs_path)
-    prov = out / _PROVENANCE_FILE
-    prov.write_text(
-        json.dumps(_provenance(seed, command or "run_circuit"), indent=2), encoding="utf-8"
-    )
-    files["provenance"] = str(prov)
+        files["provenance"] = str(prov)
     return files
 
 
@@ -1266,7 +1274,10 @@ def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any
     p = Path(path).expanduser().resolve()
     if not p.is_file():
         raise ValueError(f"graph (file): no such file {str(p)!r}")
-    num_nodes, gs, ws = graphs.load(p)
+    try:
+        num_nodes, gs, ws = graphs.load(p)
+    except OSError as exc:
+        raise _unreadable_graph_file(p, exc) from None
     if num_nodes != n:
         raise ValueError(f"graph (file): {p.name} has num_nodes {num_nodes}, but num_system is {n}")
     if len(gs) == 1:
@@ -1285,9 +1296,20 @@ def _graph_file_record(spec: dict) -> dict[str, str] | None:
     if not (isinstance(graph, dict) and graph.get("family") == "file"):
         return None
     path = Path(graph["path"]).expanduser().resolve()
-    with path.open("rb") as f:
-        digest = hashlib.file_digest(f, "sha256").hexdigest()
+    try:
+        with path.open("rb") as f:
+            digest = hashlib.file_digest(f, "sha256").hexdigest()
+    except OSError as exc:
+        raise _unreadable_graph_file(path, exc) from None
     return {"path": str(path), "sha256": digest}
+
+
+def _unreadable_graph_file(path: Path, exc: OSError) -> ValueError:
+    """An OSError reading a graph file, as the input error it is."""
+    return ValueError(
+        f"graph (file): could not read {str(path)!r}: {exc}; close any program that holds "
+        "it open, or check its permissions"
+    )
 
 
 def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
@@ -1326,7 +1348,7 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
             assert isinstance(one, np.ndarray), "without realizations a family yields one graph"
             bank.append(one)
         return bank
-    family = params.pop("family")
+    family = _require_name(params.pop("family"), "graph.family", families)
     if family not in families:
         raise ValueError(f"unknown graph family {family!r}; choose from {sorted(families)}")
     fn = families[family]
@@ -1358,7 +1380,7 @@ def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
             f'{{"family": "power_law", "alpha": 2.0}}; families: {sorted(families)}'
         )
     params = dict(weights)
-    family = params.pop("family")
+    family = _require_name(params.pop("family"), "edge_weights.family", families)
     if family not in families:
         raise ValueError(f"unknown edge_weights family {family!r}; choose from {sorted(families)}")
     return _call_with(
@@ -1400,7 +1422,7 @@ def _build_probe(spec: Any, index: int, num_system: int) -> mipt.Probe:
             f'{where}: expected an object like {{"kind": "code_dimension"}}; kinds: {sorted(kinds)}'
         )
     params = dict(spec)
-    kind = params.pop("kind")
+    kind = _require_name(params.pop("kind"), f"{where}.kind", kinds)
     if kind not in kinds:
         raise ValueError(f"{where}: unknown probe kind {kind!r}; choose from {sorted(kinds)}")
     name = params.pop("name", None)
@@ -1472,7 +1494,8 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         for k, v in spec.items()
         if k != "graph"
     }
-    n = _require_int(spec["num_system"], "num_system", minimum=2)
+    # bounded before any graph is generated: 10**12 qubits would exhaust the memory
+    n = _require_int(spec["num_system"], "num_system", minimum=2, maximum=MAX_QUBITS)
     kwargs["num_system"] = n
     kwargs["layers"] = _require_int(spec["layers"], "layers", minimum=0)
     kwargs["measurement_rate"] = _require_number(
@@ -1527,7 +1550,7 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
 
 def _random_family(graph: Any) -> bool:
     family: Any = graph.get("family") if isinstance(graph, dict) else None
-    fn = _graph_families().get(family) if isinstance(graph, dict) else None
+    fn = _graph_families().get(family) if isinstance(family, str) else None
     return fn is not None and "seed" in _params(fn)
 
 
@@ -2209,8 +2232,27 @@ def _output_dir(path: Any) -> Path:
     out = Path(path).expanduser().resolve()
     if out.exists() and not out.is_dir():
         raise ValueError(f"output_dir {str(out)!r} exists and is not a directory")
-    out.mkdir(parents=True, exist_ok=True)
+    with _writing_to(out):
+        out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def _not_writable(out: Path, exc: OSError) -> ValueError:
+    """An OSError creating or writing to an output directory, as the input error it is."""
+    return ValueError(
+        f"output_dir {str(out)!r} is not writable: {exc}; free space or fix its permissions, "
+        "or choose another output_dir"
+    )
+
+
+@contextlib.contextmanager
+def _writing_to(out: Path) -> Iterator[None]:
+    """Report an OSError raised in the block (no permission, a full drive, a path too
+    long) as :func:`_not_writable`."""
+    try:
+        yield
+    except OSError as exc:
+        raise _not_writable(out, exc) from None
 
 
 def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
@@ -2431,15 +2473,18 @@ def _result_parts(out: Path) -> list[Path]:
     """``result.npz`` (if any) followed by the saved chunk files in trajectory order.
 
     Only these exact names are parts: a temporary file (``*.tmp.npz``), also one
-    a killed writer left, is never read as one.
+    a killed writer left, is never read as one. A ``chunks/`` that is missing, or
+    that a merge removes during the listing, holds no chunks: a merge replaces
+    result.npz before it deletes them, which is why the chunks are listed first.
+    (On Windows a directory being deleted cannot be listed for a moment either;
+    that ``PermissionError`` is raised, and readers retry it.)
     """
-    parts = []
-    if (out / _RESULT_FILE).exists():
-        parts.append(out / _RESULT_FILE)
-    chunk_dir = out / _CHUNK_DIR
-    if chunk_dir.is_dir():
-        parts.extend(sorted(p for p in chunk_dir.iterdir() if _CHUNK_NAME.fullmatch(p.name)))
-    return parts
+    try:
+        chunks = sorted(p for p in (out / _CHUNK_DIR).iterdir() if _CHUNK_NAME.fullmatch(p.name))
+    except (FileNotFoundError, NotADirectoryError):
+        chunks = []
+    result = [out / _RESULT_FILE] if (out / _RESULT_FILE).exists() else []
+    return [*result, *chunks]
 
 
 def _load_result_file(path: Path) -> mipt.EnsembleResult:
@@ -2573,17 +2618,49 @@ def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]
 
     A merge deletes the chunks it absorbed (``FileNotFoundError`` for a reader
     that listed them) and, on Windows, a file being replaced cannot be opened
-    for a moment (``PermissionError``).
+    for a moment (``PermissionError``). A file that still cannot be read after
+    the retries (another program holds it, or this process may not read it) is
+    an input error that names it.
     """
 
     def read() -> tuple[mipt.EnsembleResult | None, dict | None]:
-        meta = None
-        if (out / _SPEC_FILE).exists():
-            meta = json.loads((out / _SPEC_FILE).read_text(encoding="utf-8"))
+        meta = _read_meta(out)
         parts = _result_parts(out)
         return (_load_parts_once(parts) if parts else None), meta
 
-    return _retrying(read, (FileNotFoundError, PermissionError))
+    try:
+        return _retrying(read, (FileNotFoundError, PermissionError))
+    except OSError as exc:
+        raise _unreadable(out, exc) from None
+
+
+def _unreadable(where: Path, exc: OSError) -> ValueError:
+    """An OSError reading the saved run in ``where`` (``exc`` names the file), as the input
+    error it is."""
+    return ValueError(
+        f"could not read results from {str(where)!r}: {exc}; close any program that holds "
+        "the file open, or check its permissions"
+    )
+
+
+def _read_meta(out: Path) -> dict | None:
+    """``out/spec.json``, the run's record (None if there is none); a file that holds
+    none is an input error that names it."""
+    path = out / _SPEC_FILE
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except ValueError as exc:  # not JSON, or not UTF-8
+        raise ValueError(
+            f"{str(path)!r} is not valid JSON ({exc}); restore it, or use a new output_dir"
+        ) from None
+    if not isinstance(meta, dict):
+        raise ValueError(
+            f"{str(path)!r} holds no run's record (an object with spec, trajectories and "
+            "seed); restore it, or use a new output_dir"
+        )
+    return meta
 
 
 def _merge_if_pending(out: Path, result: mipt.EnsembleResult, meta: dict | None) -> None:
@@ -2592,7 +2669,11 @@ def _merge_if_pending(out: Path, result: mipt.EnsembleResult, meta: dict | None)
     target = None if meta is None else meta.get("trajectories")
     if not isinstance(target, int) or result.num_trajectories < target:
         return
-    if not any(p.parent.name == _CHUNK_DIR for p in _result_parts(out)):
+    try:
+        pending = any(p.parent.name == _CHUNK_DIR for p in _result_parts(out))
+    except OSError:  # chunks/ is being deleted (Windows): a merge is under way
+        return
+    if not pending:
         return
     try:
         _refuse_a_running_job(out)
@@ -2638,10 +2719,14 @@ def _os_identity() -> str:
     means nothing in another. So a lock records this too: the system's name
     and, on Linux, its pid namespace (``/proc/self/ns/pid``), which tells WSL
     distributions and containers apart. Unlike the kernel release, it stays
-    the same across reboots and upgrades of a machine, so a lock that a crash
-    leaves can still be judged after them (a container gets a new pid
-    namespace each time it starts, so its old locks then count as another
-    machine's).
+    the same across reboots and upgrades of a machine whose processes run in
+    the initial pid namespace (Windows, macOS, Linux on bare metal), so a lock
+    that a crash leaves can still be judged after them. A container, and a
+    WSL2 distribution, run in a pid namespace of their own, which may be a new
+    one each time they start (WSL after ``wsl --shutdown``, a reboot or its
+    idle shutdown): a lock that a crashed writer left there then counts as
+    another machine's, so the next writer is refused, and it must be deleted
+    by hand. That fails safe: two writers never share a directory.
     """
     identity = platform.system()
     with contextlib.suppress(OSError):  # no /proc (Windows, macOS)
@@ -2709,7 +2794,12 @@ def _holder_alive(holder: dict) -> bool:
 
 
 def _lock_record(data: bytes) -> dict | None:
-    """The holder written in a lock file, or None if the file holds no complete record."""
+    """The holder written in a lock file, or None if the file holds no complete record.
+
+    A ``created`` that is not an int (a float, a string, a bool) counts as
+    absent, never as another process's creation time: a malformed optional
+    field must not make a live holder's lock look stale.
+    """
     try:
         record = json.loads(data.decode("utf-8"))
     except ValueError:
@@ -2719,6 +2809,9 @@ def _lock_record(data: bytes) -> dict | None:
     pid = record["pid"]
     if isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**31:
         return None
+    created = record.get("created")
+    if "created" in record and (isinstance(created, bool) or not isinstance(created, int)):
+        record = {key: value for key, value in record.items() if key != "created"}
     return record if isinstance(record["host"], str) else None
 
 
@@ -2817,8 +2910,12 @@ def _held_message(out: Path, holder: dict) -> str:
         who = "this process"
     else:
         who = "another process"
+    # the lock's system, when it is another one: WSL and containers share the host name,
+    # and their pids name nothing here
+    system = holder.get("os")
+    shown = f" ({system})" if system is not None and system != _os_identity() else ""
     return (
-        f"{who} (pid {holder['pid']} on host {holder['host']}, started "
+        f"{who} (pid {holder['pid']} on host {holder['host']}{shown}, started "
         f"{holder['started']}) is writing to {str(out)!r}; wait for it to finish or cancel it"
     )
 
@@ -2873,7 +2970,8 @@ def _lock_output_dir(out: Path) -> _DirLock:
     one without a record that is older than
     :data:`_TAKEOVER_ABANDONED_SECONDS`, is stale and is taken over
     (:func:`_remove_stale_lock`). The holder releases it with
-    :meth:`_DirLock.release`, in a ``finally``.
+    :meth:`_DirLock.release`, in a ``finally``. A lock that cannot be created
+    or read (a read-only directory or drive, a full one) is an input error.
     """
     path = out / _LOCK_FILE
     record: dict[str, Any] = {
@@ -2904,14 +3002,17 @@ def _lock_output_dir(out: Path) -> _DirLock:
                     _remove_stale_lock(path, seen)
         except PermissionError as exc:  # Windows: the previous lock is being deleted
             failure = exc
+        except OSError as exc:  # a read-only or full drive, say: retrying cannot help
+            raise _not_writable(out, exc) from None
         if delay is None:
             break
         time.sleep(delay)
-    if failure is not None:
-        raise failure
+    if failure is not None:  # no permission to write here
+        raise _not_writable(out, failure) from None
     raise ValueError(
-        f"could not take the lock {str(path)!r}: other processes keep changing it; retry, or "
-        f"delete it if no process is writing to {str(out)!r}"
+        f"could not take the lock {str(path)!r}: other processes keep changing it, or it "
+        "cannot be read (check its permissions); retry, or delete it if no process is "
+        f"writing to {str(out)!r}"
     )
 
 
@@ -2972,11 +3073,16 @@ def run_ensemble(
         _refuse_a_running_job(out_path)
         lock = _lock_output_dir(out_path)
     try:
-        if out_path is not None and (_result_parts(out_path) or (out_path / _SPEC_FILE).exists()):
-            raise ValueError(
-                f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
-                "(or use start_ensemble_job to resume or extend it)"
-            )
+        if out_path is not None:
+            try:
+                held = bool(_result_parts(out_path)) or (out_path / _SPEC_FILE).exists()
+            except OSError as exc:  # a chunks/ this process may not list
+                raise _unreadable(out_path, exc) from None
+            if held:
+                raise ValueError(
+                    f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
+                    "(or use start_ensemble_job to resume or extend it)"
+                )
         setup = time.perf_counter() - start
         with _COMPUTE_LOCK:
             result = mc.run(trajectories, seed=seed, num_threads=num_threads)
@@ -2985,18 +3091,19 @@ def run_ensemble(
         result.elapsed_seconds += setup
         extra: dict[str, Any] = {}
         if out_path is not None:
-            _atomic_save_result(result, out_path / _RESULT_FILE)
-            files = {"result": str(out_path / _RESULT_FILE)}
-            files.update(
-                _write_run_metadata(
-                    out_path,
-                    spec,
-                    trajectories,
-                    seed,
-                    command or "run_ensemble",
-                    graph_file=graph_file,
+            with _writing_to(out_path):
+                _atomic_save_result(result, out_path / _RESULT_FILE)
+                files = {"result": str(out_path / _RESULT_FILE)}
+                files.update(
+                    _write_run_metadata(
+                        out_path,
+                        spec,
+                        trajectories,
+                        seed,
+                        command or "run_ensemble",
+                        graph_file=graph_file,
+                    )
                 )
-            )
             extra["files"] = files
     finally:
         if lock is not None:
@@ -3029,8 +3136,8 @@ def load_results(path: str) -> dict[str, Any]:
             _merge_if_pending(p, result, meta)
         else:
             result, meta = _retrying(functools.partial(_load_result_file, p)), None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"could not read results from {str(p)!r}: {exc}") from None
+    except OSError as exc:  # still in use after the retries, or not ours to read
+        raise _unreadable(p, exc) from None
     extra: dict[str, Any] = {"path": str(p)}
     if meta is not None:
         extra["spec"] = meta.get("spec")
@@ -3175,6 +3282,11 @@ def start_ensemble_job(
             _check_contract(out, stored, existing)
             _check_version(out, stored, existing)
             notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
+            if "seed" not in meta:
+                raise ValueError(
+                    f"output_dir {str(out)!r}: its spec.json records no seed; restore it, or "
+                    "use a new directory"
+                )
             if seed is not None and _resolve_seed(seed) != meta.get("seed"):
                 raise ValueError(
                     f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit "
@@ -3215,15 +3327,16 @@ def start_ensemble_job(
         with _JOBS_LOCK:
             _JOBS[job.job_id] = job
         try:
-            _write_run_metadata(
-                out,
-                spec,
-                job.trajectories,
-                seed,
-                command or "start_ensemble_job",
-                resumed_from=done if meta is not None else None,
-                graph_file=graph_file,
-            )
+            with _writing_to(out):
+                _write_run_metadata(
+                    out,
+                    spec,
+                    job.trajectories,
+                    seed,
+                    command or "start_ensemble_job",
+                    resumed_from=done if meta is not None else None,
+                    graph_file=graph_file,
+                )
         except BaseException:
             _forget_job(job)
             raise
@@ -3259,15 +3372,16 @@ def _canonical(obj: Any) -> str:
 
 
 def _stored_target(output_dir: Any) -> Any:
-    """The trajectory target in ``output_dir/spec.json``, or None (nothing is created)."""
+    """The trajectory target in ``output_dir/spec.json``: None if there is none (nothing
+    is created), or ``...`` if the file cannot be read, which the read under the
+    directory's lock then reports."""
     if not isinstance(output_dir, (str, os.PathLike)) or not str(output_dir):
         return None
     try:
-        path = Path(output_dir).expanduser().resolve() / _SPEC_FILE
-        meta = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return meta.get("trajectories") if isinstance(meta, dict) else None
+        meta = _read_meta(Path(output_dir).expanduser().resolve())
+    except (OSError, ValueError):
+        return ...
+    return None if meta is None else meta.get("trajectories")
 
 
 _ABSENT = object()
@@ -3704,6 +3818,7 @@ def _capability_sections() -> dict[str, Any]:
             "max_output_chars": MAX_OUTPUT_CHARS,
             "sync_ensemble_max_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
             "max_qubits_run_circuit": MAX_QUBITS,
+            "max_num_system": MAX_QUBITS,
             "max_shot_results": MAX_SHOT_RESULTS,
             "checkpoints_shown": MAX_CHECKPOINTS_SHOWN,
         },
@@ -3752,7 +3867,7 @@ def capabilities(section: str | None = None) -> dict[str, Any]:
     """
     sections = _capability_sections()
     if section is not None:
-        if section not in sections:
+        if _require_name(section, "section", sections) not in sections:
             raise ValueError(f"unknown section {section!r}; choose from {sorted(sections)}")
         return _bounded({section: sections[section]})
     out = _jsonable(sections)

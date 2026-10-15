@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+* **Every MCP failure carries a message:** the server turns every exception into a tool
+  error the model can read. A `ValueError` keeps the API's message; anything else reads
+  `TypeName: message`, followed by `(internal error: please report it)` unless it is a
+  `TypeError` (an input error too). The SDK used to send only `Error executing tool X`
+  for anything but a `ValueError`. An internal error's traceback goes to the server's
+  log (stderr). The CLI exits with 2 for a `TypeError` as well.
+* **Names are checked before they are looked up:** a graph `family`, an `edge_weights`
+  family, a probe or observable `kind` and a `capabilities` section that is not a string
+  raise `ValueError` naming the field (`graph.family must be a string (one of [...]),
+  got ['cycle']`) instead of `TypeError: unhashable type`, which the CLI reported as an
+  internal error (exit 1) and MCP as a bare error.
+* **`num_system` is bounded:** at most `MAX_QUBITS` (65,536), checked before any graph
+  is generated, in `estimate_ensemble` too (`num_system: 10**12` ran out of memory
+  generating the graph). `capabilities()["limits"]["max_num_system"]` gives it.
+* **Directories that cannot be written or read are input errors:** an `output_dir` that
+  cannot be created or written (no permission, a full or read-only drive, a path below a
+  file), its lock included, raises `ValueError("output_dir DIR is not writable: ...")` in
+  `run_circuit`, `run_ensemble` and `start_ensemble_job`. A saved part that stays
+  unreadable after the retries (`result.npz` or a chunk that another program holds, or
+  that this process may not read) raises `could not read results from DIR: ...`, naming
+  the file, in `start_ensemble_job` as in `load_results`; it raised `PermissionError`
+  (CLI exit 1, a bare MCP error). A `spec.json` that is not JSON, holds no object or
+  records no seed, and a graph file that cannot be read, are refused naming the file. The
+  CLI exits with 2 for a circuit, spec or observables file it cannot read or that is not
+  UTF-8.
+* **Strict MCP argument types:** integer, boolean and number tool arguments are checked
+  as the API checks them. Pydantic's lax default ran one trajectory for
+  `trajectories: true` and three for `"3"`, and took `seed: true` as seed 1; these, and
+  `"false"` for `phases` or `"inf"` for `max_seconds`, are now refused with a message
+  naming the argument. A whole-number float such as `4.0` still counts as 4. The input
+  schema is unchanged.
+* **Fresh seeds fit in a double:** `seed=None` draws a 53-bit seed (it drew 63 bits), so
+  the reported seed survives clients that read JSON numbers as doubles (JavaScript MCP
+  clients, Claude Code among them); a larger one came back rounded and repeated another
+  run. An explicit seed of any size is still used and reported exactly.
+* **Lock and merge details:** `load_results` no longer fails when a merge removes
+  `chunks/` while it lists it (a missing `chunks/` holds no chunks, and the chunks are
+  listed before `result.npz`, which a merge replaces first). The refusal of a lock taken
+  on another system names that system (`pid P on host H (Linux pidns:N)`), since WSL
+  and containers share the Windows or host name. A lock whose `created` is not an integer
+  counts as having none; a malformed one made a live writer's lock look stale.
 * **Kaplan-Meier survival is correctly rounded:** `analysis.kaplan_meier` computes
   `survival` as the exact product of (n_j - d_j) / n_j (`fractions.Fraction`), rounded to
   float64 once, instead of a running float product. A survival of exactly 1/2 used to
