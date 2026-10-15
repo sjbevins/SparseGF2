@@ -1087,6 +1087,38 @@ def uncorrectable_region_counts(
 
 **Commit:** `docs: codes after the run, from snapshot to StabilizerCode`
 
+### Task 32: compiled kernels are never stale
+
+**Files:**
+- Modify: `src/sparsegf2/_kernel/__init__.py`, or create `src/sparsegf2/_kernel/_cache.py` imported first by it
+- Create: `tests/test_kernel_cache.py`
+- Modify: `AGENTS.md` (Pitfalls)
+- Modify: `docs/DESIGN.md` (section 5, a short note)
+- Modify: `CHANGELOG.md` (Unreleased)
+
+**The problem** (found in Task 15): Numba's `cache=True` keys each function's cache on its own source file's timestamp and size. A jitted caller in file A that calls a jitted callee in file B compiles B's code into A's cache entry. Editing B does not invalidate A's cache, so A keeps running the old callee. With JIT caches in the editable checkout's `__pycache__` (shared by the owner's SmallWorldCodes environment), a later kernel edit could silently run stale code in production. Task 15 confirmed it: `sample()` ran the contract-1 `stream_state` from a warm cache.
+
+**Requirements:**
+- **On import of `sparsegf2._kernel`,** before any kernel submodule is imported, compute a fingerprint: sha256 over the numba version, the Python version, and the bytes of every package module that defines or calls jitted code. Determine the set statically: all of `_kernel/*.py`, plus any other module with `@njit`/`numba.njit` (grep; `_parallel.py` uses numba but may not define kernels).
+- **Compare** it with a marker file in the directory where Numba actually writes this package's cache. That is `<module dir>/__pycache__` by default, or the layout under `NUMBA_CACHE_DIR` when that is set. Find the real location through numba's cache locator logic (for example, by asking a jitted dispatcher's cache for its cache path), not by guessing.
+- **On mismatch,** delete this package's Numba cache files (`*.nbi` and `*.nbc` of the fingerprinted modules) in that directory, then write the marker atomically.
+- **Robustness:** a read-only cache dir and concurrent processes are tolerated (ignore missing files; never crash the import). Add one `logging` debug line, not a warning, since warnings are errors in the suite.
+- **The end-to-end test** (it must fail without the fix):
+  1. Copy `src/sparsegf2` to a temp dir, and use a fresh `NUMBA_CACHE_DIR` per test.
+  2. In a subprocess with `PYTHONPATH` set to the copy, run a shot `sample()` with a fixed seed and record the result.
+  3. Change a constant inside `_kernel/rng.py::stream_state` in the copy, keeping the file's other content, and run again in a new subprocess.
+  4. The result must change.
+  5. Then restore the file and check that the original result comes back.
+
+  Show that the test fails with the guard disabled (temporarily, in the report). Keep it under about 60 s.
+- **Docs:** add an AGENTS.md pitfall line saying kernels are recompiled automatically when any kernel source changes, and that a first import after an update is slower. Add a DESIGN 5 note and a CHANGELOG bullet.
+
+**Steps:**
+- [ ] Write the failing end-to-end test.
+- [ ] Implement.
+- [ ] Run the full suite, ruff and mypy.
+- [ ] Commit: `kernel: caches are cleared when any kernel source changes, so callers never run a stale callee`
+
 ---
 
 # Phase 3: documentation, version, and the mutation re-run
