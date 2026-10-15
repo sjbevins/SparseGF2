@@ -8,8 +8,9 @@ from its definition, through the formulas and kernels that compute it, to the
 functions you call and a worked example on a single trajectory. It is written
 for a reader fluent in the stabilizer formalism and GF(2) linear algebra, and
 every statement about the code cites the function it describes as
-`path::function` (paths relative to `src/sparsegf2/`). It describes version
-3.0.0.dev12.
+`path::function` (paths relative to `src/sparsegf2/`). It describes the code
+at randomness contract 2 (`mipt.RANDOMNESS_CONTRACT`, which every result
+records as `EnsembleResult.randomness_contract`).
 
 Companion documents: [lost-information.md](lost-information.md) (the lost
 information $\ell_C(A)$ of one region, complementarity, the profile probe) and
@@ -138,14 +139,15 @@ $m^{\ast}(n) \in \lbrace 0, \dots, n\rbrace$:
 * $m^{\ast}(n) \lt m \le n$: **$M$ uniformly random regions** per size, from
   $M$ random orderings (§2.4).
 
-$m = 0$ is trivially exact ($P_C(0) = 0$). The exhaustive regime tests
+$m = 0$ is trivially exact ($P_C(0) = 0$). The exhaustive regime covers
 **formula (3)**
 
 $$
 N_{\mathrm{exact}}(n) = \sum_{m=1}^{m^{\ast}(n)} \binom{n}{m}
 $$
 
-regions per code. For $n = 256$:
+regions per code: every one of them is accounted for, although the kernel
+tests most of them only implicitly (§2.5, §3.3). For $n = 256$:
 
 | $m$ | $\binom{256}{m}$ | cumulative $N_{\mathrm{exact}}$ with $m^{\ast} = m$ |
 |---|---|---|
@@ -154,15 +156,17 @@ regions per code. For $n = 256$:
 | 3 | 2,763,520 | 2,796,416 |
 | 4 | 174,792,640 | 177,589,056 |
 
-so $m^{\ast}(256) = 2$ costs 32,896 tests per code. The cutoff can also be set
-by an enumeration budget $B$, **formula (4)**:
+so $m^{\ast}(256) = 2$ covers 32,896 regions per code. The cutoff can also be
+set by an enumeration budget $B$, **formula (4)**:
 
 $$
 m^{\ast}(n) = \max\Big\lbrace w : \sum_{m=1}^{w} \binom{n}{m} \le B \Big\rbrace .
 $$
 
 For example $B = 50{,}000$ gives $m^{\ast}(64) = 3$, $m^{\ast}(128) = 2$,
-$m^{\ast}(256) = 2$ and $m^{\ast}(512) = 1$. In the code, $m^{\ast}(n)$ is the
+$m^{\ast}(256) = 2$ and $m^{\ast}(512) = 1$. $B$ counts regions, not
+seconds: the time per region is not constant, and every evaluation also pays
+a fixed elimination (§4.2). In the code, $m^{\ast}(n)$ is the
 `max_size` of the probe `mipt.uncorrectable_region_counts` and of
 `StabilizerCode.uncorrectable_counts`; it is written $w$ below. A `budget=`
 argument on the probe is planned; until then, compute $w$ from the budget
@@ -207,6 +211,11 @@ region $A$ there are two different restrictions:
   is the rank of the $A$-columns of any generator matrix of $V$, so
   $\dim S|_A = \operatorname{rank}(H_A)$.
 
+On a **matrix** the subscript means something else: $H_A$ (and below
+$H'_A$, $(G_N)_A$) is the submatrix of the X and Z columns of the qubits in
+$A$, so its rank is the dimension of a projection, $\dim V|_A$. On a
+**subspace**, $V_A$ always means the elements supported on $A$.
+
 The projection onto $\bar A$ has kernel $V_A$, so
 $\dim V_A = \dim V - \dim V|_{\bar A}$. In particular
 $\dim S_A = s - \operatorname{rank}(H_{\bar A})$.
@@ -215,7 +224,11 @@ $\dim S_A = s - \operatorname{rank}(H_{\bar A})$.
 
 Let $G$ be the stabilizer group of the pure joint state on $[n] \cup R$
 ($\dim G = n + |R|$). For any set $X$ of qubits, $S(X) = |X| - \dim G_X$
-(Fattal et al., quant-ph/0406168). For a region $X \subseteq [n]$ the elements
+(Fattal et al., quant-ph/0406168). The kernels use the equivalent
+projection form $S(X) = \operatorname{rank}(G|_X) - |X|$: the projection onto
+$X$ has kernel $G_{\bar X}$ ($\bar X$ the complement among all qubits here), so
+$\operatorname{rank}(G|_X) - |X| = (\dim G - \dim G_{\bar X}) - |X| = |\bar X| - \dim G_{\bar X} = S(\bar X)$,
+which is $S(X)$ by purity. For a region $X \subseteq [n]$ the elements
 of $G$ supported on $X$ act trivially on $R$, so $G_X = S_X$ and
 
 $$
@@ -282,10 +295,12 @@ a generator matrix $G_N$ of $N(S)$ whose first $s$ rows are $H'$ and whose
 other $2k_C$ rows are logical operators. The function transposes the
 echelon, so each qubit $q$ gets an X column and a Z column of $r$ bits:
 
-* the **N(S)-columns** of $q$ are its columns of $G_N$ (all $r$ bits), and
-  $\operatorname{rank}\big((G_N)_A\big) = \dim N(S)|_A$;
+* the **N(S)-columns** of $q$ are its columns of $G_N$ (all $r$ bits). For
+  the column submatrix $(G_N)_A$,
+  $\operatorname{rank}\big((G_N)_A\big) = \dim N(S)|_A$, the projection, not
+  $\dim N(S)_A$;
 * the **S-columns** of $q$ are the first $s$ bits of the same columns, i.e. its
-  columns of $H'$, and $\operatorname{rank}(H'_A) = \operatorname{rank}(TH_A) = \operatorname{rank}(H_A)$,
+  columns of $H'$, and $\operatorname{rank}(H'_A) = \operatorname{rank}(TH_A) = \operatorname{rank}(H_A) = \dim S|_A$,
   since row operations leave the rank of every set of columns unchanged.
 
 So the kernels evaluate $\ell_C(A) = \operatorname{rank}\big((G_N)_A\big) - \operatorname{rank}(H'_A)$,
@@ -460,8 +475,11 @@ harmless, because `code_columns` discards dependent rows.
 
 Cost: $O(N \cdot r \cdot \lceil 2n/64\rceil)$ word operations for the
 elimination, at most about $n^3/8$ in the purification picture ($N = 2n$ rows,
-$r \le 2n$). Each erasure kernel calls `code_columns` itself, once per
-evaluation.
+$r \le 2n$). The two $P_C$ kernels, `uncorrectable_counts_rows` and
+`first_failure_samples`, each call `code_columns` themselves, once per
+evaluation, so this is a fixed cost of every evaluation of either probe
+(§4.2). `lost_information_rows` and `erasure_profile_rows` do not use it:
+they work on the tableau rows directly.
 
 ### 3.3 Exhaustive counts (`uncorrectable_counts_rows`)
 
@@ -533,16 +551,27 @@ Only a size with $\binom{n}{m} \ge 2^{63}$ falls back to a compensated
 $(2w+2) \cdot 2^{-53}$. `StabilizerCode.uncorrectable_counts` returns the
 int64 counts whenever every $\binom{n}{m}$, $m \le w$, is below $2^{63}$. An
 ensemble result stores the counts as float64, which holds every integer below
-$2^{53}$ exactly; that covers every count whenever $\binom{n}{w} \lt 2^{53}$
-(for example $\binom{256}{4} \approx 1.7 \cdot 10^{8}$).
+$2^{53}$ exactly; that covers every count whenever
+$\max_{m \le w}\binom{n}{m} \lt 2^{53}$ (for example $\binom{256}{4} \approx 1.7 \cdot 10^{8}$).
+Larger counts are not out of reach: pruning makes them cheap when most small
+regions fail. At layer 1 of a purification run with $n = 64$ and no
+measurements, every single qubit fails, and the count at $m = 20$ is
+$\binom{64}{20} \approx 1.96 \cdot 10^{16} \gt 2^{53}$, returned in
+milliseconds and stored rounded.
 
-**Cost.** At most $\sum_{j \lt w}\binom{n}{j}$ prefixes are visited (fewer
-after pruning). Each correctable prefix of length $w - 1$ costs up to
-$4^{w-1}$ hash lookups of $\lceil s/64\rceil$ words, an $O(n)$ scan of the hit
-flags and, for the few qubits that hit, up to $4^{w-1}$ lookups in the N(S)
-table. That is roughly $\binom{n}{w-1}\big(4^{w-1}\lceil r/64\rceil + n\big)$
-word operations, against $\binom{n}{w}$ full rank computations for a naive
-enumeration. The measured times are in §4.2.
+**Cost.** First the fixed `code_columns` elimination (§3.2). Then the walk:
+at most $\sum_{j \lt w}\binom{n}{j}$ prefixes are visited (fewer after
+pruning). Each correctable prefix of length $w - 1$ costs up to $4^{w-1}$ hash
+lookups of $\lceil s/64\rceil$ words, an $O(n)$ scan of the hit flags and, for
+the few qubits that hit, up to $4^{w-1}$ lookups in the N(S) table. That is
+roughly $\binom{n}{w-1}\big(4^{w-1}\lceil r/64\rceil + n\big)$ word
+operations, against $\binom{n}{w}$ full rank computations for a naive
+enumeration. Divided by the $\binom{n}{w} \approx \binom{n}{w-1}(n-w+1)/w$
+regions of the largest size, the walk costs about
+$\frac{w}{n-w+1} 4^{w-1}\lceil r/64\rceil + w$ word operations per region.
+This is a model, not a measurement, but it shows that the cost per region
+depends on $n$ and grows with $w$, about fourfold per step once the $4^{w-1}$
+term dominates. The measured times are in §4.2.
 
 ### 3.4 First-failure scans (`first_failure_samples`)
 
@@ -567,8 +596,9 @@ writes one first-failure size per entry of `out`:
   bases grow together until the N(S)-rank exceeds the S-rank. That $m + 1$ is
   $D$, and the scan stops.
 
-Cost per ordering: $O(n)$ for the shuffle plus $O(D^2 \lceil r/64\rceil)$ for
-the two bases. The scan stops at $D$, which is typically much smaller than $n$.
+Cost: one `code_columns` elimination per evaluation, then per ordering $O(n)$
+for the shuffle plus $O(D^2 \lceil r/64\rceil)$ for the two bases. The scan
+stops at $D$, which is typically much smaller than $n$.
 
 ### 3.5 How the engine dispatches the probes
 
@@ -598,8 +628,9 @@ sample, 0 for every count, and $n$ for `code_snapshot`, with no code stored
 ### 3.6 Per-evaluation random streams
 
 Each run derives two 128-bit keys from its seed: one for the circuit and one
-for probe sampling (`mipt.py::_keys`). In 3.0.0.dev12 (randomness contract 2,
-`mipt.RANDOMNESS_CONTRACT`), every evaluation of a sampled probe
+for probe sampling (`mipt.py::_keys`). Under randomness contract 2
+(`mipt.RANDOMNESS_CONTRACT`; a result records its contract as
+`EnsembleResult.randomness_contract`), every evaluation of a sampled probe
 (`erasure_first_failure`, `erasure_lost_profile`) at layer $L$ of trajectory
 $t$ draws only from its own stream, `stream_state(key_probe, mix(t, h, L))`.
 Here $h$ is a 64-bit hash of the probe's name (blake2b) and `mix` a fixed
@@ -611,12 +642,19 @@ orderings start from the identity. Consequences:
   probe's name, the layer, $M$ and the state, never on other probes, on the
   other checkpoints, or on earlier evaluations (an evaluation with
   $k_C = 0$ draws nothing, and that no longer shifts anything);
-* `MonitoredCircuit.replay(t, seed=..., probes=[...], checkpoints=[L])`
-  reproduces the original run's samples at $L$ exactly, so one trajectory can
-  be re-examined at new depths;
+* `result.replay(t, probes=[...], checkpoints=[L])` (`mipt.py::EnsembleResult.replay`)
+  reruns trajectory $t$ of a saved or in-memory result from the result's own
+  spec and seed, and reproduces its samples at $L$ exactly, so one trajectory
+  can be re-examined at new depths. It refuses a result made under another
+  randomness contract;
+* `spec.replay(t, seed=...)` and `spec.circuit(t, seed=...)` repeat a run only
+  when `result.randomness_contract == mipt.RANDOMNESS_CONTRACT`. Under another
+  contract the same seed gives other circuits and samples, and they cannot
+  tell;
 * fewer samples are a prefix of more (same name, seed, trajectory and layer);
-* results written under contract 1 (3.0.0.dev11 and earlier) cannot be merged
-  with or extended by dev12 runs.
+* results with `randomness_contract` 1 (files saved before contracts were
+  recorded load as 1) cannot be merged with, or extended by, contract-2 runs
+  (`EnsembleResult.concatenate` and the API's output directories refuse).
 
 `StabilizerCode.first_failure_sizes(samples, seed=...)` draws from a stream
 seeded by `_kernel/rng.py::seed_state(seed)` and is independent of all of
@@ -721,7 +759,7 @@ standard error at the last checkpoint with data (`at_layer`, `count`, `mean`,
 * `uncorrectable_region_counts`: each trajectory's exact $P_C(m)$,
   $m = 0..w$, with $P_C(0) = 0$ prepended.
 
-In 3.0.0.dev12 these means are over **all** trajectories, and a trajectory
+At present these means are over **all** trajectories, and a trajectory
 without a code contributes $P_C \equiv 0$ (§6). Conditioning the summaries on
 $k_C > 0$ is planned. With `output_dir`, the full result is saved as
 `result.npz`, which `mipt.EnsembleResult.load` reads back, together with
@@ -744,34 +782,67 @@ and `{"kind": "erasure_profile", "system": "0:16", "reference": "16:32", "sample
 
 | routine | cost per evaluation |
 |---|---|
-| `code_columns` | $O(N r \lceil 2n/64\rceil)$ word operations, once per erasure kernel call |
-| `uncorrectable_counts_rows`, cutoff $w$ | about $\binom{n}{w-1}(4^{w-1}\lceil r/64\rceil + n)$, after pruning less |
-| `first_failure_samples`, $M$ orderings | $M \cdot O(n + D^2\lceil r/64\rceil)$ |
+| `code_columns` | $O(N r \lceil 2n/64\rceil)$ word operations (up to about $n^3/8$), once per evaluation of either $P_C$ probe |
+| `uncorrectable_counts_rows`, cutoff $w$ | `code_columns`, plus about $\binom{n}{w-1}(4^{w-1}\lceil r/64\rceil + n)$ for the walk (less after pruning) |
+| `first_failure_samples`, $M$ orderings | `code_columns`, plus $M \cdot O(n + D^2\lceil r/64\rceil)$ |
 | `code_snapshot_rows` | $O(N n)$; stores $n \cdot 2\lceil n/64\rceil$ words |
 
 Memory per evaluation per trajectory: 8 bytes per first-failure sample, 8
 bytes per count, and $16 n \lceil n/64\rceil$ bytes per code snapshot (16 KB at
 $n = 256$).
 
-### 4.2 Measured costs
+### 4.2 Measured costs, and what a budget means
 
-Single-thread cost per evaluation at $n = 256$, for codes generated by random
-circuits (AGENTS.md, and the `mipt.uncorrectable_region_counts` docstring):
+One evaluation of the exhaustive counts costs
 
-| probe | cost per evaluation | regions in the exhaustive regime |
+$$
+T(n, w) = T_{\mathrm{cols}}(n) + T_{\mathrm{walk}}(n, w).
+$$
+
+* $T_{\mathrm{cols}}$ is the `code_columns` elimination (§3.2). It is paid on
+  every evaluation whatever $w$ is, and by `erasure_first_failure` too. Its
+  operation count is $O(N r \lceil 2n/64\rceil)$, up to about $n^3/8$ word
+  operations in the purification picture, so it grows about eightfold when
+  $n$ doubles (derived from the operation count).
+* $T_{\mathrm{walk}}$ is the walk of §3.3, about
+  $\binom{n}{w-1}(4^{w-1}\lceil r/64\rceil + n)$ word operations (a model).
+  Per region its cost depends on $n$ and grows with $w$, so there is no
+  constant time per region.
+
+Measured on one thread, through `StabilizerCode` (the same kernels as the
+engine), on codes from Watts–Strogatz trajectories at $n = 256$ (degree 4,
+$\beta = 0.1$, purification picture, `random_edges`, 64 to 1024 layers at
+$p = 0.05$ or $0.1$, $k_C$ between 59 and 134), on the development machine
+(AMD Ryzen 9 9950X3D), nine codes (two for $w = 4$):
+
+| work per evaluation | $N_{\mathrm{exact}}$ | time |
 |---|---|---|
-| `erasure_first_failure`, $M = 100$ | 3 to 7 ms | |
-| `uncorrectable_region_counts`, $w = 2$ | about 1 ms | 32,896 |
-| `uncorrectable_region_counts`, $w = 3$ | 40 to 50 ms | 2,796,416 |
-| `uncorrectable_region_counts`, $w = 4$ | about 7 s | 177,589,056 |
+| `code_columns` alone | | 0.3 to 0.6 ms |
+| counts, $w = 1$ | 256 | 0.3 to 0.6 ms (almost all `code_columns`) |
+| counts, $w = 2$ | 32,896 | 0.4 to 0.7 ms |
+| counts, $w = 3$ | 2,796,416 | 18 to 22 ms |
+| counts, $w = 4$ | 177,589,056 | 4.3 to 4.7 s |
+| first failure, $M = 100$ | | 0.6 to 1.8 ms |
 
-Divided by the regions in the exhaustive regime, the counts cost about 15 to
-40 ns per region at $n = 256$ on one thread. So, at $n = 256$,
-$N_{\mathrm{exact}} \times 4 \cdot 10^{-8}$ s is a pessimistic planning figure
-per code and evaluation. Multiply by trajectories and evaluations, and divide
-by the cores in use: the engine runs trajectories in parallel. A dedicated
-benchmark of these costs, by $n$ and $w$, on codes from real trajectories, is
-planned.
+AGENTS.md and the `mipt.uncorrectable_region_counts` docstring quote an
+earlier, slower measurement (40 to 50 ms for $w = 3$, about 7 s for $w = 4$,
+3 to 7 ms for 100 orderings). Plan with those if you want to be pessimistic.
+Derived from the table, not measured separately:
+
+* the time per region is 1 to 2 µs at $w = 1$ (the fixed elimination
+  dominates), 12 to 21 ns at $w = 2$, 6 to 8 ns at $w = 3$ and about 25 ns at
+  $w = 4$;
+* $w = 5$ at $n = 256$ would visit about 63 times more prefixes than $w = 4$,
+  each with up to four times more lookups: by the model, roughly 10 to 20
+  minutes per code.
+
+So a budget $B$ in formula (4) counts regions, not seconds. The same $B$
+costs different times at different $n$ and $w$, and every evaluation pays
+$T_{\mathrm{cols}}$ on top. A dedicated benchmark, `benchmarks/erasure_cost.py`
+(planned), will publish measured times per $(n, w)$; choose $m^{\ast}(n)$ from
+those measured times, then set it as `max_size` (or as the budget that gives
+it). For a study, multiply the time per code by trajectories and evaluations,
+and divide by the cores in use: the engine runs trajectories in parallel.
 
 ### 4.3 Error bars
 
@@ -780,11 +851,15 @@ planned.
   orderings, the one-sided 95% bound is $P_C(m) \le 3/M$ (rule of three).
 * **One code, a function of the curve.** Do not combine per-$m$ error bars:
   the sizes are correlated (§2.4). $\hat\Phi_C(e)$ and $\hat\mu_C$ are means of
-  per-ordering quantities, $f(D_j) = \Pr[\mathrm{Bin}(n, e) \ge \max(D_j, w+1)]$
-  (with $w = 0$ when there are no counts) and $D_j$ (or
-  $\max(D_j - w - 1, 0)$ with counts), so their standard error is the sample
-  standard deviation of those quantities divided by $\sqrt{M}$. The exact part
-  adds no variance.
+  per-ordering quantities, so their standard error is the sample standard
+  deviation of those quantities divided by $\sqrt{M}$, and the exact part
+  adds no variance. For $\hat\Phi_C(e)$ the quantity is
+  $f(D_j) = \Pr[\mathrm{Bin}(n, e) \ge \max(D_j, w+1)]$ (with $w = 0$ when there
+  are no counts). For $\hat\mu_C$ it is $D_j$ without counts. With counts,
+  $\hat\mu_C = \sum_{m \le w}\big(1 - P_C(m)\big) + \sum_{m=w+1}^{n}\big(1 - \hat P_C(m)\big)$,
+  and ordering $j$ contributes $1 - \mathbf{1}[D_j \le m] = \mathbf{1}[m \lt D_j]$
+  to each sampled term. Summed over $w+1 \le m \le n$, that is the number of
+  integers in $[w+1, D_j - 1]$, so the quantity is $\max(D_j - w - 1, 0)$.
 * **An ensemble.** Trajectories are independent, so the mean over $T$ codes and
   its standard error (`analysis.mean_and_error` over the per-code values)
   include both the code-to-code spread and each code's sampling noise. With a
@@ -803,13 +878,17 @@ are where this happens. A distance-2 code at $n = 256$ with a single
 uncorrectable pair has $P_C(2) = 1/32{,}640$; with $M = 100$ orderings the
 chance that any $D_j \le 2$ is about 0.3%. Yet that pair sets the leading term
 $\Phi_C(e) \approx N_d e^d = e^2$ as $e \to 0$. The exhaustive regime gives
-these $N_m$ exactly, at a cost fixed in advance.
+these $N_m$ exactly, at a cost set by $n$ and $w$ (§4.2) rather than by how
+rare the failures are.
 
 A practical way to choose $m^{\ast}(n)$:
 
-1. **Cost.** Pick the largest $w$ whose time per code (§4.2), multiplied by
-   trajectories and evaluations and divided by cores, fits your budget. This
-   is formula (4) with $B$ in regions; `cutoff_from_budget` above computes it.
+1. **Time.** For each candidate $w$, take the measured time per evaluation
+   at your $n$: §4.2 at $n = 256$, the planned benchmark otherwise. It
+   includes the fixed elimination. Multiply by trajectories and evaluations,
+   divide by cores, and keep the largest $w$ that fits your time. A region
+   budget $B$ (formula (4), `cutoff_from_budget` above) is not a time budget:
+   use it only after checking what that $B$ costs at your $n$.
 2. **Accuracy.** The sampled regime is informative where $M P_C(m) \gg 1$. If
    $\hat P_C(w+1)$ is 0 or rests on a handful of orderings, either raise $w$
    or raise $M$ (orderings are cheap: §4.2).
@@ -837,7 +916,11 @@ assertions are what the example establishes.
 
 **Run, and get the code two ways.** From the engine's snapshot, and from the
 exported circuit replayed on a general `Simulator` (whose plain measurement
-rule differs from the engine's, but leaves the same stabilizer group):
+rule differs from the engine's, but leaves the same stabilizer group).
+`spec.circuit(t, seed=7)` rebuilds the circuit this run simulated because the
+run was made under this version's randomness contract, which the example
+checks. For a saved result, `result.replay(t, ...)` makes that check itself.
+The run starts at trajectory 0, so row $t$ of the result is trajectory $t$.
 
 ```python
 import math
@@ -873,6 +956,7 @@ counts = all_counts[t]
 first = res.values["erasure_first_failure"][t, -1]  # D_1, ..., D_M
 print(f"trajectory {t}: k = {k}; engine counts N_1..N_{w} = {counts.astype(int).tolist()}")
 
+assert res.randomness_contract == mipt.RANDOMNESS_CONTRACT  # so spec.circuit repeats this run
 sim = Simulator(spec.num_qubits, phases=False)
 sim.run(spec.circuit(t, seed=7))
 refs = spec.reference_qubits
@@ -882,11 +966,15 @@ assert np.array_equal(replayed.uncorrectable_counts(w), counts)
 assert np.array_equal(code.uncorrectable_counts(w), counts)
 ```
 
-**Brute force with formula (1).** An independent GF(2) rank on integers
-(read as bit vectors), the columns of $H$ packed with numpy, and the ranks
-$\operatorname{rank}(H_A)$ of all $2^{16}$ regions by a depth-first walk over
-subsets. Then $\ell_C(A)$ for every region at once, and the exact $N_m$ and
-$P_C(m)$ for every $m$:
+**Brute force with formula (1).** The check matrix $H$ is derived here from
+the replayed state alone, by numpy Gaussian elimination: eliminate the
+reference columns of the stabilizer generators, and the rows left with no
+reference part generate $S$. That keeps the oracle independent of the
+engine's snapshot, which is then compared with it. An independent GF(2) rank
+on integers (read as bit vectors) gives $\operatorname{rank}(H_A)$ for all
+$2^{16}$ regions by a depth-first walk over subsets. Then $\ell_C(A)$ follows
+for every region at once, and with it the exact $N_m$ and $P_C(m)$ for every
+$m$:
 
 ```python
 def gf2_rank(vectors):
@@ -901,10 +989,35 @@ def gf2_rank(vectors):
     return len(basis)
 
 
-H = code.stabilizer_matrix()  # (s, 2n): X bits of qubits 0..n-1, then Z bits
-s = gf2_rank(int(row) for row in H.astype(np.int64) @ (1 << np.arange(2 * n)))
-assert s == n - k
-col = [int(c) for c in H.T.astype(np.int64) @ (1 << np.arange(H.shape[0]))]  # column j of H
+def check_matrix(sim, system, reference):
+    """Generators of the stabilizers acting trivially on `reference`, restricted to `system`."""
+    xs, zs, _ = sim.stabilizer_arrays()  # one row per generator of the whole pure state
+    rows = np.concatenate(
+        [xs[:, reference], zs[:, reference], xs[:, system], zs[:, system]], axis=1
+    ).astype(np.uint8)
+    top = 0
+    for c in range(2 * len(reference)):  # Gaussian elimination on the reference columns
+        hits = top + np.flatnonzero(rows[top:, c])
+        if hits.size == 0:
+            continue
+        rows[[top, hits[0]]] = rows[[hits[0], top]]
+        others = np.flatnonzero(rows[:, c])
+        rows[others[others != top]] ^= rows[top]
+        top += 1
+    return rows[top:, 2 * len(reference) :]  # no reference part left: (s, 2n), X bits then Z bits
+
+
+def as_ints(matrix):
+    """The rows of a 0/1 matrix as integers (bit j = column j)."""
+    return [int(sum(int(bit) << j for j, bit in enumerate(row))) for row in matrix]
+
+
+H = check_matrix(sim, list(range(n)), refs)
+s = gf2_rank(as_ints(H))
+assert s == H.shape[0] == n - k  # independent generators, n - k of them
+snapshot = code.stabilizer_matrix()  # the engine's code_snapshot
+assert gf2_rank(as_ints(H) + as_ints(snapshot)) == gf2_rank(as_ints(snapshot)) == s  # same S
+col = as_ints(H.T)  # col[q] and col[n + q]: the X and Z columns of qubit q, over the s rows
 
 
 def ranks_of_all_regions():
@@ -962,17 +1075,36 @@ for _ in range(300):
     assert ell[bitmask] == observables.lost_logical_information(sim, region, refs)
 ```
 
-**The sampled regime.** $\hat P_C(m)$ from the $M = 2000$ first-failure sizes
-agrees with the exact $P_C(m)$ at every $m$ within 5 binomial standard errors
-$\sigma_m = \sqrt{P_C(m)(1-P_C(m))/M}$. Where $\sigma_m = 0$
-($P_C \in \lbrace 0, 1\rbrace$) the estimate must be exact, and it is (§2.4).
-The hybrid curve is the exact curve up to $w$ and the sampled one above:
+**The sampled regime.** By §2.4, the number of orderings with $D_j \le m$
+is $\mathrm{Bin}(M, P_C(m))$ with the exact $P_C(m)$. The example checks it
+with exact binomial tail probabilities rather than a Gaussian band, because
+a Gaussian band fails far more often than its nominal rate where $P_C(m)$ is
+tiny, which is exactly where small codes live. A tail probability of a
+discrete count is at most $\alpha$ with probability at most $\alpha$,
+whatever $P_C(m)$ is. So requiring both tails to be at least $10^{-6}$ (about
+4.75σ one-sided) gives a false alarm with probability at most
+$2 \cdot 10^{-6}$ per size. Where $P_C \in \lbrace 0, 1\rbrace$ the count must
+be exactly 0 or $M$, and it is (§2.4). The hybrid curve is the exact curve up
+to $w$ and the sampled one above:
 
 ```python
-p_hat = analysis.failure_by_size(first, n)
-sigma = np.sqrt(p_exact * (1 - p_exact) / M)
-assert np.all(np.abs(p_hat - p_exact) <= 5 * sigma)  # a 5-sigma band, exact where sigma = 0
+def binomial_tails(count, trials, p):
+    """(Pr[X <= count], Pr[X >= count]) for X ~ Bin(trials, p), from the exact pmf (in logs)."""
+    if p in (0.0, 1.0):  # X is constant
+        x = 0 if p == 0.0 else trials
+        return float(count >= x), float(count <= x)
+    j = np.arange(trials + 1)
+    log_factorial = np.array([math.lgamma(i + 1) for i in j])
+    log_choose = log_factorial[trials] - log_factorial - log_factorial[::-1]
+    pmf = np.exp(log_choose + j * math.log(p) + (trials - j) * math.log1p(-p))
+    return float(pmf[: count + 1].sum()), float(pmf[count:].sum())
 
+
+for m in range(n + 1):
+    below, above = binomial_tails(int(np.sum(first <= m)), M, float(p_exact[m]))
+    assert min(below, above) >= 1e-6  # false alarm: probability <= 1e-6 per tail and size
+
+p_hat = analysis.failure_by_size(first, n)
 hybrid = analysis.hybrid_failure_by_size(first, n, exact_counts=counts)
 assert np.array_equal(hybrid[: w + 1], p_exact[: w + 1])
 assert np.array_equal(hybrid[w + 1 :], p_hat[w + 1 :])
@@ -981,36 +1113,47 @@ assert np.array_equal(hybrid[w + 1 :], p_hat[w + 1 :])
 **$\Phi_C(e)$, its estimator, $d$ and $\mu_C$.** The exact
 $\Phi_C(e) = \sum_m b_m(e) P_C(m)$ comes from the brute-force curve. The
 distribution of $D$ follows from the claim of §2.4,
-$\Pr[D = m] = P_C(m) - P_C(m-1)$. From it, the mean of the hybrid estimator
-equals $\Phi_C(e)$ exactly (unbiasedness, to rounding), and its standard
-deviation gives the 5σ band the estimate must fall in:
+$\Pr[D = m] = P_C(m) - P_C(m-1)$. From it, the means of the hybrid
+estimators' per-ordering terms (§4.3) reproduce $\Phi_C(e)$ and $\mu_C$
+exactly (unbiasedness, to rounding). Their exact standard deviations then
+give rigorous bands through Bernstein's inequality: for $M$ iid terms with
+standard deviation $\sigma$ in an interval of length $b$,
+$\Pr\big[|\text{mean} - \mathbb{E}| \ge t\big] \le 2\exp\big(-Mt^2/(2\sigma^2 + 2bt/3)\big)$.
+The half-width $t$ is chosen so that this is $10^{-6}$. Unlike a Gaussian
+band, this bound holds for any distribution of the terms:
 
 ```python
+def bernstein_halfwidth(sd, spread, trials, alpha=1e-6):
+    """t with Pr[|mean - E| >= t] <= alpha for iid terms with this sd, in an interval of this length."""
+    a = 2 * spread * math.log(2 / alpha) / 3
+    return (a + math.sqrt(a * a + 8 * trials * sd**2 * math.log(2 / alpha))) / (2 * trials)
+
+
 e = np.array([0.02, 0.05, 0.1, 0.2])
 b = np.array([[math.comb(n, m) * x**m * (1 - x) ** (n - m) for m in range(n + 1)] for x in e])
 phi_exact = b @ p_exact
 p_D = np.diff(np.append(p_exact, 1.0), prepend=0.0)  # Pr[D = m], m = 0..n+1
-f = np.array([[row[max(m, w + 1) :].sum() for m in range(n + 2)] for row in b])  # f(D)
-f_mean, f_sd = f @ p_D, np.sqrt(np.maximum(f**2 @ p_D - (f @ p_D) ** 2, 0.0))
+f = np.array([[row[max(m, w + 1) :].sum() for m in range(n + 2)] for row in b])  # f(D), per e
+f_mean = f @ p_D
+f_sd = np.sqrt(np.maximum(f**2 @ p_D - f_mean**2, 0.0))
 assert np.allclose(b[:, 1 : w + 1] @ p_exact[1 : w + 1] + f_mean, phi_exact, rtol=0, atol=1e-12)
 
 phi_hat = analysis.erasure_failure_probability(first, n, e, exact_counts=counts)
-assert np.all(np.abs(phi_hat - phi_exact) <= 5 * f_sd / math.sqrt(M) + 1e-12)
+for i in range(len(e)):
+    assert abs(phi_hat[i] - phi_exact[i]) <= bernstein_halfwidth(f_sd[i], f[i].max(), M) + 1e-12
 print("Phi_C(e) exact:", np.round(phi_exact, 6).tolist())
 
 low, high = analysis.distance_bounds(first, n, exact_counts=counts)
 assert low <= d <= high and (d > w or low == high == d)
 mu_exact = (1 - p_exact).sum()  # mu_C = E[D]
+g = np.maximum(np.arange(n + 2) - w - 1, 0)  # per-ordering term of the hybrid mu (§4.3)
+g_mean = g @ p_D
+g_sd = math.sqrt(max(g**2 @ p_D - g_mean**2, 0.0))
+assert math.isclose((1 - p_exact[: w + 1]).sum() + g_mean, mu_exact, rel_tol=0, abs_tol=1e-9)
 mu_hat = analysis.mean_first_failure(first, n, exact_counts=counts)
-mu_sd = math.sqrt(max(p_D @ np.arange(n + 2) ** 2 - mu_exact**2, 0.0))  # sd of D
-assert abs(mu_hat - mu_exact) <= 5 * mu_sd / math.sqrt(M) + 1e-9
+assert abs(mu_hat - mu_exact) <= bernstein_halfwidth(g_sd, n, M) + 1e-9
 print("mu_C exact:", round(float(mu_exact), 4))
 ```
-
-The last band uses the standard deviation of $D$ itself. That bounds the
-standard deviation of the hybrid's per-ordering term $\max(D - w - 1, 0)$
-(§4.3), since a 1-Lipschitz function of $D$ cannot have a larger variance, so
-the band is conservative.
 
 To study a code further, keep it: `code.first_failure_sizes(100_000, seed=1)`
 gives more orderings, and `code.uncorrectable_counts(4)` a larger exhaustive
@@ -1022,7 +1165,7 @@ regime, both on the saved snapshot without rerunning the circuit.
 
 * **Codes with $k_C = 0$.** They have $P_C \equiv 0$, $D = n + 1$ for every
   sample, $\Phi_C = 0$ and no distance. Averages over all trajectories (the
-  JSON summaries in 3.0.0.dev12, `EnsembleResult.mean`) mix them in as
+  JSON summaries at present, `EnsembleResult.mean`) mix them in as
   perfect protection. To condition on a code, select the rows with
   $k_C > 0$ (a `code_dimension` probe at the same layers, or any first-failure
   sample $\le n$) before calling `erasure_tolerance`, `mean_first_failure` or
@@ -1037,21 +1180,33 @@ regime, both on the saved snapshot without rerunning the circuit.
   $M P_C(m) \lesssim 1$ the estimate is mostly 0 (§4.4). Use the exhaustive
   regime for those sizes, and look at `junction_dip` where the two regimes
   meet.
-* **The exhaustive cost grows like $\binom{n}{w-1}4^{w-1}$.** Give large
-  cutoffs their own sparse `checkpoints` (for example `"final"`), and check
-  `estimate_ensemble` first.
-* **Results are float64.** The counts are exact integers stored in float64
-  (exact below $2^{53}$, far above any feasible enumeration). First-failure
-  sizes are integers in $[1, n+1]$. `analysis` checks both and refuses
-  anything else.
+* **The exhaustive cost grows like $\binom{n}{w-1}4^{w-1}$**, on top of a
+  fixed elimination that dominates at small $w$ (§4.2). A region budget is not
+  a time budget. Give large cutoffs their own sparse `checkpoints` (for
+  example `"final"`), and check `estimate_ensemble` first.
+* **Results are float64.** An ensemble stores the counts in float64, which is
+  exact below $2^{53}$. Counts above that are not out of reach, since pruning
+  makes them cheap when most small regions fail (§3.3), and they are stored
+  rounded. `StabilizerCode.uncorrectable_counts` returns exact int64 counts
+  while every $\binom{n}{m}$, $m \le w$, is below $2^{63}$. The `analysis`
+  checks differ by input:
+  * first-failure sizes must be integers in $[1, n+1]$, or they are refused;
+  * `exact_failure_by_size` checks only that the counts are finite and lie in
+    $[0, \binom{n}{m}(1 + 10^{-12})]$, so a non-integer count such as 0.5 is
+    accepted.
 * **Single picture.** With one reference qubit, $k_C \le 1$, and the code is
   the one protecting the partner's half of the Bell pair. Its $P_C$ answers
   "is that one logical qubit damaged", and a random partner adds variation
   between trajectories.
-* **Contracts.** Results from 3.0.0.dev11 or earlier (randomness contract 1)
-  differ from dev12's, circuits included, because the streams changed.
-  Results of the two contracts cannot be merged, and an old output directory
+* **Contracts.** Compare and combine results by their `randomness_contract`,
+  not by package version. Contract-1 results differ from contract-2 results
+  with the same seed, circuits included, because the streams changed. Results
+  of the two contracts cannot be merged, and a contract-1 output directory
   cannot be extended.
-* **Replay needs the same spec.** A replayed trajectory reproduces its
-  samples only if the probe name, the layer, $M$ and the seed are the same
-  (§3.6). Renaming a probe changes its stream.
+* **Replay from the result.** Use `result.replay(t, ...)`. It takes the
+  run's own spec and seed and refuses a result of another randomness
+  contract. `spec.replay(t, seed=...)` and `spec.circuit(t, seed=...)` repeat
+  the run only when `result.randomness_contract == mipt.RANDOMNESS_CONTRACT`.
+  A replayed trajectory reproduces its samples only for the same probe name,
+  layer and seed (§3.6); with another $M$, the first $\min(M, M')$ samples
+  agree. Renaming a probe changes its stream.

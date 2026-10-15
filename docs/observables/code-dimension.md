@@ -7,7 +7,7 @@ The setting and notation are those of
 [random-region-erasure.md](random-region-erasure.md) §1.1. The lost
 information of a region is in [lost-information.md](lost-information.md).
 Function references are `path::function`, relative to `src/sparsegf2/`. This
-describes version 3.0.0.dev12.
+describes the code at randomness contract 2 (`mipt.RANDOMNESS_CONTRACT`).
 
 ## Contents
 
@@ -66,7 +66,11 @@ S(X) = \operatorname{rank}(G|_X) - |X|,
 $$
 
 where $\operatorname{rank}(G|_X)$ is the rank of the $2|X|$ columns of $X$ over
-the generators (Fattal et al., quant-ph/0406168). With $X = R$, this is what
+the generators. This is equivalent to the form $S(X) = |X| - \dim G_X$ of
+Fattal et al. (quant-ph/0406168), with $G_X$ the elements supported on $X$.
+The projection onto $X$ has kernel $G_{\bar X}$, so
+$\operatorname{rank}(G|_X) - |X| = (\dim G - \dim G_{\bar X}) - |X| = |\bar X| - \dim G_{\bar X} = S(\bar X)$,
+which equals $S(X)$ for a pure state. With $X = R$, this is what
 any `Simulator` computes (`simulator.py::Simulator.entropy`, through
 `observables.py::code_dimension`). The engine avoids the elimination by
 keeping a basis adapted to $R$.
@@ -173,10 +177,13 @@ a `StabilizerCode` with `num_logical` $= k_C$.
   words per checkpoint. The generic $S(R)$ costs one elimination of
   $2\min(|R|, N - |R|)$ bitsets of $W$ words ($N$ qubits in all).
 * Across trajectories, `analysis.mean_and_error` gives the mean and its
-  standard error. The survival curve is exact at the checkpoints: every
-  trajectory is observed up to the last one, and censoring affects only later
-  layers. To combine runs with different horizons, use
-  `analysis.kaplan_meier` (AGENTS.md, Pitfalls).
+  standard error. The survival curve needs no censoring correction at the
+  checkpoints: every trajectory is observed up to the last one, and censoring
+  affects only later layers. It is still an empirical fraction over $T$
+  trajectories: a surviving fraction $q$ has binomial standard error
+  $\sqrt{q(1-q)/T}$. To combine
+  runs with different horizons, use `analysis.kaplan_meier` (AGENTS.md,
+  Pitfalls).
 
 ---
 
@@ -187,7 +194,10 @@ $k_C$ recorded after every layer. The engine's popcount is compared with the
 generic entropy of the replayed state at every `TICK`. It is also compared
 with an independent numpy rank of the stabilizers restricted to $R$, and with
 the saved code. The printed numbers depend on the version's random streams
-and are not quoted.
+and are not quoted. `spec.circuit(t, seed=7)` rebuilds the circuit this run
+simulated because the run was made under this version's randomness contract,
+which the example checks. For a saved result, `result.replay(t, ...)` makes
+that check itself.
 
 ```python
 import numpy as np
@@ -214,6 +224,7 @@ assert np.array_equal(surviving, (k > 0).mean(axis=0))  # P(tau > L) = P(k(L) > 
 
 t = 0
 print("k after each layer:", k[t].tolist())
+assert res.randomness_contract == mipt.RANDOMNESS_CONTRACT  # so spec.circuit repeats this run
 refs = spec.reference_qubits
 sim = Simulator(spec.num_qubits, phases=False)
 run = sim.run(spec.circuit(t, seed=7), observe=lambda s, tick: observables.code_dimension(s, refs))

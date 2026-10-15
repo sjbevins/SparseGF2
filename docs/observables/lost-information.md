@@ -12,7 +12,8 @@ $H \in \mathbb{F}_2^{s \times 2n}$), normalizer $N(S)$, and a reference $R$
 that purifies the $k_C$ logical qubits. That document builds $P_C(m)$ and
 $\Phi_C(e)$ on top of $\ell_C$; [code-dimension.md](code-dimension.md) covers
 $k_C$ and the reference rows. Function references are `path::function`,
-relative to `src/sparsegf2/`. This describes version 3.0.0.dev12.
+relative to `src/sparsegf2/`. This describes the code at randomness contract
+2 (`mipt.RANDOMNESS_CONTRACT`).
 
 ## Contents
 
@@ -191,8 +192,9 @@ $W = \lceil N/64\rceil$ words for $N$ qubits in all (system plus reference).
   `erasure_profile_rows`, and the stored row is the mean over the $M$
   orderings, $n + 1$ numbers. Every evaluation draws from its own random
   stream, keyed by the seed, the trajectory, the probe's name and the layer
-  ([random-region-erasure.md](random-region-erasure.md) §3.6), so a replayed
-  trajectory reproduces it.
+  ([random-region-erasure.md](random-region-erasure.md) §3.6), so
+  `result.replay(t, ...)` reproduces it (for a result of this version's
+  randomness contract; it refuses any other).
 
 With `stop_when_purified`, evaluations after a trajectory's purification
 layer hold 0 for both probes, which is exact for $k_C = 0$ (`mipt.py::_KINDS`).
@@ -272,7 +274,10 @@ probed at every layer. The engine's values are compared with:
 * formula (1) written out with numpy and an independent GF(2) rank.
 
 The trajectory is the first that holds a code at the end. Its numbers depend
-on the version's random streams and are not quoted.
+on the version's random streams and are not quoted. `spec.circuit(t, seed=7)`
+rebuilds the circuit this run simulated because the run was made under this
+version's randomness contract, which the example checks. For a saved result,
+`result.replay(t, ...)` makes that check itself.
 
 ```python
 import numpy as np
@@ -304,6 +309,7 @@ ell_engine = res.values["ell_A"][t]  # l(A) after every layer 0..64
 print(f"trajectory {t}, k = {k}; l(A) by layer:", ell_engine.astype(int).tolist())
 assert ell_engine[0] == 2 * len(region)  # at layer 0 every qubit is Bell-paired with R
 
+assert res.randomness_contract == mipt.RANDOMNESS_CONTRACT  # so spec.circuit repeats this run
 refs = spec.reference_qubits
 sim = Simulator(spec.num_qubits, phases=False)
 run = sim.run(
@@ -314,10 +320,13 @@ ell_library = np.array([value for _, value in run.observations])  # tick L = aft
 assert np.array_equal(ell_library, ell_engine)
 ```
 
-Formula (1) with numpy, on the code saved at the final layer, checked
-against `StabilizerCode` and the replayed state for the fixed region and 200
-random ones. The check also covers complementarity, correctability and the
-recovery probability:
+Formula (1) with numpy. The check matrix $H$ comes from the replayed state
+at the final layer alone: numpy Gaussian elimination on the reference
+columns of its stabilizer generators leaves the rows that act trivially on
+$R$, which generate $S$. It is compared with the code the engine saved, then
+checked against `StabilizerCode` and the replayed state for the fixed region
+and 200 random ones. The check also covers complementarity, correctability
+and the recovery probability:
 
 ```python
 def gf2_rank(vectors):
@@ -332,10 +341,35 @@ def gf2_rank(vectors):
     return len(basis)
 
 
-code = res.code(t, 0)
-H = code.stabilizer_matrix()  # (s, 2n): X bits, then Z bits
-s = gf2_rank(int(row) for row in H.astype(np.int64) @ (1 << np.arange(2 * n)))
-col = [int(c) for c in H.T.astype(np.int64) @ (1 << np.arange(H.shape[0]))]
+def check_matrix(sim, system, reference):
+    """Generators of the stabilizers acting trivially on `reference`, restricted to `system`."""
+    xs, zs, _ = sim.stabilizer_arrays()  # one row per generator of the whole pure state
+    rows = np.concatenate(
+        [xs[:, reference], zs[:, reference], xs[:, system], zs[:, system]], axis=1
+    ).astype(np.uint8)
+    top = 0
+    for c in range(2 * len(reference)):  # Gaussian elimination on the reference columns
+        hits = top + np.flatnonzero(rows[top:, c])
+        if hits.size == 0:
+            continue
+        rows[[top, hits[0]]] = rows[[hits[0], top]]
+        others = np.flatnonzero(rows[:, c])
+        rows[others[others != top]] ^= rows[top]
+        top += 1
+    return rows[top:, 2 * len(reference) :]  # no reference part left: (s, 2n), X bits then Z bits
+
+
+def as_ints(matrix):
+    """The rows of a 0/1 matrix as integers (bit j = column j)."""
+    return [int(sum(int(bit) << j for j, bit in enumerate(row))) for row in matrix]
+
+
+H = check_matrix(sim, list(range(n)), refs)  # sim is at the final layer
+s = gf2_rank(as_ints(H))
+code = res.code(t, 0)  # the engine's snapshot at the final layer
+snapshot = code.stabilizer_matrix()
+assert gf2_rank(as_ints(H) + as_ints(snapshot)) == gf2_rank(as_ints(snapshot)) == s  # same S
+col = as_ints(H.T)  # col[q] and col[n + q]: the X and Z columns of qubit q
 
 
 def ell_formula(a):
