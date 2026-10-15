@@ -124,6 +124,7 @@ sparsegf2/
   clifford.py     Clifford tableaux; canonical 1q/2q Clifford groups and indices
   gates.py        the gate library, Stim names and conventions
   _kernel/        Numba kernels
+    _cache.py     on import, deletes cached kernels whose sources changed (5.5)
     bits.py, rng.py, tables.py   bit tricks, xoshiro256** streams, gate tables
     tableau.py    layout, gates, measurement (both modes), peeks, canonical form
     program.py    the compiled circuit interpreter (one call per run / per shot)
@@ -293,6 +294,22 @@ conjugation table (`Clifford.conjugation_table()`, already in M1). Multiplying
 the pivot into many rows at once tracks the factors of i with a 2-bit counter
 per row, also word-parallel. This is the bit-sliced counting trick Stim uses
 for products of Pauli strings, applied across rows instead of along one row.
+
+### 5.5 Compiled-kernel caches
+
+The kernels use Numba's `cache=True`. Numba keys a function's cache entry on
+its own source file only, but a compiled caller embeds its callees: after an
+edit to `rng.py` alone, `program.run_many` kept running the old `stream_state`
+from a warm cache. So importing `sparsegf2._kernel`, before any kernel module,
+hashes all of `_kernel/*.py` with the Numba and Python versions and compares
+the hash with a marker file next to the cache files. On a mismatch it deletes
+the kernels' `.nbi` and `.nbc` files there and writes the new marker, and
+every kernel recompiles on first use. The directory is the one Numba itself
+picks for a function in `_kernel/` (a never-compiled `njit(cache=True)`
+dispatcher reports it as `stats.cache_path`), so `NUMBA_CACHE_DIR` and the
+fallback for a read-only `__pycache__` are covered. All compiled code lives in
+`_kernel/`, which a test checks. The check costs about 1 ms and never fails an
+import (`sparsegf2._kernel._cache`).
 
 ## 6. Circuits
 

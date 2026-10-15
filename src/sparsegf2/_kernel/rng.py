@@ -37,11 +37,11 @@ Contract 1 used ``x = key0 ^ (index * 0xD1B54A32D192ED03) ^ key1`` and four
 splitmix64 steps from ``x``, so only ``key0 ^ key1`` mattered.
 
 Changing a stream: Numba keys each cached function on a hash of its own
-source file, and a cached caller keeps the callees it was compiled with. A
-change to these functions must therefore also change the text of every
-module whose compiled code calls them (``ensemble.py``, ``program.py``,
-``entropy.py``; a new timestamp is not enough), or a warm cache keeps the old
-streams there. Bump ``mipt.RANDOMNESS_CONTRACT`` too.
+source file, and a cached caller keeps the callees it was compiled with.
+Importing :mod:`sparsegf2._kernel` deletes every cached kernel when any kernel
+source has changed (:mod:`sparsegf2._kernel._cache`), so the callers in
+``ensemble.py``, ``program.py`` and ``entropy.py`` recompile with the new
+streams. Bump ``mipt.RANDOMNESS_CONTRACT`` too.
 """
 
 from __future__ import annotations

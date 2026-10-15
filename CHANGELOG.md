@@ -44,6 +44,13 @@
 * **The contract is recorded:** `EnsembleResult.randomness_contract` is saved
   with every result (files without it load as 1), and `provenance.json`
   records `randomness_contract` next to the package version.
+* **Compiled kernels are never stale:** importing the package deletes Numba's
+  cached kernels whenever any kernel source, or the Numba or Python version, has
+  changed since they were compiled. Numba checks only each function's own file,
+  so before this a cached caller could keep running an old callee from another
+  file (for example `sample()` with an old `stream_state` after a change to
+  `rng.py`). The first import after an update, including this one, recompiles the
+  kernels once (10 to 30 s).
 
 ## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
 

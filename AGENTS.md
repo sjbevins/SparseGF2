@@ -213,6 +213,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
   `output_dir` to resume.
+* Compiled kernels are cached on disk and recompiled automatically whenever any kernel
+  source (or the Numba or Python version) changes, so the first import and run after an
+  update is slower (10 to 30 s). A process that was already running, such as the MCP
+  server, keeps the code it loaded until it is restarted.
 * Errors come back as plain messages that say what to change, for example
   `line 2: unknown gate 'FOO'`, `spec: unknown key(s) ['layrs']; allowed keys are [...]`,
   or a suggestion to use a background job. Fix the input and retry. Do not work around
