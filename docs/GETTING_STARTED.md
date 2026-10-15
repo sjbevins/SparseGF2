@@ -107,7 +107,20 @@ NUMBA_NUM_THREADS=2 python -c "import numba; print(numba.get_num_threads())"
 
 `spec.run(..., num_threads=k)` can lower the thread count for one run but not
 raise it above `NUMBA_NUM_THREADS`. Results never depend on the number of
-threads (section 3.6).
+threads (section 3.6); the benchmark checks this at every thread count.
+
+How it scales (`benchmarks/thread_scaling.py`, results in
+`benchmarks/results/thread_scaling.md`; AMD Ryzen 9 9950X3D, 16 cores and 32
+logical processors, Numba's `omp` threading layer): speedup over one thread was
+6.9 to 12.3 at 16 threads and 8.8 to 20.5 at 32, depending on the workload
+(ensembles of erasure probes scale best, shot sampling least). Using all 32
+logical processors beat 16 threads in every workload, by 1.3 to 1.7 times, so
+the default (`NUMBA_NUM_THREADS` equal to the logical processor count) is the
+right setting on a machine you have to yourself. On a shared machine, or
+when running several jobs side by side, set `NUMBA_NUM_THREADS` to each job's
+share of the logical processors. The `omp` and `tbb` layers are safe to call
+from several Python threads at once (as the MCP server's background jobs do);
+`workqueue` is not.
 
 ---
 

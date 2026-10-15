@@ -1,0 +1,351 @@
+{
+  "environment": {
+    "python": "3.14.7",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu_model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "physical_cores": 16,
+    "logical_processors": 32,
+    "numpy": "2.5.4",
+    "numba": "0.68.0",
+    "sparsegf2": "3.0.0.dev11",
+    "numba_num_threads": 32,
+    "threading_layer": "omp",
+    "threading_layer_concurrency_safe": true,
+    "threading_layer_note": "Numba documents tbb and omp as safe for concurrent calls from several Python threads (as MCP background jobs make) and workqueue as not."
+  },
+  "repeats": 3,
+  "seed": 2024,
+  "quick": false,
+  "identical_across_threads": true,
+  "workloads": [
+    {
+      "name": "W1",
+      "what": "ensemble, Watts-Strogatz n=64 k=4 beta=0.1, purification, p=0.1, 256 layers, random_edges; code_dimension every 32 layers, erasure_first_failure(512) and uncorrectable_region_counts(2) at the end",
+      "unit": "trajectories",
+      "units": 51200,
+      "digest": "01a3d775c39a670c617bb80235950af6eb38cfc7658cab6aa04044eb80371c11",
+      "rows": [
+        {
+          "threads": 1,
+          "seconds": 92.5140279000043,
+          "runs": 1,
+          "all_seconds": [
+            92.5140279000043
+          ],
+          "throughput": 553.4295842717019,
+          "speedup": 1.0,
+          "efficiency": 1.0
+        },
+        {
+          "threads": 2,
+          "seconds": 45.74447510000027,
+          "runs": 1,
+          "all_seconds": [
+            45.74447510000027
+          ],
+          "throughput": 1119.2608481805423,
+          "speedup": 2.022408776092913,
+          "efficiency": 1.0112043880464565
+        },
+        {
+          "threads": 4,
+          "seconds": 27.877935399999842,
+          "runs": 1,
+          "all_seconds": [
+            27.877935399999842
+          ],
+          "throughput": 1836.5778980892642,
+          "speedup": 3.3185394317258092,
+          "efficiency": 0.8296348579314523
+        },
+        {
+          "threads": 8,
+          "seconds": 14.893506599997636,
+          "runs": 3,
+          "all_seconds": [
+            14.860516200002166,
+            14.893506599997636,
+            14.948877500006347
+          ],
+          "throughput": 3437.7397731175092,
+          "speedup": 6.2117022125614785,
+          "efficiency": 0.7764627765701848
+        },
+        {
+          "threads": 16,
+          "seconds": 7.750463000003947,
+          "runs": 3,
+          "all_seconds": [
+            7.756853200000478,
+            7.750463000003947,
+            7.73242709999613
+          ],
+          "throughput": 6606.056954271497,
+          "speedup": 11.936580808134583,
+          "efficiency": 0.7460363005084114
+        },
+        {
+          "threads": 32,
+          "seconds": 4.5614682000014,
+          "runs": 3,
+          "all_seconds": [
+            4.5614682000014,
+            4.533932899998035,
+            4.5907225999981165
+          ],
+          "throughput": 11224.456195920491,
+          "speedup": 20.281633860776648,
+          "efficiency": 0.6338010581492702
+        }
+      ],
+      "beats_16": "32 threads take 4.561 s against 7.750 s at 16 (1.70x, faster)"
+    },
+    {
+      "name": "W2",
+      "what": "as W1 at n=256",
+      "unit": "trajectories",
+      "units": 9000,
+      "digest": "a9f0c92c2f2753343a13dfd816c70f8a52f0bc106afea51ee570169b0bfa13ec",
+      "rows": [
+        {
+          "threads": 1,
+          "seconds": 100.81979460000002,
+          "runs": 1,
+          "all_seconds": [
+            100.81979460000002
+          ],
+          "throughput": 89.26818424603294,
+          "speedup": 1.0,
+          "efficiency": 1.0
+        },
+        {
+          "threads": 2,
+          "seconds": 61.31869569999981,
+          "runs": 1,
+          "all_seconds": [
+            61.31869569999981
+          ],
+          "throughput": 146.77415912484955,
+          "speedup": 1.6441933972838947,
+          "efficiency": 0.8220966986419473
+        },
+        {
+          "threads": 4,
+          "seconds": 30.919823800009908,
+          "runs": 1,
+          "all_seconds": [
+            30.919823800009908
+          ],
+          "throughput": 291.07539739592943,
+          "speedup": 3.2606846420634428,
+          "efficiency": 0.8151711605158607
+        },
+        {
+          "threads": 8,
+          "seconds": 16.030919700002414,
+          "runs": 3,
+          "all_seconds": [
+            16.030919700002414,
+            16.02807890000986,
+            16.07921399999759
+          ],
+          "throughput": 561.4150758922862,
+          "speedup": 6.289083626311523,
+          "efficiency": 0.7861354532889404
+        },
+        {
+          "threads": 16,
+          "seconds": 8.19937000000209,
+          "runs": 3,
+          "all_seconds": [
+            8.160376100000576,
+            8.19937000000209,
+            8.216156900001806
+          ],
+          "throughput": 1097.6453068952499,
+          "speedup": 12.296041598314787,
+          "efficiency": 0.7685025998946742
+        },
+        {
+          "threads": 32,
+          "seconds": 4.912120199995115,
+          "runs": 3,
+          "all_seconds": [
+            4.807302700006403,
+            5.194726599991554,
+            4.912120199995115
+          ],
+          "throughput": 1832.2027217511798,
+          "speedup": 20.52470023027944,
+          "efficiency": 0.6413968821962325
+        }
+      ],
+      "beats_16": "32 threads take 4.912 s against 8.199 s at 16 (1.67x, faster)"
+    },
+    {
+      "name": "W3",
+      "what": "purification time, cycle n=128, single reference, p=0.1, 1024 layers, stop_when_purified, code_dimension every layer",
+      "unit": "trajectories",
+      "units": 184000,
+      "digest": "b37047c95c156c5e8d59e093c3680c0a0dd4051e101ecf6d0a266f2a040bf59b",
+      "rows": [
+        {
+          "threads": 1,
+          "seconds": 45.3203763999918,
+          "runs": 1,
+          "all_seconds": [
+            45.3203763999918
+          ],
+          "throughput": 4059.983932526061,
+          "speedup": 1.0,
+          "efficiency": 1.0
+        },
+        {
+          "threads": 2,
+          "seconds": 28.53844940000272,
+          "runs": 1,
+          "all_seconds": [
+            28.53844940000272
+          ],
+          "throughput": 6447.442095434326,
+          "speedup": 1.5880462096860624,
+          "efficiency": 0.7940231048430312
+        },
+        {
+          "threads": 4,
+          "seconds": 15.176499399996828,
+          "runs": 1,
+          "all_seconds": [
+            15.176499399996828
+          ],
+          "throughput": 12124.007990936201,
+          "speedup": 2.9862206827485704,
+          "efficiency": 0.7465551706871426
+        },
+        {
+          "threads": 8,
+          "seconds": 8.78400149999652,
+          "runs": 3,
+          "all_seconds": [
+            8.668366399986553,
+            8.78400149999652,
+            8.906507599996985
+          ],
+          "throughput": 20947.173107845312,
+          "speedup": 5.159422661757259,
+          "efficiency": 0.6449278327196574
+        },
+        {
+          "threads": 16,
+          "seconds": 5.305889600000228,
+          "runs": 3,
+          "all_seconds": [
+            5.316516200007754,
+            5.26307369999995,
+            5.305889600000228
+          ],
+          "throughput": 34678.44487378556,
+          "speedup": 8.54152268829526,
+          "efficiency": 0.5338451680184537
+        },
+        {
+          "threads": 32,
+          "seconds": 3.492734300001757,
+          "runs": 3,
+          "all_seconds": [
+            3.492734300001757,
+            3.4628484999993816,
+            3.5807940999948187
+          ],
+          "throughput": 52680.78937464766,
+          "speedup": 12.975615236455003,
+          "efficiency": 0.40548797613921883
+        }
+      ],
+      "beats_16": "32 threads take 3.493 s against 5.306 s at 16 (1.52x, faster)"
+    },
+    {
+      "name": "W4",
+      "what": "sparsegf2.sample of a noisy bit-flip repetition-code memory (distance 5, 400 rounds, X_ERROR 0.02), phases on",
+      "unit": "shots",
+      "units": 200000,
+      "digest": "613a0a33b4c4b447f439a89923867ef59df24bca050efc08bf761c47bacb54a0",
+      "rows": [
+        {
+          "threads": 1,
+          "seconds": 55.583981899995706,
+          "runs": 1,
+          "all_seconds": [
+            55.583981899995706
+          ],
+          "throughput": 3598.1589149160154,
+          "speedup": 1.0,
+          "efficiency": 1.0
+        },
+        {
+          "threads": 2,
+          "seconds": 35.565117599995574,
+          "runs": 1,
+          "all_seconds": [
+            35.565117599995574
+          ],
+          "throughput": 5623.487661405199,
+          "speedup": 1.562879181931979,
+          "efficiency": 0.7814395909659895
+        },
+        {
+          "threads": 4,
+          "seconds": 20.05346309999004,
+          "runs": 1,
+          "all_seconds": [
+            20.05346309999004
+          ],
+          "throughput": 9973.339717073573,
+          "speedup": 2.771789671581629,
+          "efficiency": 0.6929474178954073
+        },
+        {
+          "threads": 8,
+          "seconds": 12.377569399992353,
+          "runs": 3,
+          "all_seconds": [
+            12.377569399992353,
+            12.429927599994699,
+            11.69481299999461
+          ],
+          "throughput": 16158.261249589403,
+          "speedup": 4.490702504162897,
+          "efficiency": 0.5613378130203621
+        },
+        {
+          "threads": 16,
+          "seconds": 8.032923599996138,
+          "runs": 3,
+          "all_seconds": [
+            7.43002919999708,
+            8.085756999993464,
+            8.032923599996138
+          ],
+          "throughput": 24897.535437794548,
+          "speedup": 6.9195207956443685,
+          "efficiency": 0.43247004972777303
+        },
+        {
+          "threads": 32,
+          "seconds": 6.323216000004322,
+          "runs": 3,
+          "all_seconds": [
+            6.270231999995303,
+            6.323216000004322,
+            6.471257000011974
+          ],
+          "throughput": 31629.47462175312,
+          "speedup": 8.790460724409495,
+          "efficiency": 0.27470189763779673
+        }
+      ],
+      "beats_16": "32 threads take 6.323 s against 8.033 s at 16 (1.27x, faster)"
+    }
+  ],
+  "total_seconds": 860.5897683000076
+}

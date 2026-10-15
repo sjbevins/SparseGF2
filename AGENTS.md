@@ -171,6 +171,14 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   semantics; `"0:16:2"` selects the even qubits).
 * **Units.** Entropies and mutual information are in bits, as exact integers per
   trajectory.
+* **Threads.** Ensembles and `sample` use every core by default (`NUMBA_NUM_THREADS`, set
+  before Python starts; `num_threads=` lowers it for one call). Every result is identical
+  at any thread count. Measured on a 16-core, 32-thread machine (Ryzen 9 9950X3D, `omp`
+  layer; [`benchmarks/results/thread_scaling.md`](benchmarks/results/thread_scaling.md)):
+  speedup over one thread was 6.9 to 12.3 at 16 threads and 8.8 to 20.5 at 32, and 32
+  threads beat 16 in every workload (by 1.3 to 1.7 times). So leave the default, one thread
+  per logical processor, unless the machine is shared; shot sampling scales least well
+  (8.8 at 32).
 * **Random two-qubit Cliffords** in circuit text: `CLIFFORD_2Q(i) a b` applies Clifford
   number `i` in `[0, 11520)`. A uniformly random `i` gives a uniformly random Clifford.
   `Circuit.to_stim()` expands these into Stim gates.

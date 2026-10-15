@@ -10,6 +10,7 @@ them directly).
 | [`compare_simulators.py`](compare_simulators.py) | time per monitored circuit for SparseGF2 (both modes), Stim, Qiskit Aer and Cirq on identical circuits; SparseGF2's ensemble throughput | `results/simulators.json` |
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
 | [`why_data.py`](why_data.py) | the two "why this simulator" figures: the cost of measuring the state after every layer (SparseGF2 vs Stim, same circuits), and the cost of erasure screening per code (SparseGF2 kernels vs a compiled from-scratch baseline) | `results/why.json` |
+| [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -17,8 +18,11 @@ pip install -e ".[test]" qiskit-aer cirq matplotlib
 python benchmarks/compare_simulators.py
 python benchmarks/physics_data.py
 python benchmarks/why_data.py          # about 4 minutes, one thread
+python benchmarks/thread_scaling.py    # about 15 minutes, all cores; idle machine
 python benchmarks/make_figures.py
 ```
+
+`thread_scaling.py --quick --out <dir>` is its smoke test (a few seconds once compiled).
 
 `why_data.py --quick --out <file>` is a smoke test (tiny sizes, under a
 minute including compilation); pass that file to `make_figures.py --why <file>
