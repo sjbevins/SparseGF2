@@ -305,9 +305,14 @@ crosscheck.compare_measurements(circuit, seed=0)
   the smallest m with an uncorrectable m-subset is d exactly; with none, `low = w + 1`.
   A code with k = 0 gets `(n + 1, n + 1)`: it has no distance, so exclude it.
 * `replay` reruns one trajectory with other probes or checkpoints. Probes and checkpoints
-  never change the trajectory, so a replay matches the original run exactly
-  (`mipt.RANDOMNESS_CONTRACT` versions this guarantee). This is how to probe one
-  trajectory at new depths after a run.
+  never change the trajectory, so a replay matches the original run exactly. The sampled
+  probes (`erasure_first_failure`, `erasure_lost_profile`) are reproduced too: each
+  evaluation draws from its own stream, keyed by the trajectory, the probe's name and the
+  layer, so the same probe (same name and `samples`) at a layer the run evaluated gives
+  the same samples whatever the other probes and checkpoints. `mipt.RANDOMNESS_CONTRACT`
+  (now 2) versions this guarantee; results and output directories record it, and an
+  output_dir made under contract 1 cannot be resumed or extended. This is how to probe
+  one trajectory at new depths after a run.
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
   per side).

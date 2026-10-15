@@ -9,45 +9,81 @@ and explicit ``& MASK64``. It never imports ``sparsegf2._kernel``.
   generation in an interval"), here on 32-bit draws.
 
 Where the kernel's conventions go beyond those algorithms, this module states them as
-"the contract-1 convention" (``RANDOMNESS_CONTRACT = 1``):
+contract conventions (``mipt.RANDOMNESS_CONTRACT``). The draw conventions are the same
+in contracts 1 and 2:
 
 * ``next_bit`` is the top bit of a draw;
 * ``next_double`` is the top 53 bits of a draw times 2**-53;
 * ``next_below`` takes ``x = next_u64() >> 32`` and applies Lemire's method with
-  32-bit words (the rejection threshold is computed only when ``low32(m) < bound``);
-* ``stream_state`` mixes ``(key, index)`` into one 64-bit word and expands it with four
-  splitmix64 outputs. That mixing ignores part of the 128-bit key (kernel finding S1:
-  only ``key0 ^ key1`` matters). Task 15 changes it under contract 2, and this module
-  then gets a second model next to ``RANDOMNESS_CONTRACT_MODEL``'s current entry.
+  32-bit words (the rejection threshold is computed only when ``low32(m) < bound``).
+
+The stream derivation ``stream_state(key, index)`` differs, so it takes ``contract``.
+With ``mix64`` the splitmix64 output function and ``sm(x) = mix64(x + GOLDEN)`` the
+output of one splitmix64 step from state ``x`` (all arithmetic mod 2**64):
+
+* contract 1: ``x = key0 ^ (index * 0xD1B54A32D192ED03) ^ key1``, then four splitmix64
+  steps from ``x``. Only ``key0 ^ key1`` matters (kernel finding S1).
+* contract 2: ``x = key0 ^ sm(index)`` and ``gamma = sm(key1)``; word ``j``
+  (``j = 0..3``) is ``mix64(x + (j + 1) * gamma)``. For a fixed index this is one-to-one
+  in the 128-bit key: ``(x, gamma)`` follows from the key one-to-one, and
+  ``x + gamma = mix64^-1(word 0)``, ``x + 2 gamma = mix64^-1(word 1)`` give it back.
+
+In both, an all-zero state becomes ``[1, 0, 0, 0]``. Contract 2 adds ``mix(a, b, c) =
+sm(sm(sm(a) ^ b) ^ c)``, the stream index of one sampled-probe evaluation.
 """
 
 from __future__ import annotations
 
 MASK64 = (1 << 64) - 1
 
-# Which stream mixing this module models (the ``RANDOMNESS_CONTRACT`` it belongs to).
-RANDOMNESS_CONTRACT_MODEL = 1
+# The contract this module models by default (the package's current ``RANDOMNESS_CONTRACT``).
+# Every older contract stays available through ``stream_state(..., contract=c)``.
+RANDOMNESS_CONTRACT_MODEL = 2
+CONTRACTS = (1, 2)
 
 _GOLDEN = 0x9E3779B97F4A7C15
 _STREAM_MULTIPLIER = 0xD1B54A32D192ED03
 
 
+def mix64(z: int) -> int:
+    """The splitmix64 output function (a bijection of 64-bit words)."""
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
+    return z ^ (z >> 31)
+
+
 def splitmix64(x: int) -> tuple[int, int]:
     """One splitmix64 step: return ``(new state, output)``."""
     x = (x + _GOLDEN) & MASK64
-    z = x
-    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
-    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
-    return x, z ^ (z >> 31)
+    return x, mix64(x)
 
 
-def stream_state(key: tuple[int, int], index: int) -> list[int]:
-    """The four xoshiro words of stream ``index`` under ``key`` (the contract-1 convention)."""
-    x = (key[0] ^ ((index * _STREAM_MULTIPLIER) & MASK64) ^ key[1]) & MASK64
+def mix(a: int, b: int, c: int) -> int:
+    """``sm(sm(sm(a) ^ b) ^ c)`` with ``sm(x)`` the output of a splitmix64 step from ``x``."""
+    x = splitmix64(a & MASK64)[1]
+    x = splitmix64(x ^ (b & MASK64))[1]
+    return splitmix64(x ^ (c & MASK64))[1]
+
+
+def stream_state(
+    key: tuple[int, int], index: int, contract: int = RANDOMNESS_CONTRACT_MODEL
+) -> list[int]:
+    """The four xoshiro words of stream ``index`` under ``key`` (see the module docstring)."""
+    key0, key1, index = key[0] & MASK64, key[1] & MASK64, index & MASK64
     words = []
-    for _ in range(4):
-        x, z = splitmix64(x)
-        words.append(z)
+    if contract == 1:
+        x = key0 ^ ((index * _STREAM_MULTIPLIER) & MASK64) ^ key1
+        for _ in range(4):
+            x, z = splitmix64(x)
+            words.append(z)
+    elif contract == 2:
+        x = key0 ^ splitmix64(index)[1]
+        gamma = splitmix64(key1)[1]
+        for _ in range(4):
+            x = (x + gamma) & MASK64
+            words.append(mix64(x))
+    else:
+        raise ValueError(f"unknown randomness contract {contract}; known: {CONTRACTS}")
     if not any(words):
         words[0] = 1
     return words
@@ -58,7 +94,7 @@ def _rotl(x: int, k: int) -> int:
 
 
 class Xoshiro:
-    """xoshiro256** with the contract-1 draw conventions."""
+    """xoshiro256** with the contract draw conventions (the same in every contract)."""
 
     def __init__(self, state: list[int]):
         if len(state) != 4:

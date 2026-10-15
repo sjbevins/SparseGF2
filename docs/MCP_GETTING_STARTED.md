@@ -640,8 +640,8 @@ are kept and the job continues from there (`resumed_from` in the status). A larg
 `trajectories` extends a finished run; for a graph collection the maximum is
 `realizations x circuits_per_graph`, so start with fewer trajectories and leave
 `trajectories` out later to run the rest. A directory holding a different spec, a
-different seed, or a run started with a different SparseGF2 version is refused with a
-message.
+different seed, or a run started with a different SparseGF2 version or randomness
+contract (`mipt.RANDOMNESS_CONTRACT`) is refused with a message.
 
 **Jobs live inside the server process.** The client starts the server, and when the
 client exits (you close Claude Code or Claude Desktop, or the client restarts the server)

@@ -301,7 +301,8 @@ A **trajectory** is one random circuit and its simulation. The contract:
 * Hence `spec.run(count, seed=s, first_trajectory=f)` returns exactly rows
   `f .. f + count - 1` of one big run with the same seed, and
   `EnsembleResult.concatenate` merges such chunks (it refuses chunks with
-  different specs, seeds or package versions, or overlapping trajectories).
+  different specs, seeds, package versions or randomness contracts, or
+  overlapping trajectories).
 * The circuit's gates and the measurement mask use one random stream, the
   probes' random orderings another. Adding, removing or rescheduling probes,
   or changing `layers`, does not change the circuits: the state after layer T
@@ -852,8 +853,8 @@ chunks are *exactly* the single big run. Rules:
   every p of a β): common random numbers across p make the curves smooth;
 * name files by what they hold: `runs/n256_beta1_p0.05/chunk0003.npz`;
 * use the same installed version for every chunk of a point:
-  `concatenate` refuses to mix versions, because different versions need not
-  produce the same trajectories.
+  `concatenate` refuses to mix versions or randomness contracts, because
+  different versions need not produce the same trajectories.
 
 Here is the whole loop at toy size, using `main` from the script above: three
 chunks of one point, merged and compared with a single run.

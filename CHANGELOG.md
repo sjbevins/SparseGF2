@@ -21,6 +21,29 @@
 * **One hybrid estimator:** `analysis.erasure_tolerance` now computes Phi with
   the same function as `erasure_failure_probability`, no longer with a copy of
   its own.
+* **Breaking: randomness contract 2.** `mipt.RANDOMNESS_CONTRACT` is now 2.
+  Random streams now use all 128 bits of their key (`stream_state` used only
+  `key0 ^ key1` before), so a fixed seed gives other random numbers everywhere
+  a stream is drawn: the circuits and probe samples of `MonitoredCircuit.run`,
+  `replay` and `circuit`, the shot streams of `sample()` (and of `run_circuit`
+  with more than one shot), and the subsets of the `random_erasure_statistics`
+  and `erasure_profile` observables. A `Simulator`'s own stream, the graph
+  families and `StabilizerCode.first_failure_sizes` are unchanged. Results
+  saved before this version cannot be extended: `EnsembleResult.concatenate`
+  refuses to merge them with new chunks, and `start_ensemble_job` refuses to
+  resume or extend their output_dir ("this run was made under randomness
+  contract 1; this version uses 2; start a new output_dir"). They still load
+  and summarize.
+* **Replay reproduces the sampled probes:** every evaluation of
+  `erasure_first_failure` or `erasure_lost_profile` draws its orderings from a
+  stream of its own, keyed by the trajectory, the probe's name and the layer.
+  Their samples no longer depend on the other probes, the checkpoints or the
+  earlier evaluations, so `replay(t, probes=..., checkpoints=...)` reproduces
+  them, as its documentation always said. Fewer samples are a prefix of more,
+  and renaming a probe gives it other orderings.
+* **The contract is recorded:** `EnsembleResult.randomness_contract` is saved
+  with every result (files without it load as 1), and `provenance.json`
+  records `randomness_contract` next to the package version.
 
 ## 3.0.0.dev11: distances from counts, graph files and statistics, saved states, replay
 

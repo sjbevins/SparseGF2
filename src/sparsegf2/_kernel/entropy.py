@@ -210,7 +210,9 @@ def random_erasure_stats(tab, n, ws, system, reference, sizes, samples, key, los
     """For each size m, erase ``samples`` uniformly random m-subsets of ``system``.
 
     ``lost[i, j]`` receives I(R:E) for sample ``j`` of size ``sizes[i]``.
-    Subsets come from random stream 0 of ``key`` (partial Fisher-Yates).
+    Subsets come from random stream 0 of ``key`` (partial Fisher-Yates, each
+    sample continuing from the previous one's order), under the randomness
+    contract of :func:`~sparsegf2._kernel.rng.stream_state`.
     """
     rng = np.empty(4, dtype=np.uint64)
     stream_state(key, 0, rng)
@@ -349,7 +351,12 @@ def clipped_gauge(tab, n, ws, order, left, right):
 
 @njit(cache=True)
 def erasure_profiles(tab, n, ws, system, reference, samples, key, out):
-    """``out[j, m] = I(R : first m qubits of random ordering j of the system)``."""
+    """``out[j, m] = I(R : first m qubits of random ordering j of the system)``.
+
+    The orderings come from random stream 0 of ``key`` (Fisher-Yates, each
+    shuffling the previous one), under the randomness contract of
+    :func:`~sparsegf2._kernel.rng.stream_state`.
+    """
     rng = np.empty(4, dtype=np.uint64)
     stream_state(key, 0, rng)
     num_sys = system.shape[0]

@@ -2,7 +2,8 @@
 
 ``oracle_circuit_text(spec, t, seed)`` rebuilds, in plain Python, the text of the circuit
 that trajectory ``t`` of ``spec.run(seed=seed)`` simulates, so a test can require it to
-equal ``str(spec.circuit(t, seed=seed))``. It is written from the documented protocol:
+equal ``str(spec.circuit(t, seed=seed))``, and ``probe_orderings`` rebuilds the random
+orderings a sampled probe draws at one evaluation. It is written from the documented protocol:
 the ``sparsegf2._kernel.ensemble`` module docstring ("Random draws per trajectory, in
 order", items 1-4) and the ``MonitoredCircuit`` docstrings (setup, scramble, schedules,
 the colour cycle that runs on from the scramble layers). It draws from
@@ -14,8 +15,15 @@ Where the documents are silent, these conventions were read from the engine and 
 transcribed here (the equality test pins each of them):
 
 * Keys: ``SeedSequence(seed).generate_state(4, uint64)``; words 0 and 1 key the circuit
-  streams (words 2 and 3 key the probe streams, unused here). Trajectory ``t`` draws
-  from stream ``t``.
+  streams, words 2 and 3 the probe streams. Trajectory ``t`` draws its circuit from
+  stream ``t``, derived with ``_reference_rng.stream_state`` under the current contract
+  (``RANDOMNESS_CONTRACT_MODEL``).
+* Probe streams (contract 2): the evaluation of the sampled probe named ``name`` at
+  layer ``L`` of trajectory ``t`` draws only from stream ``mix(t, h, L)`` of the probe
+  key, where ``h`` is the first 8 bytes of ``blake2b(name.encode("utf-8"),
+  digest_size=8)`` read little-endian. Its orderings start from ``0 .. n - 1`` at every
+  evaluation, and each is a Fisher-Yates shuffle of the previous one (``r = i +
+  below(n - i)`` for ``i = 0 .. n - 2``, then swap entries ``i`` and ``r``).
 * Scramble pair: ``a = below(n)``, then ``b = below(n - 1)``, plus one if ``b >= a``.
 * Scramble matching: a fresh identity permutation each time, shuffled front to back
   (``r = i + below(n - i)`` for ``i = 0 .. n - 2``, then swap entries ``i`` and ``r``),
@@ -39,6 +47,7 @@ transcribed here (the equality test pins each of them):
 
 from __future__ import annotations
 
+import hashlib
 from bisect import bisect_right
 from dataclasses import dataclass, field
 
@@ -64,6 +73,39 @@ def circuit_key(seed) -> tuple[int, int]:
     ss = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
     words = ss.generate_state(4, dtype=np.uint64)
     return int(words[0]), int(words[1])
+
+
+def probe_key(seed) -> tuple[int, int]:
+    """The probe-stream key of ``run(seed=seed)``: the last two of four SeedSequence words."""
+    ss = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
+    words = ss.generate_state(4, dtype=np.uint64)
+    return int(words[2]), int(words[3])
+
+
+def probe_name_hash(name: str) -> int:
+    """The 64-bit hash of a probe name: blake2b with an 8-byte digest, read little-endian."""
+    return int.from_bytes(hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest(), "little")
+
+
+def probe_orderings(
+    seed, trajectory: int, name: str, layer: int, n: int, samples: int
+) -> list[list[int]]:
+    """The ``samples`` orderings of ``0 .. n - 1`` one sampled-probe evaluation draws.
+
+    For ``erasure_first_failure`` they order positions in the spec's ``system_order``
+    (the qubits themselves for the default order), for ``erasure_lost_profile`` the
+    system qubits.
+    """
+    index = ref.mix(int(trajectory), probe_name_hash(name), int(layer))
+    rng = ref.Xoshiro(ref.stream_state(probe_key(seed), index))
+    order = list(range(n))
+    out = []
+    for _ in range(samples):
+        for i in range(n - 1):
+            r = i + rng.next_below(n - i)
+            order[i], order[r] = order[r], order[i]
+        out.append(list(order))
+    return out
 
 
 def colour_classes(edges: list[tuple[int, int]], n: int) -> list[list[int]]:

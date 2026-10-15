@@ -514,9 +514,14 @@ rate. Why the mapping is blocked rather than cyclic is in
 
 `run(seed=s)` turns s into a `numpy.random.SeedSequence` and draws two 128-bit
 keys from it: one for **circuit structure**, one for **probe sampling**.
-Trajectory t uses stream t of each key: a xoshiro256** state computed from
-`(key, t)` alone (`stream_state` in `_kernel/rng.py`). Within a trajectory the
-draws come in a fixed order (module docstring of `_kernel/ensemble.py`): the
+Trajectory t draws its circuit from stream t of the first key: a xoshiro256**
+state computed from `(key, t)` alone (`stream_state` in `_kernel/rng.py`, which
+mixes all 128 key bits). Each evaluation of a sampled probe draws from a
+stream of the second key of its own, indexed by the trajectory, the probe's
+name and the layer, so its samples never depend on the other probes or the
+checkpoints (randomness contract 2, `mipt.RANDOMNESS_CONTRACT`). Within a
+trajectory the draws come in a fixed order (module docstring of
+`_kernel/ensemble.py`): the
 random reference partner if any, the scramble, then per layer the gates (an
 edge if edges are sampled, an orientation bit if enabled, a gate index) and
 then **one uniform number per system qubit** for the measurement mask, whether
@@ -533,7 +538,8 @@ or not that qubit ends up measured. Three consequences:
   rate are a subset of those measured at a higher rate (common random numbers
   across a rate scan).
 * **The circuit never depends on the probes.** Probes draw only from the probe
-  stream, so adding or removing a probe never changes the trajectory.
+  streams, so adding or removing a probe never changes the trajectory, and a
+  replay with other probes or checkpoints reproduces the sampled probes too.
 
 ```python
 from dataclasses import replace
@@ -694,7 +700,7 @@ the two routines below work only on it.
 ### First-failure sizes: every m at once
 
 `erasure_first_failure(samples=M)` draws M uniformly random orderings of the
-system qubits (Fisher-Yates from the probe stream) and, for each, records the
+system qubits (Fisher-Yates from the evaluation's probe stream) and, for each, records the
 **first-failure size** D: the smallest m such that erasing the first m qubits
 of the ordering is uncorrectable (n + 1 when k = 0, with no random draws).
 The scan (`first_failure_samples`) adds qubits one at a time to an
