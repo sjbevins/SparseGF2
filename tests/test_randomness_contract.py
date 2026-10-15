@@ -10,6 +10,7 @@ circuits an ensemble draws, a sampled-probe stream and a small run. The shot str
 from __future__ import annotations
 
 import hashlib
+import json
 
 import numpy as np
 import pytest
@@ -18,6 +19,7 @@ import _protocol_oracle as oracle
 import _reference_rng as ref
 from sparsegf2 import Circuit, Simulator, graphs, mipt, observables, sample
 from sparsegf2._kernel import rng as krng
+from sparsegf2.circuit import Instruction
 
 
 def _state(words) -> np.ndarray:
@@ -174,7 +176,9 @@ def test_stream_key_matches_seed_sequence():
 # -- pinned values -----------------------------------------------------------------------
 #
 # A changed value means the random draws changed. Bump `RANDOMNESS_CONTRACT` and add a new
-# entry. Never edit an existing one.
+# entry. Never edit an existing one. The circuit digests cover the instruction structure
+# (name, targets and arguments of each instruction), not its text, so a change in how a
+# circuit prints does not read as a change in the draws.
 EXPECTED: dict[int, dict] = {
     # Contract 1 (3.0.0.dev11 and before): kept to document it. The package no longer draws
     # these. Its stream_state is checked against the reference's contract-1 mixing and its
@@ -187,12 +191,12 @@ EXPECTED: dict[int, dict] = {
             11091782217626042368,
         ],
         "circuits": {
-            "S1/t0": "bed0820928164d091f8fb1a6a75069be6eb4b770da19e6574932488b2b5e5176",
-            "S1/t3": "111f3e27a7d6f4604cd1a38813d4321f76115c70798cf7f6f2e012ad47b4c8b3",
-            "S2/t0": "3dd007ec773f0f6e1f085f6c38f99276fd89416322a5452104b8b8a3a5756c06",
-            "S2/t3": "f113aadb26f1c2952b19ac573c7788f59024c95391b9d4f680fe5b39cb5b4fa5",
-            "S3/t0": "33236f7ce2397df157956377820b6ba1a216d66a40b8881042a93e201ccc9a4f",
-            "S3/t3": "7fc0cc75187d9913c4bb9966d692b382678eaac07750ac63ce574c99c6dc16e9",
+            "S1/t0": "acda886e916c832692ba15c50421870e067095437c1135960221574879fc57b9",
+            "S1/t3": "284767c1e1586b0cb887b3ffc958802264a2a2b9798eb169ada56d6092d3e41d",
+            "S2/t0": "af6670c8e03bfdd1521b51194fe7339381bec3dff4c9b65a1a4a88f6a0eeceb8",
+            "S2/t3": "01f4c1282e925017e4fa7de76af8d97c9faf169c7c7eb9efaae793c93463eb5e",
+            "S3/t0": "cb7ab1fe149508ff2015eff4a6ae81d1470441d42c265c077a01e87e71f44922",
+            "S3/t3": "b0d0330bbfc91cc846f02b8ace36ef3c832957da48da1f41c52fcf00e145ed49",
         },
         "run": "bd92422ad271ef8b783026e83f9e9f001b5cbcb4ac42f051fb3a75dbce1ef4ef",
     },
@@ -211,12 +215,12 @@ EXPECTED: dict[int, dict] = {
             381803185464458647,
         ],
         "circuits": {
-            "S1/t0": "aafc9d4809f2a71578933faf76be80e319445f74f290933e281b492206d9695c",
-            "S1/t3": "63b0873a876d6af22e9aa344fe741907fc33d8479f903153136721b535d78cd7",
-            "S2/t0": "fd17183f51cfbb14a30f5d217a7559cd9217c4e258c5f4e3174ecc45c9f3bfbb",
-            "S2/t3": "c1fb5dc6d58eb90e4a2c1ede146935f183860b8f1ca6438ac408bfdf38b238ce",
-            "S3/t0": "d9df9cc7ac9def5a723dcf071e7c526f1610531907dc945a2ed65a965c648372",
-            "S3/t3": "5d96dcb22250fe3a4072b1a0221db2a1dec0f879da55fc5b7209837e5df36724",
+            "S1/t0": "b82c8225abac37fc75ca1f00b228b69d82ad7691c643976563e0e363b2c5c92d",
+            "S1/t3": "dbbfdf760b6101b32af478d32cf3dc117c117a7a1f2487e98957bc5c9beb1006",
+            "S2/t0": "34aa57a226651140f7988213c2e1f7656769d2ba86a35a68cbf7a34ef9225461",
+            "S2/t3": "77ba11c6300ba991916087bdec36e5fb05e0223bfea7fe37e1eaee467ea5f50d",
+            "S3/t0": "2c926f2fa255dfdcf295d00a6790520cf66aa02d345c40ba5e6c95ca9ae0e7fb",
+            "S3/t3": "8003e3ec1a9ff5f905c3db7a3a183520bad4095d6970198cc99e2e9b61ec6810",
         },
         "run": "6755400726570ee83559961a33b6d56881ee5294b3ea38fa6548fb6e3096da28",
     },
@@ -229,6 +233,17 @@ PROBE_STREAM = (11, 5, "erasure_first_failure", 4)
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _structure(circuit: Circuit) -> str:
+    """A canonical form of ``circuit``: one JSON line of (name, targets, arguments) per
+    instruction, independent of how the circuit prints."""
+    lines = []
+    for ins in circuit:
+        assert isinstance(ins, Instruction), "the pinned circuits have no REPEAT blocks"
+        targets = [[t.kind, t.value, t.pauli, t.inverted] for t in ins.targets]
+        lines.append(json.dumps([ins.name, targets, [float(a) for a in ins.args]]))
+    return "\n".join(lines)
 
 
 def _specs() -> dict[str, mipt.MonitoredCircuit]:
@@ -277,14 +292,14 @@ def _probe_stream_from_package() -> list[int]:
     return [int(w) for w in out]
 
 
-def _circuit_digests(text_of) -> dict[str, str]:
-    """``{"S1/t0": sha256, ...}`` of ``text_of(spec, t)`` for the pinned specs and trajectories."""
+def _circuit_digests(structure_of) -> dict[str, str]:
+    """``{"S1/t0": sha256, ...}`` of ``structure_of(spec, t)`` for the pinned specs and trajectories."""
     circuits = {}
     for name, spec in _specs().items():
         for t in (0, 3):
             if spec.num_trajectories is not None and t >= spec.num_trajectories:
                 continue
-            circuits[f"{name}/t{t}"] = _sha(text_of(spec, t))
+            circuits[f"{name}/t{t}"] = _sha(structure_of(spec, t))
     return circuits
 
 
@@ -292,7 +307,7 @@ def _current_values() -> dict:
     key = (0x0123456789ABCDEF, 0xFEDCBA9876543210)
     out = np.zeros(4, dtype=np.uint64)
     krng.stream_state(_state(key), 7, out)
-    circuits = _circuit_digests(lambda spec, t: str(spec.circuit(t, seed=2024)))
+    circuits = _circuit_digests(lambda spec, t: _structure(spec.circuit(t, seed=2024)))
     s1 = _specs()["S1"]
     spec = mipt.MonitoredCircuit(
         num_system=s1.num_system,
@@ -338,7 +353,9 @@ def test_oracle_rebuilds_the_pinned_circuits_of_every_contract(contract):
     # changed. So the protocol oracle, given the contract, rebuilds each contract's pinned
     # circuits from the reference RNG alone, and the old digests stay executable.
     digests = _circuit_digests(
-        lambda spec, t: oracle.oracle_circuit_text(spec, t, 2024, contract=contract)
+        lambda spec, t: _structure(
+            Circuit(oracle.oracle_circuit_text(spec, t, 2024, contract=contract))
+        )
     )
     assert digests == EXPECTED[contract]["circuits"]
 

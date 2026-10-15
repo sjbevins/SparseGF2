@@ -111,8 +111,14 @@ def test_chunks_equal_one_run(spec, whole):
 
 
 def test_thread_count_does_not_matter(spec, whole):
+    # Under NUMBA_DISABLE_JIT=1 (the weekly job) prange runs serially, so equality holds
+    # trivially there; it is still asserted, and the thread-count requirement is waived.
+    # With the JIT on, one thread would make the comparison vacuous, so that fails.
     threads = min(4, numba.config.NUMBA_NUM_THREADS)
-    assert threads > 1, "this machine offers Numba a single thread; the comparison would be vacuous"
+    assert threads > 1 or numba.config.DISABLE_JIT, (
+        "this machine offers Numba a single thread, so the thread comparison would be vacuous;"
+        " set NUMBA_NUM_THREADS to at least 2"
+    )
     one = spec.run(TRAJECTORIES, seed=SEED, num_threads=1)
     many = spec.run(TRAJECTORIES, seed=SEED, num_threads=threads)
     assert_same(one, many)

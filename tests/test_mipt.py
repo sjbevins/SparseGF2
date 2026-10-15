@@ -10,6 +10,7 @@ import itertools
 import json
 import re
 
+import numba
 import numpy as np
 import pytest
 
@@ -243,7 +244,8 @@ SPECS = {
     # References above 64 qubits and at the 64-bit word boundaries. The lost_information
     # region crosses qubit 64 wherever the system has one (n > 64); for n <= 64 the
     # references (qubits n .. 2n - 1) cross it instead. At rate 0.03 some single-reference
-    # trajectories purify (k = 0) and some keep their code.
+    # trajectories purify (k = 0) and some keep their code: the test picks them by scanning
+    # (_chosen_trajectories), so the coverage survives a change of the random streams.
     "purification_n40_80_qubits": dict(
         num_system=40,
         edges=graphs.watts_strogatz(40, 4, 0.2, seed=40),
@@ -341,6 +343,36 @@ FEW_REPLAYS = {
 }
 
 
+# Single-reference specs whose test trajectories are chosen by scanning: one that purifies,
+# one that does not, and one whose code has a contiguous distance above 1.
+SCANNED = {
+    "single_n70_partner_64",
+    "single_n127_partner_63",
+    "single_n128_partner_64",
+    "single_n129_random_partner",
+}
+
+
+def _chosen_trajectories(spec: mipt.MonitoredCircuit, seed, scan: int = 400) -> list[int]:
+    """The first purified, the first unpurified and the first distance > 1 trajectory.
+
+    Scans ``scan`` trajectories with two cheap probes only (probes never change a
+    trajectory), and fails if the spec has no trajectory of one of the three kinds.
+    """
+    cheap = dataclasses.replace(spec, probes=[mipt.code_dimension(), mipt.contiguous_distance()])
+    found = cheap.run(scan, seed=seed)
+    tau = found.purification_layer
+    distance = np.nan_to_num(found.values["contiguous_distance"])
+    kinds = {
+        "purified": np.flatnonzero(tau >= 0),
+        "unpurified": np.flatnonzero(tau < 0),
+        "distance above 1": np.flatnonzero((distance > 1).any(axis=1)),
+    }
+    for kind, rows in kinds.items():
+        assert rows.size, f"none of {scan} trajectories is {kind}; change the spec's rate"
+    return sorted({int(rows[0]) for rows in kinds.values()})
+
+
 @pytest.mark.parametrize("name", list(SPECS))
 def test_engine_matches_exported_circuits_exactly(name):
     """Every deterministic probe, at its own layers, equals the replayed circuit.
@@ -353,9 +385,17 @@ def test_engine_matches_exported_circuits_exactly(name):
     """
     spec = mipt.MonitoredCircuit(**SPECS[name])
     seed = 2024
-    trajectories = 3 if name in FEW_REPLAYS else 6
-    result = spec.run(trajectories, seed=seed)
-    for t in range(trajectories):
+    if name in SCANNED:
+        rows = _chosen_trajectories(spec, seed)
+    else:
+        rows = list(range(3 if name in FEW_REPLAYS else 6))
+    result = mipt.EnsembleResult.concatenate(
+        [spec.run(1, seed=seed, first_trajectory=t) for t in rows]
+    )
+    if name in SCANNED:
+        assert (result.purification_layer >= 0).any() and (result.purification_layer < 0).any()
+        assert (np.nan_to_num(result.values["contiguous_distance"]) > 1).any()
+    for row, t in enumerate(rows):
         obs = _replay(spec, t, seed)
         tau_expected = -1
         for layer in spec.checkpoint_layers:
@@ -364,27 +404,27 @@ def test_engine_matches_exported_circuits_exactly(name):
                 tau_expected = int(layer)
                 break
         if spec.reference != "none":
-            assert result.purification_layer[t] == tau_expected
+            assert result.purification_layer[row] == tau_expected
         stop = tau_expected if (spec.stop_when_purified and tau_expected >= 0) else None
         for p in spec.probes:
             if p.kind in RANDOM_KINDS:
                 continue
             for c, layer in enumerate(result.layers(p.name)):
-                got = result.values[p.name][t, c]
+                got = result.values[p.name][row, c]
                 expected = obs[int(layer)][0][p.name]
-                if (
-                    stop is not None
-                    and layer > stop
-                    and np.isnan(mipt._probe_fill(p, spec.num_system))
-                ):
+                after_stop = stop is not None and layer > stop
+                if after_stop and np.isnan(mipt._probe_fill(p, spec.num_system)):
                     assert np.all(np.isnan(got)), f"{p.name} t={t} layer={layer}"
                     continue
                 np.testing.assert_allclose(got, expected, err_msg=f"{p.name} t={t} layer={layer}")
                 if p.kind == "code_snapshot" and spec.reference != "none":
-                    if result.snapshots[p.name][1][t, c] < 0:  # stopped: no code was saved
+                    # a code is saved at every evaluation up to the stop, and only there
+                    saved = result.snapshots[p.name][1][row, c] >= 0
+                    assert saved == (not after_stop), f"{p.name} t={t} layer={layer}"
+                    if not saved:
                         continue
                     np.testing.assert_array_equal(
-                        _row_space(result.code(t, c, p.name).stabilizer_matrix()),
+                        _row_space(result.code(row, c, p.name).stabilizer_matrix()),
                         obs[int(layer)][0][(p.name, "code")],
                         err_msg=f"{p.name} code t={t} layer={layer}",
                     )
@@ -392,7 +432,12 @@ def test_engine_matches_exported_circuits_exactly(name):
 
 def test_results_independent_of_threads_and_chunking():
     spec = mipt.MonitoredCircuit(**SPECS["random_edges_ws_single_random_partner"])
-    full = spec.run(40, seed=5, num_threads=4)
+    threads = min(4, numba.config.NUMBA_NUM_THREADS)
+    assert threads > 1 or numba.config.DISABLE_JIT, (
+        "this machine offers Numba a single thread, so the thread comparison would be vacuous;"
+        " set NUMBA_NUM_THREADS to at least 2"
+    )
+    full = spec.run(40, seed=5, num_threads=threads)
     one = spec.run(40, seed=5, num_threads=1)
     chunks = mipt.EnsembleResult.concatenate(
         [spec.run(15, seed=5), spec.run(25, seed=5, first_trajectory=15)]

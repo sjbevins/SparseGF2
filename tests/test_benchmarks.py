@@ -1,6 +1,7 @@
 """The benchmark scripts' smoke modes run and write well-formed results."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_thread_scaling_quick(tmp_path):
     out = tmp_path / "ts"
+    # benchmark this checkout's src, not whatever an editable install points at
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), os.environ.get("PYTHONPATH", "")]),
+    }
     proc = subprocess.run(
         [
             sys.executable,
@@ -22,6 +28,7 @@ def test_thread_scaling_quick(tmp_path):
         text=True,
         timeout=300,
         cwd=ROOT,
+        env=env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     data = json.loads((out / "thread_scaling.json").read_text(encoding="utf-8"))
