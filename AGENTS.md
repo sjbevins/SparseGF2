@@ -180,8 +180,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   layer; [`benchmarks/results/thread_scaling.md`](benchmarks/results/thread_scaling.md)):
   speedup over one thread was 12.3 to 13.7 at 16 threads and 17.3 to 21.1 at 32, and 32
   threads beat 16 in every workload (by 1.4 to 1.5 times). So leave the default, one thread
-  per logical processor, unless the machine is shared; shot sampling scales least well
-  (8.8 at 32).
+  per logical processor, unless the machine is shared; the purification-time workload (an entropy probe every
+  layer) scales least well (17.3 at 32).
 * **Random two-qubit Cliffords** in circuit text: `CLIFFORD_2Q(i) a b` applies Clifford
   number `i` in `[0, 11520)`. A uniformly random `i` gives a uniformly random Clifford.
   `Circuit.to_stim()` expands these into Stim gates.

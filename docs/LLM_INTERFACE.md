@@ -243,8 +243,9 @@ probes are exact after a stop, so their averages need no correction; entanglemen
 and `contiguous_distance` are NaN there and drop out of the means. At most one
 `code_snapshot` per spec; give it its own `"checkpoints": "final"`, since codes are large.
 The cost of `uncorrectable_region_counts` grows like C(n, w): measured one-thread costs
-per evaluation at n = 256 are about 1 ms for w = 2, 40 to 50 ms for w = 3 and about 7 s
-for w = 4, against 3 to 7 ms for `erasure_first_failure` with 100 samples.
+per evaluation at n = 256 are about 1 ms for w = 2, about 20 ms for w = 3 and about 4 s
+for w = 4, against about 2 ms for `erasure_first_failure` with 100 samples
+(`benchmarks/results/erasure_cost.md` has every n and w).
 
 The cutoff w = m*(n) of `uncorrectable_region_counts` separates the exact regime of
 P_C(m), m <= w, from the sampled one. It takes one of these forms (giving both `max_size`

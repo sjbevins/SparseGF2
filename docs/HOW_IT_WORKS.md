@@ -815,10 +815,13 @@ trajectories run in parallel over all cores:
 
 | probe | cost per evaluation |
 |---|---|
-| `erasure_first_failure`, M = 100 samples | 3 to 7 ms |
+| `erasure_first_failure`, M = 100 samples | about 2 ms |
 | `uncorrectable_region_counts`, w = 2 | about 1 ms |
-| `uncorrectable_region_counts`, w = 3 | 40 to 50 ms |
-| `uncorrectable_region_counts`, w = 4 | about 7 s (C(256, 4) = 1.7·10^8 sets; practical only at a few depths) |
+| `uncorrectable_region_counts`, w = 3 | about 20 ms |
+| `uncorrectable_region_counts`, w = 4 | about 4 s (C(256, 4) = 1.7·10^8 sets; practical only at a few depths) |
+
+(n = 256, one thread, AMD Ryzen 9 9950X3D, 2026-10-15; every n and w in
+[`benchmarks/results/erasure_cost.md`](../benchmarks/results/erasure_cost.md).)
 | `code_snapshot` | under 1 ms, but about 16 KB per stored code |
 
 Values are stored as float64, so `erasure_first_failure` costs 8·M bytes per

@@ -405,14 +405,15 @@ print(toy.lost_information([0]), toy.lost_information([0, 1]))   # 0 2
 ```
 
 Costs per evaluation at n = 256, one thread, on random-circuit codes
-(trajectories run in parallel over all cores):
+(AMD Ryzen 9 9950X3D, 2026-10-15; every n and w in [`benchmarks/results/erasure_cost.md`](benchmarks/results/erasure_cost.md);
+trajectories run in parallel over all cores):
 
 | probe | cost |
 |---|---|
-| `erasure_first_failure`, M = 100 | 3–7 ms |
+| `erasure_first_failure`, M = 100 | about 2 ms |
 | `uncorrectable_region_counts`, w = 2 | about 1 ms |
-| `uncorrectable_region_counts`, w = 3 | 40–50 ms |
-| `uncorrectable_region_counts`, w = 4 | about 7 s (C(256, 4) = 1.7·10⁸ subsets: only at a few depths) |
+| `uncorrectable_region_counts`, w = 3 | about 20 ms |
+| `uncorrectable_region_counts`, w = 4 | about 4 s (C(256, 4) = 1.7·10⁸ subsets: only at a few depths) |
 | `code_snapshot` | under 1 ms |
 
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole

@@ -768,23 +768,23 @@ random-circuit codes: a layer of dynamics (n/2 random two-qubit Cliffords plus
 the measurements) costs about 30 µs (at p = 0.05; up to about 60 µs at p = 0.2
 on β = 1 graphs, so a circuit that never purifies at a higher rate costs up to
 twice as much); one evaluation of
-`erasure_first_failure` with M = 100 costs 3–7 ms,
-`uncorrectable_region_counts` costs about 1 ms for w = 2, 40–50 ms for w = 3
-and about 7 s for w = 4, and `code_snapshot` under 1 ms. With about 175 sparse
+`erasure_first_failure` with M = 100 costs about 2 ms,
+`uncorrectable_region_counts` costs about 1 ms for w = 2, about 20 ms for w = 3
+and about 4 s for w = 4 (`benchmarks/results/erasure_cost.md` has every n and w), and `code_snapshot` under 1 ms. With about 175 sparse
 depths (`sparse_depths(depths)` above), one circuit that never purifies costs
 
 | part | cost per circuit (one thread) |
 |---|---|
 | dynamics, 10⁶ layers × 30 µs | 30 s |
-| `erasure_first_failure`, 175 × 3–7 ms | 0.5–1.2 s |
-| `uncorrectable_region_counts(3)`, 175 × 40–50 ms | 7–9 s |
+| `erasure_first_failure`, 175 × 2 ms | 0.35 s |
+| `uncorrectable_region_counts(3)`, 175 × 20 ms | 3.5 s |
 | `code_dimension` at 5957 depths, `code_snapshot` once | well under 1 s |
-| **total** | **about 40 s** |
+| **total** | **about 35 s** |
 
-so a point of 1000 circuits is about 11 core-hours, or about 3 hours on 4
+so a point of 1000 circuits is about 10 core-hours, or about 2.5 hours on 4
 cores. Circuits that purify stop early (`stop_when_purified`), so points deep
 in the pure phase cost far less. w = 4 at the same 175 depths would add
-175 × 7 s ≈ 20 minutes *per circuit*: if you want it, give it a handful of
+175 × 4 s ≈ 12 minutes *per circuit*: if you want it, give it a handful of
 depths of its own.
 
 **Memory** is set by the stored values (float64, 8 bytes each) and codes:
