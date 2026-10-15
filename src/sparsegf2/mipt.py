@@ -108,7 +108,7 @@ from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
 from sparsegf2._parallel import threads
 from sparsegf2._version import __version__
-from sparsegf2.analysis import exhaustive_cutoff
+from sparsegf2.analysis import _integer, exhaustive_cutoff
 from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
@@ -423,7 +423,9 @@ def _cutoff_value(value, form: str) -> int | tuple[tuple[int, int], ...]:
     """A budget (an int) or a mapping {n: value} as sorted ``(n, value)`` pairs, validated.
 
     A budget must be non-negative. A mapping's entries are checked against
-    their own n: a ``max_size`` must lie in [1, n].
+    their own n at once: a ``max_size`` must lie in [1, n], and a budget must
+    allow at least the n single-qubit regions. One budget meets its n only in
+    the spec.
     """
     if not isinstance(value, Mapping):  # one budget (one max_size needs no resolving)
         b = _integer(value, form)
@@ -447,6 +449,8 @@ def _cutoff_value(value, form: str) -> int | tuple[tuple[int, int], ...]:
             raise ValueError(f"max_size[{n}] must be in [1, {n}], got {x}")
         if form == "budget" and x < 0:
             raise ValueError(f"budget[{n}] must be non-negative, got {x}")
+        if form == "budget" and x < n:
+            raise ValueError(_no_exhaustive_size(x, n))
         pairs.append((n, x))
     return tuple(sorted(pairs))
 
@@ -458,30 +462,39 @@ def _unresolved_name(cutoff: tuple) -> str:
     return f"uncorrectable_region_counts({form}={shown})"
 
 
-def _resolve_cutoff(p: Probe, n: int) -> Probe:
-    """``p`` with ``size`` (and a default name) set from its budget or mapping for ``n`` qubits."""
-    assert p.cutoff is not None, "only probes with a cutoff are resolved"
-    form, value = p.cutoff
-    if isinstance(value, tuple):
-        given = dict(value)
-        if n not in given:
-            raise ValueError(
-                f"probe {p.name!r}: {form} has no entry for num_system = {n}; it covers the "
-                f"system sizes {sorted(given)}"
-            )
-        value = given[n]
-    if form == "budget":
-        w = exhaustive_cutoff(n, value)
-        if w == 0:
-            raise ValueError(
-                f"probe {p.name!r}: budget {value} allows no exhaustive region size at n = {n} "
-                f"(C({n}, 1) = {n} > {value}); raise the budget or drop the probe"
-            )
-    else:
-        w = value
-    # A default name follows the resolved size; a name the user chose stays.
-    default = p.name in (_unresolved_name(p.cutoff), f"uncorrectable_region_counts[{p.size}]")
-    return replace(p, size=w, name=f"uncorrectable_region_counts[{w}]" if default else p.name)
+def _no_exhaustive_size(budget: int, n: int) -> str:
+    """The error for a budget below n: not even the n single-qubit regions fit."""
+    return (
+        f"budget {budget} allows no exhaustive region size at n = {n} "
+        f"(C({n}, 1) = {n} > {budget}); raise the budget or drop the probe"
+    )
+
+
+def _counts_size(p: Probe, n: int) -> Probe:
+    """An uncorrectable_counts probe for ``n`` system qubits: its budget or mapping resolved
+    into ``size`` (and a default name), and the size checked against n.
+
+    The errors say what to change but not which probe; the caller names it.
+    """
+    if p.cutoff is not None:
+        form, value = p.cutoff
+        if isinstance(value, tuple):
+            given = dict(value)
+            if n not in given:
+                raise ValueError(
+                    f"{form} has no entry for num_system = {n}; it covers the system sizes "
+                    f"{sorted(given)}"
+                )
+            value = given[n]
+        w = exhaustive_cutoff(n, value) if form == "budget" else value
+        if form == "budget" and w == 0:
+            raise ValueError(_no_exhaustive_size(value, n))
+        # A default name follows the resolved size; a name the user chose stays.
+        default = p.name in (_unresolved_name(p.cutoff), f"uncorrectable_region_counts[{p.size}]")
+        p = replace(p, size=w, name=f"uncorrectable_region_counts[{w}]" if default else p.name)
+    if not 1 <= p.size <= n:
+        raise ValueError(f"max_size must be in [1, {n}], got {p.size}")
+    return p
 
 
 def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
@@ -774,11 +787,11 @@ class MonitoredCircuit:
                 )
         if _KINDS[p.kind].sampled and p.samples < 1:
             raise ValueError(f"probe {p.name!r}: samples must be at least 1")
-        if p.kind == "uncorrectable_counts":
-            if p.cutoff is not None:  # a budget or a mapping: its size at this n
-                p = _resolve_cutoff(p, n)
-            if not 1 <= p.size <= n:
-                raise ValueError(f"probe {p.name!r}: max_size must be in [1, {n}], got {p.size}")
+        if p.kind == "uncorrectable_counts":  # a budget or a mapping gets its size for n here
+            try:
+                p = _counts_size(p, n)
+            except ValueError as exc:
+                raise ValueError(f"probe {p.name!r}: {exc}") from None
         return p
 
     def _resolve_checkpoints(self, spec) -> tuple[str | int | np.ndarray, np.ndarray]:
@@ -1189,18 +1202,6 @@ def _read_only(arr: np.ndarray) -> np.ndarray:
     """Mark an array the spec owns as read-only (the spec is frozen) and return it."""
     arr.flags.writeable = False
     return arr
-
-
-def _integer(value, what: str) -> int:
-    """``value`` as a Python int: numpy integers and whole-number floats are accepted."""
-    if isinstance(value, (bool, np.bool_)):
-        raise TypeError(f"{what} must be an integer, got {value!r}")
-    if isinstance(value, (float, np.floating)) and float(value).is_integer():
-        return int(value)
-    try:
-        return operator.index(value)
-    except TypeError:
-        raise TypeError(f"{what} must be an integer, got {value!r}") from None
 
 
 def _number(value, what: str) -> float:
@@ -1648,6 +1649,11 @@ class EnsembleResult:
             )
             if not np.array_equal(spec.checkpoint_layers, layers):
                 raise ValueError(f"{path}: the stored checkpoints do not match the stored layers")
+            # The spec resolves a budget or mapping again; it must give the stored size and
+            # name, under which the values are stored.
+            stored = [(p["name"], p["size"]) for p in meta["probes"]]
+            if [(p.name, p.size) for p in spec.probes] != stored:
+                raise ValueError(f"{path}: the stored probe sizes do not match their cutoff")
             return cls(
                 spec=spec,
                 seed_entropy=meta["seed_entropy"],

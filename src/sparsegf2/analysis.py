@@ -255,8 +255,12 @@ def exact_failure_by_size(counts, num_qubits: int) -> np.ndarray:
     return np.clip(c / binom, 0.0, 1.0)
 
 
-def _whole(value, what: str) -> int:
-    """``value`` as a Python int: numpy integers and whole-number floats are accepted."""
+def _integer(value, what: str) -> int:
+    """``value`` as a Python int: numpy integers and whole-number floats are accepted.
+
+    Fractions, bools and strings raise ``TypeError``. :mod:`sparsegf2.mipt` validates
+    every integer of a spec and its probes with this function too.
+    """
     if isinstance(value, (bool, np.bool_)):
         raise TypeError(f"{what} must be an integer, got {value!r}")
     if isinstance(value, (float, np.floating)) and float(value).is_integer():
@@ -268,7 +272,7 @@ def _whole(value, what: str) -> int:
 
 
 def _qubit_count(num_qubits) -> int:
-    n = _whole(num_qubits, "num_qubits")
+    n = _integer(num_qubits, "num_qubits")
     if n < 0:
         raise ValueError(f"num_qubits must be non-negative, got {n}")
     return n
@@ -283,7 +287,7 @@ def exhaustive_region_count(num_qubits: int, max_size: int) -> int:
     ``max_size`` must lie in [0, n]; 0 gives 0.
     """
     n = _qubit_count(num_qubits)
-    w = _whole(max_size, "max_size")
+    w = _integer(max_size, "max_size")
     if not 0 <= w <= n:
         raise ValueError(f"max_size must be in [0, {n}], got {w}")
     return sum(math.comb(n, m) for m in range(1, w + 1))
@@ -301,7 +305,7 @@ def exhaustive_cutoff(num_qubits: int, budget: int) -> int:
     ``mipt.uncorrectable_region_counts(budget=B)``.
     """
     n = _qubit_count(num_qubits)
-    b = _whole(budget, "budget")
+    b = _integer(budget, "budget")
     if b < 0:
         raise ValueError(f"budget must be non-negative, got {b}")
     total, term, w = 0, 1, 0

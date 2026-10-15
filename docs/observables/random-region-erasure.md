@@ -184,11 +184,13 @@ Either may be one integer or a mapping from the system size $n$ to a value,
 such as `max_size={64: 3, 128: 2}` or `budget={64: 20_000, 256: 50_000}`, so
 one probe definition serves a sweep over $n$. `MonitoredCircuit` resolves the
 probe for its own `num_system` (`mipt.py::MonitoredCircuit._resolve_probe`,
-which calls `mipt.py::_resolve_cutoff`). A mapping without an entry for $n$
+which calls `mipt.py::_counts_size`). A mapping without an entry for $n$
 is an error that lists the sizes it covers. So is a budget below $n$: then
-not even the $n$ single-qubit regions fit, and no $w \ge 1$ does. The default
-name of the probe, `uncorrectable_region_counts[w]`, carries the resolved
-$w$; give a `name` to keep one key at every $n$.
+not even the $n$ single-qubit regions fit, and no $w \ge 1$ does. The entries
+of a mapping are checked against their own $n$ when the probe is built
+(`mipt.py::_cutoff_value`); a single budget meets its $n$ only in the spec.
+The default name of the probe, `uncorrectable_region_counts[w]`, carries the
+resolved $w$; give a `name` to keep one key at every $n$.
 
 ```python
 from sparsegf2 import analysis, graphs, mipt
@@ -214,7 +216,9 @@ for n, w in ((64, 3), (128, 2)):
 ```
 
 The resolved $w$ is what the engine runs and what a saved result stores, with
-the budget or mapping kept beside it.
+the budget or mapping kept beside it. `EnsembleResult.load` resolves the
+stored budget or mapping again and refuses a file in which it no longer gives
+the stored size (`mipt.py::EnsembleResult.load`).
 
 ---
 

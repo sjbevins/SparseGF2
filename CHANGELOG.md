@@ -76,9 +76,11 @@
   `num_system`, so one probe definition serves a sweep over n. The JSON forms
   are `{"budget": 50000}` and objects keyed by n (`{"64": 3, "128": 2}`); a
   missing n, a budget below n, both arguments, and non-integer keys or values
-  are refused with a message that names the field. The key stays
-  `uncorrectable_region_counts[w]` with the resolved w (give `name` to keep one
-  key at every n), saved results store the resolved w and the input, and
+  are refused with a message that names the field (`probes[i]` in JSON); the
+  entries of a mapping are checked against their own n when the probe is built.
+  The key stays `uncorrectable_region_counts[w]` with the resolved w (give
+  `name` to keep one key at every n), saved results store the resolved w and
+  the input (loading refuses a file in which they disagree), and
   `estimate_ensemble` costs the resolved w. New `analysis.exhaustive_cutoff(n, B)`
   and `analysis.exhaustive_region_count(n, w)` (sum_{m=1}^{w} C(n, m), an exact
   int). The default is unchanged: `max_size=2`.

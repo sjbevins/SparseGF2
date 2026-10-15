@@ -7,6 +7,7 @@ values to match exactly at every checkpoint.
 
 import dataclasses
 import itertools
+import json
 import re
 
 import numpy as np
@@ -1143,13 +1144,15 @@ def test_cutoff_arguments_are_validated():
         _counts_spec(12, mipt.uncorrectable_region_counts(max_size={32: 2, 16: 2}))
     with pytest.raises(ValueError, match=r"no entry for num_system = 12.*\[16\]"):
         _counts_spec(12, mipt.uncorrectable_region_counts(budget={16: 100}))
-    for budget in (11, {12: 11}):
-        message = (
-            "budget 11 allows no exhaustive region size at n = 12 (C(12, 1) = 12 > 11); "
-            "raise the budget or drop the probe"
-        )
-        with pytest.raises(ValueError, match=re.escape(message)):
-            _counts_spec(12, mipt.uncorrectable_region_counts(budget=budget))
+    message = (
+        "budget 11 allows no exhaustive region size at n = 12 (C(12, 1) = 12 > 11); "
+        "raise the budget or drop the probe"
+    )
+    probe = mipt.uncorrectable_region_counts(budget=11)  # n is not known yet
+    with pytest.raises(ValueError, match=re.escape(f"probe {probe.name!r}: {message}")):
+        _counts_spec(12, probe)
+    with pytest.raises(ValueError, match=re.escape(message)):  # each entry knows its n
+        mipt.uncorrectable_region_counts(budget={64: 50_000, 12: 11})
     with pytest.raises(ValueError, match=r"max_size must be in \[1, 12\], got 13"):
         _counts_spec(12, mipt.uncorrectable_region_counts(max_size=13))
     with pytest.raises(ValueError, match=r"max_size\[12\] must be in \[1, 12\], got 13"):
@@ -1200,3 +1203,33 @@ def test_cutoff_probes_survive_save_and_load(tmp_path):
     more = spec.run(2, seed=3, first_trajectory=6)
     merged = mipt.EnsembleResult.concatenate([back, more])  # the same protocol
     assert merged.num_trajectories == 8
+
+
+def _edit_saved_probe(src, dst, **changes) -> None:
+    """Copy the saved result ``src`` to ``dst`` with fields of its first stored probe changed."""
+    with np.load(src, allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    meta["probes"][0].update(changes)
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(dst, **arrays)
+
+
+def test_load_refuses_a_probe_whose_size_disagrees_with_its_cutoff(tmp_path):
+    spec = _counts_spec(12, mipt.uncorrectable_region_counts(budget=100))  # 78 <= 100: w = 2
+    res = spec.run(3, seed=1)
+    res.save(tmp_path / "good.npz")
+    # A cutoff that no longer gives the stored size (an edit, or a future rule change):
+    # budget 1000 resolves to w = 4, but the file holds 2 columns under "[2]".
+    for i, changes in enumerate(({"cutoff": {"budget": 1000}}, {"size": 3})):
+        bad = tmp_path / f"bad{i}.npz"
+        _edit_saved_probe(tmp_path / "good.npz", bad, **changes)
+        with pytest.raises(ValueError, match="the stored probe sizes do not match their cutoff"):
+            mipt.EnsembleResult.load(bad)
+    # another budget with the same cutoff (78 <= 90 < 298) agrees with the file
+    _edit_saved_probe(tmp_path / "good.npz", tmp_path / "same.npz", cutoff={"budget": 90})
+    back = mipt.EnsembleResult.load(tmp_path / "same.npz")
+    assert back.spec.probes[0].cutoff == ("budget", 90)
+    np.testing.assert_array_equal(
+        back.values["uncorrectable_region_counts[2]"], res.values["uncorrectable_region_counts[2]"]
+    )

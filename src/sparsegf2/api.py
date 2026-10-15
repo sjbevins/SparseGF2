@@ -1319,7 +1319,8 @@ def _size_map(value: dict, what: str) -> dict:
             n = int(key)  # from Python callers
         else:
             raise ValueError(
-                f'{what}: the keys are system sizes, written as integers like "64", got {key!r}'
+                f'{what}: the keys are system sizes, written as positive integers like "64", '
+                f"got {key!r}"
             )
         if n in out:
             raise ValueError(f"{what} gives the system size {n} twice")
@@ -1327,7 +1328,9 @@ def _size_map(value: dict, what: str) -> dict:
     return out
 
 
-def _build_probe(spec: Any, index: int) -> mipt.Probe:
+def _build_probe(spec: Any, index: int, num_system: int) -> mipt.Probe:
+    """One JSON probe as a :class:`~sparsegf2.mipt.Probe`, with its exhaustive size resolved
+    for ``num_system`` so that every error names the probe as ``probes[i]``."""
     kinds = _probe_kinds()
     where = f"probes[{index}]"
     if not isinstance(spec, dict) or "kind" not in spec:
@@ -1341,6 +1344,9 @@ def _build_probe(spec: Any, index: int) -> mipt.Probe:
     name = params.pop("name", None)
     if name is not None and (not isinstance(name, str) or not name.strip()):
         raise ValueError(f"{where}.name must be a non-empty string, got {name!r}")
+    what = f"{where} ({kind})"
+    # unknown keys first: their values may not be what the conversions below expect
+    _check_keys(params, [k for k in _params(kinds[kind]) if k != "name"], what)
     for key, value in list(params.items()):
         if key in _QUBIT_ARGS and value is not None:
             params[key] = _qubit_list(value, f"{where}.{key}")
@@ -1348,8 +1354,16 @@ def _build_probe(spec: Any, index: int) -> mipt.Probe:
             params[key] = _size_map(value, f"{where}.{key}")
     if params.get("checkpoints") is not None:
         params["checkpoints"] = _checkpoints(params["checkpoints"], f"{where}.checkpoints")
-    probe = _call_with(kinds[kind], params, {"name": None}, f"{where} ({kind})")
-    return dataclasses.replace(probe, name=name) if name is not None else probe
+    probe = _call_with(kinds[kind], params, {"name": None}, what)
+    if name is not None:
+        probe = dataclasses.replace(probe, name=name)
+    if probe.kind == "uncorrectable_counts":
+        # Resolved here so the errors say probes[i]; the spec's own resolution is then a no-op.
+        try:
+            probe = mipt._counts_size(probe, num_system)
+        except ValueError as exc:
+            raise ValueError(f"{what}: {exc}") from None
+    return probe
 
 
 def _gate_set(value: Any) -> np.ndarray | None:
@@ -1442,7 +1456,7 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
     if "probes" in spec:
         if not isinstance(spec["probes"], list):
             raise ValueError('probes must be a list like [{"kind": "code_dimension"}]')
-        kwargs["probes"] = [_build_probe(p, i) for i, p in enumerate(spec["probes"])]
+        kwargs["probes"] = [_build_probe(p, i, n) for i, p in enumerate(spec["probes"])]
     try:
         return mipt.MonitoredCircuit(**kwargs)
     except (TypeError, ValueError, OverflowError) as exc:

@@ -1174,23 +1174,37 @@ def test_json_cutoff_forms_run_like_their_max_size():
     assert out["probes"] == {"counts": explicit[2]["uncorrectable_region_counts[2]"]}
 
 
+RESOLVING = r"probes\[0\] \(uncorrectable_region_counts\): "  # errors at num_system = 10
+
+
 @pytest.mark.parametrize(
     ("cutoff", "message"),
     [
         (
             {"max_size": {"64": 3, "128": 2}},
-            r"max_size has no entry for num_system = 10; it covers the system sizes \[64, 128\]",
+            RESOLVING
+            + r"max_size has no entry for num_system = 10; it covers the system sizes \[64, 128\]",
         ),
         (
             {"budget": 5},
-            re.escape(
+            RESOLVING
+            + re.escape(
                 "budget 5 allows no exhaustive region size at n = 10 (C(10, 1) = 10 > 5); "
                 "raise the budget or drop the probe"
             ),
         ),
+        ({"max_size": 11}, RESOLVING + r"max_size must be in \[1, 10\], got 11"),
+        (  # an entry below its own n fails at once, whatever num_system is
+            {"budget": {"10": 50000, "64": 50}},
+            re.escape("budget 50 allows no exhaustive region size at n = 64 (C(64, 1) = 64 > 50)"),
+        ),
         ({"max_size": 2, "budget": 100}, "give max_size or budget, not both"),
         ({"max_size": {"ten": 3}}, r"probes\[0\]\.max_size: .*integers like \"64\", got 'ten'"),
         ({"budget": {"10.5": 100}}, r"probes\[0\]\.budget: .*integers like \"64\", got '10.5'"),
+        (
+            {"budget": {"-5": 100}},
+            r"probes\[0\]\.budget: .*positive integers like \"64\", got '-5'",
+        ),
         (
             {"max_size": {"10": 2, "010": 3}},
             r"probes\[0\]\.max_size gives the system size 10 twice",
@@ -1207,7 +1221,18 @@ def test_json_cutoff_forms_run_like_their_max_size():
 )
 def test_json_cutoff_errors_name_the_field(cutoff, message):
     spec = dict(SMALL_SPEC, probes=[{"kind": "uncorrectable_region_counts", **cutoff}])
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=message) as info:
+        api.run_ensemble(spec, 2, seed=1)
+    assert str(info.value).startswith("probes[0]")  # which probe, like every spec error
+
+
+@pytest.mark.parametrize("extra", [{"budget": {"x": 1}}, {"max_size": 2}, {"region": "bad"}])
+def test_probe_keys_are_checked_before_their_values(extra):
+    spec = dict(SMALL_SPEC, probes=[{"kind": "code_dimension", **extra}])
+    key = re.escape(str([next(iter(extra))]))
+    with pytest.raises(
+        ValueError, match=rf"probes\[0\] \(code_dimension\): unknown key\(s\) {key}"
+    ):
         api.run_ensemble(spec, 2, seed=1)
 
 
