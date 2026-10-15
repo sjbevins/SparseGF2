@@ -705,7 +705,7 @@ the script of section 4.
 | result size | 8 GB | refused by `estimate_ensemble`, `run_ensemble` and `start_ensemble_job`, with advice |
 | `job_status` wait | 0 to 60 s per call | poll again |
 | graph collection | `realizations` at most 100,000 | error |
-| graph memory | the edges of the spec's graphs at most 2 GB (16 bytes per edge) | refused before any graph is generated, with how many realizations (or the largest `num_system`) fit |
+| graph memory | 2 GB: the edges a collection keeps (16 bytes each), and the peak while one graph is generated | refused before any graph is generated, with how many realizations (or the largest `num_system`) fit |
 
 **Threads.** The engine runs trajectories in parallel on all cores. On a shared machine
 set `NUMBA_NUM_THREADS` in the server's environment (the `env` block or `--env` of

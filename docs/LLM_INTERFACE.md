@@ -355,17 +355,20 @@ take the exact spec to pass back from the `"spec"` entry of `spec.json` instead.
 
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
-saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`. `run_ensemble`,
+saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`, and `notes` where
+the estimate can be too low (see below). `run_ensemble`,
 `estimate_ensemble` and `start_ensemble_job` refuse a run whose result would exceed
 `MAX_RESULT_GB` (8 GB); the message suggests giving the large probes
 (`erasure_first_failure` samples, `code_snapshot`, vector probes) fewer checkpoints of
 their own, or splitting the trajectories over several output directories. They also
 refuse a `num_system` above `MAX_QUBITS` (65,536) before any graph is generated, and
-graphs whose edges would take more than `MAX_GRAPH_GB` (2 GB at 16 bytes per edge,
-counted from the family's parameters): a `graph.realizations` collection that is too
-large is refused with how many realizations fit at that `num_system`, and one graph that
-alone is too large (`complete`, or `erdos_renyi`, which draws every pair) with the largest
-`num_system` that fits.
+graphs that would take more than `MAX_GRAPH_GB` (2 GB), counted from the family's
+parameters: the edges a collection keeps (16 bytes each) and the peak while one graph is
+generated (48 bytes per pair for `complete` and `erdos_renyi`, which build every pair; up
+to 512 bytes per edge for the ring families). A `graph.realizations` collection that is
+too large is refused with how many realizations fit at that `num_system`, and one graph
+that alone is too large with the largest `num_system` that fits and that the family
+accepts (or, if there is none, with advice to choose a smaller degree).
 
 The estimate is deliberately pessimistic. Its probe terms are about 3 times or more the
 one-thread costs measured on an AMD Ryzen 9 9950X3D up to n = 2048, in both reference
@@ -379,7 +382,12 @@ code's first failure (`contiguous_distance`, `erasure_first_failure`) are priced
 worst case of the single-reference picture (k = 1, erasures that fail only at about n / 2
 qubits) and for codes of monitored dynamics in the purification picture, so codes of small
 distance run well within their estimate; a purification code of rate near 0 whose
-erasures fail only near n / 2 would take up to the single-reference price.
+erasures fail only near n / 2 would take up to the single-reference price. In the
+purification picture, a spec with either scan therefore gets a note in
+`estimate_ensemble`'s `notes` saying how many times its estimate such a code can make them
+take: the single-reference price over the purification price of those probes at that n
+(for example about 3.9 for `erasure_first_failure` and 27 for `contiguous_distance` at
+n = 256).
 
 ### 3.4 Erasure studies
 

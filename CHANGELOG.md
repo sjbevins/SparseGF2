@@ -30,29 +30,38 @@
   `contiguous_distance` in the single-reference picture as n³ W, and the elimination that
   every erasure probe starts with as n W Wc (Wc the words of a code column);
   `uncorrectable_region_counts` at w <= 2 was priced at 0.25 to 0.8 times its cost, and
-  `erasure_first_failure` with a single reference at 0.1 to 0.9. A run estimated at 50 s
-  could take 20 minutes, blocking an MCP call that should have gone to a background job.
-  The scans that stop at a code's first failure (`contiguous_distance`,
-  `erasure_first_failure`) are priced for the worst case of the single-reference picture
-  (k = 1, erasures that fail only at about n / 2 qubits) and for the codes of monitored
-  dynamics in the purification picture, so their estimates for small-distance codes are
-  generous. Trajectories on many threads are no longer priced as if every thread ran as
+  `erasure_first_failure` with a single reference at 0.14 to 1.30 (below 1 from
+  n = 256). A run estimated at 50 s could take 20 minutes, blocking an MCP call that
+  should have gone to a background job. The scans that stop at a code's first failure
+  (`contiguous_distance`, `erasure_first_failure`) are priced for the worst case of the
+  single-reference picture (k = 1, erasures that fail only at about n / 2 qubits) and for
+  the codes of monitored dynamics in the purification picture, so their estimates for
+  small-distance codes are generous. In the purification picture, a spec with either scan
+  gets a note in `estimate_ensemble`'s result: a code whose first
+  failures are near n / 2 (low rate, large distance) can make them take up to about X
+  times their estimate, with X the single-reference price over the purification price of
+  those probes at that n (about 3.9 for `erasure_first_failure` and 27 for
+  `contiguous_distance` at n = 256). Trajectories on many threads are no longer priced as
   fast as one thread alone: each of T busy threads counts as 1 / (1 + 0.04 (T - 1)) of one
   (0.45 at 32 threads; with every logical processor busy, each ran at 0.35 to 0.66 of a
   thread alone's speed), so one trajectory per thread is estimated longer than one
   trajectory alone. Graph generation is priced per family: `erdos_renyi` draws a random
-  number for every pair (it was priced 10 to 100 times too low) and `random_regular`
-  repeats its pairing until the graph is simple.
-* **Graph collections are bounded before they are built:** the edges of a spec's graphs
-  may take at most `MAX_GRAPH_GB` (2 GB at 16 bytes per edge; the engine holds them about
-  three times over, so this matches the 8 GB a result may take), computed from the
-  family's edge count before anything is generated. A larger `graph.realizations`
-  collection is refused by `estimate_ensemble`, `run_ensemble` and `start_ensemble_job`
-  with a message naming `realizations` and `num_system` and how many realizations fit;
-  one graph that alone is too large (`complete`, or `erdos_renyi`, which draws every
-  pair, on tens of thousands of qubits) is refused with the largest `num_system` that
-  fits. A Watts–Strogatz collection at n = 4096 with 100,000 realizations (13 GB of edges)
-  used to exhaust the memory of the very call meant to say it was too big.
+  number for every pair (it was priced 1.4 to 100 times too low) and `random_regular`
+  repeats its pairing until the graph is simple, up to its own `max_tries`.
+* **Graph collections are bounded before they are built:** a spec's graphs may take at
+  most `MAX_GRAPH_GB` (2 GB), computed from the family's parameters before anything is
+  generated: the edges a collection keeps, 16 bytes each (the engine holds them about
+  three times over, so this matches the 8 GB a result may take), and the peak while one
+  graph is generated, measured with tracemalloc: 48 bytes per pair for `complete` and
+  `erdos_renyi`, which build every pair, and up to 512 bytes per edge for the Python
+  generators of the ring families. A larger `graph.realizations` collection is refused by
+  `estimate_ensemble`, `run_ensemble` and `start_ensemble_job` with a message naming
+  `realizations` and `num_system` and how many realizations fit; one graph that alone is
+  too large (`complete` or `erdos_renyi` on about 9,000 qubits or more, or an absurd
+  degree) is refused with the largest `num_system` that fits and that the family accepts,
+  or, when none does, with advice to choose a smaller degree. A Watts–Strogatz collection
+  at n = 4096 with 100,000 realizations (13 GB of edges) used to exhaust the memory of the
+  very call meant to say it was too big.
 * **Directories that cannot be written or read are input errors:** an `output_dir` that
   cannot be created or written (no permission, a full or read-only drive, a path below a
   file), its lock included, raises `ValueError("output_dir DIR is not writable: ...")` in

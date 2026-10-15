@@ -106,10 +106,12 @@ MAX_RESULT_GB = 8.0
 """Largest ensemble result (probe values and code snapshots) one run or job may hold in memory."""
 
 MAX_GRAPH_GB = 2.0
-"""Largest memory the edges of a spec's graphs (16 bytes per edge) may take, checked from the
-family's edge count before any graph is generated. The engine holds the edges about three
-times over (the graphs, their concatenation and an index per edge), so a collection at this
-limit needs about as much memory as the largest result (:data:`MAX_RESULT_GB`)."""
+"""Largest memory a spec's graphs may take, checked from the family's parameters before any
+graph is generated: the edges a collection keeps (16 bytes per edge), and the peak while one
+graph is generated (48 bytes per pair for ``complete`` and ``erdos_renyi``, up to 512 per
+edge for the ring families). The engine holds the edges about three times over (the graphs,
+their concatenation and an index per edge), so a collection at this limit needs about as
+much memory as the largest result (:data:`MAX_RESULT_GB`)."""
 
 MAX_CHECKPOINTS_SHOWN = 50
 MAX_BITS_SHOWN = 256
@@ -1393,15 +1395,34 @@ def _build_graph(graph: Any, n: int) -> np.ndarray | list[np.ndarray]:
     return _call_with(fn, params, {"n": n}, f"graph ({family})")
 
 
-_EDGE_BYTES = 16  # one edge of an (m, 2) int64 edge array
+_EDGE_BYTES = 16  # one edge of an (m, 2) int64 edge array, as a collection keeps it
+
+# Peak bytes allocated while one graph is generated, per pair drawn (``complete`` and
+# ``erdos_renyi`` build every pair: triu_indices, the stacked pairs and their int64 copy are
+# 48 bytes per pair) or per edge of the bound (the Python tuples and sets of the ring
+# families, about 390 bytes per edge). Measured with tracemalloc at n = 2048 to 8192 and
+# rounded up; plus a fixed allowance per graph for the interpreter's own objects (up to
+# about 8 KB at small n).
+_GENERATION_BYTES = {
+    "cycle": 128,
+    "path": 64,
+    "complete": 48,
+    "erdos_renyi": 48,
+    "lattice_2d": 256,
+    "watts_strogatz": 512,
+    "newman_watts": 512,
+    "random_regular": 128,
+}
+_GENERATION_OVERHEAD = 64 * 1024
 
 
 def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
     """At most how many edges one graph of ``family`` on ``n`` nodes keeps, and how many
-    pairs generating it materialises, from its parameters alone (before it exists).
+    pairs or edges generating it materialises, from its parameters alone (before it exists).
 
-    None for a family not listed here, or when a parameter the count needs is not a number
-    in its valid range: the family itself then reports the parameter.
+    None for a family not listed here, or when the family rejects its parameters at this n
+    (a degree that is not an integer in its range, an odd ``n * d``): the family itself then
+    reports the parameter.
     """
     pairs = n * (n - 1) // 2
 
@@ -1431,36 +1452,56 @@ def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
             return None
         mean = p * pairs
         return min(pairs, math.ceil(mean + 6.0 * math.sqrt(mean * (1.0 - p)) + 1.0)), pairs
-    if family in ("watts_strogatz", "newman_watts", "random_regular"):
-        k = number("d" if family == "random_regular" else "k")
-        if k is None or not 0 <= k < n:
+    if family in ("watts_strogatz", "newman_watts"):
+        k = number("k")  # the ring lattice needs an even k with 2 <= k < n
+        if k is None or k != int(k) or int(k) % 2 or not 2 <= k < n:
             return None
-        ring = math.ceil(n * k / 2)
+        ring = n * int(k) // 2
         # Newman-Watts keeps the ring and adds at most one shortcut per ring edge
         edges = min(pairs, 2 * ring if family == "newman_watts" else ring)
         return edges, edges
+    if family == "random_regular":
+        d = number("d")  # an integer degree 1 <= d < n, with n * d even
+        if d is None or d != int(d) or not 1 <= d < n or (n * int(d)) % 2:
+            return None
+        return n * int(d) // 2, n * int(d) // 2
     return None
 
 
-def _check_graph_memory(family: str, params: dict, n: int, realizations: int | None) -> None:
-    """Refuse graphs whose edges would exceed :data:`MAX_GRAPH_GB`, before generating any.
+def _generation_bytes(family: str, params: dict, n: int) -> int | None:
+    """Peak bytes allocated while one graph of ``family`` on ``n`` nodes is generated."""
+    counts = _graph_edges(family, params, n)
+    if counts is None:
+        return None
+    return _GENERATION_BYTES[family] * counts[1] + _GENERATION_OVERHEAD
 
-    Checks generating one graph, and keeping ``realizations`` of them (one graph when None).
+
+def _check_graph_memory(family: str, params: dict, n: int, realizations: int | None) -> None:
+    """Refuse graphs that would take more than :data:`MAX_GRAPH_GB`, before generating any.
+
+    Checks generating one graph (what generation allocates at its peak), and keeping
+    ``realizations`` of them (16 bytes per edge; nothing when ``realizations`` is None).
     """
     counts = _graph_edges(family, params, n)
     if counts is None:
         return
-    kept, generated = counts
+    kept, drawn = counts
     limit = MAX_GRAPH_GB * 1e9
-    one = max(kept, generated)
-    if _EDGE_BYTES * one > limit:
-        what = "pairs drawn" if generated > kept else "edges"
+    per = _GENERATION_BYTES[family]
+    generating = per * drawn + _GENERATION_OVERHEAD
+    if generating > limit:
+        what = "pairs drawn" if family in ("complete", "erdos_renyi") else "edges"
+        largest = _largest_fitting_n(family, params, n, limit)
+        fits = (
+            f"at most num_system = {largest:,} fits for this family and these parameters; "
+            "choose a smaller num_system or a sparser graph"
+            if largest is not None
+            else "no num_system fits these parameters; choose a sparser graph (a smaller k or d)"
+        )
         raise ValueError(
             f"graph ({family}): one graph on num_system = {n:,} qubits takes about "
-            f"{_EDGE_BYTES * one / 1e9:.1f} GB ({one:,} {what} at {_EDGE_BYTES} bytes; limit "
-            f"{MAX_GRAPH_GB:g} GB): at most num_system = "
-            f"{_largest_fitting_n(family, params, n, limit):,} fits for this family and these "
-            "parameters; choose a smaller num_system or a sparser graph"
+            f"{generating / 1e9:.1f} GB while it is generated ({drawn:,} {what} at about "
+            f"{per} bytes each; limit {MAX_GRAPH_GB:g} GB): {fits}"
         )
     if realizations is not None and _EDGE_BYTES * kept * realizations > limit:
         raise ValueError(
@@ -1472,21 +1513,34 @@ def _check_graph_memory(family: str, params: dict, n: int, realizations: int | N
         )
 
 
-def _largest_fitting_n(family: str, params: dict, n: int, limit: float) -> int:
-    """The largest num_system below ``n`` at which one graph of ``family`` fits in ``limit``."""
+def _largest_fitting_n(family: str, params: dict, n: int, limit: float) -> int | None:
+    """The largest num_system below ``n`` that the family accepts with these parameters and
+    at which one graph fits in ``limit``; None if there is none."""
 
-    def fits(m: int) -> bool:
-        counts = _graph_edges(family, params, m)
-        return counts is None or _EDGE_BYTES * max(counts) <= limit
+    def accepted(m: int) -> bool:
+        return _graph_edges(family, params, m) is not None
 
-    low, high = 2, n  # fits(low) holds: a graph on 2 nodes has at most one edge
+    def small(m: int) -> bool:
+        # A size the family rejects is priced as its neighbour below (random_regular rejects
+        # an odd n * d) or, when that is rejected too, counts as small: below the range.
+        size = _generation_bytes(family, params, m)
+        if size is None:
+            size = _generation_bytes(family, params, m - 1)
+        return size is None or size <= limit
+
+    # Every family's bound grows with n and its range is n above some minimum, so small()
+    # holds up to one size and fails above it.
+    low, high = 2, n
     while high - low > 1:
         mid = (low + high) // 2
-        if fits(mid):
+        if small(mid):
             low = mid
         else:
             high = mid
-    return low
+    for m in (low, low - 1):  # an odd n * d is next to an even one
+        if m >= 2 and accepted(m) and small(m):
+            return m
+    return None
 
 
 def _build_weights(weights: Any, edges: np.ndarray, n: int) -> np.ndarray:
@@ -1776,8 +1830,11 @@ def _code_columns_us(n: int, words: int) -> float:
     return 1e-3 * (64 * words) * (2 * n) * (24.0 + 0.15 * code_words)
 
 
-def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit) -> float:
+def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = None) -> float:
     """Microseconds (one thread) to evaluate one probe at one checkpoint, pessimistically.
+
+    ``single`` prices the erasure scans as in the single-reference picture (True) or the
+    purification picture (False); by default, as in the picture of ``mc``.
 
     The erasure scans that stop at the code's first failure (``contiguous_distance``,
     ``erasure_first_failure``) cost what the code makes them: they are priced for the worst
@@ -1791,7 +1848,8 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit) -> float:
     words = (num_qubits + 63) // 64
     code_words = (2 * n + 63) // 64
     sizes = [len(region) for region in p.regions]
-    single = mc.reference == "single"
+    if single is None:
+        single = mc.reference == "single"
     if p.kind == "code_dimension":
         return 1.0 + 0.06 * n
     if p.kind in ("entropy", "half_cut"):
@@ -1885,7 +1943,7 @@ def _generation_us(graph: Any, n: int) -> float:
 
     ``erdos_renyi`` draws a random number for every pair, and ``random_regular``
     redraws its pairing until the graph is simple, about exp((d**2 - 1) / 4)
-    times for degree d (at most 1000).
+    times for degree d, at most ``max_tries`` (default 1000) times.
     """
     family = graph.get("family") if isinstance(graph, dict) else None
     us = 300.0
@@ -1893,10 +1951,15 @@ def _generation_us(graph: Any, n: int) -> float:
         us += 0.6 * (n * (n - 1) // 2)
     elif family == "random_regular":
         d = graph.get("d")
+        cap = graph.get("max_tries", 1000)
+        if not isinstance(cap, (int, float)) or isinstance(cap, bool) or not cap >= 1:
+            cap = 1000  # not a count: the family reports it
         if isinstance(d, (int, float)) and not isinstance(d, bool) and 0 < d < n:
             exponent = (float(d) ** 2 - 1.0) / 4.0
-            tries = 1000.0 if exponent > math.log(1000.0) else math.exp(exponent)
-            us += 2.0 * tries * n * d
+            # math.log takes ints of any size; an infinite float cap stays infinite
+            log_cap = math.inf if isinstance(cap, float) and cap == math.inf else math.log(cap)
+            # in logs, and capped, so that absurd degrees and caps stay finite
+            us += 2.0 * math.exp(min(exponent, log_cap, 400.0)) * n * d
     return us
 
 
@@ -1978,14 +2041,15 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
     :data:`SYNC_ENSEMBLE_MAX_SECONDS`, the trajectory count (every circuit of a
     graph collection when ``trajectories`` is omitted) and the memory the
     result needs. Trajectories that stop early (``stop_when_purified``) make
-    real runs faster.
+    real runs faster. ``notes`` (when present) says where the estimate can be
+    too low.
     """
     import numba
 
     mc = _build_spec(spec)
     trajectories = _trajectory_count(mc, trajectories)
     seconds = _estimate_seconds(spec, mc, trajectories)
-    return {
+    out: dict[str, Any] = {
         "estimated_seconds": _num(seconds),
         "trajectories": trajectories,
         "result_megabytes": _num(_result_bytes(mc, trajectories) / 1e6),
@@ -1993,6 +2057,40 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
     }
+    notes = _estimate_notes(mc)
+    if notes:
+        out["notes"] = notes
+    return out
+
+
+_SCAN_KINDS = ("contiguous_distance", "erasure_first_failure")  # stop at the first failure
+
+
+def _estimate_notes(mc: mipt.MonitoredCircuit) -> list[str]:
+    """Where the estimate of ``mc`` can be too low, one sentence each.
+
+    The scans that stop at a code's first failure are priced for the worst case only with a
+    single reference (:func:`_probe_us`); in the purification picture, a code whose first
+    failures are near n / 2 makes them cost up to their single-reference price.
+    """
+    scans = [p for p in mc.probes if p.kind in _SCAN_KINDS]
+    if not scans or mc.reference == "single":
+        return []
+    priced = worst = 0.0
+    for p in scans:
+        evaluations = len(mc.probe_layers(p.name))
+        priced += evaluations * _probe_us(p, mc)
+        worst += evaluations * _probe_us(p, mc, single=True)
+    factor = worst / priced
+    shown = f"{factor:.0f}" if factor >= 10 else f"{factor:.1f}"
+    kinds = sorted({p.kind for p in scans})
+    return [
+        f"{' and '.join(kinds)} {'is' if len(kinds) == 1 else 'are'} priced for codes whose "
+        "erasures fail well before n / 2 qubits; a code "
+        f"whose first failures are near n / 2 (low rate, large distance) can make "
+        f"{'it' if len(kinds) == 1 else 'them'} take up to about {shown} times "
+        f"{'its' if len(kinds) == 1 else 'their'} estimate"
+    ]
 
 
 # ---------------------------------------------------------------------------

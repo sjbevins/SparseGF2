@@ -19,9 +19,12 @@ about 3 (3.5 or more at n = 512 for every case here) leaves room for the referen
 probes to scale differently between machines.
 """
 
+import functools
 import math
+import re
 import statistics
 import time
+import tracemalloc
 
 import numba
 import numpy as np
@@ -136,6 +139,7 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
         ({"kind": "contiguous_distance"}, "monitored", 2),
         ({"kind": "entropy_profile"}, "purification", 4),
         ({"kind": "erasure_lost_profile", "samples": 10}, "purification", 1),
+        ({"kind": "erasure_lost_profile", "samples": 10}, "single", 1),
         ({"kind": "erasure_first_failure", "samples": 100}, "single", 1),
         ({"kind": "erasure_first_failure", "samples": 100}, "monitored", 2),
         ({"kind": counts, "max_size": 1}, "purification", 2),
@@ -179,6 +183,59 @@ def test_every_probe_costs_at_most_its_estimate():
     assert not under, "estimate below the measured cost:\n" + "\n".join(under)
 
 
+def _every_thread(mc, threads: int):
+    return lambda: mc.run(threads, seed=7, num_threads=threads)
+
+
+def test_one_trajectory_per_thread_costs_at_most_its_estimate():
+    """One trajectory per thread on every thread: ``estimate_ensemble``'s kernel term against
+    the wall time, for the probes with the smallest all-threads margins in
+    benchmarks/results/probe_cost.md (entropy_profile and counts at w = 2, n = 512).
+
+    A busy thread runs slower than a thread alone (all-core clocks, SMT siblings, shared
+    memory bandwidth); ``api._parallel_threads`` prices each of T busy threads at
+    1 / (1 + 0.04 (T - 1)) of a lone one, and that model is what this checks. The measured
+    time is normalised with the one-thread reference workload, as above. At 32 threads on
+    the fitting machine, with other processes running, the estimate was 4.0 and 3.8 times
+    the normalised wall time. A runner with 2 to 4 threads cannot make this flaky: the model
+    gives a busy thread 0.89 or more of a lone one there, so even SMT siblings at half speed
+    leave these probes' one-thread margin (3.5 or more) at 1.75 or more.
+    """
+    threads = numba.get_num_threads()
+    n = 16 if numba.config.DISABLE_JIT else 512  # JIT-free kernels time the interpreter
+    rows = []
+    reference_times = []
+    counts = {"kind": "uncorrectable_region_counts", "max_size": 2}
+    for probe, evaluations in (({"kind": "entropy_profile"}, 4), (counts, 2)):
+        base_spec, probed_spec = _specs(n, probe, "purification", evaluations)
+        base, probed = api._build_spec(base_spec), api._build_spec(probed_spec)
+        # the kernel term of estimate_ensemble (its overhead and setup cancel)
+        estimate = api._estimate_seconds({}, probed, threads) - api._estimate_seconds(
+            {}, base, threads
+        )
+        assert math.isfinite(estimate) and estimate > 0, probe
+        if numba.config.DISABLE_JIT:
+            continue
+        reference_times.append(_median_seconds(_reference_workload, 5))
+        _every_thread(probed, threads)()  # warm-up: compiled, and every thread started
+        _every_thread(base, threads)()
+        with_probe = _median_seconds(_every_thread(probed, threads), 5)
+        without = _median_seconds(_every_thread(base, threads), 5)
+        rows.append((probe, estimate, with_probe - without))
+    if numba.config.DISABLE_JIT:
+        return
+    reference_times.append(_median_seconds(_reference_workload, 5))
+    speed = REFERENCE_SECONDS / statistics.median(reference_times)
+    lines = [
+        f"{p['kind']} on {threads} threads: estimate {est * 1e3:.3g} ms, wall {wall * 1e3:.3g} "
+        f"ms here = {wall * speed * 1e3:.3g} ms on the fitting machine "
+        f"(ratio {est / max(wall * speed, 1e-12):.2f})"
+        for p, est, wall in rows
+    ]
+    under = [line for line, (_, est, wall) in zip(lines, rows, strict=True) if est < wall * speed]
+    assert not under, "estimate below the measured wall time:\n" + "\n".join(under)
+
+
 # ---------------------------------------------------------------------------
 # graph collections are bounded before any graph is generated
 # ---------------------------------------------------------------------------
@@ -188,10 +245,13 @@ RANDOM_FAMILIES = ("watts_strogatz", "newman_watts", "erdos_renyi", "random_regu
 
 
 def _no_generation(monkeypatch) -> None:
-    def generated(*args, **kwargs):
-        raise AssertionError("a graph was generated")
-
+    """Every family raises when called; each keeps its signature, which the API reads."""
     for name in (*RANDOM_FAMILIES, "complete", "cycle"):
+
+        @functools.wraps(getattr(graphs, name))
+        def generated(*args, **kwargs):
+            raise AssertionError("a graph was generated")
+
         monkeypatch.setattr(graphs, name, generated)
 
 
@@ -230,59 +290,178 @@ def test_a_graph_collection_too_large_is_refused_before_any_graph_is_generated(
 
 
 @pytest.mark.parametrize(
-    ("graph", "n", "what"),
+    ("graph", "n"),
     [
-        ({"family": "complete"}, 65_536, "edges"),
-        ({"family": "erdos_renyi", "p": 1e-4, "seed": 1}, 20_000, "pairs drawn"),
-        ({"family": "erdos_renyi", "p": 1e-4, "seed": 1, "realizations": 2}, 20_000, "pairs drawn"),
+        ({"family": "complete"}, 65_536),
+        ({"family": "erdos_renyi", "p": 1e-4, "seed": 1}, 20_000),
+        ({"family": "erdos_renyi", "p": 1e-4, "seed": 1, "realizations": 2}, 20_000),
+        # 72 million pairs: 1.2 GB at 16 bytes each, but generating them allocates 3.5 GB
+        ({"family": "erdos_renyi", "p": 1e-4, "seed": 1}, 12_000),
     ],
 )
-def test_one_graph_too_large_is_refused_before_it_is_generated(
-    monkeypatch, tmp_path, graph, n, what
-):
-    # Both families hold (or draw) every one of the n (n - 1) / 2 pairs, 16 bytes each.
-    largest = max(m for m in range(2, n + 1) if 16 * (m * (m - 1) // 2) <= api.MAX_GRAPH_GB * 1e9)
+def test_one_graph_too_large_is_refused_before_it_is_generated(monkeypatch, tmp_path, graph, n):
+    # Both families build every one of the n (n - 1) / 2 pairs: triu_indices, the stacked
+    # pairs and their int64 copy, 48 bytes per pair at the peak (measured with tracemalloc,
+    # see test_the_generation_bound_covers_what_generation_allocates), plus 64 KiB.
+    limit = api.MAX_GRAPH_GB * 1e9
+    largest = max(m for m in range(2, n + 1) if 48 * (m * (m - 1) // 2) + 65_536 <= limit)
+    assert largest == 9129
     _no_generation(monkeypatch)
     message = (
-        rf"graph \({graph['family']}\): one graph on num_system = {n:,} qubits takes about .* "
-        rf"{what} .* at most num_system = {largest:,} fits"
+        rf"graph \({graph['family']}\): one graph on num_system = {n:,} qubits takes about "
+        rf".* GB while it is generated \(.* pairs drawn at about 48 bytes each; .*\): at most "
+        rf"num_system = {largest:,} fits"
     )
     _refused_everywhere(dict(SPEC, num_system=n, graph=graph), message, tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("graph", "accepted"),
+    [
+        # a degree so large that no num_system the family accepts (k < n) fits
+        ({"family": "watts_strogatz", "k": 20_000, "beta": 0.1, "seed": 1}, None),
+        ({"family": "newman_watts", "k": 20_000, "p": 0.1, "seed": 1}, None),
+        ({"family": "random_regular", "d": 30_001, "seed": 1}, None),
+        # one that fits at a smaller n, which must be one the family accepts
+        ({"family": "watts_strogatz", "k": 1000, "beta": 0.1, "seed": 1}, lambda m: m > 1000),
+        # an odd degree needs an even n (n * d even)
+        ({"family": "random_regular", "d": 1001, "seed": 1}, lambda m: m > 1001 and m % 2 == 0),
+    ],
+)
+def test_the_suggested_num_system_is_one_the_family_accepts(monkeypatch, graph, accepted):
+    _no_generation(monkeypatch)
+    spec = dict(SPEC, num_system=65_536, graph=graph)
+    with pytest.raises(ValueError, match="takes about") as info:
+        api.estimate_ensemble(spec, 1)
+    found = re.search(r"at most num_system = ([\d,]+) fits", str(info.value))
+    if accepted is None:
+        assert found is None and "no num_system fits these parameters" in str(info.value)
+        return
+    assert found is not None, str(info.value)
+    m = int(found.group(1).replace(",", ""))
+    assert accepted(m), m
+    # there the bound passes, so generation starts (and the patched family raises)
+    with pytest.raises(AssertionError, match="a graph was generated"):
+        api.estimate_ensemble(dict(spec, num_system=m), 1)
+
+
 def test_a_graph_collection_that_fits_runs(monkeypatch):
-    # Watts-Strogatz at n = 16, k = 4: 32 edges, 512 bytes; a limit that holds three of them
-    monkeypatch.setattr(api, "MAX_GRAPH_GB", 3.5 * 512 / 1e9)
-    bank = {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 3, "realizations": 3}
+    # Watts-Strogatz at n = 16, k = 4: 32 edges, 512 bytes kept per graph; a limit that holds
+    # 200 of them (and generating one graph, 512 bytes per edge plus 64 KiB, fits too)
+    monkeypatch.setattr(api, "MAX_GRAPH_GB", 200.5 * 512 / 1e9)
+    bank = {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 3, "realizations": 200}
     out = api.run_ensemble(dict(SPEC, graph=bank), seed=1)
-    assert out["num_trajectories"] == 3
-    with pytest.raises(ValueError, match="at most 3 realizations fit at num_system = 16"):
-        api.estimate_ensemble(dict(SPEC, graph=dict(bank, realizations=4)))
+    assert out["num_trajectories"] == 200
+    with pytest.raises(ValueError, match="at most 200 realizations fit at num_system = 16"):
+        api.estimate_ensemble(dict(SPEC, graph=dict(bank, realizations=201)))
+
+
+GRAPH_CASES = [
+    ("cycle", {}),
+    ("path", {}),
+    ("complete", {}),
+    ("lattice_2d", {"periodic": True}),
+    ("lattice_2d", {"periodic": False}),
+    ("watts_strogatz", {"k": 4, "beta": 0.3}),
+    ("watts_strogatz", {"k": 6, "beta": 1.0}),
+    ("newman_watts", {"k": 4, "p": 1.0}),
+    ("erdos_renyi", {"p": 0.5}),
+    ("erdos_renyi", {"p": 0.05}),
+    ("random_regular", {"d": 3}),
+]
+
+
+def _generate(family: str, params: dict, n: int, seed: int | None):
+    if family == "lattice_2d":  # four rows: rows * cols = n
+        return graphs.lattice_2d(4, n // 4, **params)
+    extra = {"seed": seed} if family in RANDOM_FAMILIES and seed is not None else {}
+    return getattr(graphs, family)(n, **params, **extra)
+
+
+@pytest.mark.parametrize(("family", "params"), GRAPH_CASES)
+def test_the_edge_bound_covers_every_generated_graph(family, params):
+    for n in (8, 32, 64):
+        bound = {"rows": 4, "cols": n // 4, **params} if family == "lattice_2d" else params
+        kept, drawn = api._graph_edges(family, bound, n)
+        assert kept <= drawn
+        for seed in range(5) if family in RANDOM_FAMILIES else [None]:
+            edges = _generate(family, params, n, seed)
+            assert len(edges) <= kept, (family, params, n, seed)
+
+
+# ---------------------------------------------------------------------------
+# the estimate says where it can be too low
+# ---------------------------------------------------------------------------
+
+SCAN_SPEC = {
+    "num_system": 256,
+    "graph": {"family": "cycle"},
+    "layers": 10,
+    "measurement_rate": 0.1,
+    "reference": "purification",
+    "checkpoints": 5,
+}
 
 
 @pytest.mark.parametrize(
-    ("family", "params"),
+    "probes",
     [
-        ("cycle", {}),
-        ("path", {}),
-        ("complete", {}),
-        ("watts_strogatz", {"k": 4, "beta": 0.3}),
-        ("watts_strogatz", {"k": 6, "beta": 1.0}),
-        ("newman_watts", {"k": 4, "p": 1.0}),
-        ("erdos_renyi", {"p": 0.5}),
-        ("erdos_renyi", {"p": 0.05}),
-        ("random_regular", {"d": 3}),
+        [{"kind": "erasure_first_failure"}],
+        [{"kind": "contiguous_distance"}],
+        [{"kind": "contiguous_distance"}, {"kind": "erasure_first_failure", "checkpoints": 10}],
     ],
 )
-def test_the_edge_bound_covers_every_generated_graph(family, params):
-    for n in (8, 32, 64):
-        kept, drawn = api._graph_edges(family, params, n)
-        assert kept <= drawn
-        seeds = range(5) if family in RANDOM_FAMILIES else [None]
-        for seed in seeds:
-            extra = {} if seed is None else {"seed": seed}
-            edges = getattr(graphs, family)(n, **params, **extra)
-            assert len(edges) <= kept, (family, params, n, seed)
+def test_purification_scans_carry_their_worst_case_in_a_note(probes):
+    spec = dict(SCAN_SPEC, probes=[{"kind": "code_dimension"}, *probes])
+    notes = api.estimate_ensemble(spec, 10)["notes"]
+    assert len(notes) == 1
+    kinds = sorted(p["kind"] for p in probes)
+    assert notes[0].startswith(" and ".join(kinds))
+    assert "near n / 2" in notes[0]
+    shown = re.search(r"up to about (\S+) times", notes[0]).group(1)
+    assert float(shown) > 1  # the single-reference price is the higher one
+    # one sentence, with the factor rounded: to a whole number from 10 on, else to 0.1
+    assert ". " not in notes[0] and "\n" not in notes[0]
+    assert re.fullmatch(r"\d+" if float(shown) >= 10 else r"\d\.\d", shown), shown
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        dict(SCAN_SPEC, reference="single", probes=[{"kind": "erasure_first_failure"}]),
+        dict(SCAN_SPEC, reference="single", probes=[{"kind": "contiguous_distance"}]),
+        dict(SCAN_SPEC, probes=[{"kind": "code_dimension"}, {"kind": "entropy_profile"}]),
+        dict(SCAN_SPEC, probes=[{"kind": "uncorrectable_region_counts", "max_size": 2}]),
+    ],
+)
+def test_other_specs_have_no_note(spec):
+    assert "notes" not in api.estimate_ensemble(spec, 10)
+
+
+@pytest.mark.parametrize(("family", "params"), GRAPH_CASES)
+def test_the_generation_bound_covers_what_generation_allocates(family, params):
+    # tracemalloc sees numpy's arrays and the interpreter's objects alike
+    _generate(family, params, 64, 1)  # anything imported or compiled on first use
+    for n in (8, 64, 512):
+        bound = {"rows": 4, "cols": n // 4, **params} if family == "lattice_2d" else params
+        tracemalloc.start()
+        try:
+            _generate(family, params, n, 1)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert peak <= api._generation_bytes(family, bound, n), (family, params, n, peak)
+
+
+def test_random_regular_is_priced_at_its_own_max_tries():
+    # d = 7 needs about exp(12) = 162,755 pairings on average, above the default cap of 1000
+    default = api._generation_us({"family": "random_regular", "d": 7}, 64)
+    allowed = api._generation_us({"family": "random_regular", "d": 7, "max_tries": 10**6}, 64)
+    assert allowed > 100 * default
+    for cap in (10**400, math.inf):  # absurd caps stay finite
+        assert math.isfinite(
+            api._generation_us({"family": "random_regular", "d": 60_000, "max_tries": cap}, 65_536)
+        )
 
 
 def test_absurd_inputs_give_finite_estimates():
