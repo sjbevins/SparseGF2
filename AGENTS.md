@@ -230,7 +230,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   shows 17 sizes); the other notes say whether anything else was cut.
 * Background jobs live in the server process. If the process restarts, the job ids are
   lost but the saved chunks are not: call `start_ensemble_job` again with the same
-  `output_dir` to resume.
+  `output_dir` to resume. One process writes to an `output_dir` at a time (it holds
+  `output_dir/.lock`): while a job, or another process such as a CLI run, writes there,
+  the next writer is refused with a message naming it. Wait for it or cancel it; a lock
+  left by a process that has ended is taken over.
 * Compiled kernels are cached on disk and recompiled automatically whenever any kernel
   source (or the Numba or Python version) changes, so the first import and run after an
   update is slower (10 to 30 s). Kernels that a process started before the update saves

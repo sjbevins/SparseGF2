@@ -2,8 +2,10 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +220,23 @@ def test_ensemble_ctrl_c_exits_130_with_partial_summary(capsys, spec_file, tmp_p
     assert data["job"]["status"] in ("cancelled", "completed")
     assert data["num_trajectories"] == data["job"]["trajectories_done"] > 0
     assert "rerun the same command to resume" in err
+    assert not (out_dir / ".lock").exists()  # the rerun is not refused
+
+
+def test_ensemble_refuses_an_output_dir_another_process_writes_to(capsys, spec_file, tmp_path):
+    out_dir = tmp_path / "held"
+    out_dir.mkdir()
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    holder = {"pid": os.getpid(), "host": socket.gethostname(), "started": started}
+    (out_dir / ".lock").write_text(json.dumps(holder), encoding="utf-8")
+    for extra in ([], ["--chunk-size", "5"]):
+        code, data = run_json(
+            capsys, "ensemble", str(spec_file), "--trajectories", "10", "--seed", "1",
+            "--output-dir", str(out_dir), *extra,
+        )  # fmt: skip
+        assert code == 2, data
+        assert f"another process (pid {os.getpid()} on host" in data["error"]["message"]
+    assert [p.name for p in out_dir.iterdir()] == [".lock"]
 
 
 def test_ensemble_graph_file_collection_runs_every_circuit_without_trajectories(capsys, tmp_path):

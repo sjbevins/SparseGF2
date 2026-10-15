@@ -116,7 +116,8 @@ one run_ensemble call with the same spec and seed. To resume after a cancel or r
 call again with the same spec and output_dir; seed and trajectories may be omitted (the
 stored seed and target are used, also for a graph collection). Only a larger trajectories
 extends a run. A spec that builds another protocol, or a changed graph file, is refused
-before anything runs. Poll with job_status, then call load_results(output_dir).
+before anything runs, and so is a directory another job or process is writing to (one
+writer per output_dir). Poll with job_status, then call load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,
@@ -145,7 +146,8 @@ Example: {}"""
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
 cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
-spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run.
+spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run. A
+"merge pending" left by a finished job is completed here.
 
 Example: {"path": "runs/n128_p012"}"""
 

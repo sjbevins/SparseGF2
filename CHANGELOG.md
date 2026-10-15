@@ -88,6 +88,31 @@
   A single graph is refused with the API's message, which now names `--trajectories`
   and every case where the count may be omitted, still exit code 2; a non-object
   `graph` is now exit 2 instead of an internal error.
+* **One writer per output directory:** `start_ensemble_job`, `run_ensemble` with an
+  `output_dir`, and so the CLI, hold `output_dir/.lock` (created with
+  `O_CREAT | O_EXCL`; it records pid, host and start time) while they write, and
+  release it when they end, also on an error, a cancel or Ctrl-C. A second writer, in
+  another process too, is refused before anything runs: `another process (pid P on host
+  H, started T) is writing to DIR; wait for it to finish or cancel it` (a job of the
+  same process is named instead, as before). Only jobs of the same process used to be
+  refused, so the MCP server's job and a CLI resume of the same directory could both
+  write, and with different chunk sizes both failed and left the directory unreadable. A
+  lock whose process is gone (same host; checked with `os.kill(pid, 0)`, or on Windows
+  with `OpenProcess` and `GetExitCodeProcess`, and on Windows also when its pid now
+  names a process created after the lock) is taken over; a lock from another host
+  always holds.
+* **Overlapping chunks merge:** trajectories saved twice (chunks of two writers with
+  different chunk sizes, or chunks a merge could not delete) are kept once when a
+  directory is read or merged, instead of failing the merge. A part of another run is
+  still refused, even when all of its trajectories are covered.
+* **Merges survive readers (Windows):** replacing `result.npz` or deleting a chunk while
+  a reader holds the file (a notebook calling `EnsembleResult.load`, or `load_results`)
+  is retried with a backoff of about 5 s in total. If `result.npz` is still in use, the
+  job ends `completed` with the note `merge pending: result.npz is in use; the chunk
+  files hold the data, and the next load_results or start_ensemble_job merges them`,
+  instead of `failed`, and the next `load_results` (when no writer holds the
+  directory) or `start_ensemble_job` merges them. `load_results` retries a file that a
+  merge is replacing in the same way instead of failing with "could not read results".
 
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 

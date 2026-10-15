@@ -438,6 +438,21 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
 * Chunks: `chunk_size` trajectories each (default about 10 estimated seconds, and at
   least 4 per thread). Each chunk is saved atomically to `output_dir/chunks/` when it
   finishes. On completion the chunks are merged into `output_dir/result.npz` and removed.
+  On Windows a file another process holds open cannot be replaced or deleted, so the
+  merge retries for about 5 s while a reader holds `result.npz` or a chunk. If
+  `result.npz` is still in use, the job ends `completed` with the note `merge pending:
+  result.npz is in use; the chunk files hold the data, and the next load_results or
+  start_ensemble_job merges them`; nothing is lost, and every read includes the chunks.
+* One writer per directory: a job, and `run_ensemble` with an `output_dir`, hold
+  `output_dir/.lock` (pid, host and start time) while they write and release it when
+  they end (also after an error, a cancel or Ctrl-C). Another writer, from this process
+  or another one (the MCP server and the CLI, say), is refused before anything runs:
+  `another process (pid P on host H, started T) is writing to DIR; wait for it to finish
+  or cancel it`, or `job ID is already writing to DIR; poll it or cancel it` for a job
+  of the same process. A lock whose process has ended on the same host (a process that
+  was killed, say) is taken over by the next writer; a lock from another host always
+  holds. Readers (`load_results`, `EnsembleResult.load`) take no lock, except that
+  `load_results` takes it for a moment to finish a pending merge (below).
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.
@@ -477,14 +492,17 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   thread.
 * Lifetime: jobs live in the process that started them. After a restart, resume from the
   directory.
-* Crash safety: chunks and `result.npz` are written atomically, and chunks already merged
-  into `result.npz` are ignored, so a directory stays readable and resumable whenever the
-  process dies.
+* Crash safety: chunks and `result.npz` are written atomically, and trajectories saved
+  twice (chunks already merged into `result.npz`, or overlapping chunks of two writers
+  with different chunk sizes) are kept once, so a directory stays readable and resumable
+  whenever the process dies. `load_results` merges the chunks of a finished run whose
+  merge is pending, unless a writer holds the directory.
 
 The CLI runs the same machinery in the foreground:
 `sparsegf2 ensemble spec.json --trajectories 100000 --output-dir runs/big --chunk-size 5000`
 prints progress to stderr. Ctrl-C stops it after the current chunk, prints the partial
-summary and exits with code 130; rerunning the same command resumes it.
+summary and exits with code 130; rerunning the same command resumes it (also after the
+process was killed: the rerun takes over the lock the dead process left).
 
 ---
 

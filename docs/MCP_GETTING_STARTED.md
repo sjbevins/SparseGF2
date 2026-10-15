@@ -642,6 +642,7 @@ reports the absolute paths actually written. Parent directories are created as n
                     entry per resume under "resumes"
   chunks/           only while a job runs or after a cancel: traj_000000000000.npz, ...
                     (merged into result.npz and deleted when the job completes)
+  .lock             only while a process writes here: its pid, host and start time
 ```
 
 `run_ensemble` refuses an `output_dir` that already holds a run, so a finished run is
@@ -738,6 +739,18 @@ gives up on slow tool calls, warm up first with the script of section 4 or a tin
 
 **`output_dir ... already holds a run`.** `run_ensemble` never overwrites. Use a new
 directory, or `start_ensemble_job` to resume or extend the run that is there.
+
+**`another process (pid P on host H, started T) is writing to DIR`.** One process writes
+to an output directory at a time, and another one (a CLI run, a script, a second server)
+is writing there now. Wait for it to finish, or stop it, then repeat the call. A lock
+left by a process that has ended on this machine is taken over automatically; a lock
+from another machine (a shared drive) is not, so delete `DIR/.lock` by hand only once
+you are sure that no process is writing there.
+
+**A job ends `completed` with `merge pending: result.npz is in use`.** Something (a
+notebook, say) held `result.npz` open for more than about 5 s when the job merged its
+chunks, which Windows does not allow. Nothing is lost: every read includes the chunks,
+and the next `load_results` or `start_ensemble_job` on the directory merges them.
 
 **The results are not where you expected.** A relative `output_dir` was resolved against
 the server's working directory. Every result's `files` entry (and every job status's

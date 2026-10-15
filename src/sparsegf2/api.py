@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import inspect
 import json
@@ -49,6 +50,7 @@ import os
 import platform
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import textwrap
@@ -61,7 +63,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -133,6 +135,19 @@ _RESULT_FILE = "result.npz"
 _CHUNK_DIR = "chunks"
 _SPEC_FILE = "spec.json"
 _PROVENANCE_FILE = "provenance.json"
+_LOCK_FILE = ".lock"  # held by the one process writing to an output directory
+_TAKEOVER_FILE = ".lock.takeover"  # the turn of a process removing a stale lock
+
+# Windows refuses to replace or delete a file that another process holds open (a
+# notebook reading result.npz, say), and to open one that is being replaced; that
+# passes within moments, so these operations are retried with this backoff (seconds,
+# about 5 s in total) before they fail.
+_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 1.6)
+
+_MERGE_PENDING = (
+    "merge pending: result.npz is in use; the chunk files hold the data, and the next "
+    "load_results or start_ensemble_job merges them"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2205,10 +2220,31 @@ def _atomic_savez(path: Path, arrays: dict[str, np.ndarray]) -> None:
     os.replace(tmp, path)
 
 
+_T = TypeVar("_T")
+
+
+def _retrying(
+    action: Callable[[], _T], errors: tuple[type[OSError], ...] = (PermissionError,)
+) -> _T:
+    """``action()``, retried with the :data:`_RETRY_DELAYS` backoff while it raises ``errors``."""
+    for delay in _RETRY_DELAYS:
+        try:
+            return action()
+        except errors:
+            time.sleep(delay)
+    return action()
+
+
 def _atomic_save_result(result: mipt.EnsembleResult, path: Path) -> None:
+    """Save to a temporary file, then replace ``path`` (retried while a reader holds it)."""
     tmp = path.with_name(path.name + ".tmp.npz")
     result.save(tmp)
-    os.replace(tmp, path)
+    try:
+        _retrying(functools.partial(os.replace, tmp, path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _git_commit() -> str | None:
@@ -2374,10 +2410,14 @@ def _result_parts(out: Path) -> list[Path]:
 
 
 def _load_result_file(path: Path) -> mipt.EnsembleResult:
-    """Load one ``EnsembleResult.save`` file; anything else is reported as not a result."""
+    """Load one ``EnsembleResult.save`` file; anything else is reported as not a result.
+
+    ``FileNotFoundError`` and ``PermissionError`` pass through: a merge deleting
+    or replacing the file meanwhile raises them, and the caller retries.
+    """
     try:
         return mipt.EnsembleResult.load(path)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         raise
     except (
         OSError,
@@ -2394,23 +2434,32 @@ def _load_result_file(path: Path) -> mipt.EnsembleResult:
 
 
 def _load_parts_once(parts: list[Path]) -> mipt.EnsembleResult:
-    """Merge result.npz and chunks, skipping chunks that result.npz already contains.
+    """Merge result.npz and chunks, keeping each trajectory once.
 
-    A merge writes result.npz before deleting the chunks it absorbed, so a
-    crash (or a concurrent read) in between leaves chunks that overlap
-    result.npz; they are redundant, not a conflict.
+    Trajectory ``t`` depends only on ``(spec, seed, t)``, so a part's
+    trajectories that an earlier part already holds are redundant, not a
+    conflict, and are dropped: a merge writes result.npz before deleting the
+    chunks it absorbed (a crash, or a reader holding a chunk, in between
+    leaves chunks that overlap result.npz), and jobs run with different chunk
+    sizes save overlapping ranges. Only a part of the same run is trimmed; a
+    part of another run is refused, even when every trajectory it holds is
+    covered.
     """
     results: list[mipt.EnsembleResult] = []
     paths: list[Path] = []
     covered = 0
     for path in parts:
         part = _load_result_file(path)
-        if path.name != _RESULT_FILE and part.num_trajectories and part.trajectories[-1] < covered:
-            continue
+        if results and _same_run_as(results[0], part, overlap=True):
+            keep = np.asarray(part.trajectories) >= covered
+            if not keep.any():
+                continue
+            if not keep.all():
+                part = _rows(part, keep)
         results.append(part)
         paths.append(path)
         if part.num_trajectories:
-            covered = max(covered, int(part.trajectories[-1]) + 1)
+            covered = max(covered, int(np.max(part.trajectories)) + 1)
     try:
         merged = results[0] if len(results) == 1 else mipt.EnsembleResult.concatenate(results)
     except ValueError as exc:
@@ -2453,10 +2502,12 @@ def _strays(results: list[mipt.EnsembleResult], paths: list[Path]) -> str:
     )
 
 
-def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
+def _same_run_as(
+    first: mipt.EnsembleResult, part: mipt.EnsembleResult, *, overlap: bool = False
+) -> bool:
     """Whether ``part`` could be merged with ``first``: what ``EnsembleResult.concatenate``
     checks, without copying any data (contract, seed, protocol, probes, layers, version,
-    and no trajectory saved twice)."""
+    and, unless ``overlap``, no trajectory saved twice)."""
     return (
         part.randomness_contract == first.randomness_contract
         and mipt._seed_record(part) == mipt._seed_record(first)
@@ -2464,24 +2515,296 @@ def _same_run_as(first: mipt.EnsembleResult, part: mipt.EnsembleResult) -> bool:
         and list(part.values) == list(first.values)
         and np.array_equal(part.checkpoint_layers, first.checkpoint_layers)
         and part.version == first.version
-        and not np.intersect1d(first.trajectories, part.trajectories).size
+        and (overlap or not np.intersect1d(first.trajectories, part.trajectories).size)
+    )
+
+
+def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
+    """The trajectories of ``result`` that the boolean mask ``keep`` selects."""
+    share = float(np.count_nonzero(keep)) / result.num_trajectories
+    tau = result.purification_layer
+    return dataclasses.replace(
+        result,
+        trajectories=np.asarray(result.trajectories)[keep],
+        values={name: v[keep] for name, v in result.values.items()},
+        purification_layer=None if tau is None else tau[keep],
+        final_layer=result.final_layer[keep],
+        num_measurements=result.num_measurements[keep],
+        elapsed_seconds=result.elapsed_seconds * share,
+        snapshots={name: (g[keep], c[keep]) for name, (g, c) in result.snapshots.items()},
     )
 
 
 def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
-    """Read an output directory, retrying if a running job merges chunks meanwhile."""
-    for attempt in range(5):
+    """Read an output directory, retrying while a running job merges chunks meanwhile.
+
+    A merge deletes the chunks it absorbed (``FileNotFoundError`` for a reader
+    that listed them) and, on Windows, a file being replaced cannot be opened
+    for a moment (``PermissionError``).
+    """
+
+    def read() -> tuple[mipt.EnsembleResult | None, dict | None]:
+        meta = None
+        if (out / _SPEC_FILE).exists():
+            meta = json.loads((out / _SPEC_FILE).read_text(encoding="utf-8"))
+        parts = _result_parts(out)
+        return (_load_parts_once(parts) if parts else None), meta
+
+    return _retrying(read, (FileNotFoundError, PermissionError))
+
+
+def _merge_if_pending(out: Path, result: mipt.EnsembleResult, meta: dict | None) -> None:
+    """Merge the chunks of a finished run that its job could not merge (a reader held
+    result.npz), unless a writer holds the directory: a running job merges them itself."""
+    target = None if meta is None else meta.get("trajectories")
+    if not isinstance(target, int) or result.num_trajectories < target:
+        return
+    if not any(p.parent.name == _CHUNK_DIR for p in _result_parts(out)):
+        return
+    try:
+        lock = _lock_output_dir(out)
+    except (OSError, ValueError):  # another writer, or a directory this process cannot write
+        return
+    try:
+        with contextlib.suppress(OSError):  # still pending: the next call tries again
+            _merge_chunks(out)
+    finally:
+        lock.release()
+
+
+# ---------------------------------------------------------------------------
+# ensembles: one writer per output directory
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _DirLock:
+    """``output_dir/.lock``, held by the one process that writes to the directory."""
+
+    path: Path
+    data: bytes  # this holder's record, as written
+
+    def release(self) -> None:
+        """Delete the lock, if it is still this one (never another writer's)."""
+
+        def remove() -> None:
+            if self.path.read_bytes() == self.data:
+                self.path.unlink()
+
+        with contextlib.suppress(OSError):  # already gone, or still in use after the retries
+            _retrying(remove)
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether process ``pid`` is running on this machine (no dependency beyond the stdlib)."""
+    if pid <= 0:  # os.kill(0) and os.kill(-1) would address process groups
+        return False
+    if sys.platform == "win32":
+        return _windows_process(pid)[0]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # it runs, under another user
+        return True
+    return True
+
+
+def _process_started(pid: int) -> float | None:
+    """When process ``pid`` was created (Unix time), where that is cheap to ask (Windows)."""
+    if sys.platform == "win32" and pid > 0:
+        return _windows_process(pid)[1]
+    return None
+
+
+def _windows_process(pid: int) -> tuple[bool, float | None]:
+    """Whether process ``pid`` runs, and when it was created, from kernel32 (Windows only)."""
+    if sys.platform != "win32":
+        raise OSError("kernel32 exists on Windows only")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ERROR_ACCESS_DENIED: it runs, under an account this one may not query
+        return ctypes.get_last_error() == 5, None
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True, None  # unknown: never take over a lock that may be live
+        times = [wintypes.FILETIME() for _ in range(4)]  # creation, exit, kernel, user
+        created = None
+        if kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            ticks = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime  # 100 ns since 1601
+            created = ticks / 1e7 - 11_644_473_600.0
+        return code.value == 259, created  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+# A process created this long after a lock was taken is not the one that took it.
+_PID_REUSE_SECONDS = 60.0
+
+
+def _holder_alive(holder: dict) -> bool:
+    """Whether the process of this host that took a lock still runs.
+
+    Its id must name a running process, and one created before the lock was
+    taken: Windows soon gives the id of a process that ended to another one.
+    """
+    if not _process_alive(holder["pid"]):
+        return False
+    created = _process_started(holder["pid"])
+    try:
+        taken = datetime.fromisoformat(holder["started"]).timestamp()
+    except (TypeError, ValueError):
+        return True
+    return created is None or created < taken + _PID_REUSE_SECONDS
+
+
+def _lock_record(data: bytes) -> dict | None:
+    """The holder written in a lock file, or None if the file holds no complete record."""
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not {"pid", "host", "started"} <= set(record):
+        return None
+    pid = record["pid"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**31:
+        return None
+    return record if isinstance(record["host"], str) else None
+
+
+def _lock_holder(path: Path) -> tuple[bytes, dict | None] | None:
+    """The bytes of the lock file and the holder they record, or None if there is no lock.
+
+    A holder writes its record right after creating the file, so a record that
+    stays unreadable for a moment was left by a process that died in between
+    (the holder is then None).
+    """
+    data = b""
+    for delay in (0.05, 0.1, 0.2, None):
         try:
-            meta = None
-            if (out / _SPEC_FILE).exists():
-                meta = json.loads((out / _SPEC_FILE).read_text(encoding="utf-8"))
-            parts = _result_parts(out)
-            return (_load_parts_once(parts) if parts else None), meta
+            data = path.read_bytes()
         except FileNotFoundError:
-            if attempt == 4:
+            return None
+        except PermissionError:  # Windows: being deleted
+            data = b""
+        record = _lock_record(data)
+        if record is not None:
+            return data, record
+        if delay is not None:
+            time.sleep(delay)
+    return data, None
+
+
+_TAKEOVER_ABANDONED_SECONDS = 10.0
+
+
+def _remove_stale_lock(path: Path, seen: bytes) -> None:
+    """Delete a stale lock, but only if it still holds ``seen``, the bytes judged stale.
+
+    Processes that find a stale lock take turns, each creating
+    ``.lock.takeover`` with ``O_CREAT | O_EXCL``, and delete the lock only if
+    it still holds ``seen``. Between that check and the deletion the lock
+    cannot change: its holder is gone, every other process that would delete
+    it waits for its turn, and a new lock can be created only once it is
+    deleted. So a lock that another process has just taken over is never
+    deleted, and of the processes racing for a stale lock exactly one creates
+    the new one. A turn left behind by a process that died in it is freed
+    after :data:`_TAKEOVER_ABANDONED_SECONDS`.
+    """
+    guard = path.with_name(_TAKEOVER_FILE)
+    try:
+        os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        with contextlib.suppress(OSError):
+            if time.time() - guard.stat().st_mtime > _TAKEOVER_ABANDONED_SECONDS:
+                guard.unlink()
+        return
+    except PermissionError:  # Windows: the previous turn's file is being deleted
+        return
+    try:
+        if path.read_bytes() == seen:
+            path.unlink()
+    except (FileNotFoundError, PermissionError):  # gone, or in use: try again later
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            guard.unlink()
+
+
+def _held_message(out: Path, holder: dict) -> str:
+    """The refusal for a writer while ``holder`` holds the lock of ``out``."""
+    if holder["pid"] == os.getpid() and holder["host"] == socket.gethostname():
+        with _JOBS_LOCK:
+            jobs = [
+                job
+                for job in _JOBS.values()
+                if job.output_dir == out and job.status in ("queued", "running")
+            ]
+        if jobs:  # a job of this process: name it, so it can be polled or cancelled
+            return f"job {jobs[0].job_id} is already writing to {str(out)!r}; poll it or cancel it"
+    return (
+        f"another process (pid {holder['pid']} on host {holder['host']}, started "
+        f"{holder['started']}) is writing to {str(out)!r}; wait for it to finish or cancel it"
+    )
+
+
+def _lock_output_dir(out: Path) -> _DirLock:
+    """Take ``out/.lock`` for this process, or refuse because another writer holds it.
+
+    The lock is created with ``O_CREAT | O_EXCL``, so of several writers
+    exactly one gets it; it records the holder's pid, host and start time. A
+    lock of another host always holds (its process cannot be checked from
+    here). A lock of this host whose process is gone (:func:`_holder_alive`)
+    is stale and is taken over (:func:`_remove_stale_lock`). The holder
+    releases it with :meth:`_DirLock.release`, in a ``finally``.
+    """
+    path = out / _LOCK_FILE
+    host = socket.gethostname()
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    data = json.dumps({"pid": os.getpid(), "host": host, "started": started}).encode("utf-8")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    failure: OSError | None = None
+    for delay in (*_RETRY_DELAYS, None):
+        try:
+            fd = os.open(path, flags)
+        except FileExistsError:
+            held = _lock_holder(path)
+            if held is not None:
+                seen, holder = held
+                if holder is not None and (holder["host"] != host or _holder_alive(holder)):
+                    raise ValueError(_held_message(out, holder)) from None
+                _remove_stale_lock(path, seen)
+            failure = None
+        except PermissionError as exc:  # Windows: the previous lock is being deleted
+            failure = exc
+        else:
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    path.unlink()
                 raise
-            time.sleep(0.1)
-    raise AssertionError("unreachable")
+            return _DirLock(path, data)
+        if delay is None:
+            break
+        time.sleep(delay)
+    if failure is not None:
+        raise failure
+    raise ValueError(
+        f"could not take the lock {str(path)!r}: other processes keep changing it; retry, or "
+        f"delete it if no process is writing to {str(out)!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2513,8 +2836,9 @@ def run_ensemble(
     ``trajectories_per_second`` are wall-clock figures for the whole call,
     building the spec and its graphs included. With ``output_dir`` the full
     :class:`~sparsegf2.mipt.EnsembleResult` is saved to
-    ``output_dir/result.npz`` with ``spec.json`` and ``provenance.json``.
-    With ``max_seconds``, a run whose :func:`estimate_ensemble` exceeds it is
+    ``output_dir/result.npz`` with ``spec.json`` and ``provenance.json``,
+    under ``output_dir/.lock`` (a directory another process is writing to is
+    refused). With ``max_seconds``, a run whose :func:`estimate_ensemble` exceeds it is
     refused before anything runs (the MCP tool's guard).
     """
     start = time.perf_counter()
@@ -2535,32 +2859,37 @@ def run_ensemble(
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     out_path = _output_dir(output_dir) if output_dir is not None else None
-    if out_path is not None and (_result_parts(out_path) or (out_path / _SPEC_FILE).exists()):
-        raise ValueError(
-            f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
-            "(or use start_ensemble_job to resume or extend it)"
-        )
-    setup = time.perf_counter() - start
-    with _COMPUTE_LOCK:
-        result = mc.run(trajectories, seed=seed, num_threads=num_threads)
-    # the run's own timer covers graph preprocessing and the kernel; add the
-    # spec construction (graph generation, validation) before it
-    result.elapsed_seconds += setup
-    extra: dict[str, Any] = {}
-    if out_path is not None:
-        _atomic_save_result(result, out_path / _RESULT_FILE)
-        files = {"result": str(out_path / _RESULT_FILE)}
-        files.update(
-            _write_run_metadata(
-                out_path,
-                spec,
-                trajectories,
-                seed,
-                command or "run_ensemble",
-                graph_file=graph_file,
+    lock = _lock_output_dir(out_path) if out_path is not None else None  # one writer
+    try:
+        if out_path is not None and (_result_parts(out_path) or (out_path / _SPEC_FILE).exists()):
+            raise ValueError(
+                f"output_dir {str(out_path)!r} already holds a run; choose a new directory "
+                "(or use start_ensemble_job to resume or extend it)"
             )
-        )
-        extra["files"] = files
+        setup = time.perf_counter() - start
+        with _COMPUTE_LOCK:
+            result = mc.run(trajectories, seed=seed, num_threads=num_threads)
+        # the run's own timer covers graph preprocessing and the kernel; add the
+        # spec construction (graph generation, validation) before it
+        result.elapsed_seconds += setup
+        extra: dict[str, Any] = {}
+        if out_path is not None:
+            _atomic_save_result(result, out_path / _RESULT_FILE)
+            files = {"result": str(out_path / _RESULT_FILE)}
+            files.update(
+                _write_run_metadata(
+                    out_path,
+                    spec,
+                    trajectories,
+                    seed,
+                    command or "run_ensemble",
+                    graph_file=graph_file,
+                )
+            )
+            extra["files"] = files
+    finally:
+        if lock is not None:
+            lock.release()
     return _bounded_summary(result, extra)
 
 
@@ -2569,9 +2898,11 @@ def load_results(path: str) -> dict[str, Any]:
 
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or cancelled
-    job. The summary has the same form as :func:`run_ensemble`'s, plus the
-    stored ``spec`` when ``spec.json`` exists: exactly as stored (its floats
-    are not rounded for display), so passing it back to
+    job. The chunks of a finished run that its job could not merge (a reader
+    held ``result.npz``) are merged now, unless another writer holds the
+    directory. The summary has the same form as :func:`run_ensemble`'s, plus
+    the stored ``spec`` when ``spec.json`` exists: exactly as stored (its
+    floats are not rounded for display), so passing it back to
     :func:`start_ensemble_job` resumes or extends the run.
     """
     if not isinstance(path, (str, os.PathLike)):
@@ -2584,8 +2915,9 @@ def load_results(path: str) -> dict[str, Any]:
             result, meta = _load_directory(p)
             if result is None:
                 raise ValueError(f"no saved results in {str(p)!r} (expected result.npz or chunks/)")
+            _merge_if_pending(p, result, meta)
         else:
-            result, meta = _load_result_file(p), None
+            result, meta = _retrying(functools.partial(_load_result_file, p)), None
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read results from {str(p)!r}: {exc}") from None
     extra: dict[str, Any] = {"path": str(p)}
@@ -2620,6 +2952,7 @@ class _Job:
     started: float | None = None
     finished: float | None = None
     error: str | None = None
+    notes: list[str] = dataclasses.field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -2645,6 +2978,8 @@ class _Job:
             }
             if self.error:
                 out["error"] = self.error
+            if self.notes:
+                out["notes"] = list(self.notes)
             if self.status in ("completed", "cancelled", "failed") and self.done:
                 out["next_step"] = f"load_results({str(self.output_dir)!r}) for the summary"
             return out
@@ -2695,6 +3030,13 @@ def start_ensemble_job(
     another protocol than the saved run (the error names a differing key
     and both values) or a graph file whose contents changed since the run
     started.
+
+    One writer per directory: the job holds ``output_dir/.lock`` until it
+    ends, and a directory that another job or process is writing to is
+    refused. If a reader keeps ``result.npz`` open through the final merge
+    (Windows), the job still ends ``completed``, with a note that the merge
+    is pending; the next :func:`load_results` or ``start_ensemble_job``
+    merges the chunks.
     """
     mc = _build_spec(spec)
     graph_file = _graph_file_record(spec)
@@ -2709,40 +3051,38 @@ def start_ensemble_job(
             "background jobs need an output_dir (results are saved there chunk by chunk)"
         )
     out = _output_dir(output_dir)
-    existing, meta = _load_directory(out)
-    notes: list[str] = []
-    if meta is not None:
-        # The contract and version first: nothing else can be resumed under another one.
-        stored = _read_provenance(out)
-        _check_contract(out, stored, existing)
-        _check_version(out, stored, existing)
-        notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
-        if seed is not None and _resolve_seed(seed) != meta.get("seed"):
-            raise ValueError(
-                f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit seed to "
-                "resume it, or use a new directory"
-            )
-        seed = meta["seed"]
-        _check_saved_seed(out, seed, existing)
-        started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
-        if started_at and now_at and started_at != now_at:
-            notes.append(
-                f"this resume runs git commit {now_at[:12]}, the run started at {started_at[:12]}; "
-                "both are recorded in provenance.json"
-            )
-    elif existing is not None:
-        raise ValueError(
-            f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
-        )
-    if resume_to_target:  # the directory holds this run: run to its stored target
-        count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
-    seed = _resolve_seed(seed)
-    with _JOBS_LOCK:
-        for other in _JOBS.values():
-            if other.output_dir == out and other.status in ("queued", "running"):
+    # One writer per directory, in this process or another (a job of this process is
+    # named in the refusal); the job releases the lock when it ends.
+    lock = _lock_output_dir(out)
+    try:
+        existing, meta = _load_directory(out)
+        notes: list[str] = []
+        if meta is not None:
+            # The contract and version first: nothing else can be resumed under another one.
+            stored = _read_provenance(out)
+            _check_contract(out, stored, existing)
+            _check_version(out, stored, existing)
+            notes.extend(_check_same_run(out, spec, mc, graph_file, meta, existing))
+            if seed is not None and _resolve_seed(seed) != meta.get("seed"):
                 raise ValueError(
-                    f"job {other.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+                    f"output_dir {str(out)!r} holds a run with seed {meta.get('seed')}; omit "
+                    "seed to resume it, or use a new directory"
                 )
+            seed = meta["seed"]
+            _check_saved_seed(out, seed, existing)
+            started_at, now_at = (stored or {}).get("git_commit"), _git_commit()
+            if started_at and now_at and started_at != now_at:
+                notes.append(
+                    f"this resume runs git commit {now_at[:12]}, the run started at "
+                    f"{started_at[:12]}; both are recorded in provenance.json"
+                )
+        elif existing is not None:
+            raise ValueError(
+                f"output_dir {str(out)!r} holds results without spec.json; use a new directory"
+            )
+        if resume_to_target:  # the directory holds this run: run to its stored target
+            count = _trajectory_count(mc, None if meta is None else meta.get("trajectories"))
+        seed = _resolve_seed(seed)
         done = existing.num_trajectories if existing is not None else 0
         job = _Job(
             job_id=uuid.uuid4().hex[:12],
@@ -2760,28 +3100,35 @@ def start_ensemble_job(
             done=done,
             resumed_from=done,
         )
-        _JOBS[job.job_id] = job
-    try:
-        _write_run_metadata(
-            out,
-            spec,
-            job.trajectories,
-            seed,
-            command or "start_ensemble_job",
-            resumed_from=done if meta is not None else None,
-            graph_file=graph_file,
-        )
+        with _JOBS_LOCK:
+            _JOBS[job.job_id] = job
+        try:
+            _write_run_metadata(
+                out,
+                spec,
+                job.trajectories,
+                seed,
+                command or "start_ensemble_job",
+                resumed_from=done if meta is not None else None,
+                graph_file=graph_file,
+            )
+            job.thread = threading.Thread(
+                target=_run_job,
+                args=(job, mc, lock),
+                name=f"sparsegf2-job-{job.job_id}",
+                daemon=True,
+            )
+            job.thread.start()
+        except BaseException:
+            with _JOBS_LOCK:  # never leave a job that would block this output_dir
+                del _JOBS[job.job_id]
+            raise
     except BaseException:
-        with _JOBS_LOCK:  # never leave a job that would block this output_dir
-            del _JOBS[job.job_id]
+        lock.release()  # not handed over to a job
         raise
-    job.thread = threading.Thread(
-        target=_run_job, args=(job, mc), name=f"sparsegf2-job-{job.job_id}", daemon=True
-    )
-    job.thread.start()
     status = job.snapshot()
     if notes:
-        status["notes"] = notes
+        status["notes"] = [*notes, *status.get("notes", [])]
     return _bounded(status)
 
 
@@ -2965,11 +3312,12 @@ def _check_same_run(
     return notes
 
 
-def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:
+def _run_job(job: _Job, mc: mipt.MonitoredCircuit, lock: _DirLock) -> None:
     chunk_dir = job.output_dir / _CHUNK_DIR
     with job.lock:
         job.started = time.time()
         job.status = "running"
+    status, error, notes = "failed", None, []  # what the job reports when it ends
     try:
         while True:
             with job.lock:
@@ -2989,32 +3337,44 @@ def _run_job(job: _Job, mc: mipt.MonitoredCircuit) -> None:
                 job.done = first + count
                 job.compute_seconds += seconds
         finished = job.done >= job.trajectories
-        if finished:
-            _merge_chunks(job.output_dir)
-        with job.lock:
-            job.status = "completed" if finished else "cancelled"
-            job.finished = time.time()
+        if finished and not _merge_chunks(job.output_dir):
+            notes.append(_MERGE_PENDING)
+        status = "completed" if finished else "cancelled"
     except Exception as exc:  # reported through job_status
+        error = f"{type(exc).__name__}: {exc}\n" + "".join(traceback.format_exception(exc)[-3:])
+    finally:
+        # The lock first: once the job reports its end, the next writer may start at once.
+        lock.release()
         with job.lock:
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}\n" + "".join(
-                traceback.format_exception(exc)[-3:]
-            )
-            job.finished = time.time()
+            job.status, job.error, job.finished = status, error, time.time()
+            job.notes.extend(notes)
 
 
-def _merge_chunks(out: Path) -> None:
-    """Fold the chunk files into result.npz, then delete them (safe to interrupt anywhere)."""
+def _merge_chunks(out: Path) -> bool:
+    """Fold the chunk files into result.npz, then delete them (safe to interrupt anywhere).
+
+    Run only by the holder of the directory's lock. Replacing result.npz and
+    deleting a chunk are retried while a reader holds the file (Windows). If
+    result.npz stays in use, the chunks are kept and False is returned: the
+    merge is pending, and the next one folds them in. A chunk that stays in
+    use is left behind; it repeats trajectories of result.npz, which a load
+    drops, and the next merge deletes it.
+    """
     parts = _result_parts(out)
     chunk_parts = [p for p in parts if p.parent.name == _CHUNK_DIR]
     if not chunk_parts:
-        return
+        return True
     merged = _load_parts_once(parts)
-    _atomic_save_result(merged, out / _RESULT_FILE)
+    try:
+        _atomic_save_result(merged, out / _RESULT_FILE)
+    except PermissionError:
+        return False
     for p in chunk_parts:
-        p.unlink(missing_ok=True)
+        with contextlib.suppress(PermissionError):
+            _retrying(functools.partial(p.unlink, missing_ok=True))
     with contextlib.suppress(OSError):  # leftover temporary files of an interrupted save
         (out / _CHUNK_DIR).rmdir()
+    return True
 
 
 def _get_job(job_id: Any) -> _Job:
