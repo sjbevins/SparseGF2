@@ -622,9 +622,11 @@ reports the absolute paths actually written. Parent directories are created as n
 ```text
 ~/sparsegf2-runs/erasure/n32_beta1_p0.05_G200/
   result.npz        the full EnsembleResult (all probe arrays, layers, seeds, codes)
-  spec.json         {"spec": ..., "trajectories": ..., "seed": ...}: replaying it repeats the run
-  provenance.json   package, Python, numpy and numba versions, git commit, platform,
-                    seed, UTC timestamp, command; one entry per resume under "resumes"
+  spec.json         {"spec": ..., "trajectories": ..., "seed": ...}: replaying it repeats the
+                    run, if this version has the randomness contract in provenance.json
+  provenance.json   package version, randomness contract, Python, numpy and numba
+                    versions, git commit, platform, seed, UTC timestamp, command; one
+                    entry per resume under "resumes"
   chunks/           only while a job runs or after a cancel: traj_000000000000.npz, ...
                     (merged into result.npz and deleted when the job completes)
 ```

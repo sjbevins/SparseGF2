@@ -17,7 +17,8 @@ transcribed here (the equality test pins each of them):
 * Keys: ``SeedSequence(seed).generate_state(4, uint64)``; words 0 and 1 key the circuit
   streams, words 2 and 3 the probe streams. Trajectory ``t`` draws its circuit from
   stream ``t``, derived with ``_reference_rng.stream_state`` under the current contract
-  (``RANDOMNESS_CONTRACT_MODEL``).
+  (``RANDOMNESS_CONTRACT_MODEL``) or the one passed as ``contract=``. The draw order is
+  the same in every contract, so ``contract=1`` rebuilds contract-1 circuits.
 * Probe streams (contract 2): the evaluation of the sampled probe named ``name`` at
   layer ``L`` of trajectory ``t`` draws only from stream ``mix(t, h, L)`` of the probe
   key, where ``h`` is the first 8 bytes of ``blake2b(name.encode("utf-8"),
@@ -136,11 +137,13 @@ def cumulative(weights) -> list[float]:
     return cum
 
 
-def oracle_draws(spec, trajectory: int, seed) -> TrajectoryDraws:
+def oracle_draws(
+    spec, trajectory: int, seed, contract: int = ref.RANDOMNESS_CONTRACT_MODEL
+) -> TrajectoryDraws:
     """Replay trajectory ``trajectory``'s random draws from the documented protocol."""
     n = int(spec.num_system)
     t = int(trajectory)
-    rng = ref.Xoshiro(ref.stream_state(circuit_key(seed), t))
+    rng = ref.Xoshiro(ref.stream_state(circuit_key(seed), t, contract=contract))
     graph = 0 if spec.num_graphs == 1 else t // int(spec.circuits_per_graph)
     edges = [(int(a), int(b)) for a, b in np.asarray(spec.graphs[graph]).tolist()]
     weights = spec.edge_weights
@@ -229,9 +232,15 @@ def _gate_line(gates: list[Gate]) -> list[str]:
     return [f"CLIFFORD_2Q({indices}) {targets}"]
 
 
-def oracle_circuit_text(spec, trajectory: int, seed) -> str:
-    """The text of ``spec.circuit(trajectory, seed=seed)``, from :func:`oracle_draws`."""
-    draws = oracle_draws(spec, trajectory, seed)
+def oracle_circuit_text(
+    spec, trajectory: int, seed, contract: int = ref.RANDOMNESS_CONTRACT_MODEL
+) -> str:
+    """The text of ``spec.circuit(trajectory, seed=seed)``, from :func:`oracle_draws`.
+
+    With ``contract`` other than the package's, it is the circuit the package drew
+    under that contract.
+    """
+    draws = oracle_draws(spec, trajectory, seed, contract)
     n = int(spec.num_system)
     lines = []
     if spec.reference == "purification":

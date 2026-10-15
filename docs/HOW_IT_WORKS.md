@@ -516,13 +516,13 @@ rate. Why the mapping is blocked rather than cyclic is in
 keys from it: one for **circuit structure**, one for **probe sampling**.
 Trajectory t draws its circuit from stream t of the first key: a xoshiro256**
 state computed from `(key, t)` alone (`stream_state` in `_kernel/rng.py`, which
-mixes all 128 key bits). Each evaluation of a sampled probe draws from a
-stream of the second key of its own, indexed by the trajectory, the probe's
-name and the layer, so its samples never depend on the other probes or the
+mixes all 128 key bits). Each evaluation of a sampled probe draws from its
+own stream under the second key, indexed by the trajectory, the probe's name
+and the layer, so its samples never depend on the other probes or the
 checkpoints (randomness contract 2, `mipt.RANDOMNESS_CONTRACT`). Within a
 trajectory the draws come in a fixed order (module docstring of
-`_kernel/ensemble.py`): the
-random reference partner if any, the scramble, then per layer the gates (an
+`_kernel/ensemble.py`): the random reference partner if any, the scramble,
+then per layer the gates (an
 edge if edges are sampled, an orientation bit if enabled, a gate index) and
 then **one uniform number per system qubit** for the measurement mask, whether
 or not that qubit ends up measured. Three consequences:

@@ -297,8 +297,8 @@ code.contiguous_distance()
 
 # exact states and trajectories
 sim.save("state.npz"); same = Simulator.load("state.npz")   # tableau, signs, random stream
-mc = mipt.MonitoredCircuit(...)                              # the spec of a saved run
-again = mc.replay(17, seed=7, probes=[...], checkpoints=[...])  # trajectory 17 of run(seed=7)
+res = mipt.EnsembleResult.load("runs/a/result.npz")          # a saved run
+again = res.replay(17, probes=[...], checkpoints=[...])      # its trajectory 17, observed anew
 
 # Stim comparison of any circuit, tick by tick
 crosscheck.compare_stabilizers(circuit, seed=0)
@@ -308,15 +308,21 @@ crosscheck.compare_measurements(circuit, seed=0)
 * `distance_bounds` uses `high = min_j D_j` from the orderings. With counts for m = 1..w,
   the smallest m with an uncorrectable m-subset is d exactly; with none, `low = w + 1`.
   A code with k = 0 gets `(n + 1, n + 1)`: it has no distance, so exclude it.
-* `replay` reruns one trajectory with other probes or checkpoints. Probes and checkpoints
-  never change the trajectory, so a replay matches the original run exactly. The sampled
-  probes (`erasure_first_failure`, `erasure_lost_profile`) are reproduced too: each
-  evaluation draws from its own stream, keyed by the trajectory, the probe's name and the
-  layer, so the same probe (same name and `samples`) at a layer the run evaluated gives
-  the same samples whatever the other probes and checkpoints. `mipt.RANDOMNESS_CONTRACT`
-  (now 2) versions this guarantee; results and output directories record it, and an
-  output_dir made under contract 1 cannot be resumed or extended. This is how to probe
+* `result.replay(t, probes=..., checkpoints=...)` reruns trajectory `t` of a saved run
+  with other probes or checkpoints, using the run's own spec and seed. Probes and
+  checkpoints never change the trajectory, so a replay matches the original run exactly.
+  The sampled probes (`erasure_first_failure`, `erasure_lost_profile`) are reproduced too:
+  each evaluation draws from its own stream, keyed by the trajectory, the probe's name and
+  the layer, so the same probe (same name and `samples`) at a layer the run evaluated
+  gives the same samples whatever the other probes and checkpoints. This is how to probe
   one trajectory at new depths after a run.
+* All of this holds only under the randomness contract the run was made under:
+  `result.randomness_contract == mipt.RANDOMNESS_CONTRACT` (now 2). This version cannot
+  reproduce the trajectories of a run made under contract 1 (results saved before it was
+  recorded load as 1). `result.replay` refuses such a result, `start_ensemble_job`
+  refuses to resume or extend its output_dir, and `concatenate` refuses to mix contracts.
+  `spec.replay(t, seed=...)`, `spec.circuit(t, seed=...)` and rerunning a saved
+  `spec.json` do not check, so prefer `result.replay`.
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
   per side).

@@ -169,10 +169,12 @@ _CX_INDEX = _CX_CLIFFORD.index()
 #: stream, the graph families, ``StabilizerCode.first_failure_sizes``) use the
 #: same generator but not ``stream_state``; contract 2 left them unchanged.
 #: Bump this whenever a change gives any covered draw other random numbers;
-#: results and output directories record it and refuse to merge or resume
-#: across the change. Contract 2 mixes all 128 key bits into every stream and
-#: gives each sampled-probe evaluation its own stream; contract 1 folded the
-#: key to ``key0 ^ key1`` and read one probe stream per trajectory in sequence.
+#: results and output directories record it and refuse to merge, resume or
+#: replay (``EnsembleResult.replay``) across the change: this version cannot
+#: reproduce a run made under another contract. Contract 2 mixes all 128 key
+#: bits into every stream and gives each sampled-probe evaluation its own
+#: stream; contract 1 folded the key to ``key0 ^ key1`` and read one probe
+#: stream per trajectory in sequence.
 RANDOMNESS_CONTRACT = 2
 
 
@@ -960,8 +962,15 @@ class MonitoredCircuit:
         new depths after the fact. The sampled probes are reproduced too: an
         evaluation's orderings depend only on the trajectory, the probe's name,
         its ``samples`` and the layer, so the same probe at a layer the original
-        run evaluated gives the same values (under the same
-        :data:`RANDOMNESS_CONTRACT`).
+        run evaluated gives the same values.
+
+        All of this holds only when the run was made under this version's
+        :data:`RANDOMNESS_CONTRACT` (``result.randomness_contract ==
+        RANDOMNESS_CONTRACT``). This version cannot reproduce the trajectories
+        of a run made under contract 1: the same seed gives other circuits and
+        samples, and nothing here can tell. For a saved run use
+        :meth:`EnsembleResult.replay`, which takes the run's own spec and seed
+        and refuses a result made under another contract.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -979,6 +988,11 @@ class MonitoredCircuit:
         0), then per layer ``CLIFFORD_2Q`` gates, ``M`` measurements and a
         ``TICK``. So tick ``t`` of ``Simulator.run(circuit, observe=...)``
         sees the state after layer ``t``.
+
+        It is the circuit of a run made under this version's
+        :data:`RANDOMNESS_CONTRACT` only: for a result made under contract 1
+        (``result.randomness_contract == 1``) the same seed gives another
+        circuit, and this version cannot rebuild the one that run simulated.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
@@ -1279,7 +1293,11 @@ class EnsembleResult:
 
     @property
     def seed_sequence(self) -> np.random.SeedSequence:
-        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run."""
+        """The ``SeedSequence`` the run used; pass it as ``seed=`` to repeat the run.
+
+        The repeat is exact only under the run's :attr:`randomness_contract`;
+        :meth:`replay` checks it.
+        """
         return np.random.SeedSequence(
             self.seed_entropy, spawn_key=self.seed_spawn_key, pool_size=self.seed_pool_size
         )
@@ -1317,6 +1335,43 @@ class EnsembleResult:
             )
         return StabilizerCode.from_packed(
             generators[trajectory, evaluation, :rows], self.spec.num_system
+        )
+
+    def replay(self, trajectory: int, *, probes=None, checkpoints=None) -> EnsembleResult:
+        """Trajectory ``trajectory`` of this run again, with other probes or checkpoints.
+
+        :meth:`MonitoredCircuit.replay` with this result's own spec and seed
+        (``self.spec.replay(trajectory, seed=self.seed_sequence, ...)``): the
+        same circuit and, for the same probe at a layer the run evaluated, the
+        same values, sampled probes included. ``trajectory`` is a trajectory
+        index (an entry of :attr:`trajectories`; it is also the row when the
+        run started at trajectory 0).
+
+        Raises ``ValueError`` if the run was made under another
+        :data:`RANDOMNESS_CONTRACT`: under another contract the same seed gives
+        other circuits and samples, so this version cannot reproduce that run.
+        """
+        trajectory = _integer(trajectory, "trajectory")
+        if self.randomness_contract != RANDOMNESS_CONTRACT:
+            raise ValueError(
+                f"this result was made under randomness contract {self.randomness_contract}; "
+                f"this version uses {RANDOMNESS_CONTRACT}, under which its seed gives other "
+                "circuits and samples, so its trajectories cannot be replayed. Rerun the "
+                "protocol with this version (result.spec.run(...)) and replay that result"
+            )
+        held = np.asarray(self.trajectories, dtype=np.int64)
+        if not np.any(held == trajectory):
+            where = (
+                f"{held.size} trajectories between {held.min()} and {held.max()}"
+                if held.size
+                else "no trajectories"
+            )
+            raise ValueError(
+                f"trajectory {trajectory} is not in this result, which holds {where} (pass a "
+                "trajectory index from result.trajectories, not a row of a chunk)"
+            )
+        return self.spec.replay(
+            trajectory, seed=self.seed_sequence, probes=probes, checkpoints=checkpoints
         )
 
     @property

@@ -250,6 +250,9 @@ The result contains:
 
 * `num_trajectories`, `seed`, `elapsed_seconds` and `trajectories_per_second` (wall clock
   for the whole call, including building the spec and generating its graphs);
+* `randomness_contract`: the `mipt.RANDOMNESS_CONTRACT` the run was made under (1 for
+  results saved before it was recorded). Only a run made under this version's contract
+  can be replayed, resumed or extended;
 * `checkpoints`: the spec's layers shown, the total count, and whether they were
   subsampled;
 * `probes`, each on its own layers:

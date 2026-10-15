@@ -1871,6 +1871,7 @@ def _summarize_ensemble(
         "layers": spec.layers,
         "measurement_rate": spec.measurement_rate,
         "seed": result.seed_entropy,
+        "randomness_contract": result.randomness_contract,
         "elapsed_seconds": result.elapsed_seconds,
         "trajectories_per_second": result.trajectories_per_second
         if result.elapsed_seconds > 0
@@ -2061,6 +2062,10 @@ def _write_run_metadata(
     resumed_from: int | None = None,
 ) -> dict[str, str]:
     """Write ``spec.json`` (exact: replaying it repeats the run) and ``provenance.json``.
+
+    Replaying ``spec.json`` repeats the run only under the randomness contract
+    that ``provenance.json`` records: this version cannot reproduce a run made
+    under another one (``mipt.RANDOMNESS_CONTRACT``).
 
     For a resumed job (``resumed_from`` set) the original provenance is kept and
     this process's record is appended under ``"resumes"``.

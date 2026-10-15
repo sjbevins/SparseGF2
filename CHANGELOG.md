@@ -42,8 +42,16 @@
   them, as its documentation always said. Fewer samples are a prefix of more,
   and renaming a probe gives it other orderings.
 * **The contract is recorded:** `EnsembleResult.randomness_contract` is saved
-  with every result (files without it load as 1), and `provenance.json`
-  records `randomness_contract` next to the package version.
+  with every result (files without it load as 1), `provenance.json` records
+  `randomness_contract` next to the package version, and the `run_ensemble`
+  and `load_results` summaries show it.
+* **`EnsembleResult.replay(t, probes=..., checkpoints=...)`** replays
+  trajectory `t` of a saved run with the run's own spec and seed, and refuses a
+  result made under another randomness contract: this version cannot
+  reproduce the trajectories of a run made under contract 1.
+  `MonitoredCircuit.replay(t, seed=...)`, `circuit(t, seed=...)` and
+  rerunning a saved `spec.json` repeat a run only under the contract it was
+  made under, and do not check it.
 * **Compiled kernels are never stale:** importing the package deletes Numba's
   cached kernels whenever any kernel source, or the Numba or Python version, has
   changed since they were compiled. Numba checks only each function's own file,

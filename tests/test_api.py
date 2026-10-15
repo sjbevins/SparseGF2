@@ -976,6 +976,16 @@ def test_resume_refuses_another_randomness_contract(tmp_path):
     assert not (out / "chunks").exists()  # nothing was run
 
 
+def test_summaries_show_the_randomness_contract(tmp_path):
+    out = tmp_path / "shown"
+    summary = api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(out))
+    assert summary["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    assert api.load_results(str(out))["randomness_contract"] == mipt.RANDOMNESS_CONTRACT
+    _rewrite_without_contract(out / "result.npz")  # saved before the contract was recorded
+    assert api.load_results(str(out))["randomness_contract"] == 1
+    assert api.load_results(str(out / "result.npz"))["randomness_contract"] == 1
+
+
 def test_estimate_includes_graph_generation_and_times_are_wall_clock():
     one = dict(SMALL_SPEC, schedule="random_edges", checkpoints="final")
     bank = dict(one, graph={**SMALL_SPEC["graph"], "realizations": 2000})

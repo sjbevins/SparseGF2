@@ -14,6 +14,7 @@ import hashlib
 import numpy as np
 import pytest
 
+import _protocol_oracle as oracle
 import _reference_rng as ref
 from sparsegf2 import Circuit, Simulator, graphs, mipt, observables, sample
 from sparsegf2._kernel import rng as krng
@@ -175,8 +176,9 @@ def test_stream_key_matches_seed_sequence():
 # A changed value means the random draws changed. Bump `RANDOMNESS_CONTRACT` and add a new
 # entry. Never edit an existing one.
 EXPECTED: dict[int, dict] = {
-    # Contract 1 (3.0.0.dev11 and before): kept to document it. Its stream_state is still
-    # checked against the reference's contract-1 mixing; the package no longer draws these.
+    # Contract 1 (3.0.0.dev11 and before): kept to document it. The package no longer draws
+    # these. Its stream_state is checked against the reference's contract-1 mixing and its
+    # circuits against the protocol oracle under contract 1; its run digest is a record only.
     1: {
         "stream_state": [
             11467144058010140927,
@@ -275,16 +277,22 @@ def _probe_stream_from_package() -> list[int]:
     return [int(w) for w in out]
 
 
-def _current_values() -> dict:
-    key = (0x0123456789ABCDEF, 0xFEDCBA9876543210)
-    out = np.zeros(4, dtype=np.uint64)
-    krng.stream_state(_state(key), 7, out)
+def _circuit_digests(text_of) -> dict[str, str]:
+    """``{"S1/t0": sha256, ...}`` of ``text_of(spec, t)`` for the pinned specs and trajectories."""
     circuits = {}
     for name, spec in _specs().items():
         for t in (0, 3):
             if spec.num_trajectories is not None and t >= spec.num_trajectories:
                 continue
-            circuits[f"{name}/t{t}"] = _sha(str(spec.circuit(t, seed=2024)))
+            circuits[f"{name}/t{t}"] = _sha(text_of(spec, t))
+    return circuits
+
+
+def _current_values() -> dict:
+    key = (0x0123456789ABCDEF, 0xFEDCBA9876543210)
+    out = np.zeros(4, dtype=np.uint64)
+    krng.stream_state(_state(key), 7, out)
+    circuits = _circuit_digests(lambda spec, t: str(spec.circuit(t, seed=2024)))
     s1 = _specs()["S1"]
     spec = mipt.MonitoredCircuit(
         num_system=s1.num_system,
@@ -322,6 +330,17 @@ def test_reference_stream_state_is_pinned_value():
     assert set(EXPECTED) == set(ref.CONTRACTS)
     for contract, values in EXPECTED.items():
         assert ref.stream_state(key, 7, contract=contract) == values["stream_state"], contract
+
+
+@pytest.mark.parametrize("contract", sorted(EXPECTED))
+def test_oracle_rebuilds_the_pinned_circuits_of_every_contract(contract):
+    # The circuit draw order is the same in every contract; only the stream derivation
+    # changed. So the protocol oracle, given the contract, rebuilds each contract's pinned
+    # circuits from the reference RNG alone, and the old digests stay executable.
+    digests = _circuit_digests(
+        lambda spec, t: oracle.oracle_circuit_text(spec, t, 2024, contract=contract)
+    )
+    assert digests == EXPECTED[contract]["circuits"]
 
 
 def test_reference_probe_stream_is_pinned_value():

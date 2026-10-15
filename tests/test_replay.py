@@ -231,3 +231,57 @@ def test_results_carry_the_contract_and_never_mix_contracts(tmp_path):
         [mipt.EnsembleResult.load(old_a), mipt.EnsembleResult.load(old_b)]
     )
     assert old.randomness_contract == 1  # one contract throughout: merged as before
+
+
+# --- replaying a saved result --------------------------------------------------------------
+
+
+def test_result_replay_equals_spec_replay(tmp_path):
+    spec = _full_spec()
+    full = spec.run(TRAJECTORIES, seed=3)
+    full.save(tmp_path / "r.npz")
+    loaded = mipt.EnsembleResult.load(tmp_path / "r.npz")
+    probes = [mipt.code_dimension(), *(_probe(kind) for kind in SAMPLED)]
+    for t in (0, 3):
+        want = spec.replay(t, seed=3, probes=probes, checkpoints=[12])
+        for result in (full, loaded):
+            got = result.replay(t, probes=probes, checkpoints=[12])
+            assert list(got.trajectories) == [t]
+            assert list(got.values) == list(want.values)
+            for name in want.values:
+                np.testing.assert_array_equal(got.values[name], want.values[name], err_msg=name)
+        for kind in SAMPLED:  # the run's own samples at layer 12
+            np.testing.assert_array_equal(want.values[kind][0, 0], full.values[kind][t, 1])
+    # by default the run's own probes and checkpoints
+    again = full.replay(2)
+    for name, v in full.values.items():
+        np.testing.assert_array_equal(again.values[name][0], v[2], err_msg=name)
+    # a fresh seed (seed=None) is replayed from the seed the result recorded
+    fresh = spec.run(2, seed=None)
+    np.testing.assert_array_equal(
+        fresh.replay(1).values["erasure_first_failure"][0],
+        fresh.values["erasure_first_failure"][1],
+    )
+    # a chunk replays its own trajectories, by trajectory index
+    chunk = spec.run(2, seed=3, first_trajectory=2)
+    np.testing.assert_array_equal(
+        chunk.replay(3).values["erasure_first_failure"][0], full.values["erasure_first_failure"][3]
+    )
+    with pytest.raises(ValueError, match="trajectory 0 is not in this result"):
+        chunk.replay(0)
+
+
+def test_result_replay_refuses_another_contract(tmp_path):
+    result = _sampled_spec().run(2, seed=3)
+    result.save(tmp_path / "r.npz")
+    _drop_contract(tmp_path / "r.npz", tmp_path / "old.npz")
+    old = mipt.EnsembleResult.load(tmp_path / "old.npz")
+    refused = (
+        f"made under randomness contract 1; this version uses {mipt.RANDOMNESS_CONTRACT}, "
+        "under which its seed gives other circuits and samples"
+    )
+    with pytest.raises(ValueError, match=refused):
+        old.replay(0)
+    result.randomness_contract = 1
+    with pytest.raises(ValueError, match=refused):
+        result.replay(1, probes=[mipt.code_dimension()], checkpoints="final")

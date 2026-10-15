@@ -303,10 +303,13 @@ A **trajectory** is one random circuit and its simulation. The contract:
   `EnsembleResult.concatenate` merges such chunks (it refuses chunks with
   different specs, seeds, package versions or randomness contracts, or
   overlapping trajectories).
-* The circuit's gates and the measurement mask use one random stream, the
-  probes' random orderings another. Adding, removing or rescheduling probes,
+* The circuit's gates and the measurement mask use one random stream. Each
+  evaluation of a sampled probe draws its random orderings from a stream of
+  its own under a separate probe key. Adding, removing or rescheduling probes,
   or changing `layers`, does not change the circuits: the state after layer T
-  is the same in every run of the same trajectory that reaches layer T.
+  is the same in every run of the same trajectory that reaches layer T, and
+  `result.replay(t, probes=..., checkpoints=...)` reproduces the sampled
+  probes too.
 * With the same seed, runs at different measurement rates share their gates
   and random numbers (section 3.4).
 * `seed` can be an integer, a sequence of integers, a
