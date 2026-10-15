@@ -439,20 +439,30 @@ api.load_results("runs/big")                      # works mid-run too (reads sav
   least 4 per thread). Each chunk is saved atomically to `output_dir/chunks/` when it
   finishes. On completion the chunks are merged into `output_dir/result.npz` and removed.
   On Windows a file another process holds open cannot be replaced or deleted, so the
-  merge retries for about 5 s while a reader holds `result.npz` or a chunk. If
-  `result.npz` is still in use, the job ends `completed` with the note `merge pending:
-  result.npz is in use; the chunk files hold the data, and the next load_results or
-  start_ensemble_job merges them`; nothing is lost, and every read includes the chunks.
+  merge retries for about 5 s while a reader holds `result.npz` (and once more, for all
+  chunks together, while one holds a chunk; a chunk still in use is left, a repeat that
+  loads drop). If `result.npz` is still in use, the job ends `completed` with the note
+  `merge pending: result.npz is in use; the chunk files hold the data, and the next
+  load_results or start_ensemble_job merges them`; nothing is lost, and every read
+  includes the chunks. Chunks that `result.npz` already covers are only deleted. Files
+  are saved under a temporary name of the writer's own first; reads never see them.
 * One writer per directory: a job, and `run_ensemble` with an `output_dir`, hold
-  `output_dir/.lock` (pid, host and start time) while they write and release it when
-  they end (also after an error, a cancel or Ctrl-C). Another writer, from this process
-  or another one (the MCP server and the CLI, say), is refused before anything runs:
-  `another process (pid P on host H, started T) is writing to DIR; wait for it to finish
-  or cancel it`, or `job ID is already writing to DIR; poll it or cancel it` for a job
-  of the same process. A lock whose process has ended on the same host (a process that
-  was killed, say) is taken over by the next writer; a lock from another host always
-  holds. Readers (`load_results`, `EnsembleResult.load`) take no lock, except that
-  `load_results` takes it for a moment to finish a pending merge (below).
+  `output_dir/.lock` while they write and release it when they end (also after an error,
+  a cancel or Ctrl-C). It appears with its whole record: pid, hostname, start time, the
+  system (`platform.system()`, and the pid namespace on Linux) and, on Windows, the
+  process's creation time. Another writer, from this process or another one (the MCP
+  server and the CLI, say), is refused before anything runs: `another process (pid P on
+  host H, started T) is writing to DIR; wait for it to finish or cancel it` (`this
+  process (...)` when the lock is this process's own), or `job ID is already writing to
+  DIR; poll it or cancel it` for a job of the same process. A lock of this machine whose
+  process has ended (a process that was killed, say; on Windows also when its pid now
+  names a process with another creation time) is taken over by the next writer. A lock
+  of another machine always holds: another hostname, or the same hostname under another
+  system (WSL and containers report the Windows or host name, but their pids are
+  others), so a Windows writer and a WSL writer of one directory exclude each other.
+  Readers (`load_results`, `EnsembleResult.load`) take no lock, except that
+  `load_results` takes it to finish a pending merge (below), which for a large run can
+  take minutes.
 * Equivalence: trajectory `t` depends only on `(spec, seed, t)`, so a job's result is
   identical to a single `run_ensemble` call. The tests check this.
 * Resume and extend: call `start_ensemble_job` again with the same spec and `output_dir`.

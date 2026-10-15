@@ -642,7 +642,7 @@ reports the absolute paths actually written. Parent directories are created as n
                     entry per resume under "resumes"
   chunks/           only while a job runs or after a cancel: traj_000000000000.npz, ...
                     (merged into result.npz and deleted when the job completes)
-  .lock             only while a process writes here: its pid, host and start time
+  .lock             only while a process writes here: its pid, host, start time, system
 ```
 
 `run_ensemble` refuses an `output_dir` that already holds a run, so a finished run is
@@ -742,10 +742,15 @@ directory, or `start_ensemble_job` to resume or extend the run that is there.
 
 **`another process (pid P on host H, started T) is writing to DIR`.** One process writes
 to an output directory at a time, and another one (a CLI run, a script, a second server)
-is writing there now. Wait for it to finish, or stop it, then repeat the call. A lock
-left by a process that has ended on this machine is taken over automatically; a lock
-from another machine (a shared drive) is not, so delete `DIR/.lock` by hand only once
-you are sure that no process is writing there.
+is writing there now (`this process (...)`: another call to the same server is). Wait
+for it to finish, or stop it, then repeat the call. A lock left by a process that has
+ended on this machine is taken over automatically. A lock from another machine is not: one written over a shared drive, or from WSL or a
+container when you work in Windows or on the host (and the other way round), since
+their process ids cannot be checked from here. If the message persists, look up pid P
+(Task Manager, or `tasklist /FI "PID eq P"` on Windows; `ps -p P` elsewhere, on the
+machine that wrote the lock). If it is not a SparseGF2 run writing to DIR, no writer
+runs, and you can delete `DIR/.lock` by hand. Do that only then: two writers in one
+directory can lose each other's work.
 
 **A job ends `completed` with `merge pending: result.npz is in use`.** Something (a
 notebook, say) held `result.npz` open for more than about 5 s when the job merged its

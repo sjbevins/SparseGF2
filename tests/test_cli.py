@@ -223,11 +223,43 @@ def test_ensemble_ctrl_c_exits_130_with_partial_summary(capsys, spec_file, tmp_p
     assert not (out_dir / ".lock").exists()  # the rerun is not refused
 
 
-def test_ensemble_refuses_an_output_dir_another_process_writes_to(capsys, spec_file, tmp_path):
+def test_ensemble_chunked_shows_the_job_notes(capsys, spec_file, tmp_path, monkeypatch):
+    out_dir = tmp_path / "notes"
+    argv = ["ensemble", str(spec_file), "--trajectories", "10", "--seed", "1",
+            "--output-dir", str(out_dir), "--chunk-size", "5"]  # fmt: skip
+    # a reader holds result.npz through the final merge (and the summary's load)
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst).name == "result.npz":
+            raise PermissionError(13, "the file is in use by another process", str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    code, data = run_json(capsys, *argv)
+    assert code == 0 and data["num_trajectories"] == 10
+    assert data["job"]["notes"] == [api._MERGE_PENDING]
+    monkeypatch.undo()
+    # a resume's notes: a spec written differently that builds the same protocol
+    spec_file.write_text(json.dumps({**SPEC, "schedule": "matching"}), encoding="utf-8")
+    code, data = run_json(capsys, *argv)
+    assert code == 0 and data["job"]["resumed_from"] == 10
+    assert any("written differently" in note for note in data["job"]["notes"])
+    assert not (out_dir / "chunks").exists()  # the pending merge was done
+
+
+def test_ensemble_refuses_an_output_dir_another_process_writes_to(
+    capsys, spec_file, tmp_path, monkeypatch
+):
+    real_state = api._process_state
+    monkeypatch.setattr(
+        api, "_process_state", lambda pid: (True, None) if pid == 4242 else real_state(pid)
+    )
     out_dir = tmp_path / "held"
     out_dir.mkdir()
     started = datetime.now(UTC).isoformat(timespec="seconds")
-    holder = {"pid": os.getpid(), "host": socket.gethostname(), "started": started}
+    holder = {"pid": 4242, "host": socket.gethostname(), "started": started}  # running
     (out_dir / ".lock").write_text(json.dumps(holder), encoding="utf-8")
     for extra in ([], ["--chunk-size", "5"]):
         code, data = run_json(
@@ -235,7 +267,10 @@ def test_ensemble_refuses_an_output_dir_another_process_writes_to(capsys, spec_f
             "--output-dir", str(out_dir), *extra,
         )  # fmt: skip
         assert code == 2, data
-        assert f"another process (pid {os.getpid()} on host" in data["error"]["message"]
+        assert (
+            f"another process (pid 4242 on host {socket.gethostname()}, started {started})"
+            in (data["error"]["message"])
+        )
     assert [p.name for p in out_dir.iterdir()] == [".lock"]
 
 

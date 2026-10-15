@@ -1,5 +1,6 @@
 """The JSON service layer: validation, bounded output, equivalence with direct library calls."""
 
+import errno
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1586,27 +1588,35 @@ _LONG_SPEC = dict(SMALL_SPEC, num_system=24, layers=200, stop_when_purified=Fals
                   graph={"family": "cycle"}, measurement_rate=0.05)  # fmt: skip
 
 
-def _write_lock(out: Path, pid: int, host: str | None = None, ago: float = 0.0) -> dict:
-    """A lock file as another writer would have left it, ``ago`` seconds ago."""
-    started = datetime.fromtimestamp(time.time() - ago, UTC).isoformat(timespec="seconds")
-    record = {"pid": pid, "host": host or socket.gethostname(), "started": started}
+def _write_lock(out: Path, pid: int, host: str | None = None, **fields) -> dict:
+    """A lock file as another writer would have left it (``fields``: ``os``, ``created``)."""
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    record = {"pid": pid, "host": host or socket.gethostname(), "started": started, **fields}
     out.mkdir(parents=True, exist_ok=True)
     (out / ".lock").write_text(json.dumps(record), encoding="utf-8")
     return record
 
 
-def _held(out: Path, record: dict) -> str:
+def _held(out: Path, record: dict, who: str = "another process") -> str:
     """The refusal for a lock held by ``record``, as a regular expression."""
     return re.escape(
-        f"another process (pid {record['pid']} on host {record['host']}, started "
+        f"{who} (pid {record['pid']} on host {record['host']}, started "
         f"{record['started']}) is writing to {str(out.resolve())!r}; wait for it to finish "
         "or cancel it"
     )
 
 
+def _processes(monkeypatch, states: dict) -> None:
+    """Processes as the system reports them, ``{pid: (alive, creation time)}``; other pids
+    (this process's) are asked for real."""
+    real = api._process_state
+    monkeypatch.setattr(api, "_process_state", lambda pid: states.get(pid) or real(pid))
+
+
 def test_a_live_writer_holds_the_output_dir_against_every_other_writer(tmp_path, monkeypatch):
+    _processes(monkeypatch, {4242: (True, None), 9999: (False, None)})
     out = tmp_path / "held"
-    record = _write_lock(out, os.getpid())  # this process: alive on every platform
+    record = _write_lock(out, 4242, os=api._os_identity())  # another process, running
     text = (out / ".lock").read_text(encoding="utf-8")
     with pytest.raises(ValueError, match=_held(out, record)):
         api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=1)
@@ -1615,11 +1625,16 @@ def test_a_live_writer_holds_the_output_dir_against_every_other_writer(tmp_path,
     # nothing was written, and the holder's lock is untouched
     assert [p.name for p in out.iterdir()] == [".lock"]
     assert (out / ".lock").read_text(encoding="utf-8") == text
-    # a process on another host cannot be checked from here, so its lock always holds
-    monkeypatch.setattr(api, "_process_alive", lambda pid: False)
-    other = _write_lock(out, 4242, host="cluster-node-7")
-    with pytest.raises(ValueError, match=_held(out, other)):
+    # a lock of this process that no job holds (a run_ensemble in another thread, say)
+    mine = _write_lock(out, os.getpid())
+    with pytest.raises(ValueError, match=_held(out, mine, who="this process")):
         api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=1)
+    # another machine's lock always holds, even when its pid runs nothing here: another
+    # hostname, or this hostname under another system (WSL and containers share it)
+    for other in ({"host": "cluster-node-7"}, {"os": "Linux pidns:1"}):
+        record = _write_lock(out, 9999, **other)
+        with pytest.raises(ValueError, match=_held(out, record)):
+            api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=1)
     (out / ".lock").unlink()  # the holder finished
     job = api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=1)
     assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
@@ -1628,19 +1643,20 @@ def test_a_live_writer_holds_the_output_dir_against_every_other_writer(tmp_path,
 
 def test_a_lock_left_by_a_dead_process_is_taken_over(tmp_path, monkeypatch):
     dead = 4242
-    monkeypatch.setattr(api, "_process_alive", lambda pid: pid != dead)
+    _processes(monkeypatch, {dead: (False, None)})
     out = tmp_path / "stale"
-    _write_lock(out, dead)
-    lock = api._lock_output_dir(out)
-    held = json.loads((out / ".lock").read_text(encoding="utf-8"))
-    assert (held["pid"], held["host"]) == (os.getpid(), socket.gethostname())
-    assert not (out / ".lock.takeover").exists()
-    lock.release()
-    assert not (out / ".lock").exists()
-    # an empty lock: its writer died between creating and writing it
-    (out / ".lock").write_bytes(b"")
-    api._lock_output_dir(out).release()
-    assert not (out / ".lock").exists()
+    # a lock written before the system was recorded is judged by its hostname alone
+    for fields in ({}, {"os": api._os_identity()}):
+        _write_lock(out, dead, **fields)
+        lock = api._lock_output_dir(out)
+        held = json.loads((out / ".lock").read_text(encoding="utf-8"))
+        assert (held["pid"], held["host"], held["os"]) == (
+            os.getpid(), socket.gethostname(), api._os_identity()
+        )  # fmt: skip
+        assert held.get("created") == api._process_state(os.getpid())[1]  # None off Windows
+        assert [p.name for p in out.iterdir()] == [".lock"]  # no turn or temporary file left
+        lock.release()
+        assert not (out / ".lock").exists()
     # through a job and through run_ensemble
     _write_lock(out, dead)
     job = api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=1)
@@ -1650,6 +1666,73 @@ def test_a_lock_left_by_a_dead_process_is_taken_over(tmp_path, monkeypatch):
     api.run_ensemble(SMALL_SPEC, 5, seed=1, output_dir=str(tmp_path / "stale2"))
     assert (tmp_path / "stale2" / "result.npz").exists()
     assert not (tmp_path / "stale2" / ".lock").exists()
+
+
+def test_a_lock_whose_pid_now_names_another_process_is_taken_over(tmp_path, monkeypatch):
+    # Windows soon gives the pid of a process that ended to another one; the lock records
+    # its holder's creation time (the kernel's), which the new process does not share
+    _processes(monkeypatch, {4242: (True, 1001)})
+    out = tmp_path / "reused"
+    record = _write_lock(out, 4242, created=1001)  # the running process took it: it holds
+    with pytest.raises(ValueError, match=_held(out, record)):
+        api._lock_output_dir(out)
+    _write_lock(out, 4242, created=1000)  # an earlier process with that pid took it
+    api._lock_output_dir(out).release()
+    assert not (out / ".lock").exists()
+    # without a creation time on either side (a POSIX writer, say) liveness decides
+    record = _write_lock(out, 4242)
+    with pytest.raises(ValueError, match=_held(out, record)):
+        api._lock_output_dir(out)
+    _processes(monkeypatch, {4242: (True, None)})
+    record = _write_lock(out, 4242, created=1000)
+    with pytest.raises(ValueError, match=_held(out, record)):
+        api._lock_output_dir(out)
+
+
+def test_a_lock_without_a_record_is_judged_by_its_age(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
+    out = tmp_path / "empty"
+    out.mkdir()
+    # created but not yet written (a drive without hard links): its writer may be alive
+    (out / ".lock").write_bytes(b"")
+    with pytest.raises(ValueError, match="could not take the lock .*retry, or delete it if no"):
+        api._lock_output_dir(out)
+    assert (out / ".lock").read_bytes() == b""
+    # still empty long after: its writer died while writing it
+    old = time.time() - 60
+    os.utime(out / ".lock", (old, old))
+    api._lock_output_dir(out).release()
+    assert not (out / ".lock").exists()
+
+
+def test_the_lock_appears_with_its_whole_record(tmp_path, monkeypatch):
+    out = tmp_path / "atomic"
+    out.mkdir()
+    real_link, linked = os.link, []
+
+    def link(src, dst, *args, **kwargs):
+        # the record is complete before the lock appears under its name
+        linked.append(json.loads(Path(src).read_text(encoding="utf-8")))
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", link)
+    lock = api._lock_output_dir(out)
+    assert linked == [json.loads((out / ".lock").read_text(encoding="utf-8"))]
+    assert [p.name for p in out.iterdir()] == [".lock"]
+    lock.release()
+    # without hard links (FAT drives, some shares; EPERM on Linux) it is created exclusively
+    for error in (OSError(errno.EOPNOTSUPP, "not supported"), PermissionError(1, "not permitted")):
+
+        def unsupported(src, dst, *args, error=error, **kwargs):
+            raise error
+
+        monkeypatch.setattr(os, "link", unsupported)
+        lock = api._lock_output_dir(out)
+        assert json.loads((out / ".lock").read_text(encoding="utf-8"))["pid"] == os.getpid()
+        assert [p.name for p in out.iterdir()] == [".lock"]
+        with pytest.raises(ValueError, match="this process"):  # and still exclusively
+            api._lock_output_dir(out)
+        lock.release()
 
 
 def test_a_stale_lock_is_deleted_only_while_it_is_unchanged(tmp_path):
@@ -1676,27 +1759,14 @@ def test_a_stale_lock_is_deleted_only_while_it_is_unchanged(tmp_path):
     assert not path.exists() and not guard.exists()
 
 
-def test_process_alive_tells_a_running_process_from_a_finished_one():
-    assert api._process_alive(os.getpid())
+def test_process_state_tells_a_running_process_from_a_finished_one():
+    alive, created = api._process_state(os.getpid())
+    assert alive and (created is None or isinstance(created, int))  # known on Windows
+    assert api._process_state(os.getpid()) == (alive, created)  # the kernel's, so it is stable
     with subprocess.Popen([sys.executable, "-c", "pass"]) as proc:
         proc.wait()
-    assert not api._process_alive(proc.pid)
-    assert not api._process_alive(0) and not api._process_alive(-1)  # never os.kill(0 or -1)
-    created = api._process_started(os.getpid())  # known on Windows, None elsewhere
-    assert created is None or created <= time.time()
-
-
-def test_a_lock_whose_pid_now_names_a_newer_process_is_taken_over(tmp_path, monkeypatch):
-    # Windows soon reuses the id of a process that ended: a process with the lock's pid
-    # that was created after the lock was taken is not its holder
-    monkeypatch.setattr(api, "_process_started", lambda pid: time.time())
-    out = tmp_path / "reused"
-    record = _write_lock(out, os.getpid())  # taken now, by "this" process: it holds
-    with pytest.raises(ValueError, match=_held(out, record)):
-        api._lock_output_dir(out)
-    _write_lock(out, os.getpid(), ago=3600)  # taken an hour before that process existed
-    api._lock_output_dir(out).release()
-    assert not (out / ".lock").exists()
+    assert not api._process_state(proc.pid)[0]
+    assert api._process_state(0) == api._process_state(-1) == (False, None)  # no os.kill(0)
 
 
 def test_lock_records_are_validated_and_a_lock_that_cannot_be_taken_says_so(tmp_path, monkeypatch):
@@ -1707,11 +1777,9 @@ def test_lock_records_are_validated_and_a_lock_that_cannot_be_taken_says_so(tmp_
                   for change in ({"pid": True}, {"pid": 0}, {"pid": 2**31}, {"pid": "4242"},
                                  {"host": 7}))):  # fmt: skip
         assert api._lock_record(bad) is None, bad
-    # an unreadable start time cannot show that the pid was reused: the holder counts as alive
-    assert api._holder_alive({**good, "pid": os.getpid(), "started": "this morning"})
     monkeypatch.setattr(api, "_RETRY_DELAYS", (0.001,) * len(api._RETRY_DELAYS))
     # a stale lock that keeps coming back (another process takes turns that never end)
-    monkeypatch.setattr(api, "_process_alive", lambda pid: False)
+    _processes(monkeypatch, {4242: (False, None)})
     monkeypatch.setattr(api, "_remove_stale_lock", lambda path, seen: None)
     out = tmp_path / "contended"
     _write_lock(out, 4242)
@@ -1719,14 +1787,11 @@ def test_lock_records_are_validated_and_a_lock_that_cannot_be_taken_says_so(tmp_
         api._lock_output_dir(out)
     # a directory this process may not write to: the error of the last attempt
     (out / ".lock").unlink()
-    real_open = os.open
 
-    def denied(path, *args, **kwargs):
-        if Path(path).name == ".lock":
-            raise PermissionError(13, "Permission denied", str(path))
-        return real_open(path, *args, **kwargs)
+    def denied(path, data):
+        raise PermissionError(13, "Permission denied", str(path))
 
-    monkeypatch.setattr(os, "open", denied)
+    monkeypatch.setattr(api, "_create_lock", denied)
     with pytest.raises(PermissionError, match="Permission denied"):
         api._lock_output_dir(out)
 
@@ -1736,14 +1801,49 @@ def test_a_running_job_is_named_to_a_second_writer_in_the_same_process(tmp_path)
     job = api.start_ensemble_job(_LONG_SPEC, 2000, output_dir=str(out), seed=2, chunk_size=1)
     try:
         named = f"job {job['job_id']} is already writing to {str(out.resolve())!r}; poll it"
-        with pytest.raises(ValueError, match=re.escape(named)):
-            api.start_ensemble_job(_LONG_SPEC, 2000, output_dir=str(out))
-        with pytest.raises(ValueError, match=re.escape(named)):
-            api.run_ensemble(_LONG_SPEC, 2, seed=2, output_dir=str(out))
+        for _ in range(2):  # the second time with .lock deleted by hand: still refused
+            with pytest.raises(ValueError, match=re.escape(named)):
+                api.start_ensemble_job(_LONG_SPEC, 2000, output_dir=str(out))
+            with pytest.raises(ValueError, match=re.escape(named)):
+                api.run_ensemble(_LONG_SPEC, 2, seed=2, output_dir=str(out))
+            (out / ".lock").unlink(missing_ok=True)
     finally:
         api.cancel_job(job["job_id"])
         final = api.job_status(job["job_id"], wait_seconds=60)
     assert final["status"] == "cancelled" and not (out / ".lock").exists()
+
+
+def test_an_interrupt_after_the_job_started_leaves_it_the_lock(tmp_path, monkeypatch):
+    real_start = threading.Thread.start
+
+    def start(self, fail=None):
+        if fail is not None and self.name.startswith("sparsegf2-job-"):
+            raise fail
+        real_start(self)
+        if self.name.startswith("sparsegf2-job-"):
+            raise KeyboardInterrupt  # Ctrl-C right after the job started
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    out = tmp_path / "handover"
+    with pytest.raises(KeyboardInterrupt):
+        api.start_ensemble_job(_LONG_SPEC, 2000, output_dir=str(out), seed=2, chunk_size=1)
+    monkeypatch.undo()
+    (job,) = [j for j in api.list_jobs()["jobs"] if j["output_dir"] == str(out.resolve())]
+    try:  # the running job keeps its lock
+        assert json.loads((out / ".lock").read_text(encoding="utf-8"))["pid"] == os.getpid()
+    finally:
+        api.cancel_job(job["job_id"])
+        final = api.job_status(job["job_id"], wait_seconds=60)
+    assert final["status"] == "cancelled" and not (out / ".lock").exists()
+    # a thread that cannot be started owns nothing: the lock is released, the job forgotten
+    monkeypatch.setattr(
+        threading.Thread, "start", lambda self: start(self, RuntimeError("can't start"))
+    )
+    with pytest.raises(RuntimeError, match="can't start"):
+        api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(tmp_path / "no_thread"), seed=1)
+    assert not (tmp_path / "no_thread" / ".lock").exists()
+    assert all(j["output_dir"] != str((tmp_path / "no_thread").resolve())
+               for j in api.list_jobs()["jobs"])  # fmt: skip
 
 
 def test_the_lock_is_released_on_every_path(tmp_path, monkeypatch):
@@ -1946,3 +2046,86 @@ def test_load_results_retries_while_a_merge_replaces_a_file(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="could not read results from"):
         api.load_results(str(out))
     assert len(calls) == len(api._RETRY_DELAYS) + 1
+
+
+def test_a_merge_that_cannot_write_its_file_fails_instead_of_waiting(tmp_path, monkeypatch):
+    real_save = mipt.EnsembleResult.save
+
+    def save(self, path):
+        if Path(path).name.startswith("result.npz"):  # the merged file, not a chunk
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_save(self, path)
+
+    monkeypatch.setattr(mipt.EnsembleResult, "save", save)
+    out = tmp_path / "unwritable"
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out), seed=4, chunk_size=10)
+    final = api.job_status(job["job_id"], wait_seconds=60)
+    assert final["status"] == "failed" and "Permission denied" in final["error"]
+    assert "notes" not in final  # not "result.npz is in use"
+    assert len(list((out / "chunks").glob("traj_*.npz"))) == 2
+    assert not list(out.rglob("*.tmp*")) and not (out / ".lock").exists()
+
+
+def test_chunks_that_result_npz_covers_are_deleted_without_rewriting_it(tmp_path, monkeypatch):
+    out = tmp_path / "covered"
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out), seed=4, chunk_size=10)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    # a chunk a held delete left behind: result.npz holds its trajectories already
+    (out / "chunks").mkdir()
+    _direct_spec().run(10, seed=4, first_trajectory=10).save(
+        out / "chunks" / "traj_000000000010.npz"
+    )
+    written = (out / "result.npz").stat().st_mtime_ns
+    attempts = _blocked_replace(monkeypatch, failures=0)  # records every replace of result.npz
+    assert api.load_results(str(out))["num_trajectories"] == 20
+    assert attempts == [] and (out / "result.npz").stat().st_mtime_ns == written
+    assert not (out / "chunks").exists()
+
+
+def test_chunks_a_reader_holds_share_one_backoff(tmp_path, monkeypatch):
+    out = tmp_path / "held_chunks"
+    job = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out), seed=4, chunk_size=10)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    chunks = out / "chunks"
+    chunks.mkdir()
+    for first in (0, 10):
+        _direct_spec().run(10, seed=4, first_trajectory=first).save(
+            chunks / f"traj_{first:012d}.npz"
+        )
+    real_unlink, sleeps = os.unlink, []
+
+    def unlink(path, *args, **kwargs):
+        if Path(path).name.startswith("traj_"):  # a sync client holds every chunk
+            raise PermissionError(13, "the file is in use by another process", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert api._merge_chunks(out)
+    assert sleeps == list(api._RETRY_DELAYS)  # one backoff of about 5 s for both chunks
+    assert len(list(chunks.glob("traj_*.npz"))) == 2  # left: repeats that a load drops
+    monkeypatch.undo()
+    assert api.load_results(str(out))["num_trajectories"] == 20  # and the next merge deletes
+    assert not chunks.exists()
+
+
+def test_temporary_files_are_each_writers_own_and_never_read(tmp_path):
+    out = tmp_path / "temporaries"
+    first, second = api._temporary(out / "result.npz"), api._temporary(out / "result.npz")
+    assert first != second
+    assert first.name.startswith(f"result.npz.{os.getpid()}.") and first.name.endswith(".tmp.npz")
+    job = api.start_ensemble_job(SMALL_SPEC, 10, output_dir=str(out), seed=4)
+    assert api.job_status(job["job_id"], wait_seconds=60)["status"] == "completed"
+    # complete files that killed writers left under temporary names, of another run
+    (out / "chunks").mkdir()
+    other = _direct_spec(measurement_rate=0.3).run(5, seed=4, first_trajectory=10)
+    other.save(out / "chunks" / "traj_000000000010.npz.999.deadbeef.tmp.npz")
+    other.save(out / "result.npz.999.deadbeef.tmp.npz")
+    assert api.load_results(str(out))["num_trajectories"] == 10  # never read as parts
+    more = api.start_ensemble_job(SMALL_SPEC, 20, output_dir=str(out))
+    assert api.job_status(more["job_id"], wait_seconds=60)["status"] == "completed"
+    assert not list(out.rglob("*.tmp*")) and not (out / "chunks").exists()  # merged away
+    saved = mipt.EnsembleResult.load(out / "result.npz")
+    np.testing.assert_array_equal(
+        saved.purification_layer, _direct_spec().run(20, seed=4).purification_layer
+    )

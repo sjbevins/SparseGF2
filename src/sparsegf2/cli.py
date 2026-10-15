@@ -366,6 +366,7 @@ def _run_job_in_foreground(
         command=_command_line(),
     )
     job_id = status["job_id"]
+    start_notes = list(status.get("notes", []))  # the resume's notes, shown by the start only
     if status["resumed_from"]:
         _log(f"resuming: {status['resumed_from']} trajectories already saved")
     interrupted = False
@@ -388,6 +389,10 @@ def _run_job_in_foreground(
     summary["job"] = {
         k: status[k] for k in ("job_id", "status", "trajectories_done", "resumed_from")
     }
+    # the resume's notes and the job's own (a merge left pending, say)
+    notes = [*start_notes, *(n for n in status.get("notes", []) if n not in start_notes)]
+    if notes:
+        summary["job"]["notes"] = notes
     return summary, EXIT_INTERRUPTED if interrupted else EXIT_OK
 
 

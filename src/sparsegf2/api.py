@@ -2235,16 +2235,42 @@ def _retrying(
     return action()
 
 
-def _atomic_save_result(result: mipt.EnsembleResult, path: Path) -> None:
-    """Save to a temporary file, then replace ``path`` (retried while a reader holds it)."""
-    tmp = path.with_name(path.name + ".tmp.npz")
-    result.save(tmp)
+def _temporary(path: Path) -> Path:
+    """A temporary file beside ``path`` whose name is this writer's own.
+
+    Two writers never write into one temporary file (their bytes would
+    interleave). Loads never read temporaries (:func:`_result_parts`), and a
+    merge deletes those a killed writer left (:func:`_remove_temporaries`).
+    """
+    return path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp.npz")
+
+
+def _save_temporary(result: mipt.EnsembleResult, path: Path) -> Path:
+    """Save ``result`` to a :func:`_temporary` file for ``path``; returns its path."""
+    tmp = _temporary(path)
+    try:
+        result.save(tmp)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return tmp
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """Move ``tmp`` onto ``path``, retried while a reader holds ``path``; ``tmp`` is
+    deleted if that still fails."""
     try:
         _retrying(functools.partial(os.replace, tmp, path))
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
+
+
+def _atomic_save_result(result: mipt.EnsembleResult, path: Path) -> None:
+    """Save to a temporary file, then replace ``path`` (retried while a reader holds it)."""
+    _replace(_save_temporary(result, path), path)
 
 
 def _git_commit() -> str | None:
@@ -2398,14 +2424,21 @@ def _check_saved_seed(out: Path, seed: Any, existing: mipt.EnsembleResult | None
         )
 
 
+_CHUNK_NAME = re.compile(r"traj_\d+\.npz")
+
+
 def _result_parts(out: Path) -> list[Path]:
-    """``result.npz`` (if any) followed by the saved chunk files in trajectory order."""
+    """``result.npz`` (if any) followed by the saved chunk files in trajectory order.
+
+    Only these exact names are parts: a temporary file (``*.tmp.npz``), also one
+    a killed writer left, is never read as one.
+    """
     parts = []
     if (out / _RESULT_FILE).exists():
         parts.append(out / _RESULT_FILE)
     chunk_dir = out / _CHUNK_DIR
     if chunk_dir.is_dir():
-        parts.extend(sorted(p for p in chunk_dir.glob("traj_*.npz") if ".tmp" not in p.name))
+        parts.extend(sorted(p for p in chunk_dir.iterdir() if _CHUNK_NAME.fullmatch(p.name)))
     return parts
 
 
@@ -2562,6 +2595,7 @@ def _merge_if_pending(out: Path, result: mipt.EnsembleResult, meta: dict | None)
     if not any(p.parent.name == _CHUNK_DIR for p in _result_parts(out)):
         return
     try:
+        _refuse_a_running_job(out)
         lock = _lock_output_dir(out)
     except (OSError, ValueError):  # another writer, or a directory this process cannot write
         return
@@ -2595,30 +2629,44 @@ class _DirLock:
             _retrying(remove)
 
 
-def _process_alive(pid: int) -> bool:
-    """Whether process ``pid`` is running on this machine (no dependency beyond the stdlib)."""
+@functools.cache
+def _os_identity() -> str:
+    """The operating system whose process ids a lock's pid belongs to.
+
+    The hostname alone does not say it: WSL distributions report the Windows
+    computer name, and containers may share the host's name, but a pid of one
+    means nothing in another. So a lock records this too: the system's name
+    and, on Linux, its pid namespace (``/proc/self/ns/pid``), which tells WSL
+    distributions and containers apart. Unlike the kernel release, it stays
+    the same across reboots and upgrades of a machine, so a lock that a crash
+    leaves can still be judged after them (a container gets a new pid
+    namespace each time it starts, so its old locks then count as another
+    machine's).
+    """
+    identity = platform.system()
+    with contextlib.suppress(OSError):  # no /proc (Windows, macOS)
+        identity += f" pidns:{os.stat('/proc/self/ns/pid').st_ino}"
+    return identity
+
+
+def _process_state(pid: int) -> tuple[bool, int | None]:
+    """Whether process ``pid`` runs on this machine, and its creation time where the
+    system gives it exactly (Windows: the ``FILETIME``, in 100 ns ticks; else None)."""
     if pid <= 0:  # os.kill(0) and os.kill(-1) would address process groups
-        return False
+        return False, None
     if sys.platform == "win32":
-        return _windows_process(pid)[0]
+        return _windows_process(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return False, None
     except PermissionError:  # it runs, under another user
-        return True
-    return True
+        return True, None
+    return True, None
 
 
-def _process_started(pid: int) -> float | None:
-    """When process ``pid`` was created (Unix time), where that is cheap to ask (Windows)."""
-    if sys.platform == "win32" and pid > 0:
-        return _windows_process(pid)[1]
-    return None
-
-
-def _windows_process(pid: int) -> tuple[bool, float | None]:
-    """Whether process ``pid`` runs, and when it was created, from kernel32 (Windows only)."""
+def _windows_process(pid: int) -> tuple[bool, int | None]:
+    """Whether process ``pid`` runs, and its creation time, from kernel32 (Windows only)."""
     if sys.platform != "win32":
         raise OSError("kernel32 exists on Windows only")
     import ctypes
@@ -2641,31 +2689,23 @@ def _windows_process(pid: int) -> tuple[bool, float | None]:
         times = [wintypes.FILETIME() for _ in range(4)]  # creation, exit, kernel, user
         created = None
         if kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-            ticks = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime  # 100 ns since 1601
-            created = ticks / 1e7 - 11_644_473_600.0
+            created = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
         return code.value == 259, created  # STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
 
 
-# A process created this long after a lock was taken is not the one that took it.
-_PID_REUSE_SECONDS = 60.0
-
-
 def _holder_alive(holder: dict) -> bool:
-    """Whether the process of this host that took a lock still runs.
+    """Whether the process of this machine that took a lock still runs.
 
-    Its id must name a running process, and one created before the lock was
-    taken: Windows soon gives the id of a process that ended to another one.
+    Its pid must name a running process, and, where the lock records its
+    holder's creation time, the very process: Windows soon gives the pid of
+    a process that ended to another one, whose creation time differs. Both
+    times are the kernel's, so a clock step cannot make them differ.
     """
-    if not _process_alive(holder["pid"]):
-        return False
-    created = _process_started(holder["pid"])
-    try:
-        taken = datetime.fromisoformat(holder["started"]).timestamp()
-    except (TypeError, ValueError):
-        return True
-    return created is None or created < taken + _PID_REUSE_SECONDS
+    alive, created = _process_state(holder["pid"])
+    recorded = holder.get("created")
+    return alive and (recorded is None or created is None or created == recorded)
 
 
 def _lock_record(data: bytes) -> dict | None:
@@ -2682,29 +2722,37 @@ def _lock_record(data: bytes) -> dict | None:
     return record if isinstance(record["host"], str) else None
 
 
+def _this_machine(holder: dict) -> bool:
+    """Whether a lock was taken on this machine: the same hostname and, where the lock
+    records it (locks written before it was recorded do not), the same
+    :func:`_os_identity`. Another machine's lock never expires."""
+    return holder["host"] == socket.gethostname() and holder.get("os", _os_identity()) == (
+        _os_identity()
+    )
+
+
 def _lock_holder(path: Path) -> tuple[bytes, dict | None] | None:
-    """The bytes of the lock file and the holder they record, or None if there is no lock.
-
-    A holder writes its record right after creating the file, so a record that
-    stays unreadable for a moment was left by a process that died in between
-    (the holder is then None).
-    """
-    data = b""
-    for delay in (0.05, 0.1, 0.2, None):
-        try:
-            data = path.read_bytes()
-        except FileNotFoundError:
-            return None
-        except PermissionError:  # Windows: being deleted
-            data = b""
-        record = _lock_record(data)
-        if record is not None:
-            return data, record
-        if delay is not None:
-            time.sleep(delay)
-    return data, None
+    """The bytes of the lock file and the holder they record (None if they record
+    none), or None if there is no lock."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except PermissionError:  # Windows: being deleted
+        data = b""
+    return data, _lock_record(data)
 
 
+def _age(path: Path) -> float:
+    """Seconds since ``path`` was last written (0 if that cannot be read)."""
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+# A lock without a record, or a takeover turn, this old was left by a process that died
+# while writing it.
 _TAKEOVER_ABANDONED_SECONDS = 10.0
 
 
@@ -2725,8 +2773,8 @@ def _remove_stale_lock(path: Path, seen: bytes) -> None:
     try:
         os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except FileExistsError:
-        with contextlib.suppress(OSError):
-            if time.time() - guard.stat().st_mtime > _TAKEOVER_ABANDONED_SECONDS:
+        if _age(guard) > _TAKEOVER_ABANDONED_SECONDS:
+            with contextlib.suppress(OSError):
                 guard.unlink()
         return
     except PermissionError:  # Windows: the previous turn's file is being deleted
@@ -2741,61 +2789,121 @@ def _remove_stale_lock(path: Path, seen: bytes) -> None:
             guard.unlink()
 
 
+def _running_job(out: Path) -> _Job | None:
+    """A job of this process that is writing to ``out``, if any."""
+    with _JOBS_LOCK:
+        for job in _JOBS.values():
+            if job.output_dir == out and job.status in ("queued", "running"):
+                return job
+    return None
+
+
+def _refuse_a_running_job(out: Path) -> None:
+    """Refuse, naming it, a job of this process that writes to ``out``: the check that
+    holds in this process even if ``.lock`` was deleted by hand."""
+    job = _running_job(out)
+    if job is not None:
+        raise ValueError(
+            f"job {job.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+        )
+
+
 def _held_message(out: Path, holder: dict) -> str:
     """The refusal for a writer while ``holder`` holds the lock of ``out``."""
-    if holder["pid"] == os.getpid() and holder["host"] == socket.gethostname():
-        with _JOBS_LOCK:
-            jobs = [
-                job
-                for job in _JOBS.values()
-                if job.output_dir == out and job.status in ("queued", "running")
-            ]
-        if jobs:  # a job of this process: name it, so it can be polled or cancelled
-            return f"job {jobs[0].job_id} is already writing to {str(out)!r}; poll it or cancel it"
+    if holder["pid"] == os.getpid() and _this_machine(holder):
+        job = _running_job(out)
+        if job is not None:  # a job of this process: name it, so it can be polled or cancelled
+            return f"job {job.job_id} is already writing to {str(out)!r}; poll it or cancel it"
+        who = "this process"
+    else:
+        who = "another process"
     return (
-        f"another process (pid {holder['pid']} on host {holder['host']}, started "
+        f"{who} (pid {holder['pid']} on host {holder['host']}, started "
         f"{holder['started']}) is writing to {str(out)!r}; wait for it to finish or cancel it"
     )
+
+
+def _create_lock(path: Path, data: bytes) -> bool:
+    """Create ``path`` holding ``data``, unless it exists (then return False).
+
+    The record is written to a file of this writer's own first and then
+    hard-linked to ``path``: ``os.link`` fails if ``path`` exists, and the
+    lock appears with its whole record, so no other process ever reads it
+    half written. Where hard links are not supported (FAT drives, some
+    network shares) it is created with ``O_CREAT | O_EXCL`` and written
+    after; a lock found without a record is then judged by its age
+    (:data:`_TAKEOVER_ABANDONED_SECONDS`).
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(tmp, "xb") as f:
+            f.write(data)
+        try:
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:  # no hard links here
+            pass
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            raise
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def _lock_output_dir(out: Path) -> _DirLock:
     """Take ``out/.lock`` for this process, or refuse because another writer holds it.
 
-    The lock is created with ``O_CREAT | O_EXCL``, so of several writers
-    exactly one gets it; it records the holder's pid, host and start time. A
-    lock of another host always holds (its process cannot be checked from
-    here). A lock of this host whose process is gone (:func:`_holder_alive`)
-    is stale and is taken over (:func:`_remove_stale_lock`). The holder
-    releases it with :meth:`_DirLock.release`, in a ``finally``.
+    The lock is created exclusively (:func:`_create_lock`), so of several
+    writers exactly one gets it. It records the holder's pid, host, start
+    time, :func:`_os_identity` and, on Windows, its creation time. A lock of
+    another machine always holds (its process cannot be checked from here).
+    A lock of this machine whose process is gone (:func:`_holder_alive`), or
+    one without a record that is older than
+    :data:`_TAKEOVER_ABANDONED_SECONDS`, is stale and is taken over
+    (:func:`_remove_stale_lock`). The holder releases it with
+    :meth:`_DirLock.release`, in a ``finally``.
     """
     path = out / _LOCK_FILE
-    host = socket.gethostname()
-    started = datetime.now(UTC).isoformat(timespec="seconds")
-    data = json.dumps({"pid": os.getpid(), "host": host, "started": started}).encode("utf-8")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    record: dict[str, Any] = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started": datetime.now(UTC).isoformat(timespec="seconds"),
+        "os": _os_identity(),
+    }
+    created = _process_state(os.getpid())[1]
+    if created is not None:
+        record["created"] = created
+    data = json.dumps(record).encode("utf-8")
     failure: OSError | None = None
     for delay in (*_RETRY_DELAYS, None):
         try:
-            fd = os.open(path, flags)
-        except FileExistsError:
+            if _create_lock(path, data):
+                return _DirLock(path, data)
+            failure = None
             held = _lock_holder(path)
             if held is not None:
                 seen, holder = held
-                if holder is not None and (holder["host"] != host or _holder_alive(holder)):
-                    raise ValueError(_held_message(out, holder)) from None
-                _remove_stale_lock(path, seen)
-            failure = None
+                if holder is None:  # no record: a writer died writing it, or is writing it
+                    if _age(path) > _TAKEOVER_ABANDONED_SECONDS:
+                        _remove_stale_lock(path, seen)
+                elif not _this_machine(holder) or _holder_alive(holder):
+                    raise ValueError(_held_message(out, holder))
+                else:
+                    _remove_stale_lock(path, seen)
         except PermissionError as exc:  # Windows: the previous lock is being deleted
             failure = exc
-        else:
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                raise
-            return _DirLock(path, data)
         if delay is None:
             break
         time.sleep(delay)
@@ -2859,7 +2967,10 @@ def run_ensemble(
     if num_threads is not None:
         num_threads = _require_int(num_threads, "num_threads", minimum=1)
     out_path = _output_dir(output_dir) if output_dir is not None else None
-    lock = _lock_output_dir(out_path) if out_path is not None else None  # one writer
+    lock = None
+    if out_path is not None:  # one writer per directory
+        _refuse_a_running_job(out_path)
+        lock = _lock_output_dir(out_path)
     try:
         if out_path is not None and (_result_parts(out_path) or (out_path / _SPEC_FILE).exists()):
             raise ValueError(
@@ -3051,8 +3162,9 @@ def start_ensemble_job(
             "background jobs need an output_dir (results are saved there chunk by chunk)"
         )
     out = _output_dir(output_dir)
-    # One writer per directory, in this process or another (a job of this process is
-    # named in the refusal); the job releases the lock when it ends.
+    # One writer per directory: a job of this process is refused by name, and the lock
+    # refuses any other writer, in this process or another. The job releases it when it ends.
+    _refuse_a_running_job(out)
     lock = _lock_output_dir(out)
     try:
         existing, meta = _load_directory(out)
@@ -3112,24 +3224,33 @@ def start_ensemble_job(
                 resumed_from=done if meta is not None else None,
                 graph_file=graph_file,
             )
-            job.thread = threading.Thread(
-                target=_run_job,
-                args=(job, mc, lock),
-                name=f"sparsegf2-job-{job.job_id}",
-                daemon=True,
-            )
-            job.thread.start()
         except BaseException:
-            with _JOBS_LOCK:  # never leave a job that would block this output_dir
-                del _JOBS[job.job_id]
+            _forget_job(job)
             raise
     except BaseException:
         lock.release()  # not handed over to a job
+        raise
+    # The hand-over: from here on the job owns the lock, so an interrupt arriving now (Ctrl-C
+    # in the CLI) must not release it under a running job.
+    job.thread = threading.Thread(
+        target=_run_job, args=(job, mc, lock), name=f"sparsegf2-job-{job.job_id}", daemon=True
+    )
+    try:
+        job.thread.start()
+    except RuntimeError:  # no thread could be started, so nothing owns the lock
+        _forget_job(job)
+        lock.release()
         raise
     status = job.snapshot()
     if notes:
         status["notes"] = [*notes, *status.get("notes", [])]
     return _bounded(status)
+
+
+def _forget_job(job: _Job) -> None:
+    """Remove a job that never started, so it cannot block its output_dir."""
+    with _JOBS_LOCK:
+        _JOBS.pop(job.job_id, None)
 
 
 def _canonical(obj: Any) -> str:
@@ -3353,28 +3474,67 @@ def _run_job(job: _Job, mc: mipt.MonitoredCircuit, lock: _DirLock) -> None:
 def _merge_chunks(out: Path) -> bool:
     """Fold the chunk files into result.npz, then delete them (safe to interrupt anywhere).
 
-    Run only by the holder of the directory's lock. Replacing result.npz and
-    deleting a chunk are retried while a reader holds the file (Windows). If
-    result.npz stays in use, the chunks are kept and False is returned: the
-    merge is pending, and the next one folds them in. A chunk that stays in
-    use is left behind; it repeats trajectories of result.npz, which a load
-    drops, and the next merge deletes it.
+    Run only by the holder of the directory's lock. If every chunk repeats
+    trajectories of result.npz (chunks a held delete left behind), they are
+    only deleted: result.npz is not written again. Replacing result.npz is
+    retried while a reader holds it (Windows); if it stays in use, the chunks
+    are kept and False is returned: the merge is pending, and the next one
+    folds them in. An error writing the merged file itself is raised. The
+    chunks are then deleted (:func:`_delete_files`); one that stays in use is
+    left behind, a repeat of result.npz that a load drops and the next merge
+    deletes. Temporary files that killed writers left are deleted too.
     """
     parts = _result_parts(out)
     chunk_parts = [p for p in parts if p.parent.name == _CHUNK_DIR]
-    if not chunk_parts:
-        return True
-    merged = _load_parts_once(parts)
-    try:
-        _atomic_save_result(merged, out / _RESULT_FILE)
-    except PermissionError:
-        return False
-    for p in chunk_parts:
-        with contextlib.suppress(PermissionError):
-            _retrying(functools.partial(p.unlink, missing_ok=True))
-    with contextlib.suppress(OSError):  # leftover temporary files of an interrupted save
+    if chunk_parts:
+        result_path = out / _RESULT_FILE
+        merged = _load_parts_once(parts)
+        if merged.num_trajectories > _saved_trajectories(result_path):
+            tmp = _save_temporary(merged, result_path)
+            try:
+                _replace(tmp, result_path)
+            except PermissionError:
+                return False
+        _delete_files(chunk_parts)
+    _remove_temporaries(out)
+    with contextlib.suppress(OSError):  # a chunk still in use
         (out / _CHUNK_DIR).rmdir()
     return True
+
+
+def _saved_trajectories(path: Path) -> int:
+    """How many trajectories ``path`` (a result.npz) holds, 0 if there is none; reads only
+    that array."""
+    if not path.exists():
+        return 0
+    with np.load(path, allow_pickle=False) as z:
+        return int(z["trajectories"].size)
+
+
+def _delete_files(paths: Sequence[Path]) -> None:
+    """Delete ``paths``, retrying the ones a reader holds (Windows) with one backoff of
+    about 5 s for all of them; the ones still in use after it are left."""
+    left = list(paths)
+    for delay in (*_RETRY_DELAYS, None):
+        in_use = []
+        for p in left:
+            try:
+                p.unlink(missing_ok=True)
+            except PermissionError:
+                in_use.append(p)
+        left = in_use
+        if not left or delay is None:
+            return
+        time.sleep(delay)
+
+
+def _remove_temporaries(out: Path) -> None:
+    """Delete the temporary files of writers that were killed while saving (run by the
+    lock holder, so no other writer's file is among them)."""
+    stale = [*out.glob(f"{_RESULT_FILE}*.tmp.npz"), *(out / _CHUNK_DIR).glob("*.tmp.npz")]
+    for p in stale:
+        with contextlib.suppress(OSError):
+            p.unlink()
 
 
 def _get_job(job_id: Any) -> _Job:

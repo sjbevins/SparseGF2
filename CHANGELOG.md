@@ -89,30 +89,44 @@
   and every case where the count may be omitted, still exit code 2; a non-object
   `graph` is now exit 2 instead of an internal error.
 * **One writer per output directory:** `start_ensemble_job`, `run_ensemble` with an
-  `output_dir`, and so the CLI, hold `output_dir/.lock` (created with
-  `O_CREAT | O_EXCL`; it records pid, host and start time) while they write, and
-  release it when they end, also on an error, a cancel or Ctrl-C. A second writer, in
-  another process too, is refused before anything runs: `another process (pid P on host
-  H, started T) is writing to DIR; wait for it to finish or cancel it` (a job of the
-  same process is named instead, as before). Only jobs of the same process used to be
-  refused, so the MCP server's job and a CLI resume of the same directory could both
-  write, and with different chunk sizes both failed and left the directory unreadable. A
-  lock whose process is gone (same host; checked with `os.kill(pid, 0)`, or on Windows
-  with `OpenProcess` and `GetExitCodeProcess`, and on Windows also when its pid now
-  names a process created after the lock) is taken over; a lock from another host
-  always holds.
+  `output_dir`, and so the CLI, hold `output_dir/.lock` while they write, and release it
+  when they end, also on an error, a cancel or Ctrl-C. The lock appears with its whole
+  record (written to a file of the writer's own, then hard-linked, which fails if a lock
+  exists; created with `O_CREAT | O_EXCL` where hard links are not supported): pid,
+  hostname, start time, the system (`platform.system()` and, on Linux, the pid
+  namespace) and, on Windows, the process's creation time. A second writer, in another
+  process too, is refused before anything runs: `another process (pid P on host H,
+  started T) is writing to DIR; wait for it to finish or cancel it` (`this process
+  (...)` for a lock of the same process, and a job of the same process is named, as
+  before, also when its lock was deleted by hand). Only jobs of the same process used to
+  be refused, so the MCP server's job and a CLI resume of the same directory could both
+  write, and with different chunk sizes both failed and left the directory unreadable.
+  A lock of this machine (the same hostname and system: WSL and containers share the
+  Windows or host name but not its pids) whose process is gone is taken over: checked
+  with `os.kill(pid, 0)`, or on Windows with `OpenProcess` and `GetExitCodeProcess`,
+  and on Windows also when its pid now names a process with another creation time (the
+  kernel's, so clock steps do not matter). A lock without a record is taken over only
+  when it is older than 10 s. Another machine's lock always holds.
 * **Overlapping chunks merge:** trajectories saved twice (chunks of two writers with
   different chunk sizes, or chunks a merge could not delete) are kept once when a
   directory is read or merged, instead of failing the merge. A part of another run is
-  still refused, even when all of its trajectories are covered.
-* **Merges survive readers (Windows):** replacing `result.npz` or deleting a chunk while
-  a reader holds the file (a notebook calling `EnsembleResult.load`, or `load_results`)
-  is retried with a backoff of about 5 s in total. If `result.npz` is still in use, the
-  job ends `completed` with the note `merge pending: result.npz is in use; the chunk
-  files hold the data, and the next load_results or start_ensemble_job merges them`,
-  instead of `failed`, and the next `load_results` (when no writer holds the
-  directory) or `start_ensemble_job` merges them. `load_results` retries a file that a
-  merge is replacing in the same way instead of failing with "could not read results".
+  still refused, even when all of its trajectories are covered. Chunks that `result.npz`
+  covers entirely are deleted without writing `result.npz` again.
+* **Merges survive readers (Windows):** replacing `result.npz` while a reader holds it (a
+  notebook calling `EnsembleResult.load`, or `load_results`) is retried with a backoff
+  of about 5 s in total, and so is deleting the merged chunks, with one backoff for all
+  of them (a chunk still in use is left; it repeats `result.npz`). If `result.npz` is
+  still in use, the job ends `completed` with the note `merge pending: result.npz is in
+  use; the chunk files hold the data, and the next load_results or start_ensemble_job
+  merges them`, instead of `failed`, and the next `load_results` (when no writer holds
+  the directory) or `start_ensemble_job` merges them. An error writing the merged file
+  itself still fails the job. `load_results` retries a file that a merge is replacing
+  in the same way instead of failing with "could not read results". The CLI shows the
+  job's notes (this one, and a resume's) under `job.notes`.
+* **Temporary files are each writer's own:** `result.npz` and chunks are saved to a
+  temporary file named after the writer's pid and a random token, so two writers never
+  write into one file; loads never read temporaries, and a merge deletes those that
+  killed writers left.
 
 ## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 
