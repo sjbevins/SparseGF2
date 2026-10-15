@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.0.0.dev12: randomness contract 2, exact erasure counts, the exhaustive cutoff by budget
 
 * **Exact erasure counts:** `StabilizerCode.uncorrectable_counts` and the
   `uncorrectable_region_counts` probe add up each count in int64 while
