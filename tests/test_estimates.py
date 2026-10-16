@@ -128,6 +128,12 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
     each measurement at least about a millisecond at n = 512."""
     q = n // 4
     counts = "uncorrectable_region_counts"
+    correlated = {
+        "kind": "correlated_erasure",
+        "couplings": [0, 1],
+        "sizes": [n // 16, n // 2],
+        "samples": 20,
+    }
     return [
         ({"kind": "code_dimension"}, "purification", 1024),
         ({"kind": "entropy", "region": f"0:{n}"}, "purification", 4),
@@ -146,6 +152,9 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
         ({"kind": counts, "max_size": 2}, "purification", 2),
         ({"kind": counts, "max_size": 3}, "monitored", 1),
         ({"kind": "code_snapshot"}, "single", 4),
+        # the swap chain on the Watts-Strogatz graph, and the exact ring sampler
+        ({**correlated, "burn_in": 100}, "monitored", 1),
+        (correlated, "purification", 1),
     ]
 
 
