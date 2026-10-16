@@ -61,6 +61,7 @@ import platform
 import re
 import secrets
 import socket
+import statistics
 import subprocess
 import sys
 import textwrap
@@ -4687,7 +4688,7 @@ def list_jobs() -> dict[str, Any]:
 # saved run (erasure_curves)
 # ---------------------------------------------------------------------------
 
-MAX_REGION_COUPLINGS = 16
+MAX_REGION_COUPLINGS = 12
 """Most couplings one :func:`sample_erasure_regions` call takes (one row each in the result)."""
 
 MAX_REGION_CHAINS = 32
@@ -4700,7 +4701,12 @@ MAX_EXACT_REGIONS = 100_000_000
 the boundary (about 8 ns per region compiled)."""
 
 RHAT_WARNING = 1.01
-"""R-hat above this over the chains gets a note (the threshold of Vehtari et al. 2021)."""
+"""The least R-hat limit (Vehtari et al. 2021): see :func:`_rhat_limit`, which raises it for the
+number of series tested and for the chains' own autocorrelation."""
+
+TEST_ALPHA = 0.01
+"""The chance of a false note from the R-hat series or from Proposition 2's steps in one call
+of :func:`sample_erasure_regions` with a correct sampler (Bonferroni over everything tested)."""
 
 ESS_WARNING = 400
 """An effective sample size below this gets a note."""
@@ -4719,6 +4725,19 @@ MAX_WARNINGS = 6
 MAX_CURVE_ERASURES = 16
 MAX_CURVE_COUPLINGS = 12
 MAX_TOLERANCE_CODES = 4000
+"""Most codes whose own tolerance :func:`erasure_curves` computes (see also
+:data:`MAX_TOLERANCE_WORK`, which lowers it for large systems)."""
+
+MAX_TOLERANCE_WORK = 1e10
+"""Multiply-adds :func:`erasure_curves` spends on the per-code tolerances: the number of codes
+times couplings times (n + 1) times the 2,049 grid points of ``tolerance_from_curve``; about 3
+seconds here (3.5e9 per second measured, n = 64..1024). Past it fewer codes (at least 10) are used."""
+
+MAX_CURVE_VALUES = 1e8
+"""Curve values (codes x couplings x (n + 1)) :func:`erasure_curves` builds and averages: about 4
+to 6 seconds here (18 ns per value at n = 256, 38 ns at n = 1024). Past it, evenly spaced codes (at
+least 100) are used, for Phi as well, and a note says so."""
+
 INTERPOLATION_MASS_WARNING = 1e-3
 """Interpolated sizes that carry more binomial probability than this make a curve incomplete."""
 
@@ -4746,28 +4765,39 @@ def _region_graph(graph: Any, num_nodes: Any) -> tuple[np.ndarray, int, str, lis
         if num_nodes is None
         else _require_int(num_nodes, "num_nodes", minimum=1, maximum=MAX_QUBITS)
     )
+    inner = graph.get("num_nodes")  # accepted inside the graph object too, beside the family
+    if inner is not None:
+        inner = _require_int(inner, "graph.num_nodes", minimum=1, maximum=MAX_QUBITS)
+    if inner is not None and given is not None and inner != given:
+        raise ValueError(f"num_nodes is {given} but graph.num_nodes is {inner}: give one of them")
+    given = inner if inner is not None else given
     notes: list[str] = []
     if "edges" in graph:
         _check_keys(graph, ("edges", "num_nodes"), "graph (edges)")
-        inner = graph.get("num_nodes")
-        if inner is not None:
-            inner = _require_int(inner, "graph.num_nodes", minimum=1, maximum=MAX_QUBITS)
-        if inner is not None and given is not None and inner != given:
-            raise ValueError(
-                f"num_nodes is {given} but graph.num_nodes is {inner}: give one of them"
-            )
-        n = inner if inner is not None else given
-        if n is None:
+        if given is None:
             raise ValueError(
                 "give num_nodes, the number of qubits n (also those without an edge), with a "
                 "graph of edges"
             )
+        if isinstance(graph["edges"], (list, tuple)) and not graph["edges"]:
+            raise ValueError(
+                "graph (edges): the edge list is empty; a graph without edges has no boundary"
+            )
         try:
-            return graphs.from_edges(_edge_list(graph["edges"]), n), n, "edges", notes
+            raw = _edge_list(graph["edges"])
+            edges = graphs.from_edges(raw, given)
         except ValueError as exc:
             raise ValueError(f"graph (edges): {exc}") from None
+        if len(edges) < len(raw):
+            notes.append(
+                f"{len(raw) - len(edges)} repeated edge(s) were merged: the boundary counts each "
+                "edge once (the graph has no weights)"
+            )
+        return edges, given, "edges", notes
     if graph.get("family") == "file":
-        n_file, bank, _ = _read_graph_file(graph)
+        n_file, bank, weights = _read_graph_file(
+            {k: v for k, v in graph.items() if k != "num_nodes"}
+        )
         if given is not None and given != n_file:
             raise ValueError(
                 f"graph (file): the file has num_nodes {n_file}, but num_nodes is {given}: "
@@ -4778,6 +4808,8 @@ def _region_graph(graph: Any, num_nodes: Any) -> tuple[np.ndarray, int, str, lis
                 f"the graph file holds {len(bank)} graphs; only the first of {len(bank)} graphs "
                 "is sampled (save another one alone with graphs.save to check it)"
             )
+        if weights is not None:
+            notes.append("the file's edge weights are ignored: the boundary counts edges")
         return bank[0], n_file, "file", notes
     if "realizations" in graph:
         raise ValueError(
@@ -4790,9 +4822,9 @@ def _region_graph(graph: Any, num_nodes: Any) -> tuple[np.ndarray, int, str, lis
             "give num_nodes, the number of qubits n, with a graph family (a graph file carries "
             "its own)"
         )
-    edges = _build_graph(graph, given)
-    assert isinstance(edges, np.ndarray), "without realizations a family yields one graph"
-    return edges, given, str(graph["family"]), notes
+    built = _build_graph({k: v for k, v in graph.items() if k != "num_nodes"}, given)
+    assert isinstance(built, np.ndarray), "without realizations a family yields one graph"
+    return built, given, str(graph["family"]), notes
 
 
 def _region_couplings(couplings: Any) -> np.ndarray:
@@ -4803,7 +4835,7 @@ def _region_couplings(couplings: Any) -> np.ndarray:
         raise ValueError(
             f"couplings must be a number or a list of numbers such as [0, 1, 2], got {couplings!r}"
         )
-    if any(isinstance(x, (bool, np.bool_)) for x in couplings):
+    if any(isinstance(x, (bool, np.bool_, str, bytes)) for x in couplings):
         raise ValueError(f"couplings must be numbers, got {list(couplings)!r}")
     given = erasures._couplings(list(couplings), distinct=True)
     if given.size > MAX_REGION_COUPLINGS:
@@ -4815,26 +4847,129 @@ def _region_couplings(couplings: Any) -> np.ndarray:
     return given
 
 
-def _nonincreasing_in_coupling(
+def _proposition_two(
     couplings: Sequence[float], means: Sequence[float], errors: Sequence[float]
-) -> bool | None:
-    """Proposition 2: the mean boundary does not increase with the coupling.
+) -> dict[str, Any] | None:
+    """Proposition 2 on the estimates: the mean boundary does not increase with the coupling.
 
-    True when, along the couplings in increasing order, no later mean exceeds an earlier
-    one by more than three standard errors of their difference; None with fewer than two
-    couplings (nothing to compare). The estimates are noisy, so this is a test of the
-    estimates, not of the proposition.
+    Along the couplings in increasing order, each step from one coupling to the next is a
+    one-sided test of "the mean does not rise": ``z = (later mean - earlier mean) /
+    hypot(stderr, stderr)``. The ``c - 1`` consecutive steps share the chance
+    :data:`TEST_ALPHA` of a false alarm (Bonferroni: a step fails above the normal quantile
+    ``z_critical = Phi^-1(1 - alpha / (c - 1))``, 3.1 for 12 couplings, 2.33 for two). A
+    step's two means come from chains that exchange states, so their errors are positively
+    correlated and the test is a little conservative. Returns None with fewer than two
+    couplings, else a dict: ``holds`` (no step fails), ``z_critical``, ``steps`` (c - 1),
+    ``worst`` (the step with the largest z) and ``failed`` (the steps above ``z_critical``,
+    at most four), each ``{"J": [from, to], "increase": later - earlier, "z": z}`` (a z of 1000
+    stands for a rise with no variation at all). A failed step means the estimates are off (too few samples, or a chain that has not
+    equilibrated), not that the proposition is false.
     """
     if len(couplings) < 2:
         return None
     order = np.argsort(np.asarray(couplings, dtype=np.float64), kind="stable")
+    js = np.asarray(couplings, dtype=np.float64)[order]
     mu = np.asarray(means, dtype=np.float64)[order]
     se = np.asarray(errors, dtype=np.float64)[order]
-    for i in range(len(mu) - 1):
-        for j in range(i + 1, len(mu)):
-            if mu[j] - mu[i] > 3.0 * math.hypot(se[i], se[j]) + 1e-12:
-                return False
-    return True
+    steps = len(js) - 1
+    z_critical = statistics.NormalDist().inv_cdf(1.0 - TEST_ALPHA / steps)
+    found: list[dict[str, Any]] = []
+    for i in range(steps):
+        rise = float(mu[i + 1] - mu[i])
+        error = math.hypot(se[i], se[i + 1])
+        # no variation in either: a real rise (beyond rounding) is as significant as can be
+        no_variation = R_HAT_INFINITE if rise > 1e-9 else 0.0
+        z = rise / error if error > 0 else no_variation
+        found.append({"J": [float(js[i]), float(js[i + 1])], "increase": rise, "z": z})
+    failed = [s for s in found if s["z"] > z_critical]
+    worst = max(found, key=lambda s: s["z"])
+    return {
+        "holds": not failed,
+        "z_critical": z_critical,
+        "steps": steps,
+        "worst": worst,
+        "failed": failed[:4],
+    }
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """The continued fraction of the incomplete beta function (modified Lentz)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (tiny if abs(d) < tiny else d)
+    h = d
+    for m in range(1, 1000):
+        m2 = 2 * m
+        for aa in (
+            m * (b - m) * x / ((qam + m2) * (a + m2)),
+            -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2)),
+        ):
+            d = 1.0 + aa * d
+            d = 1.0 / (tiny if abs(d) < tiny else d)
+            c = 1.0 + aa / c
+            c = tiny if abs(c) < tiny else c
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-15:
+            break
+    return h
+
+
+def _f_upper_tail(f: float, d1: float, d2: float) -> float:
+    """``P(F > f)`` for the F distribution with ``d1`` and ``d2`` degrees of freedom.
+
+    The regularized incomplete beta function ``I_x(d2 / 2, d1 / 2)`` at ``x = d2 / (d2 + d1 f)``
+    (numerical recipes' continued fraction; no scipy).
+    """
+    a, b, x = d2 / 2.0, d1 / 2.0, d2 / (d2 + d1 * f)
+    if x <= 0.0:
+        return 0.0
+    log_front = (
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return math.exp(log_front) * _betacf(a, b, x) / a
+    return 1.0 - math.exp(log_front) * _betacf(b, a, 1.0 - x) / b
+
+
+@functools.lru_cache(maxsize=512)
+def _f_quantile(tail: float, d1: int, d2: int) -> float:
+    """The ``f`` with ``P(F > f) = tail`` for the F distribution (bisection on the tail)."""
+    lo, hi = 0.0, 1.0
+    while _f_upper_tail(hi, d1, d2) > tail:
+        lo, hi = hi, hi * 2.0
+        if hi > 1e12:
+            return math.inf
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if _f_upper_tail(mid, d1, d2) > tail:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
+def _rhat_limit(chains: int, samples: int, series: int, tau: float = 1.0) -> float:
+    """The R-hat above which a series of draws differs from one stationary distribution.
+
+    The split R-hat of ``chains`` chains of ``samples`` draws (each cut in two halves of
+    ``L = samples // 2``, so ``M = 2 x chains`` of them) is, for stationary draws with
+    integrated autocorrelation time ``tau``, about ``sqrt(1 + (tau F - 1) / L)`` with ``F``
+    following the F distribution with ``M - 1`` and ``M (L - 1)`` degrees of freedom (the
+    between-chain over the within-chain variance). The limit is that at the
+    ``1 - alpha / series`` quantile, ``alpha = TEST_ALPHA``, so that ``series`` series tested
+    together raise a false alarm with chance ``alpha``, and never below
+    :data:`RHAT_WARNING`. With ``tau = 1`` (independent draws) and 4 chains of 200 draws it is
+    1.0136 for one coupling (18 series), 1.0172 for 8 and 1.0184 for 16; a chain's own
+    ``tau`` (at least 1) raises it, so that autocorrelation alone, which the effective sample
+    size reports, does not raise it. The rank-normalized R-hat is approximated by the plain one.
+    """
+    length = samples // 2
+    m = 2 * chains
+    if length < 2 or m < 2:
+        return math.inf
+    q = _f_quantile(TEST_ALPHA / series, m - 1, m * (length - 1))
+    return max(RHAT_WARNING, math.sqrt(1.0 + (max(tau, 1.0) * q - 1.0) / length))
 
 
 def _exact_boundary(
@@ -4893,19 +5028,19 @@ def _regions_seconds(
     each ``O(degree)``: measured at 19 to 32 ns at mean degree 4 and 30 ns at 8 on one thread
     of an AMD Ryzen 9 9950X3D (n = 64..1024, 2026-10-16), priced at ``30 + 7.5 x degree`` ns
     (about 3 times that, as :func:`_correlated_us`). The exact samplers cost up to 12 us each
-    at n = 1024 (priced ``3 + 0.04 n`` us). The diagnostics cost about 17 ns per node of a
-    region (the 8 followed nodes) and 100 ns per sample (priced at 40 and 100 ns), and
-    enumerating costs 8 ns per region (priced at 32 ns).
+    at n = 1024 (priced ``3 + 0.04 n`` us) and need no diagnostics. A chain's diagnostics cost
+    about 17 ns per node of a region (the 8 followed nodes) and 100 ns per sample, run twice
+    (``sample_regions`` checks its own chain too; priced at 40 and 100 ns), and enumerating
+    costs 8 ns per region (priced at 32 ns).
     """
     if exact:
         sampling = chains * couplings * samples * (3.0 + 0.04 * n) * 1e-6
+        diagnostics = 0.0
     else:
         degree = 2.0 * num_edges / n
         sweeps = burn_in + (samples - 1) * thin
         sampling = chains * rungs * sweeps * n * (30.0 + 7.5 * degree) * 1e-9
-    diagnostics = (
-        2 * chains * couplings * samples * (40e-9 * m + 100e-9)
-    )  # sample_regions checks too
+        diagnostics = 2 * chains * couplings * samples * (40e-9 * m + 100e-9)
     return 0.1 + sampling + diagnostics + 32e-9 * enumerated
 
 
@@ -4938,22 +5073,25 @@ def _regions_mixing_notes(
     burn_in: int,
     pair_acceptance: np.ndarray,
     ladder: np.ndarray,
+    proposition: dict[str, Any] | None = None,
 ) -> list[str]:
     """The notes on how well the chains mixed: one per kind of problem, with what to change.
 
-    R-hat above :data:`RHAT_WARNING` (chains only: exact samples are independent), an
-    effective sample size below :data:`ESS_WARNING`, a mean boundary more than
-    :data:`DEVIATION_WARNING` standard errors from its exact value, and a replica-exchange
-    acceptance below :data:`EXCHANGE_MIXING_WARNING` between two rungs. The entries name the
-    coupling, the value and what was followed (the boundary, or the membership of a node).
+    R-hat above its limit (:func:`_rhat_limit`; chains only: exact samples are independent),
+    an effective sample size below :data:`ESS_WARNING`, a mean boundary more than
+    :data:`DEVIATION_WARNING` standard errors from its exact value, a replica-exchange
+    acceptance below :data:`EXCHANGE_MIXING_WARNING` between two rungs, and a rise of the mean
+    boundary with the coupling beyond chance (``proposition``, from :func:`_proposition_two`).
+    The entries name the coupling, the value and what was followed (the boundary, or the
+    membership of a node).
     """
     chain = method == "chain"
     rhat, ess, off, exchange = [], [], [], []
     for row, info in zip(rows, details, strict=True):
         j = f"J = {row['coupling']:g}"
-        if chain and info["r_hat"] is not None and info["r_hat"] > RHAT_WARNING:
+        if chain and info["r_hat"] is not None and info["r_hat"] > info["r_hat_limit"]:
             shown = "infinite" if info["r_hat"] >= R_HAT_INFINITE else f"{info['r_hat']:.3f}"
-            rhat.append(f"{j} ({shown}, {_where(info['r_hat_node'])})")
+            rhat.append(f"{j} ({shown} > {info['r_hat_limit']:.3f}, {_where(info['r_hat_node'])})")
         if row["ess"] is not None and row["ess"] < ESS_WARNING:
             ess.append(f"{j} ({row['ess']:.0f}, {_where(info['slowest'])})")
         dev = row["deviation_se"]
@@ -4962,10 +5100,12 @@ def _regions_mixing_notes(
     notes = []
     if rhat:
         notes.append(
-            f"R-hat over {chains} chains above {RHAT_WARNING} at {_listed(rhat)}: the chains "
-            f"disagree, so they have not forgotten their starts; raise burn_in (now {burn_in}) "
-            "or samples, add couplings between so that replica exchange helps, and compare "
-            "another seed"
+            f"R-hat over {chains} chains above the limit that one stationary distribution allows "
+            f"(given the chains' length and autocorrelation) at {_listed(rhat)}: the chains "
+            "differ more than that, so they are not in equilibrium yet, or sit in different "
+            f"regions, or are too short for their autocorrelation; raise burn_in (now {burn_in}), "
+            f"then thin or samples (now {samples}) or chains, add couplings between so that "
+            "replica exchange helps, and compare another seed"
         )
     if ess:
         notes.append(
@@ -4993,6 +5133,18 @@ def _regions_mixing_notes(
             f"replica exchange accepted in under {100 * EXCHANGE_MIXING_WARNING:.0f}% of attempts "
             f"between {_listed(exchange, 6)}: add couplings between them (or pass a smaller "
             "max_step); the colder chains hardly move"
+        )
+    if proposition is not None and not proposition["holds"]:
+        rises = [
+            f"J = {s['J'][0]:g} to {s['J'][1]:g} ({s['increase']:+.3g}, z = {s['z']:.1f})"
+            for s in proposition["failed"]
+        ]
+        notes.append(
+            f"the mean boundary rises with the coupling at {_listed(rises)}, above z = "
+            f"{proposition['z_critical']:.2f} ({proposition['steps']} steps, {100 * TEST_ALPHA:g}% "
+            "false-alarm budget); Proposition 2 forbids that in expectation, so the estimates "
+            f"are off, not the proposition: raise samples (now {samples}) or chains (now "
+            f"{chains}), then burn_in (now {burn_in}), and repeat"
         )
     return notes
 
@@ -5027,20 +5179,52 @@ def sample_erasure_regions(
     ``{"edges": [[a, b], ...], "num_nodes": n}``; ``burn_in=None`` is
     ``max(200, 8 n)`` sweeps.
 
-    Per coupling (in the order given): the mean boundary with its standard error (from the
-    effective sample size), its variance, the swap and replica-exchange acceptance, the
-    integrated autocorrelation time, effective sample size and R-hat (the slowest of the
-    boundary and the membership of a few nodes: the boundary alone looks mixed on a ring
-    long before the regions have moved), the smallest boundary seen, and the exact mean
-    and variance where they exist (``exact_source`` says which: the ring or path closed
-    form, the enumeration of every region, or the uniform law at ``J = 0``).
-    ``nonincreasing_in_J`` tests Proposition 2 on the estimates; ``mixing`` lists what looks
-    wrong (R-hat above 1.01, effective sample size below 400, exchange acceptance below 5%,
-    a mean far from its exact value) and what to change; ``warnings`` passes on the
-    sampler's own. No note is no proof of equilibrium: repeat with another seed and a
-    longer burn-in. An ``r_hat`` of 1000 stands for infinity (every half-chain constant,
-    and different: the chains are stuck apart); ``null`` means that nothing varied at all.
-    Three example regions at the largest coupling are written as node runs
+    Per coupling (in the order given):
+
+    * ``mean_boundary`` with ``stderr = sqrt(variance / ess_boundary)``, ``ess_boundary`` the
+      effective sample size of the boundary itself;
+    * ``acceptance`` of the swaps and ``exchange_acceptance`` of the replica exchanges next to
+      the coupling (null for exact samples);
+    * ``tau_int`` and ``ess``: the integrated autocorrelation time (largest) and effective sample
+      size (smallest) over the boundary and the membership of 8 spread nodes (``slowest`` says
+      which): the boundary alone looks mixed on a ring long before the regions have moved;
+    * ``r_hat``, ``r_hat_limit`` and ``r_hat_at``: the R-hat over the chains of the series (the
+      boundary or a node) that is furthest above its limit, its limit and which series it is.
+      The limit is what stationary draws of that series' own autocorrelation allow
+      (:func:`_rhat_limit`): the 99% point of the F distribution of the split R-hat, shared
+      over the ``2 x 9 x couplings`` series tested, so that a correct sampler raises it with
+      chance :data:`TEST_ALPHA` (1%) per call; it is never below 1.01. Measured on correct swap
+      chains (4 chains, default burn-in, J = 0 to 2): on a ring of 32 nodes (size 8, the chain
+      forced) and a Watts-Strogatz graph of 14 nodes (size 5) the R-hat note fired in 2.7% and
+      2.3% of 300 calls at 200 samples and in none of 100 at 800, while the limit for
+      independent draws alone was exceeded in 100% and 87% of 60 calls at 200 samples (and 1.01
+      in 100% and 97%): that R-hat sees autocorrelation, which the effective sample size
+      reports. Where a record is too short for its autocorrelation the note fires on a correct
+      chain too (the same 14-node graph with 12 couplings up to J = 2.2: 22% of 60 calls at 200
+      samples, none at thin = 5, and the effective sample size note in 95%); a graph whose
+      regions really move slowly (a Watts-Strogatz graph of 64 nodes, size 16, J up to 2) is
+      flagged in 90% of 40 calls at 200 samples and in none of 20 at thin = 20. An ``r_hat``
+      of 1000 stands for infinity (every half-chain constant, and different: the chains are
+      stuck apart); null means that nothing varied at all (and, for exact samples, that R-hat
+      does not apply);
+    * ``min_boundary_seen``, and ``exact`` / ``deviation_se``: the exact mean and variance where
+      they exist (``exact_source`` says which: the ring or path closed form, the enumeration of
+      every region, or the uniform law at ``J = 0``) and the mean's distance from it in
+      standard errors.
+
+    For exact samples (a cycle or a path) the draws are independent: ``tau_int`` is 1, ``ess``
+    is ``chains x samples``, and R-hat, ``r_hat_limit`` and the acceptances are null.
+
+    ``nonincreasing_in_J`` tests Proposition 2 on the estimates (:func:`_proposition_two`):
+    each step to the next coupling must not rise by more than the normal quantile that
+    shares a 1% false-alarm chance over the ``c - 1`` steps (3.1 for 12 couplings, measured
+    at 1.5% false alarms over 400 calls with 12 couplings 0.001 apart on a ring); ``proposition2``
+    gives that ``z_critical``, the ``worst`` step and the ``failed`` steps with their z. A
+    failure means the estimates are off. ``mixing`` lists what looks wrong (R-hat above its
+    limit, effective sample size below 400, exchange acceptance below 5%, a mean far from its
+    exact value, a failed Proposition-2 step) and what to change; ``warnings`` passes on the
+    sampler's own. No note is no proof of equilibrium: repeat with another seed and a longer
+    burn-in. Three example regions at the largest coupling are written as node runs
     ``start:stop[:step]``.
 
     The call is refused when its estimated time (:func:`_regions_seconds`, pessimistic)
@@ -5156,25 +5340,56 @@ def sample_erasure_regions(
     source, truth = _exact_boundary(edges, n, m, sample.geometry, given)
     rows: list[dict[str, Any]] = []
     details: list[dict[str, Any]] = []
+    draws = chains * samples
+    followed = len({v * n // erasures.REGION_PROBES for v in range(erasures.REGION_PROBES)})
+    series = 2 * (1 + followed) * c  # tested for R-hat: bulk and folded, boundary and nodes
+    raw: list[tuple[float, float]] = []  # each coupling's mean boundary and its standard error
     for k in range(c):
-        diag = erasures.chain_diagnostics(bounds[:, k])
-        where = erasures.region_diagnostics(regions[:, k], n)
-        tau_b, tau_p = diag["tau_int"], where["tau_int_max"]
-        slowest = None if tau_b >= tau_p else where["slowest"]
-        ess = min(diag["ess"], where["ess_min"])
-        r_values = [(diag["rhat"], None)] + [
-            (r, v) for r, v in zip(where["rhat"].tolist(), where["vertices"], strict=True)
-        ]
-        known = [(min(r, R_HAT_INFINITE), v) for r, v in r_values if not math.isnan(r)]
-        r_hat, r_node = max(known, key=lambda t: t[0]) if known else (None, None)
         j = float(given[k])
+        exact_row = truth[k]
+        if used == "exact":
+            # independent draws: no autocorrelation to estimate, no chains to compare
+            mean = float(np.mean(bounds[:, k]))
+            variance = float(np.var(bounds[:, k]))
+            diag = {"mean": mean, "variance": variance, "std_error": math.sqrt(variance / draws)}
+            tau, ess, ess_boundary = 1.0, float(draws), float(draws)
+            slowest = r_hat = r_node = r_limit = None
+        else:
+            diag = erasures.chain_diagnostics(bounds[:, k])
+            where = erasures.region_diagnostics(regions[:, k], n)
+            tau_b, tau_p = diag["tau_int"], where["tau_int_max"]
+            slowest = None if tau_b >= tau_p else where["slowest"]
+            tau, ess, ess_boundary = (
+                max(tau_b, tau_p),
+                min(diag["ess"], where["ess_min"]),
+                diag["ess"],
+            )
+            # R-hat of the boundary and of each followed node against its own limit; the row
+            # shows the series furthest above (or nearest to) its limit
+            candidates = [(diag["rhat"], tau_b, None)] + [
+                (r, t, v)
+                for r, t, v in zip(
+                    where["rhat"].tolist(),
+                    where["tau_int"].tolist(),
+                    where["vertices"],
+                    strict=True,
+                )
+            ]
+            scored = [
+                (min(r, R_HAT_INFINITE), _rhat_limit(chains, samples, series, t), v)
+                for r, t, v in candidates
+                if not math.isnan(r)
+            ]
+            r_hat, r_limit, r_node = (
+                max(scored, key=lambda s: s[0] / s[1]) if scored else (None,) * 3
+            )
         position = int(np.searchsorted(rungs_used, j)) if used == "chain" else -1
         near = [
             pair_acceptance[p]
             for p in (position - 1, position)
             if 0 <= p < len(pair_acceptance) and math.isfinite(pair_acceptance[p])
         ]
-        exact_row = truth[k]
+        raw.append((diag["mean"], diag["std_error"]))
         deviation = None
         if exact_row is not None and diag["std_error"] > 0:
             deviation = (diag["mean"] - exact_row["mean_boundary"]) / diag["std_error"]
@@ -5186,16 +5401,29 @@ def sample_erasure_regions(
                 "variance": _sig(diag["variance"]),
                 "acceptance": _sig(swap_mean[k]),
                 "exchange_acceptance": _sig(min(near)) if near else None,
-                "tau_int": _sig(max(tau_b, tau_p)),
+                "tau_int": _sig(tau),
                 "ess": _sig(ess),
+                "ess_boundary": _sig(ess_boundary),
+                "slowest": None if used == "exact" else _where(slowest),
                 "r_hat": _sig(r_hat),
-                "slowest": _where(slowest),
+                "r_hat_limit": _sig(r_limit),
+                "r_hat_at": None if r_hat is None else _where(r_node),
                 "min_boundary_seen": int(np.min(bounds[:, k])),
                 "exact": exact_row,
                 "deviation_se": _sig(deviation),
             }
         )
-        details.append({"r_hat": r_hat, "r_hat_node": r_node, "slowest": slowest})
+        details.append(
+            {
+                "r_hat": r_hat,
+                "r_hat_limit": r_limit,
+                "r_hat_node": r_node,
+                "slowest": slowest,
+            }
+        )
+    proposition = _proposition_two(
+        [r["coupling"] for r in rows], [a for a, _ in raw], [b for _, b in raw]
+    )
 
     top = int(np.argmax(given))
     examples = []
@@ -5216,6 +5444,7 @@ def sample_erasure_regions(
         burn_in=burn,
         pair_acceptance=pair_acceptance,
         ladder=rungs_used,
+        proposition=proposition,
     )
     warnings_out = [f"{text} [in {k} of {chains} chains]" for text, k in seen.items()]
     if len(warnings_out) > MAX_WARNINGS:
@@ -5224,13 +5453,14 @@ def sample_erasure_regions(
     notes += _seed_notes(seed)
     notes.append(
         f"chain i runs erasures.sample_regions with seed [{seed}, i], i = 0..{chains - 1}; "
-        "boundary means and errors pool the chains (errors from the effective sample size)"
+        "boundary means and errors pool the chains; stderr = sqrt(variance / ess_boundary), "
+        "while ess and tau_int are those of the slowest of the boundary and the followed nodes"
     )
     if used == "exact":
         notes.append(
             "the samples are exact and independent (the graph is a "
-            f"{sample.geometry}): burn_in, thin, tempering and ladder do not apply, and R-hat "
-            "and the exchange acceptance are not checked"
+            f"{sample.geometry}): tau_int is 1, ess = chains x samples, and burn_in, thin, "
+            "tempering, ladder, R-hat and the acceptances do not apply (null)"
         )
     notes.append(
         "an empty mixing list is no proof of equilibrium (a bias left by too short a burn_in "
@@ -5264,11 +5494,8 @@ def sample_erasure_regions(
         seed=seed,
         couplings=rows,
         exact_source=source,
-        nonincreasing_in_J=_nonincreasing_in_coupling(
-            [r["coupling"] for r in rows],
-            [r["mean_boundary"] for r in rows],
-            [r["stderr"] for r in rows],
-        ),
+        nonincreasing_in_J=None if proposition is None else proposition["holds"],
+        proposition2=None if proposition is None else _proposition_summary(proposition),
         mixing=mixing,
         warnings=warnings_out,
         examples={"coupling": float(given[top]), "regions": examples},
@@ -5283,6 +5510,20 @@ def sample_erasure_regions(
             "listed in full by erasures.sample_regions in Python)",
         )
     return _bounded(out)
+
+
+def _proposition_summary(proposition: dict[str, Any]) -> dict[str, Any]:
+    """The Proposition-2 test for the result: its critical z, the worst step and the failed ones."""
+
+    def step(s: dict[str, Any]) -> dict[str, Any]:
+        return {"J": s["J"], "increase": _sig(s["increase"]), "z": _sig(s["z"], 3)}
+
+    return {
+        "z_critical": _sig(proposition["z_critical"], 3),
+        "steps": proposition["steps"],
+        "worst": step(proposition["worst"]),
+        "failed": [step(s) for s in proposition["failed"]],
+    }
 
 
 def _graph_geometry(edges: np.ndarray, n: int) -> str:
@@ -5379,22 +5620,49 @@ def _chunk_rows(n: int, c: int) -> int:
     return max(1, min(_ROW_CHUNK // c, (1 << 22) // (c * (n + 1))))
 
 
+MIN_CURVE_CODES = 100
+MIN_TOLERANCE_CODES = 10
+
+
+def _curve_plan(n: int, c: int, codes: int) -> tuple[int, int]:
+    """How many of ``codes`` codes to use: ``(for Phi and the mean curve, for the per-code tolerance)``.
+
+    The curves of ``c`` couplings are ``codes x c x (n + 1)`` values, at most
+    :data:`MAX_CURVE_VALUES` of them (but at least :data:`MIN_CURVE_CODES` codes); the
+    per-code tolerance costs ``codes x c x (n + 1) x 2049`` multiply-adds, at most
+    :data:`MAX_TOLERANCE_WORK` (but at least :data:`MIN_TOLERANCE_CODES` codes) and
+    :data:`MAX_TOLERANCE_CODES` codes. A smaller number means evenly spaced codes.
+    """
+    per_curve = max(c, 1) * (n + 1)
+    used = min(codes, max(MIN_CURVE_CODES, int(MAX_CURVE_VALUES // per_curve)))
+    work = int(MAX_TOLERANCE_WORK // (per_curve * 2049))
+    return used, min(used, MAX_TOLERANCE_CODES, max(MIN_TOLERANCE_CODES, work))
+
+
 def _curve_statistics(
-    chunks: Iterable[np.ndarray], n: int, es: list[float], delta: float, codes: int
+    chunks: Iterable[np.ndarray],
+    n: int,
+    es: list[float],
+    delta: float,
+    codes: int,
+    tolerance_codes: int,
 ) -> dict[str, Any]:
     """Ensemble statistics of failure curves, one chunk of codes at a time.
 
     Each chunk is ``(rows, c, n + 1)``: the curve P(m), m = 0..n, of each code at each of
-    ``c`` couplings (``c = 1`` for the uniform channel). Returns, per coupling: the mean and
-    standard error of ``Phi(e)`` over all ``codes`` (``phi_mean``, ``phi_stderr``), the
-    tolerance ``e_delta`` of each code's own curve summarized by its mean, median and
-    standard error over at most :data:`MAX_TOLERANCE_CODES` codes spaced evenly
-    (``tol_mean``, ``tol_median``, ``tol_stderr``), the tolerance of the mean curve
-    (``tol_of_mean``: the ensemble's, what ``analysis.erasure_tolerance`` gives), and the
-    fraction of those codes whose curve is nondecreasing in m (``monotone``).
+    ``c`` couplings (``c = 1`` for the uniform channel); together they hold ``codes`` codes.
+    Returns, per coupling: the mean and standard error of ``Phi(e)`` over all ``codes``
+    (``phi_mean``, ``phi_stderr``), the tolerance ``e_delta`` of each code's own curve
+    summarized by its mean, median and standard error over ``tolerance_codes`` codes spaced
+    evenly (``tol_mean``, ``tol_median``, ``tol_stderr``), the tolerance of the mean curve
+    (``tol_of_mean``: the ensemble's, what ``analysis.erasure_tolerance`` gives) and of the
+    mean curve moved by plus and minus its standard error at every size
+    (``tol_range``: the tolerance of the higher curve, then of the lower one), and the
+    fraction of the ``tolerance_codes`` codes whose curve is nondecreasing in m (``monotone``).
     """
-    keep = min(codes, MAX_TOLERANCE_CODES)
-    mean = squares = curve_sum = np.zeros(0)  # running mean and sum of squares of Phi (Chan et al.)
+    keep = tolerance_codes
+    # running mean and sum of squared deviations (Chan et al.) of Phi and of the curve itself
+    mean = squares = curve_mean = curve_squares = np.zeros(0)
     tolerances: list[np.ndarray] = []
     flags: list[np.ndarray] = []
     done = 0
@@ -5407,29 +5675,43 @@ def _curve_statistics(
             tol, mono = analysis.tolerance_from_curve(chunk[picked], n, delta, return_monotone=True)
             tolerances.append(tol)
             flags.append(mono)
-        here = phi.mean(axis=0)
+        here, here_curve = phi.mean(axis=0), chunk.mean(axis=0)
         around = ((phi - here) ** 2).sum(axis=0)
+        around_curve = ((chunk - here_curve) ** 2).sum(axis=0)
         if not done:
-            mean, squares, curve_sum = here, around, chunk.sum(axis=0)
+            mean, squares, curve_mean, curve_squares = here, around, here_curve, around_curve
         else:
-            gap = here - mean
-            squares = squares + around + gap**2 * done * rows / (done + rows)
-            mean = mean + gap * rows / (done + rows)
-            curve_sum = curve_sum + chunk.sum(axis=0)
+            share = done * rows / (done + rows)
+            squares = squares + around + (here - mean) ** 2 * share
+            curve_squares = curve_squares + around_curve + (here_curve - curve_mean) ** 2 * share
+            mean = mean + (here - mean) * rows / (done + rows)
+            curve_mean = curve_mean + (here_curve - curve_mean) * rows / (done + rows)
         done += rows
     assert done == codes, "the chunks must hold every code"
     with np.errstate(invalid="ignore", divide="ignore"):
         stderr = np.sqrt(squares / (codes - 1) / codes)
+        curve_stderr = np.sqrt(curve_squares / (codes - 1) / codes)
     each = np.concatenate(tolerances, axis=0)  # (kept, c)
     with np.errstate(invalid="ignore", divide="ignore"):
         tol_err = np.std(each, axis=0, ddof=1) / math.sqrt(each.shape[0])
+    higher = np.clip(curve_mean + np.nan_to_num(curve_stderr), 0.0, 1.0)
+    lower = np.clip(curve_mean - np.nan_to_num(curve_stderr), 0.0, 1.0)
+    tol_range = np.stack(
+        [
+            np.atleast_1d(analysis.tolerance_from_curve(higher, n, delta)),
+            np.atleast_1d(analysis.tolerance_from_curve(lower, n, delta)),
+        ],
+        axis=-1,
+    )
     return {
         "phi_mean": mean,
         "phi_stderr": stderr,
+        "phi_codes": codes,
         "tol_mean": each.mean(axis=0),
         "tol_median": np.median(each, axis=0),
         "tol_stderr": tol_err,
-        "tol_of_mean": np.atleast_1d(analysis.tolerance_from_curve(curve_sum / codes, n, delta)),
+        "tol_of_mean": np.atleast_1d(analysis.tolerance_from_curve(curve_mean, n, delta)),
+        "tol_range": tol_range,
         "monotone": np.concatenate(flags, axis=0).mean(axis=0),
         "tol_codes": each.shape[0],
     }
@@ -5438,10 +5720,11 @@ def _curve_statistics(
 def _tolerance_entry(stats: dict[str, Any], pick: int | slice) -> dict[str, Any]:
     """The ``e_delta`` fields of one coupling (``pick`` an index) or of the couplings shown."""
     return {
+        "of_mean_phi": stats["tol_of_mean"][pick],
+        "of_mean_phi_range": stats["tol_range"][pick],
         "per_code_mean": stats["tol_mean"][pick],
         "per_code_median": stats["tol_median"][pick],
         "per_code_stderr": stats["tol_stderr"][pick],
-        "of_mean_phi": stats["tol_of_mean"][pick],
         "codes": stats["tol_codes"],
     }
 
@@ -5458,13 +5741,26 @@ def _probe_column(
     return int(hit[0]) if hit.size else None
 
 
-def _subset_note(name: str, stats: dict[str, Any], codes: int) -> str | None:
-    if stats["tol_codes"] >= codes:
-        return None
-    return (
-        f"{name}: the per-code e_delta is computed for {stats['tol_codes']} of the {codes} codes "
-        "(evenly spaced) to bound the work; Phi and of_mean_phi use all of them"
-    )
+def _subset_note(name: str, stats: dict[str, Any], holding: int) -> str | None:
+    """The note on codes left out to bound the work, if any were."""
+    used, tolerance = stats["phi_codes"], stats["tol_codes"]
+    if used < holding:
+        return (
+            f"{name}: to bound the work, Phi, the tolerances and their standard errors use "
+            f"{used} of the {holding} codes that hold a code (evenly spaced); the per-code "
+            f"e_delta uses {tolerance} of them"
+        )
+    if tolerance < used:
+        return (
+            f"{name}: the per-code e_delta uses {tolerance} of the {used} codes (evenly spaced) "
+            "to bound the work; Phi and of_mean_phi use all of them"
+        )
+    return None
+
+
+def _spaced(rows: np.ndarray, used: int) -> np.ndarray:
+    """At most ``used`` of the ``rows``, evenly spaced (ends kept)."""
+    return rows if rows.size <= used else rows[_subsample(rows.size, used)]
 
 
 def _uniform_curves(
@@ -5514,7 +5810,8 @@ def _uniform_curves(
     }
     if k == 0:
         return entry
-    rows = np.flatnonzero(code)
+    used, tolerance = _curve_plan(n, 1, k)
+    rows = _spaced(np.flatnonzero(code), used)
     step = _chunk_rows(n, 1)
 
     def chunks() -> Iterator[np.ndarray]:
@@ -5525,9 +5822,16 @@ def _uniform_curves(
             )
             yield curve[:, None, :]
 
-    stats = _curve_statistics(chunks(), n, es, delta, k)
-    entry["phi"] = {"mean": stats["phi_mean"][0], "stderr": stats["phi_stderr"][0]}
-    entry["e_delta"] = _tolerance_entry(stats, 0)
+    stats = _curve_statistics(chunks(), n, es, delta, rows.size, tolerance)
+    entry["phi"] = {
+        "mean": stats["phi_mean"][0],
+        "stderr": stats["phi_stderr"][0],
+        "codes": stats["phi_codes"],
+    }
+    entry["e_delta"] = {
+        key: (v[0] if isinstance(v, np.ndarray) else v)
+        for key, v in _tolerance_entry(stats, slice(None)).items()
+    }
     note = _subset_note(probe.name, stats, k)
     if note:
         notes.append(note)
@@ -5589,21 +5893,29 @@ def _correlated_curves(
         entry["what"] += "; here every trajectory counts, k = 0 as P = 0"
         notes.append(
             f"{probe.name}: no code_dimension or erasure_first_failure probe covers layer "
-            f"{layer}, so trajectories without a code (k = 0) count as P = 0 in these curves; "
-            "add one evaluated at the same layers to average over the codes (k > 0) only"
+            f"{layer}, so trajectories without a code (k = 0) count as P = 0 in these curves "
+            "(a trajectory whose stored fractions are all 0 is taken as one); add one evaluated "
+            "at the same layers to average over the codes (k > 0) only"
         )
     if k == 0:
         return entry
-    rows = np.flatnonzero(code)
+    used, tolerance = _curve_plan(n, int(shown.size), k)
+    rows = _spaced(np.flatnonzero(code), used)
     step = _chunk_rows(n, int(shown.size))
 
     def chunks() -> Iterator[np.ndarray]:
         for a in range(0, rows.size, step):
-            sel = rows[a : a + step]
-            yield analysis.correlated_failure_curve(sampled[sel][:, shown, :], sizes, n)[0]
+            part = sampled[rows[a : a + step]][:, shown, :]
+            # without a code probe a trajectory with all fractions 0 loses nothing: P(n) = 0
+            holds = None if holders is not None else part.max(axis=(1, 2)) > 0
+            yield analysis.correlated_failure_curve(part, sizes, n, holds_code=holds)[0]
 
-    stats = _curve_statistics(chunks(), n, es, delta, k)
-    entry["phi"] = {"mean": stats["phi_mean"], "stderr": stats["phi_stderr"]}
+    stats = _curve_statistics(chunks(), n, es, delta, rows.size, tolerance)
+    entry["phi"] = {
+        "mean": stats["phi_mean"],
+        "stderr": stats["phi_stderr"],
+        "codes": stats["phi_codes"],
+    }
     entry["e_delta"] = _tolerance_entry(stats, slice(None)) | {
         "monotone_fraction": stats["monotone"]
     }
@@ -5646,20 +5958,35 @@ def erasure_curves(
     probe's last evaluation), over the trajectories that hold a code (k > 0): ``q_plus``
     (the fraction of trajectories that do) and ``count_with_code``; ``phi``, ``Phi(e)`` with
     its standard error at each ``e`` (default eight values log-spaced from 1/n to 1/2); and
-    ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}`` of each code's own curve
-    (``per_code_mean``, ``per_code_median``, ``per_code_stderr``) and of the mean curve
-    (``of_mean_phi``: the ensemble's tolerance, what ``analysis.erasure_tolerance`` returns
-    for the whole ensemble, not the mean of the per-code ones). For a correlated channel,
-    ``interpolated_sizes`` are the sizes the probe did not sample, whose curve is
-    interpolated, ``interpolated_mass`` the binomial probability they carry at each ``e``,
-    ``complete`` whether that stays below 0.1% and ``binomial_window`` the sizes (from, to)
-    that carry all but a millionth of the probability at the ``e`` given (the sizes worth
-    sampling). A curve that is exact for small sizes at
-    every coupling needs the saved codes (``StabilizerCode.boundary_failure_counts``).
+    ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}``:
 
-    The output is bounded: at most :data:`MAX_CURVE_COUPLINGS` couplings are shown (evenly
-    spaced, ends included; ``truncated`` is then set). Writes nothing.
+    * ``of_mean_phi`` is the headline: the tolerance of the ensemble-mean ``Phi`` (what
+      ``analysis.erasure_tolerance`` returns for the whole ensemble), with
+      ``of_mean_phi_range`` its value when the mean curve moves by plus and minus its standard
+      error at every size (the tolerance of the higher curve, then of the lower: a rough
+      one-standard-error band, since errors at different sizes are positively correlated);
+    * ``per_code_mean``, ``per_code_median`` and ``per_code_stderr`` summarize the tolerance
+      of each code's own curve: they describe the spread across codes and are biased upward
+      for noisy curves, because the tolerance is not linear in ``Phi``.
+
+    For a correlated channel, ``interpolated_sizes`` are the sizes the probe did not sample,
+    whose curve is interpolated, ``interpolated_mass`` the binomial probability they carry at
+    each ``e``, ``complete`` whether that stays below 0.1% and ``binomial_window`` the sizes
+    (from, to) that carry all but a millionth of the probability at the ``e`` given (the
+    sizes worth sampling). A curve that is exact for small sizes at every coupling needs the
+    saved codes (``StabilizerCode.boundary_failure_counts``). The standard errors treat
+    trajectories as independent; circuits on one graph are not (a note says so for a graph
+    collection).
+
+    The work is bounded, not the codes alone: the curves of at most :data:`MAX_CURVE_VALUES`
+    values (codes x couplings x (n + 1)) and the per-code tolerances of at most
+    :data:`MAX_TOLERANCE_WORK` multiply-adds (and :data:`MAX_TOLERANCE_CODES` codes) are
+    computed, with evenly spaced codes beyond that and a note; about 10 seconds at the most
+    on the machine measured (``elapsed_seconds`` says). The output is bounded too: at most
+    :data:`MAX_CURVE_COUPLINGS` couplings are shown (evenly spaced, ends included;
+    ``truncated`` is then set). Writes nothing.
     """
+    start = time.perf_counter()
     if not isinstance(path, (str, os.PathLike)):
         raise ValueError("path must be a string")
     given = _curve_erasures(e)
@@ -5706,11 +6033,19 @@ def erasure_curves(
                 f"{name}: no trajectory holds a code (k > 0) at layer {entry['layer']}, so "
                 "there is no curve to average"
             )
-    if curves:
+    notes.append(
+        "e_delta.of_mean_phi is the tolerance of the ensemble-mean Phi and the headline "
+        "(of_mean_phi_range: its tolerance when the mean curve moves by one standard error); "
+        "per_code_* summarize each code's own tolerance, which spreads across codes and is "
+        "biased upward for noisy curves (the tolerance is not linear in Phi)"
+    )
+    graph_of = np.asarray(result.graph_index)
+    if isinstance(result.spec.edges, tuple) and np.unique(graph_of).size < graph_of.size:
         notes.append(
-            "e_delta.per_code_* are the tolerances of each code's own Phi, summarized over the "
-            "codes; of_mean_phi is the tolerance of the ensemble-mean Phi (they differ: Phi is "
-            "linear in P(m), the tolerance is not linear in Phi)"
+            f"the {result.num_trajectories} trajectories ran on {np.unique(graph_of).size} "
+            "graphs: circuits on one graph are correlated, but the standard errors treat every "
+            "trajectory as independent and can be too small (by about 15% in a test with "
+            "strong disorder); average per graph first for errors that allow for it"
         )
     out: dict[str, Any] = {
         "path": str(where),
@@ -5725,6 +6060,7 @@ def erasure_curves(
     if curves:
         out["correlated"] = curves
     out["notes"] = notes
+    out["elapsed_seconds"] = time.perf_counter() - start
     return _bounded(_fit_curves(out))
 
 
@@ -5749,11 +6085,11 @@ def _fit_curves(out: dict[str, Any]) -> dict[str, Any]:
             row = dict(entry)
             row["couplings"] = entry["couplings"][pick]
             if entry["phi"] is not None:
-                row["phi"] = {key: v[pick] for key, v in entry["phi"].items()}
-                row["e_delta"] = {
-                    key: (v[pick] if isinstance(v, np.ndarray) else v)
-                    for key, v in entry["e_delta"].items()
-                }
+                for field in ("phi", "e_delta"):
+                    row[field] = {
+                        key: (v[pick] if isinstance(v, np.ndarray) else v)
+                        for key, v in entry[field].items()
+                    }
             shown[name] = row
         candidate = {**out, "correlated": shown}
         if any(len(row["couplings"]) < row["num_couplings"] for row in shown.values()):
