@@ -93,7 +93,9 @@ undirected. Region `A ⊆ V`, size `m = |A|`. Edge boundary `∂A = {{u,v} ∈ E
   forces the Metropolis chain, `"exact"` refuses other graphs). Reason (the literature memo, by exact diagonalization):
   on the ring at large `J` the swap chain equilibrates the boundary at once but the interval's *position* only diffuses,
   about `m(n-m) / (2(1 - cos(2π/n)))` proposals (≈ 8·10^4 sweeps at n = 256, m = 64); on the open path the two
-  minimum-boundary states (the end intervals) are separated by an exponentially large barrier. Exact sampling removes
+  minimum-boundary states (the end intervals) are separated by a barrier of `Δb = 1` (an interior interval), so leaving
+  an end takes an expected `>= e^J` proposals there (corrected 2026-10-16 from "exponentially large", which the barrier
+  is not: it is exponential in `J`, not in `n`). Exact sampling removes
   both problems where the geometry allows it, which covers the brickwork baseline. Path counts (derived and to be checked
   by brute force): a subset with `r` runs, `e ∈ {0,1,2}` of them touching an end, has `b = 2r - e`; the numbers of
   such subsets of size `m` are `C(m-1,r-1)·C(n-m-1,r)` (`e = 0`), `2·C(m-1,r-1)·C(n-m-1,r-1)` (`e = 1`) and
