@@ -78,3 +78,30 @@ def test_file_family_size_mismatch_and_weights_conflict(tmp_path):
             },
             4,
         )
+
+
+def test_a_file_named_npz_that_is_not_an_archive_gets_a_plain_message(tmp_path):
+    # numpy's own text for these talks about pickles (allow_pickle) or says nothing useful
+    good = graphs.save(tmp_path / "good.npz", [graphs.cycle(8)], 8)
+    bad = {
+        "text.npz": b"num_nodes 8\n0 1\n",
+        "empty.npz": b"",
+        "cut.npz": good.read_bytes()[:40],
+    }
+    for name, content in bad.items():
+        (tmp_path / name).write_bytes(content)
+    np.save(tmp_path / "array.npy", np.arange(6).reshape(3, 2))
+    (tmp_path / "array.npy").replace(tmp_path / "array.npz")  # one array, not an archive
+    for name in ("text.npz", "empty.npz", "cut.npz", "array.npz"):
+        path = tmp_path / name
+        regions = {"family": "file", "path": str(path)}
+        for call in (
+            lambda path=path: graphs.load(path),
+            lambda regions=regions: api.sample_erasure_regions(regions, 3, [0.0], 20, seed=1),
+        ):
+            with pytest.raises(
+                ValueError, match=rf"{name}: not a readable \.npz graph file"
+            ) as err:
+                call()
+            assert "pickle" not in str(err.value) and "num_nodes and edges" in str(err.value)
+    assert graphs.load(good)[0] == 8  # a real archive still loads
