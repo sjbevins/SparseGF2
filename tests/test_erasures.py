@@ -47,6 +47,11 @@ region A, Q_J(A) = exp(-J b(A)) / Z_m(J) on the regions of size m):
     ladder's seeds disagree and scatter, the automatic one agrees with a long run);
     warnings when expected and not otherwise; the order of exchange acceptances (M4); the
     uniform start (M5); refusals of oversized work (M2, M3).
+13. Fix round 2: the size-aware default burn-in (8 n sweeps) removes the drift that 200
+    sweeps leave at n = 192 (compiled; JIT-free checks the rule only); correlation warnings
+    need 50 records; the advice depends on the ladder; extreme ladders and ``ladder=None``
+    are refused cleanly; ``max_step`` is None without variance; unsorted couplings equal
+    the sorted run with rows permuted; the remaining input errors.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import re
 from collections import Counter
 
 import numba
@@ -1587,3 +1593,156 @@ def test_size_limits_refuse_with_what_to_change():
         erasures.sample_ring_regions(10, 5, 0.0, 10**10, seed=1)
     with pytest.raises(ValueError, match="bytes"):
         erasures.sample_path_regions(10, 5, 0.0, 10**10, seed=1)
+
+
+# ---------------------------------------------------------------------------------------
+# 13. Fix round 2: size-aware burn-in, warning thresholds, extreme arguments
+# ---------------------------------------------------------------------------------------
+
+
+def test_default_burn_in_grows_with_n():
+    def burn(n, **kw):
+        return erasures.sample_regions(graphs.cycle(n), n, n // 4, [1.0], 1, seed=1, **kw).burn_in
+
+    assert burn(10) == 200 and burn(25) == 200  # max(200, 8 n)
+    assert burn(64) == 512 and burn(256) == 2048
+    assert burn(64, burn_in=7) == 7  # an explicit value is kept
+    assert erasures.default_burn_in(10) == 200 and erasures.default_burn_in(4096) == 32_768
+
+
+def test_default_burn_in_removes_the_drift_of_a_short_one():
+    """The reviewer's case at the largest size that stays fast: Watts–Strogatz n = 192
+    (beta = 0.1, m = n/4), couplings 0, 0.5, 1, 2, the automatic ladder. Every rung starts
+    from a uniform region, and with 200 sweeps of burn-in the J = 2 records are still
+    settling: their first 200 lie above their last 500, and their mean lies above a long
+    run's. The size-aware default (8 n = 1,536 sweeps) leaves neither. (At n = 256, 200
+    sweeps leave +6%, and 4 n sweeps still leave a drift of 0.2-0.7.)"""
+    n, m = 192, 48
+    edges = graphs.watts_strogatz(n, 4, 0.1, seed=1)
+    requested = [0.0, 0.5, 1.0, 2.0]
+    if JIT_FREE:  # far too slow as plain Python; the rule itself is checked above
+        assert erasures.default_burn_in(n) == 1_536
+        return
+
+    def runs(seeds, **kw):
+        drift, means = [], []
+        for seed in seeds:
+            res = erasures.sample_regions(edges, n, m, requested, 1_000, seed=seed, **kw)
+            b = res.boundaries[3]
+            drift.append(b[:200].mean() - b[-500:].mean())
+            means.append(b.mean())
+        return float(np.mean(drift)), float(np.mean(means)), res
+
+    old_drift, old_mean, _ = runs(range(16), burn_in=200)
+    new_drift, new_mean, last = runs(range(16))
+    assert last.burn_in == 1_536 and last.warnings == ()
+    _, reference, _ = runs(range(100, 108), burn_in=6_144)
+    assert old_drift > 0.6 and abs(new_drift) < 0.5  # measured 1.16 +- 0.25, -0.01 +- 0.20
+    assert old_mean - reference > 0.4  # measured 18.19 against 17.41 (+- 0.15, 0.12)
+    assert abs(new_mean - reference) < 0.4  # measured 17.34
+
+
+def test_correlation_warnings_need_enough_records():
+    """Short or thinned runs of a well-mixed chain do not warn (the old threshold, a tenth
+    of the records, was 1 at 10 records); a strongly correlated one with enough records
+    still does, with tau to one decimal."""
+    n, m = 32, 8
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=1)
+    for seed in range(_size(20, 2)):
+        for samples, thin in ((10, 1), (20, 1), (50, 10)):
+            res = erasures.sample_regions(
+                edges, n, m, [0.0, 0.7, 1.5], samples, thin=thin, seed=seed
+            )
+            assert not any("strongly correlated" in w for w in res.warnings), res.warnings
+    ws96 = graphs.watts_strogatz(96, 4, 0.1, seed=1)
+
+    def lone(samples):
+        return erasures.sample_regions(
+            ws96, 96, 24, [2.0], samples, burn_in=100, seed=0, method="chain", tempering=False
+        ).warnings
+
+    assert not any("strongly correlated" in w for w in lone(40))  # fewer than 50 records
+    texts = [w for w in lone(100) if "strongly correlated" in w]
+    assert texts and re.search(r"is \d+\.\d of 100 records", texts[0]), texts
+
+
+def test_warning_advice_depends_on_the_ladder():
+    n, m = 32, 8
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=1)
+    given = erasures.sample_regions(edges, n, m, [0.0, 4.0], 100, seed=3, ladder="given")
+    automatic = erasures.sample_regions(edges, n, m, [0.0, 4.0], 100, seed=3, max_step=10.0)
+    assert automatic.ladder.tolist() == [0.0, 4.0]  # max_step 10 inserts nothing
+    advice_given = [w for w in given.warnings if "replica exchange" in w]
+    advice_auto = [w for w in automatic.warnings if "replica exchange" in w]
+    assert advice_given and "use ladder='auto'" in advice_given[0]
+    assert advice_auto and "pass a smaller max_step" in advice_auto[0]
+    assert "ladder='auto'" not in advice_auto[0]
+
+
+def test_extreme_ladders_are_refused_cleanly():
+    for couplings, step in (([0.0, 1e308], 0.1), ([-1e308, 1e308], 1.0), ([0.0, 1.0], 1e-320)):
+        with pytest.raises(ValueError, match="at most 256") as info:
+            erasures.coupling_ladder(couplings, step)
+        assert "a smaller largest |J|, a larger max_step, or ladder='given'" in str(info.value)
+    with pytest.raises(ValueError, match="at most 256") as info:
+        erasures.coupling_ladder([0.0, 1e300], 0.1)
+    assert len(str(info.value)) < 400  # no 300-digit integer in the message
+    args = (graphs.watts_strogatz(16, 4, 0.2, seed=1), 16, 4, [1.0], 5)
+    for bad in (None, [], ["x"], [[1.0, 2.0]]):
+        with pytest.raises(ValueError, match="ladder must be 'auto', 'given' or a list"):
+            erasures.sample_regions(*args, seed=1, ladder=bad)
+
+
+def test_max_step_is_none_without_variance_and_other_corners():
+    # Var_0(b) = 0 (no edges, a complete graph, m = 0 or n): nothing to insert, max_step None.
+    for edges, n, m in ((_EMPTY, 6, 2), (graphs.complete(6), 6, 3), (graphs.cycle(5), 5, 0)):
+        res = erasures.sample_regions(edges, n, m, [0.5, 2.0], 3, seed=1, method="chain")
+        assert res.max_step is None and res.ladder.tolist() == [0.0, 0.5, 2.0]
+    assert erasures.sample_regions(*_ladder_case(), 3, seed=1).max_step is not None
+    # Exact samples ignore tempering and the ladder, so this pair is not refused there.
+    res = erasures.sample_regions(
+        graphs.cycle(8), 8, 3, [1.0], 3, seed=1, tempering=False, ladder=[0.5]
+    )
+    assert res.method == "exact"
+    with pytest.raises(ValueError, match="extra couplings only help"):
+        erasures.sample_regions(*_ladder_case(), 3, seed=1, tempering=False, ladder=[0.5])
+
+
+def _ladder_case():
+    return graphs.watts_strogatz(16, 4, 0.2, seed=1), 16, 4, [1.0]
+
+
+def test_unsorted_couplings_give_the_sorted_run_with_rows_permuted():
+    edges = graphs.watts_strogatz(20, 4, 0.2, seed=2)
+    unsorted = [1.5, -0.5, 0.75, 0.0]
+    permutation = np.argsort(unsorted)  # sorted[k] = unsorted[permutation[k]]
+    a = erasures.sample_regions(edges, 20, 5, unsorted, 30, burn_in=20, seed=8)
+    b = erasures.sample_regions(edges, 20, 5, sorted(unsorted), 30, burn_in=20, seed=8)
+    assert np.array_equal(a.ladder, b.ladder) and len(a.ladder) > 4  # automatic ladder
+    assert [unsorted[k] for k in permutation] == sorted(unsorted)
+    assert np.array_equal(a.regions[permutation], b.regions)
+    assert np.array_equal(a.boundaries[permutation], b.boundaries)
+    assert np.array_equal(a.acceptance[permutation], b.acceptance, equal_nan=True)
+    assert np.array_equal(a.exchange_acceptance, b.exchange_acceptance, equal_nan=True)
+
+
+def test_remaining_input_errors():
+    ring = graphs.cycle(8)
+    with pytest.raises(ValueError, match="coupling must be a number"):
+        erasures.ring_partition_function(8, 3, "x")
+    for bad in (True, "seed", [], [1, -2]):
+        with pytest.raises(ValueError, match="seed"):
+            erasures.sample_regions(ring, 8, 3, [1.0], 2, seed=bad)
+    listed = erasures.sample_regions(ring, 8, 3, [1.0], 2, seed=[4, 5])
+    assert listed.seed == (4, 5)
+    assert np.array_equal(
+        erasures.sample_regions(ring, 8, 3, [1.0], 2, seed=(4, 5)).regions, listed.regions
+    )
+    with pytest.raises(ValueError, match="counts must be"):
+        erasures.boundary_moments(["a", "b"], [0.0])
+    with pytest.raises(ValueError, match="series must be numbers"):
+        erasures.chain_diagnostics(["a", "b"])
+    with pytest.raises(ValueError, match="vertices must be a non-empty list"):
+        erasures.region_diagnostics(np.tile(np.arange(3), (10, 1)), 8, vertices=[])
+    with pytest.raises(ValueError, match=r"m must be in \[0, 5\]"):
+        erasures.path_boundary_distribution(5, 7, 0.0)

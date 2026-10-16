@@ -86,6 +86,8 @@ from sparsegf2._kernel.rng import seed_state
 
 __all__ = [
     "ACCEPTANCE_WARNING",
+    "BURN_IN_PER_NODE",
+    "CORRELATION_MIN_RECORDS",
     "CORRELATION_WARNING",
     "ENUMERATION_BUDGET",
     "EXCHANGE_WARNING",
@@ -101,6 +103,7 @@ __all__ = [
     "boundary_moments",
     "chain_diagnostics",
     "coupling_ladder",
+    "default_burn_in",
     "minimum_boundary_regions",
     "path_boundary_distribution",
     "path_partition_function",
@@ -134,7 +137,16 @@ ACCEPTANCE_WARNING = 0.01
 """Swap acceptance below this at a coupling no exchange reaches gets a warning."""
 
 CORRELATION_WARNING = 0.1
-"""An integrated autocorrelation time above this fraction of the records gets a warning."""
+"""An integrated autocorrelation time above ``max(3, this x records)`` gets a warning."""
+
+CORRELATION_MIN_RECORDS = 50
+"""The correlation warning needs at least this many records (tau from fewer is noise)."""
+
+MIN_BURN_IN = 200
+"""The smallest default burn-in, in sweeps (:func:`default_burn_in`)."""
+
+BURN_IN_PER_NODE = 8
+"""Default burn-in sweeps per node: ``default_burn_in(n) = max(MIN_BURN_IN, BURN_IN_PER_NODE n)``."""
 
 
 # ---------------------------------------------------------------------------------------
@@ -441,28 +453,55 @@ def coupling_ladder(couplings, max_step: float) -> np.ndarray:
     of them, at ``a + (b - a) j / (k + 1)``, ``j = 1..k``. ``max_step =
     math.inf`` inserts none. Neighbouring rungs exchange their states with
     probability about ``exp(-ΔJ Δb)``, and ``Δb`` is of the order of
-    ``ΔJ Var(b)``, so ``ΔJ <= 1 / sqrt(Var b)`` keeps exchanges frequent;
-    :func:`sample_regions` uses ``max_step = 1 / sqrt(Var_0(b))``
-    (:func:`uniform_boundary_moments`). At most :data:`MAX_LADDER_INSERTED`
-    couplings are inserted; more are refused with what to change.
+    ``ΔJ Var_J(b)``, so ``ΔJ <~ 1 / sqrt(Var_J b)`` keeps exchanges frequent.
+    :func:`sample_regions` starts from ``max_step = 1 / sqrt(Var_0(b))``
+    (:func:`uniform_boundary_moments`), a guess: ``Var_J(b)`` is usually
+    smaller than ``Var_0(b)`` at ``J > 0``, but near a transition it can be far
+    larger (two cliques of 9 joined by one edge, ``m = 9``: ``Var_0 = 10.7``,
+    ``Var_J = 176`` at ``J = 0.3``), and the exchanges there become rare. The
+    exchange warning of :func:`sample_regions` is the safeguard: a smaller
+    ``max_step`` fixes it. At most :data:`MAX_LADDER_INSERTED` couplings are
+    inserted in all; more (the number is the span of the couplings divided by
+    ``max_step``) are refused with what to change.
     """
     points = np.unique(np.append(_couplings(couplings, distinct=False), 0.0))
     step = _max_step(max_step)
     pieces = [points[:1]]
     inserted = 0
     for a, b in itertools.pairwise(points.tolist()):
-        k = max(math.ceil((b - a) / step) - 1, 0) if math.isfinite(step) else 0
-        inserted += k
-        if inserted > MAX_LADDER_INSERTED:
+        ratio = (b - a) / step  # inf when it overflows (huge |J|, tiny max_step)
+        k = 0
+        if ratio <= MAX_LADDER_INSERTED + 1:
+            k = max(math.ceil(ratio) - 1, 0)
+        if not ratio <= MAX_LADDER_INSERTED + 1 or inserted + k > MAX_LADDER_INSERTED:
             raise ValueError(
-                f"the exchange ladder would insert more than {MAX_LADDER_INSERTED} couplings "
-                f"({k} between J = {a:g} and J = {b:g} alone, at max_step = {step:g}), and at "
-                f"most {MAX_LADDER_INSERTED} can be inserted: pass a larger max_step, couplings "
-                "closer together, or ladder='given' (and check exchange_acceptance)"
+                f"the exchange ladder needs about {ratio:.3g} rungs between J = {a:.6g} and "
+                f"J = {b:.6g} at max_step = {step:.3g}, and at most {MAX_LADDER_INSERTED} "
+                "couplings can be inserted in all: pass a smaller largest |J|, a larger "
+                "max_step, or ladder='given' (and check exchange_acceptance)"
             )
+        inserted += k
         pieces.append(a + (b - a) * np.arange(1, k + 1) / (k + 1))
         pieces.append(np.array([b]))
     return np.concatenate(pieces)
+
+
+def default_burn_in(num_nodes: int) -> int:
+    """The default burn-in of :func:`sample_regions`, in sweeps: ``max(200, 8 n)``.
+
+    Every rung of the ladder starts from a uniformly random region, and the
+    cold rungs (large ``J``) need a number of sweeps that grows with ``n`` to
+    fill with settled states. Measured on Watts-Strogatz graphs (``k = 4``,
+    ``beta = 0.1``, ``m = n/4``, couplings ``0, 0.5, 1, 2``, the automatic
+    ladder, 16 seeds of 1,000 records): with 200 sweeps the ``J = 2`` records
+    still drift (their first 200 lie above their last 500 by 1.2 at
+    ``n = 192`` and 2.0 to 2.4 at ``n = 256``, and the mean is 6% high at
+    ``n = 256``); with ``4 n`` sweeps a drift of 0.2 to 0.8 remains at
+    ``n = 192`` and ``256``; with ``8 n`` none is measurable. See
+    :data:`MIN_BURN_IN` and :data:`BURN_IN_PER_NODE`.
+    """
+    n = _integer(num_nodes, "num_nodes", 1)
+    return max(MIN_BURN_IN, BURN_IN_PER_NODE * n)
 
 
 # ---------------------------------------------------------------------------------------
@@ -492,7 +531,9 @@ class RegionSample:
     * ``ladder``: float64[L], sorted, the couplings the chain ran (the requested
       ones, plus 0 and inserted rungs with ``ladder="auto"``; the sorted
       requested couplings for exact samples). ``max_step``: the largest gap the
-      automatic ladder allowed (None when the ladder was not automatic).
+      automatic ladder allowed; None when the ladder was not automatic, or when
+      nothing could be inserted because ``Var_0(b) = 0`` (no edges, a complete
+      graph, ``m = 0`` or ``m = n``: every region has the same boundary).
     * ``acceptance``: float64[c], the fraction of swap proposals accepted at
       each requested coupling (NaN for exact samples, and when ``m = 0`` or
       ``m = n``: nothing to propose).
@@ -504,7 +545,9 @@ class RegionSample:
       change (empty when nothing looks wrong; always empty for exact samples).
       See :func:`sample_regions`.
     * ``seed``: the seed used (a fresh one when ``seed=None`` was passed).
-    * ``burn_in``, ``thin``: as passed (the exact samplers ignore them);
+    * ``burn_in``: the sweeps used before the first record (the default
+      :func:`default_burn_in` resolved, or as passed); ``thin``: as passed (the
+      exact samplers ignore both);
       ``tempering``: whether exchanges ran (False with one rung and for exact
       samples).
     """
@@ -556,20 +599,19 @@ def _check_bytes(rows: int, samples: int, m: int, limit: int) -> None:
 
 def _ladder_extra(ladder: Any) -> np.ndarray | None:
     """``None`` for ``"auto"`` and ``"given"``, else the extra couplings (checked)."""
+    message = f"ladder must be 'auto', 'given' or a list of extra couplings, got {ladder!r}"
     if isinstance(ladder, str):
         if ladder not in LADDERS:
-            raise ValueError(
-                f"ladder must be 'auto', 'given' or a list of extra couplings, got {ladder!r}"
-            )
+            raise ValueError(message)
         return None
+    if ladder is None:
+        raise ValueError(message)
     try:
         return _couplings(ladder, distinct=False)
     except ValueError as exc:
         if "finite" in str(exc):
             raise
-        raise ValueError(
-            f"ladder must be 'auto', 'given' or a list of extra couplings, got {ladder!r}"
-        ) from None
+        raise ValueError(message) from None
 
 
 def _chain_warnings(
@@ -581,16 +623,33 @@ def _chain_warnings(
     bounds: np.ndarray,
     n: int,
     m: int,
+    *,
+    automatic: bool,
+    tempering: bool,
 ) -> tuple[str, ...]:
-    """Plain warnings about a chain run (rows of ``regions``: the requested couplings, sorted)."""
+    """Plain warnings about a chain run (rows of ``regions``: the requested couplings, sorted).
+
+    The advice depends on how the ladder was made: with the automatic ladder,
+    ``max_step``; otherwise ``ladder='auto'`` (and ``tempering=True``).
+    """
+    if automatic:
+        denser = "pass a smaller max_step (the automatic spacing is too wide here)"
+    else:
+        denser = "use ladder='auto', or add couplings between them"
     notes = []
     for i, rate in enumerate(exchange.tolist()):
         if math.isfinite(rate) and rate < EXCHANGE_WARNING:
             notes.append(
                 f"replica exchange between J = {rungs[i]:g} and J = {rungs[i + 1]:g} was accepted "
-                f"in {100 * rate:.1f}% of attempts (below {100 * EXCHANGE_WARNING:.0f}%): add "
-                "couplings between them (ladder='auto', or a smaller max_step)."
+                f"in {100 * rate:.1f}% of attempts (below {100 * EXCHANGE_WARNING:.0f}%): "
+                f"{denser}."
             )
+    if not tempering:
+        reach = "use tempering=True (with the default ladder='auto')"
+    elif automatic:
+        reach = "pass a smaller max_step"
+    else:
+        reach = "use ladder='auto'"
     samples = bounds.shape[1]
     for k, i in enumerate(positions.tolist()):
         coupling = rungs[i]
@@ -600,15 +659,14 @@ def _chain_warnings(
         if math.isfinite(rate) and rate < ACCEPTANCE_WARNING and not reached:
             notes.append(
                 f"at J = {coupling:g} swaps were accepted only {100 * rate:.2f}% of the time and "
-                "no replica exchange reaches it: its records may hardly move; use "
-                "tempering=True with ladder='auto', and compare several seeds "
-                "(region_diagnostics)."
+                f"no replica exchange reaches it: its records may hardly move; {reach}, and "
+                "compare several seeds (region_diagnostics)."
             )
-        if samples >= 10 and 0 < m < n:
+        if samples >= CORRELATION_MIN_RECORDS and 0 < m < n:
             on_b = chain_diagnostics(bounds[k])["tau_int"]
             where = region_diagnostics(regions[k], n)
             worst = max(on_b, where["tau_int_max"])
-            if worst > CORRELATION_WARNING * samples:
+            if worst > max(3.0, CORRELATION_WARNING * samples):
                 which = (
                     "the boundary"
                     if on_b >= where["tau_int_max"]
@@ -616,7 +674,7 @@ def _chain_warnings(
                 )
                 notes.append(
                     f"at J = {coupling:g} the records are strongly correlated: the integrated "
-                    f"autocorrelation time of {which} is {worst:.0f} of {samples} records "
+                    f"autocorrelation time of {which} is {worst:.1f} of {samples} records "
                     f"(about {samples / worst:.0f} effective samples); record more (samples, "
                     "thin) or burn in longer, and compare several seeds."
                 )
@@ -630,7 +688,7 @@ def sample_regions(
     couplings,
     samples: int,
     *,
-    burn_in: int = 200,
+    burn_in: int | None = None,
     thin: int = 1,
     tempering: bool = True,
     seed: int | Sequence[int] | None = None,
@@ -685,10 +743,15 @@ def sample_regions(
     * ``"auto"`` (default): the requested couplings, 0, and rungs inserted so
       that no gap exceeds ``max_step`` (:func:`coupling_ladder`). Exchange
       acceptance is about ``exp(-ΔJ Δb)`` with ``Δb`` of the order of
-      ``ΔJ Var(b)``, so the gaps must satisfy ``ΔJ <~ 1 / sqrt(Var b)``; the
-      default ``max_step`` is ``1 / sqrt(Var_0(b))``, from the exact uniform
-      variance (:func:`uniform_boundary_moments`; about 0.12 for the example
-      above). ``max_step`` (a positive float, or ``math.inf``) overrides it.
+      ``ΔJ Var_J(b)``, so the gaps must satisfy ``ΔJ <~ 1 / sqrt(Var_J b)``;
+      the default ``max_step`` is ``1 / sqrt(Var_0(b))``, from the exact
+      uniform variance (:func:`uniform_boundary_moments`; about 0.12 for the
+      example above). That is a starting guess: ``Var_J(b)`` is usually smaller
+      at ``J > 0``, but near a transition it can be many times ``Var_0(b)``
+      (two cliques of 9 joined by an edge: 176 against 10.7 at ``J = 0.3``),
+      and then exchanges become rare. The exchange warning is the safeguard; a
+      smaller ``max_step`` (a positive float, or ``math.inf`` for none) fixes
+      it.
     * ``"given"``: exactly the requested couplings.
     * a list of couplings: the requested ones plus these.
 
@@ -700,9 +763,16 @@ def sample_regions(
 
     **Recording.** Each chain starts from a uniformly random region (exact at
     ``J = 0``), runs ``burn_in`` sweeps, then records its state ``samples``
-    times, ``thin`` sweeps apart. ``burn_in = 200`` is a default for small to
-    moderate ``n`` (tens to a hundred or two) and must be checked: the
-    diagnostics below, and a second run with a longer burn-in that agrees.
+    times, ``thin`` sweeps apart. The default ``burn_in=None`` is
+    :func:`default_burn_in`, ``max(200, 8 n)`` sweeps: every rung starts from
+    a uniform region, and the cold rungs need a number of sweeps that grows
+    with ``n`` to fill with settled states. In the example above, the
+    automatic ladder with only 200 sweeps still leaves ``<b>`` at ``J = 2``
+    6% high at ``n = 256`` (with no warning: exchanges are frequent and the
+    records look uncorrelated), and ``4 n`` sweeps still leave a measurable
+    drift at ``n = 192`` and ``256``; ``8 n`` leave none. It must still be
+    checked on a new graph or size: a second run with a longer burn-in that
+    agrees, and several seeds.
     Records of one chain are correlated: use :func:`chain_diagnostics` on
     ``boundaries`` and :func:`region_diagnostics` on ``regions`` for errors and
     mixing, and compare several seeds (R-hat). The boundary alone can mislead:
@@ -718,9 +788,14 @@ def sample_regions(
     between two rungs; a swap acceptance below :data:`ACCEPTANCE_WARNING` (0.01)
     at a requested coupling that no frequent exchange reaches; an integrated
     autocorrelation time of the boundary or of a followed node's membership
-    (:func:`region_diagnostics`) above :data:`CORRELATION_WARNING` (a tenth) of
-    the records (checked from 10 records on). No warning is no proof of
-    mixing; several seeds are the check.
+    (:func:`region_diagnostics`) above ``max(3, CORRELATION_WARNING x records)``
+    (a tenth of the records, and at least 3), checked from
+    :data:`CORRELATION_MIN_RECORDS` (50) records on, since ``tau`` from fewer is
+    noise. The advice in an exchange warning is ``max_step`` when the ladder was
+    automatic and ``ladder='auto'`` otherwise. No warning is no proof of
+    mixing: a bias left by too short a burn-in, or a relaxation longer than the
+    run, can pass all of them; a second, longer run and several seeds are the
+    check.
 
     **Limits.** A result of more than ``max_bytes`` (default
     :data:`MAX_RESULT_BYTES`, 2 GiB: ``8 c S (m + 1)`` bytes) is refused before
@@ -743,7 +818,7 @@ def sample_regions(
     m = _size(size, n)
     given = _couplings(couplings, distinct=True)
     samples = _integer(samples, "samples", 1)
-    burn_in = _integer(burn_in, "burn_in", 0)
+    burn_in = default_burn_in(n) if burn_in is None else _integer(burn_in, "burn_in", 0)
     thin = _integer(thin, "thin", 1)
     if not isinstance(tempering, (bool, np.bool_)):
         raise ValueError(f"tempering must be True or False, got {tempering!r}")
@@ -754,11 +829,6 @@ def sample_regions(
     limit = _integer(max_bytes, "max_bytes", 1)
     c = len(given)
     _check_bytes(c, samples, m, limit)
-    if extra is not None and not tempering:
-        raise ValueError(
-            "extra couplings only help with tempering=True (without exchanges the chains "
-            "never meet): drop ladder or set tempering=True"
-        )
     used = _seed(seed)
 
     indptr, indices = _csr(n, e)
@@ -769,19 +839,26 @@ def sample_regions(
             f"{n} nodes (in any labeling); this one is neither: use method='chain' (or 'auto')"
         )
     exact = method == "exact" or (method == "auto" and kind != 0)
+    if extra is not None and not tempering and not exact:
+        raise ValueError(
+            "extra couplings only help with tempering=True (without exchanges the chains "
+            "never meet): drop ladder or set tempering=True"
+        )
 
     order = np.argsort(given, kind="stable")
     requested = np.ascontiguousarray(given[order])
     used_step: float | None = None
+    automatic = False
     if exact or not tempering or (isinstance(ladder, str) and ladder == "given"):
         rungs = requested
     elif extra is not None:
         rungs = np.unique(np.concatenate([requested, extra]))
     else:
+        automatic = True
         if step is None:
             var0 = uniform_boundary_moments(e, n, m)[1]
             step = 1.0 / math.sqrt(var0) if var0 > 0 else math.inf
-        used_step = step
+        used_step = step if math.isfinite(step) else None  # None: nothing to insert
         rungs = coupling_ladder(requested, step)
     positions = np.searchsorted(rungs, requested)
     assert np.array_equal(rungs[positions], requested)
@@ -815,7 +892,18 @@ def sample_regions(
         )
         local = np.where(moves[:, 0] > 0, moves[:, 1] / np.maximum(moves[:, 0], 1), np.nan)
         exchange = np.where(moves[:-1, 2] > 0, moves[:-1, 3] / np.maximum(moves[:-1, 2], 1), np.nan)
-        notes = _chain_warnings(rungs, positions, local, exchange, regions, bounds, n, m)
+        notes = _chain_warnings(
+            rungs,
+            positions,
+            local,
+            exchange,
+            regions,
+            bounds,
+            n,
+            m,
+            automatic=automatic,
+            tempering=bool(tempering),
+        )
     out_regions = np.empty_like(regions)
     out_bounds = np.empty_like(bounds)
     acceptance = np.empty(c, dtype=np.float64)
