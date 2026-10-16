@@ -427,7 +427,7 @@ def main() -> None:
             res = spec.run(trajectories, seed=1)
             while (
                 res.elapsed_seconds < args.ensemble_seconds
-            ):  # long enough to amortise thread start-up
+            ):  # long enough to amortize thread start-up
                 trajectories *= 2
                 res = spec.run(trajectories, seed=1)
             results["ensemble"].append(

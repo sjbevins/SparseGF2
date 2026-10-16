@@ -12,7 +12,7 @@ You will:
 3. talk to it from a short Python script, without any agent, to see that it works
    (section 4),
 4. run a first session: a circuit, a purification ensemble, and a small erasure study
-   with graph collections, per-probe checkpoints and saved codes, then analyse the saved
+   with graph collections, per-probe checkpoints and saved codes, then analyze the saved
    result in Python (section 5).
 
 Sections 6 and 7 cover files, long runs and troubleshooting. Every command, script and
@@ -628,7 +628,7 @@ for a full-scale run:
   command line (`sparsegf2 ensemble spec.json --output-dir DIR --chunk-size N`,
   resumable by running the same command again). The command line's output directory has
   the same layout as a job's, so the agent can still summarize it with `load_results`,
-  and you analyse it in Python as in section 5.6. An agent with shell access can also
+  and you analyze it in Python as in section 5.6. An agent with shell access can also
   write such a script for you.
 
 ---

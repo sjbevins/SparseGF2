@@ -206,9 +206,9 @@ def test_one_trajectory_per_thread_costs_at_most_its_estimate():
     A busy thread runs slower than a thread alone (all-core clocks, SMT siblings, shared
     memory bandwidth); ``api._parallel_threads`` prices each of T busy threads at
     1 / (1 + 0.04 (T - 1)) of a lone one, and that model is what this checks. The measured
-    time is normalised with the one-thread reference workload, as above. At 32 threads on
+    time is normalized with the one-thread reference workload, as above. At 32 threads on
     the fitting machine, with other processes running, the estimate was 4.0 and 3.8 times
-    the normalised wall time. A runner with 2 to 4 threads cannot make this flaky: the model
+    the normalized wall time. A runner with 2 to 4 threads cannot make this flaky: the model
     gives a busy thread 0.89 or more of a lone one there, so even SMT siblings at half speed
     leave these probes' one-thread margin (3.5 or more) at 1.75 or more.
     """
@@ -559,6 +559,45 @@ def test_the_estimate_for_given_thread_counts():
     # trajectories are the unit of parallelism: threads beyond them are idle
     few = api.estimate_ensemble(spec, 2, threads=[2, 64])["by_threads"]
     assert few[0]["estimated_seconds"] == few[1]["estimated_seconds"]
+
+
+def test_the_run_guard_prices_the_threads_asked_for(monkeypatch):
+    # max_seconds keeps a synchronous call within a client's wait: a run on fewer threads takes
+    # longer, so it is priced at the count it will run on (num_threads, at most every thread)
+    seen = []
+
+    def estimate(spec, mc, trajectories, threads=None):
+        seen.append(threads)
+        return 1e9
+
+    monkeypatch.setattr(api, "_estimate_seconds", estimate)
+    every = numba.config.NUMBA_NUM_THREADS
+    for asked in (None, 1, every + 5):
+        with pytest.raises(ValueError, match="estimated at about"):
+            api.run_ensemble(LAYOUT_SPEC, 6, seed=1, num_threads=asked, max_seconds=60)
+    assert seen == [None, 1, every]
+
+
+def test_a_job_sizes_its_default_chunks_for_the_threads_asked_for(monkeypatch, tmp_path):
+    seen = []
+    chunk_size = api._default_chunk_size
+
+    def record(mc, trajectories, threads=None):
+        seen.append(threads)
+        return chunk_size(mc, trajectories, threads)
+
+    monkeypatch.setattr(api, "_default_chunk_size", record)
+    every = numba.config.NUMBA_NUM_THREADS
+    for i, asked in enumerate((None, 1, every + 5)):
+        job = api.start_ensemble_job(
+            LAYOUT_SPEC, 6, str(tmp_path / f"job{i}"), seed=1, num_threads=asked
+        )
+        api.job_status(job["job_id"], 30)
+    assert seen == [None, 1, every]
+    # a chunk is about 10 estimated seconds and at least 4 trajectories per thread
+    mc = api._build_spec(LAYOUT_SPEC)
+    assert chunk_size(mc, 10**9, 1) <= chunk_size(mc, 10**9, every)
+    assert chunk_size(mc, 10**9, 1) >= 4
 
 
 @pytest.mark.parametrize("threads", [0, -1, "4", 4, [], [0], [1, 0], [True], [1.5], ["2"]])

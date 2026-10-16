@@ -36,7 +36,7 @@ and take a few seconds together once the kernels are compiled.
 
 ### 1.1 The setting
 
-A monitored circuit acts on $n$ system qubits $[n]$ (labelled $0, \dots, n-1$
+A monitored circuit acts on $n$ system qubits $[n]$ (labeled $0, \dots, n-1$
 in the code). In the **purification picture** every system qubit $i$ starts
 Bell-paired with a reference qubit $n + i$; gates and measurements act on the
 system only, so the joint state of the system and the reference $R$ stays a
@@ -112,7 +112,7 @@ $$
 
 The binomial weights $b_m(e) = \binom{n}{m} e^m (1-e)^{n-m}$ concentrate near
 $m \approx ne$, with width $\sqrt{ne(1-e)}$. As $e \to 0$,
-$\Phi_C(e) = N_d e^d + O(e^{d+1})$: the small-$e$ behaviour is fixed by the
+$\Phi_C(e) = N_d e^d + O(e^{d+1})$: the small-$e$ behavior is fixed by the
 exact number of uncorrectable regions of the smallest failing size (§4.4).
 
 For an ensemble of codes (trajectories), $\Phi(e)$ is the mean of $\Phi_C(e)$

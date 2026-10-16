@@ -317,16 +317,16 @@ def test_job_tools_lifecycle(tmp_path):
         ))  # fmt: skip
         listed = ok(await client.call_tool("list_jobs", {}))
         loaded = ok(await client.call_tool("load_results", {"path": out_dir}))
-        cancelled = ok(await client.call_tool("cancel_job", {"job_id": started["job_id"]}))
+        canceled = ok(await client.call_tool("cancel_job", {"job_id": started["job_id"]}))
         missing = await client.call_tool("job_status", {"job_id": "nope"})
-        return started, status, listed, loaded, cancelled, missing
+        return started, status, listed, loaded, canceled, missing
 
-    started, status, listed, loaded, cancelled, missing = session(lifecycle)
+    started, status, listed, loaded, canceled, missing = session(lifecycle)
     assert status["status"] == "completed" and status["trajectories_done"] == 30
     assert started["job_id"] in {j["job_id"] for j in listed["jobs"]}
     assert loaded["num_trajectories"] == 30
     assert loaded["purification"] == api.run_ensemble(SPEC, 30, seed=9)["purification"]
-    assert cancelled["status"] == "completed"  # cancelling a finished job is harmless
+    assert canceled["status"] == "completed"  # canceling a finished job is harmless
     assert "unknown job_id" in error_text(missing)
 
 
@@ -435,6 +435,11 @@ def test_unanticipated_failures_carry_their_type_and_message(monkeypatch, caplog
         ("run_circuit", {"tick_stride": True}, "valid integer"),
         ("run_circuit", {"num_qubits": "4"}, "valid integer"),
         ("job_status", {"wait_seconds": True}, "valid number"),
+        ("run_ensemble", {"num_threads": True}, "valid integer"),
+        ("run_ensemble", {"num_threads": "2"}, "valid integer"),
+        ("run_ensemble", {"num_threads": 2.5}, "valid integer"),
+        ("start_ensemble_job", {"num_threads": False}, "valid integer"),
+        ("start_ensemble_job", {"num_threads": "4"}, "valid integer"),
     ],
 )
 def test_integer_and_boolean_arguments_are_strict(tool, given, expected, tmp_path):
@@ -461,6 +466,76 @@ def test_whole_number_floats_count_as_integers():
     schema = session(lambda c: c.list_tools()).tools
     ensemble = next(t for t in schema if t.name == "run_ensemble").input_schema["properties"]
     assert {"type": "integer"} in ensemble["trajectories"]["anyOf"]
+
+
+def _num_threads_schema(tools, name: str) -> dict:
+    return next(t for t in tools if t.name == name).input_schema["properties"]["num_threads"]
+
+
+def test_num_threads_defaults_to_the_threads_this_process_may_use(monkeypatch):
+    import numba
+
+    tools = session(lambda c: c.list_tools()).tools
+    for name in ("run_ensemble", "start_ensemble_job"):
+        field = _num_threads_schema(tools, name)
+        assert field["type"] == "integer" and field["default"] == numba.config.NUMBA_NUM_THREADS
+        description = next(t for t in tools if t.name == name).description
+        assert "num_threads" in description and str(numba.config.NUMBA_NUM_THREADS) in description
+    # read when the server is built (Clank's sandbox sets NUMBA_NUM_THREADS=16 for its 16 CPUs)
+    monkeypatch.setattr(numba.config, "NUMBA_NUM_THREADS", 3)
+    tools = session(lambda c: c.list_tools()).tools
+    assert [
+        _num_threads_schema(tools, name)["default"]
+        for name in ("run_ensemble", "start_ensemble_job")
+    ] == [3, 3]
+
+
+def test_num_threads_is_passed_to_the_api(monkeypatch, tmp_path):
+    import numba
+
+    seen = []
+
+    def recorder(name):
+        def record(*args, **kwargs):
+            seen.append((name, kwargs["num_threads"]))
+            return {"recorded": name}
+
+        return record
+
+    monkeypatch.setattr(api, "run_ensemble", recorder("run_ensemble"))
+    monkeypatch.setattr(api, "start_ensemble_job", recorder("start_ensemble_job"))
+    calls = {
+        "run_ensemble": {"spec": SPEC, "trajectories": 2},
+        "start_ensemble_job": {"spec": SPEC, "trajectories": 2, "output_dir": str(tmp_path)},
+    }
+    for tool, arguments in calls.items():
+        assert ok(call(tool, arguments)) == {"recorded": tool}
+        assert ok(call(tool, {**arguments, "num_threads": 2})) == {"recorded": tool}
+    every = numba.config.NUMBA_NUM_THREADS
+    assert seen == [("run_ensemble", every), ("run_ensemble", 2),
+                    ("start_ensemble_job", every), ("start_ensemble_job", 2)]  # fmt: skip
+
+
+@pytest.mark.parametrize("tool", ["run_ensemble", "start_ensemble_job"])
+@pytest.mark.parametrize("value", [0, -3])
+def test_num_threads_below_one_is_refused(tool, value, tmp_path):
+    arguments = {"spec": SPEC, "trajectories": 2, "seed": 1, "num_threads": value}
+    if tool == "start_ensemble_job":
+        arguments["output_dir"] = str(tmp_path / "job")
+    text = error_text(call(tool, arguments))
+    assert f"num_threads must be at least 1, got {value}" in text, text
+    assert not (tmp_path / "job").exists()
+
+
+def test_num_threads_above_the_maximum_runs_on_the_maximum():
+    import numba
+
+    many = ok(call("run_ensemble", {"spec": SPEC, "trajectories": 6, "seed": 2,
+                                    "num_threads": numba.config.NUMBA_NUM_THREADS + 7}))  # fmt: skip
+    one = ok(call("run_ensemble", {"spec": SPEC, "trajectories": 6, "seed": 2, "num_threads": 1}))
+    assert many["num_trajectories"] == 6
+    # every result is the same at any thread count
+    assert (many["probes"], many["purification"]) == (one["probes"], one["purification"])
 
 
 def test_fresh_seeds_fit_in_a_double():

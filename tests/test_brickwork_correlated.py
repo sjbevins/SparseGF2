@@ -1,4 +1,4 @@
-"""The nearest-neighbour brickwork baseline of the geometry-correlated erasures, checked exactly.
+"""The nearest-neighbor brickwork baseline of the geometry-correlated erasures, checked exactly.
 
 The baseline circuit (the literature's monitored Clifford brickwork): the periodic ring
 ``graphs.cycle(n)`` with ``schedule="matching"`` (one matching per layer, even bonds then odd

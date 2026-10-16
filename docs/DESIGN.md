@@ -433,7 +433,7 @@ force. A code on its own, without a simulator state, is a
 
 `mipt.MonitoredCircuit` describes a protocol: graph (one, or a collection of
 graphs each run with `circuits_per_graph` circuits, section 8.1), schedule
-(`matching` = brickwork on any graph through an edge colouring,
+(`matching` = brickwork on any graph through an edge coloring,
 `random_edges` with optional edge weights for long-range circuits,
 `all_edges`), measurement rate, picture (`none`, `purification`, `single`
 reference with a fixed or random partner), scramble (random pairs, random
@@ -713,7 +713,7 @@ so `lost_information_rows` returns `rank(N(S)|_A) - rank(S|_A) = l(A)`, and
 `first_failure_samples` and `uncorrectable_counts_rows` give the same
 quantities as the probes (`code_columns` discards redundant generators). In
 terms of the check matrix H, `l(A) = 2|A| - s - rank(H_A) + rank(H_Abar)`. A
-saved code can therefore be analysed later with more orderings
+saved code can therefore be analyzed later with more orderings
 (`first_failure_sizes(samples, seed=...)`) or a larger exhaustive search
 (`uncorrectable_counts(w)`) than the run used.
 

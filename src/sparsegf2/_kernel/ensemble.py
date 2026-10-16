@@ -14,7 +14,7 @@ instead of applying them. ``MonitoredCircuit.circuit(t)`` is built from those
 operations, so an exported circuit is exactly what trajectory ``t`` simulated.
 
 Graphs: ``edges`` holds one or more graphs back to back (graph ``g`` is
-``edges[graph_ptr[g]:graph_ptr[g + 1]]``, with its edge colouring and edge
+``edges[graph_ptr[g]:graph_ptr[g + 1]]``, with its edge coloring and edge
 weights stored the same way). With several graphs, trajectory ``t`` runs on
 graph ``t // circuits_per_graph``: each graph carries a block of
 ``circuits_per_graph`` consecutive trajectories. This is how graph disorder
@@ -30,9 +30,9 @@ Random draws per trajectory, in order:
    [edge: one integer draw, or one uniform draw if edges are weighted, if edges
    are sampled], [orientation bit if enabled], gate index; then (dynamics only)
    one uniform per system qubit for the measurement mask. Scramble layers and
-   dynamics layers share one layer count, so the matching schedule's colour
+   dynamics layers share one layer count, so the matching schedule's color
    cycle runs on from the scramble into the dynamics (dynamics layer ``l``,
-   counted from 1, uses colour ``(scramble_layers + l - 1) mod C``).
+   counted from 1, uses color ``(scramble_layers + l - 1) mod C``).
 
 Reference qubits
 ----------------
@@ -565,7 +565,7 @@ def run_ensemble(
         stopped = False
         for layer in range(layers + 1):
             if layer > 0:
-                # the matching schedule's colour cycle continues from the scramble layers
+                # the matching schedule's color cycle continues from the scramble layers
                 ng, nm = gen_layer(
                     rng, scramble_layers + layer - 1, schedule_kind, g_edges, g_cum, g_cptr,
                     g_cidx, gates_per_layer, pool, n_sys, p, True, orient, ga, gb, gg, mq,

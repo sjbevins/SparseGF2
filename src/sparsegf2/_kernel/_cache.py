@@ -174,7 +174,7 @@ class _KernelLocator:
     only for files in ``_kernel/`` and delegates everything but the stamp.
     """
 
-    _sparsegf2_kernels = True  # recognises a copy left by an earlier import
+    _sparsegf2_kernels = True  # recognizes a copy left by an earlier import
     imported_fingerprint = ""  # of the kernel sources this process imported
 
     def __init__(self, inner):

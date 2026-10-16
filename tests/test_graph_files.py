@@ -20,7 +20,7 @@ def test_round_trip_collection_with_weights(tmp_path, suffix):
         np.testing.assert_allclose(wa, wb)
 
 
-def test_json_single_graph_in_any_order_is_normalised(tmp_path):
+def test_json_single_graph_in_any_order_is_normalized(tmp_path):
     path = tmp_path / "g.json"
     path.write_text(
         json.dumps({"num_nodes": 4, "edges": [[3, 2], [0, 1], [2, 1]], "weights": [3.0, 1.0, 2.0]}),

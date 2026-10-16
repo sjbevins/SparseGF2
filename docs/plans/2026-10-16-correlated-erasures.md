@@ -6,7 +6,7 @@
 **Goal:** the owner's study "Geometry-correlated erasures in monitored quantum circuits" runnable end to end: sample
 erasure regions with probability `∝ exp(-J b_G(A))` at fixed size on any graph, evaluate `P_{C,G,J}(m)` and
 `Φ_{C,G,J}(ε)` on monitored-circuit codes (in a run and on saved codes), exactly where enumeration allows, with the
-nearest-neighbour brickwork ring as the baseline.
+nearest-neighbor brickwork ring as the baseline.
 
 **Execution:** one implementer per task (tests first), one review per task, a push after each task to branch
 `correlated-erasures` (pull request against `main`; merged by the owner).
@@ -42,7 +42,7 @@ nearest-neighbour brickwork ring as the baseline.
   ring, the path and small-world graphs, the literature), AGENTS.md, docs/LLM_INTERFACE.md, the observables index,
   CHANGELOG, `examples/correlated_erasure.py`; worked examples run by `tests/test_docs.py`.
 - [x] **T6. The brickwork baseline.** `tests/test_brickwork_correlated.py` and `benchmarks/correlated_erasure_baseline.py`
-  with its report: every identity on real nearest-neighbour brickwork codes, `J -> ∞` against intervals, and the
+  with its report: every identity on real nearest-neighbor brickwork codes, `J -> ∞` against intervals, and the
   literature's expectations.
 - [x] **T7. Whole-branch review and fixes;** the owner's SmallWorldCodes driver (`scripts/ws_erasure.py`) gains the
   correlated erasures (left uncommitted for the owner).

@@ -245,7 +245,7 @@ def _is_ring_interval(region, n) -> bool:
 # ---------------------------------------------------------------------------------------
 
 
-def test_csr_has_sorted_rows_with_the_neighbours_of_graphs_csr():
+def test_csr_has_sorted_rows_with_the_neighbors_of_graphs_csr():
     for _, edges, n in SMALL:
         indptr, indices = kernel.csr(n, edges)
         ref_ptr, ref_idx = graphs._csr(edges, n)
@@ -741,7 +741,7 @@ def test_chain_diagnostics_of_constant_series():
     flat = erasures.chain_diagnostics(np.full(50, 3.0))
     assert flat["mean"] == 3.0 and flat["variance"] == 0.0 and flat["std_error"] == 0.0
     assert flat["tau_int"] == 1.0 and flat["ess"] == 50.0 and flat["constant"] is True
-    # A value without an exact binary form: the mean is off by an ulp, and the centred
+    # A value without an exact binary form: the mean is off by an ulp, and the centered
     # series is not exactly zero; still "no variation" (it gave tau = N, ess = 1).
     for value in (0.1, 1 / 3):
         tenth = erasures.chain_diagnostics(np.full(1000, value))

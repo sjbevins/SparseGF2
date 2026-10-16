@@ -4,7 +4,7 @@
 (the owner's note, `implementations/Geometry-correlated_erasures_in_monitored_quantum_circuits.pdf`, transcribed and
 corrected in `docs/observables/correlated-erasure.md`) inside the simulator: generalized, documented in complete
 mathematical detail, checked against the literature, easy for a language model to use, exposed through the MCP server,
-tested exhaustively with the nearest-neighbour brickwork ring as the main baseline. Built overnight while the owner
+tested exhaustively with the nearest-neighbor brickwork ring as the main baseline. Built overnight while the owner
 sleeps; every decision below is a ruling recorded with its reason, for the owner to read in the morning.
 
 **Status:** written 2026-10-16 by Claude. Implemented on branch `correlated-erasures` (pull request against `main`;
@@ -16,7 +16,7 @@ Notation: interaction graph `G = (V, E)`, `V = {0, ..., n-1}` (the simulator num
 undirected. Region `A ⊆ V`, size `m = |A|`. Edge boundary `∂A = {{u,v} ∈ E : u ∈ A, v ∉ A}`, `b(A) = |∂A|`.
 
 - **Fixed-weight correlated law:** `Q_J(A | m) = exp(-J b(A)) / Z_m(J)`, `Z_m(J) = Σ_{|A|=m} exp(-J b(A))`, for `A` of
-  size `m` (zero otherwise). `J` real (the note takes `J >= 0`; we allow any finite real `J`: `J < 0` favours large
+  size `m` (zero otherwise). `J` real (the note takes `J >= 0`; we allow any finite real `J`: `J < 0` favors large
   boundaries, spread-out erasures; every identity below holds, only the sign of the monotonicity flips).
 - **Ising form:** with `σ_v = -1` for `v ∈ A`, `+1` otherwise, `b(A) = Σ_{{u,v}∈E} (1 - σ_u σ_v)/2`, so
   `exp(-J b(A)) ∝ exp((J/2) Σ_{{u,v}∈E} σ_u σ_v)`: the ferromagnetic (for `J > 0`) Ising model with coupling `K = J/2`
@@ -138,6 +138,6 @@ undirected. Region `A ⊆ V`, size `m = |A|`. Edge boundary `∂A = {{u,v} ∈ E
    `interval_failure_by_size`; `interval_failure_by_size` against brute force; `Φ_{C,0} = Φ_C`.
 6. Probe: reproducible, replay equal, chunked = single, any thread count, `k = 0` gives 0, summaries, JSON and MCP; the
    pinned digests of the existing probes unchanged.
-7. Brickwork baseline (nearest-neighbour ring, `schedule="matching"`): every identity above on real monitored-circuit
+7. Brickwork baseline (nearest-neighbor ring, `schedule="matching"`): every identity above on real monitored-circuit
    codes; `P_{C,∞}(m)` (intervals) against `P_{C,0}(m)`; the contiguous distance; the literature's expectations (the
    memo in the docs' references).

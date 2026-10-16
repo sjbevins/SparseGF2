@@ -6,7 +6,7 @@ equal ``str(spec.circuit(t, seed=seed))``, and ``probe_orderings`` rebuilds the 
 orderings a sampled probe draws at one evaluation. It is written from the documented protocol:
 the ``sparsegf2._kernel.ensemble`` module docstring ("Random draws per trajectory, in
 order", items 1-4) and the ``MonitoredCircuit`` docstrings (setup, scramble, schedules,
-the colour cycle that runs on from the scramble layers). It draws from
+the color cycle that runs on from the scramble layers). It draws from
 ``_reference_rng`` (a pure-Python xoshiro256**), never imports ``sparsegf2._kernel``,
 never calls ``MonitoredCircuit.circuit`` or ``run``, and reads only the spec's public
 fields (``graphs``, ``edge_weights``, ``gate_set``, ...).
@@ -29,8 +29,8 @@ transcribed here (the equality test pins each of them):
 * Scramble matching: a fresh identity permutation each time, shuffled front to back
   (``r = i + below(n - i)`` for ``i = 0 .. n - 2``, then swap entries ``i`` and ``r``),
   paired as ``(perm[2j], perm[2j + 1])``; an odd ``n`` leaves ``perm[n - 1]`` idle.
-* Edge colouring (``"matching"``): greedy in edge order (each edge takes the smallest
-  colour free at both of its ends); colour class ``c`` lists its edges in edge order.
+* Edge coloring (``"matching"``): greedy in edge order (each edge takes the smallest
+  color free at both of its ends); color class ``c`` lists its edges in edge order.
   Layer ``L`` of the count shared by the scramble layers (``0 .. s - 1``) and the
   dynamics (``s ..``) uses class ``L mod C``.
 * Weighted edge: ``u = double()``; the edge is the smallest ``e`` with ``u < cum[e]``,
@@ -109,8 +109,8 @@ def probe_orderings(
     return out
 
 
-def colour_classes(edges: list[tuple[int, int]], n: int) -> list[list[int]]:
-    """Greedy edge colouring in edge order; each colour class lists its edge indices in order."""
+def color_classes(edges: list[tuple[int, int]], n: int) -> list[list[int]]:
+    """Greedy edge coloring in edge order; each color class lists its edge indices in order."""
     used: list[set[int]] = [set() for _ in range(n)]
     classes: list[list[int]] = []
     for e, (a, b) in enumerate(edges):
@@ -119,14 +119,14 @@ def colour_classes(edges: list[tuple[int, int]], n: int) -> list[list[int]]:
             c += 1
         used[a].add(c)
         used[b].add(c)
-        if c == len(classes):  # every smaller colour is already in use at a or b
+        if c == len(classes):  # every smaller color is already in use at a or b
             classes.append([])
         classes[c].append(e)
     return classes
 
 
 def cumulative(weights) -> list[float]:
-    """Running sum of the normalised weights, with the last entry exactly 1."""
+    """Running sum of the normalized weights, with the last entry exactly 1."""
     total = float(np.sum(np.asarray(weights, dtype=np.float64)))
     cum: list[float] = []
     running = 0.0  # added in order, as np.cumsum does
@@ -153,7 +153,7 @@ def oracle_draws(
     pool = [int(g) for g in np.asarray(spec.gate_set)]
     orient = bool(spec.random_orientation)
     p = float(spec.measurement_rate)
-    classes = colour_classes(edges, n) if spec.schedule == "matching" else []
+    classes = color_classes(edges, n) if spec.schedule == "matching" else []
 
     def gate_on(a: int, b: int) -> Gate:
         if orient and rng.next_bit():

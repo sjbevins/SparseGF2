@@ -1004,7 +1004,7 @@ def test_save_records_the_package_version(tmp_path):
     assert mipt.EnsembleResult.load(tmp_path / "r.npz").version == sparsegf2.__version__
 
 
-def test_scramble_layers_continue_the_colour_cycle():
+def test_scramble_layers_continue_the_color_cycle():
     # Restarting the cycle repeated the last scramble matching in the first
     # dynamics layer, so scramble_layers=1 on a brickwork was absorbed.
     def blocks(scramble_layers):

@@ -121,7 +121,7 @@ Q_{G,J}(A \mid m) = \frac{\exp\big(-J\, b_G(A)\big)}{Z_{G,m}(J)} \quad \text{for
 $$
 
 and probability zero for subsets of other sizes. $J = 0$: no geometric
-preference. $J > 0$: subsets with smaller graph-edge boundaries are favoured.
+preference. $J > 0$: subsets with smaller graph-edge boundaries are favored.
 The normalization is exact, $\sum_{A \in \Omega_{n,m}} Q_{G,J}(A \mid m) = 1$.
 $J$ is dimensionless and only controls the statistical preference for small
 boundaries.
@@ -270,10 +270,10 @@ tend to 0, so the denominator tends to $\lvert\mathcal{M}_{G,m}\rvert \ge 1$. �
 At $J = 0$ every region of size $m$ is equally probable; as $J \to \infty$ only
 minimum-boundary regions retain nonzero probability, uniformly.
 
-### 1.7 Exactly solvable example: the nearest-neighbour ring
+### 1.7 Exactly solvable example: the nearest-neighbor ring
 
 Let $C_n$ be the cycle on $n \ge 3$ vertices (each connected to its two nearest
-neighbours, periodic boundary conditions; $n \ge 3$ makes it a simple graph).
+neighbors, periodic boundary conditions; $n \ge 3$ makes it a simple graph).
 
 **Boundary size and runs.** A nonempty proper subset $A$ of the ring consists
 of $r \ge 1$ disjoint contiguous runs of erased vertices (maximal blocks of
@@ -302,7 +302,7 @@ for any $J > 0$ a particular contiguous four-site pattern is more probable
 than a particular fully separated one.
 
 **Exact combinatorial counting.** Let $N(n, m, r)$ be the number of size-$m$
-regions on the labelled ring with exactly $r$ runs. For $1 \le m \le n-1$ and
+regions on the labeled ring with exactly $r$ runs. For $1 \le m \le n-1$ and
 $1 \le r \le \min(m, n-m)$,
 
 $$
@@ -408,7 +408,7 @@ $-\partial_J \log Z_{G,m}(J)$, and "large $j$" for large $J$.
 What the simulator generalizes: $J$ may be any real number with
 $\lvert J\rvert \le 10^6$ (`erasures.MAX_ABS_COUPLING`; beyond it use the exact
 $J \to \infty$ routes of §3.7). Every
-identity above holds for $J \lt 0$ too; Proposition 1 then favours the larger
+identity above holds for $J \lt 0$ too; Proposition 1 then favors the larger
 boundary (spread-out regions), and Proposition 2 still says that
 $\langle b\rangle$ falls as $J$ grows. $J \to \pm\infty$ is a limit, never a
 coupling (§3). $G$ is any simple graph on the qubit labels $0, \dots, n-1$.
@@ -490,7 +490,7 @@ What the mapping buys:
 * **The dynamics has a name and a literature.** The swap move of §1.8 exchanges
   one up spin and one down spin, so it conserves the magnetization: it is
   Kawasaki spin-exchange dynamics (Kawasaki 1966). The textbook Kawasaki move
-  exchanges nearest-neighbour spins; the simulator's move exchanges an
+  exchanges nearest-neighbor spins; the simulator's move exchanges an
   arbitrary (erased, unerased) pair chosen uniformly, a non-local variant
   whose proposal is symmetric because the number of such pairs, $m(n-m)$,
   does not depend on the state. Schemes that pick the pair uniformly among a
@@ -661,11 +661,11 @@ The second level, $b = 2$, holds the $n - m - 1$ interior intervals
 ### 3.5 Graphs with shortcuts: minimizers need not be contiguous
 
 On a Watts–Strogatz graph (`graphs.watts_strogatz(n, k, beta, seed=...)`: a
-ring lattice in which every node is joined to its $k/2$ nearest neighbours on
+ring lattice in which every node is joined to its $k/2$ nearest neighbors on
 each side, each edge then rewired with probability $\beta$ to a random new
 end), the minimum-boundary
 regions need not be intervals of the qubit order, for two reasons. With
-$k = 4$ the lattice already joins second neighbours, so at $m = 2$ the pair
+$k = 4$ the lattice already joins second neighbors, so at $m = 2$ the pair
 $\lbrace i, i+2\rbrace$ ties with $\lbrace i, i+1\rbrace$ (both $b = 6$) even
 at $\beta = 0$. And a shortcut can make $b_{\min}$ smaller than the boundary
 of every interval, so that no interval is a minimizer at all. The block finds
@@ -876,10 +876,10 @@ the unerased list, so the update is $O(1)$. A **sweep** is $n$ proposals.
 
 1. *Symmetric proposal.* The $m(n-m)$ pairs $(u, v) \in A \times \bar A$ give
    $m(n-m)$ distinct regions $A'$ ($u$ is the element of $A \setminus A'$ and
-   $v$ that of $A' \setminus A$): the neighbours of $A$ in the Johnson graph
+   $v$ that of $A' \setminus A$): the neighbors of $A$ in the Johnson graph
    $J(n, m)$, whose vertices are the $m$-subsets and whose edges join subsets
    differing by one swap. So $q(A, A') = 1/(m(n-m)) = q(A', A)$.
-2. *Detailed balance.* For neighbours $A \ne A'$,
+2. *Detailed balance.* For neighbors $A \ne A'$,
    $Q_J(A)P(A, A') = \frac{1}{m(n-m)Z}\min\big(e^{-Jb(A)}, e^{-Jb(A')}\big)$,
    which is symmetric in $A$ and $A'$. Summing over $A$ shows that $Q_J$ is
    stationary.
@@ -890,7 +890,7 @@ the unerased list, so the update is $O(1)$. A **sweep** is $n$ proposals.
    graph $G$ enters only through the acceptance.
 4. *Aperiodicity.* For $n \ge 3$, $J(n, m)$ contains a triangle: with
    $u, u' \in A$ and $v \notin A$ (when $m \ge 2$), the regions $A$,
-   $A - u + v$, $A - u' + v$ are pairwise neighbours; with $v, v' \notin A$
+   $A - u + v$, $A - u' + v$ are pairwise neighbors; with $v, v' \notin A$
    (when $m = 1$, so $n - m \ge 2$), $A$, $A - u + v$, $A - u + v'$ are. Closed
    walks of length 2 and 3 give period 1. More: one sweep connects any two
    regions with positive probability. Their distance $d \le \min(m, n-m) \le n/2$
@@ -937,17 +937,17 @@ with adjacent and non-adjacent pairs:
 
 ```python
 graph = graphs.watts_strogatz(12, 4, 0.3, seed=2)
-neighbours = [set() for _ in range(12)]
+neighbors = [set() for _ in range(12)]
 for a, c in graph.tolist():
-    neighbours[a].add(c)
-    neighbours[c].add(a)
+    neighbors[a].add(c)
+    neighbors[c].add(a)
 
 
 def swap_change(region, u, v):
     """Delta b of the formula, degrees counted in the current region."""
-    inside, outside = len(neighbours[u] & region), len(neighbours[u] - region)
-    v_inside, v_outside = len(neighbours[v] & region), len(neighbours[v] - region)
-    return (inside - outside) + (v_outside - v_inside) + 2 * int(v in neighbours[u])
+    inside, outside = len(neighbors[u] & region), len(neighbors[u] - region)
+    v_inside, v_outside = len(neighbors[v] & region), len(neighbors[v] - region)
+    return (inside - outside) + (v_outside - v_inside) + 2 * int(v in neighbors[u])
 
 
 rng = np.random.default_rng(1)
@@ -958,7 +958,7 @@ for m in (1, 3, 6, 11):
         b_before = erasures.boundary(graph, 12, sorted(region))
         for u in region:
             for v in set(range(12)) - region:
-                adjacent_pairs += int(v in neighbours[u])
+                adjacent_pairs += int(v in neighbors[u])
                 after = erasures.boundary(graph, 12, sorted(region - {u} | {v}))
                 assert swap_change(region, u, v) == after - b_before
 assert adjacent_pairs > 0
@@ -1037,7 +1037,7 @@ Without `tempering` the ladder is the requested couplings (a list is refused).
 The cost is proportional to the number of rungs (`RegionSample.ladder`,
 `CorrelatedFailure.rungs`).
 
-**The spacing rule.** Suppose that at neighbouring rungs $J$ and $J + \Delta J$
+**The spacing rule.** Suppose that at neighboring rungs $J$ and $J + \Delta J$
 the boundary is roughly Gaussian with a common variance $\sigma^2$ and means
 differing by $\Delta J\,\sigma^2$ (Proposition 2 to first order). The exchange
 exponent is $x = -\Delta J\,(b_J - b_{J+\Delta J})$, so for independent rungs
@@ -1358,8 +1358,8 @@ share its disorder: average per graph first, as in
 draws) or independent chains of equal length (chains × draws, at least 4
 draws each).
 
-* **Autocorrelation.** Each chain is centred on its own mean (a chain with no
-  variation, decided exactly, is centred to zeros), and
+* **Autocorrelation.** Each chain is centered on its own mean (a chain with no
+  variation, decided exactly, is centered to zeros), and
   $\hat C(t) = \frac{1}{N}\sum_{s=0}^{N-1-t}\tilde x_s\tilde x_{s+t}$ (by FFT,
   zero-padded) is averaged over chains; $\hat\rho(t) = \hat C(t)/\hat C(0)$.
 * **Integrated autocorrelation time, Sokal's window.**
@@ -1616,7 +1616,7 @@ has it:
    $t = (m - m_\ell)/(m_r - m_\ell)$ (exactly $P(m_\ell)$ on a plateau), with
    `interpolated[m] = True`.
 
-Interpolated entries are a modelling choice, not measurements: report which
+Interpolated entries are a modeling choice, not measurements: report which
 sizes they are. NaN propagates.
 
 **The channel.** `analysis.failure_probability_from_curve(curve, n, e)` computes
@@ -1678,7 +1678,7 @@ be sampled at that $\varepsilon$.
 * **The ring and path limits are nondecreasing:** $\#\lbrace s : L(s) \le m\rbrace$
   grows with $m$, and so do the two end indicators.
 * **For $J \ne 0$ on a general graph, $P_J(m)$ need not be monotone in $m$.**
-  The coupling above needs the favoured regions of size $m + 1$ to contain
+  The coupling above needs the favored regions of size $m + 1$ to contain
   those of size $m$, and under $Q_J$ they need not. The block builds a code
   and a graph where $P_\infty(2) = 1$ but $P_\infty(3) = 0$: the $[[4,2,2]]$
   code on qubits 0, 1, 2, 5 (every pair of them fails, no single one does) and
@@ -2312,7 +2312,7 @@ for i, coupling in enumerate(couplings):
 
 ### (c) A brickwork ring code, $n = 16$
 
-The nearest-neighbour ring (`graphs.cycle`) with `schedule="matching"`, which
+The nearest-neighbor ring (`graphs.cycle`) with `schedule="matching"`, which
 on an even ring is the brickwork (even bonds, then odd bonds), in the
 purification picture, $4n$ layers at measurement rate 0.1 (below the critical
 rate $p_c \approx 0.16$, §11), and the erasure graph equal to the circuit's
@@ -2674,12 +2674,12 @@ report. A study would sample every size of the window.
   `end_window_failure_by_size`, not `interval_failure_by_size(periodic=False)`,
   which weighs all windows equally.
 * **Shortcuts, and which graph.** On graphs with shortcuts (or with
-  next-nearest-neighbour edges, as Watts–Strogatz with $k = 4$) the minimizers
+  next-nearest-neighbor edges, as Watts–Strogatz with $k = 4$) the minimizers
   need not be intervals, and `interval_failure_by_size` is not the limit
   (§3.5). Decide which graph models the physical layout: the circuit's own
   interaction graph, or the ring of qubit labels on which a Watts–Strogatz
   graph is built (pass `graphs.cycle(n)` as `edges` for the latter).
-* **$J \lt 0$.** Negative couplings favour spread-out regions; the limit is the
+* **$J \lt 0$.** Negative couplings favor spread-out regions; the limit is the
   maximum-boundary regions and Proposition 2's monotonicity is the same
   statement ($\langle b\rangle$ still falls as $J$ grows, so it rises as $J$ goes
   more negative). The ladder spacing uses $\operatorname{Var}_0(b)$, which can
@@ -2865,10 +2865,10 @@ none of them defines the Gibbs ensemble used here; abstracts):
 * J. Fan, M.-H. Hsieh, H. Chen, H. Chen and Y. Li, "Construction and performance
   of quantum burst error correction codes for correlated errors", ISIT 2018,
   [arXiv:1801.03861](https://arxiv.org/abs/1801.03861): burst (contiguous)
-  errors, the code-theory analogue of the $J \to \infty$ limit.
+  errors, the code-theory analog of the $J \to \infty$ limit.
 * T. M. Stace, S. D. Barrett and A. C. Doherty, "Thresholds for topological
   codes in the presence of loss", Phys. Rev. Lett. 102, 200501 (2009),
   [arXiv:0904.3556](https://arxiv.org/abs/0904.3556).
-* N. H. Nickerson and B. J. Brown, "Analysing correlated noise on the surface
+* N. H. Nickerson and B. J. Brown, "Analysing correlated noise on the surface <!-- spelling: keep (the title) -->
   code using adaptive decoding algorithms", Quantum 3, 131 (2019),
   [arXiv:1712.00502](https://arxiv.org/abs/1712.00502).

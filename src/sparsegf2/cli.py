@@ -288,7 +288,7 @@ def _build_parser() -> _Parser:
         nargs="+",
         required=True,
         metavar="J",
-        help="couplings J (distinct, |J| <= 1e6; J > 0 favours compact regions, 0 is uniform)",
+        help="couplings J (distinct, |J| <= 1e6; J > 0 favors compact regions, 0 is uniform)",
     )
     p.add_argument(
         "--samples", type=int, default=200, help="recorded regions per chain and coupling (200)"

@@ -635,7 +635,7 @@ def test_the_limits_equal_the_counts_and_the_exact_samplers_under_any_labeling(c
 
 
 def _brickwork_codes(n: int, p: float, count: int, seed: int) -> list[StabilizerCode]:
-    """Codes of the nearest-neighbour brickwork ring after 4n layers (p < 0.1, the mixed
+    """Codes of the nearest-neighbor brickwork ring after 4n layers (p < 0.1, the mixed
     phase, where the code keeps distance 2 to 4 at these sizes) or n layers (p = 0.2,
     which purifies quickly)."""
     spec = mipt.MonitoredCircuit(

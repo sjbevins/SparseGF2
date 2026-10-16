@@ -107,7 +107,7 @@ SparseGF2's exactly.
 
 The circuits generate codes, and the question is how well those codes
 survive erasures. Two probes answer it inside the engine at the depths you
-choose (the same routines analyse a saved code through `StabilizerCode`):
+choose (the same routines analyze a saved code through `StabilizerCode`):
 exact counts of the uncorrectable erasures of up to w qubits, and
 first-failure sizes along random orderings of the qubits. Rather than
 computing two ranks from scratch for every erased set, they work in a row
@@ -162,7 +162,7 @@ Then follow the guide that fits:
 * [`docs/MCP_GETTING_STARTED.md`](docs/MCP_GETTING_STARTED.md): letting an AI
   agent run your simulations. Installing the MCP server, connecting Claude
   Code, Claude Desktop or another client, a worked first session, background
-  jobs for long runs, and analysing the saved results in Python.
+  jobs for long runs, and analyzing the saved results in Python.
 * [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md): how the simulator works
   inside, with diagrams.
 
@@ -244,7 +244,7 @@ from sparsegf2 import analysis, graphs, mipt
 
 spec = mipt.MonitoredCircuit(
     num_system=64,
-    edges=graphs.cycle(64),            # brickwork: the ring's edge colouring
+    edges=graphs.cycle(64),            # brickwork: the ring's edge coloring
     layers=256,
     measurement_rate=0.1,
     checkpoints=[256],
@@ -362,7 +362,7 @@ Three probes measure this inside the engine:
   exactly; all counts are 0 exactly when the distance exceeds w.
 * `code_snapshot()`: the code's stabilizer generators, saved with the result;
   `result.code(t, c)` returns trajectory row `t`'s code at evaluation `c` as a
-  `StabilizerCode`, to analyse again later with more orderings or a larger w.
+  `StabilizerCode`, to analyze again later with more orderings or a larger w.
 
 `sparsegf2.analysis` turns these into the physics:
 `erasure_failure_probability` gives Φ_C(e), exact for m ≤ w and sampled above
@@ -419,7 +419,7 @@ trajectories run in parallel over all cores):
 [`examples/code_and_erasure.py`](examples/code_and_erasure.py) runs the whole
 workflow versus depth: code rate, the fraction of circuits that keep a code,
 Φ(e) at several erasure rates, e_δ conditioned on k > 0, and a saved code
-analysed again with ten times more orderings.
+analyzed again with ten times more orderings.
 
 Erasures that cluster on the interaction graph (a region of m qubits drawn with
 probability ∝ exp(−J b(A)), b(A) the graph edges leaving it; J = 0 is the

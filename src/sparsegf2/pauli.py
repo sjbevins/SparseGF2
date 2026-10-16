@@ -24,7 +24,7 @@ Text format matches Stim's dense format: an optional sign prefix
 for identity, exactly like Stim.
 
 This module is pure numpy. It is used to define gates and to build lookup
-tables, never inside a hot loop, so it favours clarity over speed.
+tables, never inside a hot loop, so it favors clarity over speed.
 """
 
 from __future__ import annotations

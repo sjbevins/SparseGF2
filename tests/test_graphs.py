@@ -7,7 +7,7 @@ import pytest
 from sparsegf2 import graphs
 
 
-def _is_normalised(edges, n):
+def _is_normalized(edges, n):
     assert edges.dtype == np.int64 and edges.ndim == 2 and edges.shape[1] == 2
     assert np.all(edges[:, 0] < edges[:, 1])
     assert edges.min() >= 0 and edges.max() < n
@@ -19,7 +19,7 @@ def test_simple_families():
     assert graphs.path(4).tolist() == [[0, 1], [1, 2], [2, 3]]
     assert len(graphs.complete(7)) == 21
     torus = graphs.lattice_2d(4, 5)
-    _is_normalised(torus, 20)
+    _is_normalized(torus, 20)
     np.testing.assert_array_equal(graphs.degrees(torus, 20), 4)
     open_grid = graphs.lattice_2d(3, 3, periodic=False)
     assert len(open_grid) == 12
@@ -29,7 +29,7 @@ def test_simple_families():
 def test_watts_strogatz(beta):
     n, k = 60, 4
     e = graphs.watts_strogatz(n, k, beta, seed=1)
-    _is_normalised(e, n)
+    _is_normalized(e, n)
     assert len(e) == n * k // 2  # rewiring preserves the edge count
     np.testing.assert_array_equal(e, graphs.watts_strogatz(n, k, beta, seed=1))
     ring = graphs.watts_strogatz(n, k, 0.0, seed=1)
@@ -51,17 +51,17 @@ def test_newman_watts_adds_shortcuts():
     ring = graphs.newman_watts(n, k, 0.0, seed=0)
     assert len(ring) == n * k // 2
     e = graphs.newman_watts(n, k, 0.3, seed=0)
-    _is_normalised(e, n)
+    _is_normalized(e, n)
     assert set(map(tuple, ring.tolist())) <= set(map(tuple, e.tolist()))
     assert len(e) > len(ring)
 
 
 def test_erdos_renyi_and_random_regular():
     e = graphs.erdos_renyi(30, 0.2, seed=4)
-    _is_normalised(e, 30)
+    _is_normalized(e, 30)
     assert 0.1 * 435 < len(e) < 0.3 * 435
     r = graphs.random_regular(20, 3, seed=5)
-    _is_normalised(r, 20)
+    _is_normalized(r, 20)
     np.testing.assert_array_equal(graphs.degrees(r, 20), 3)
 
 
@@ -93,7 +93,7 @@ def test_even_cycle_coloring_is_brickwork():
     assert [(0, 1), (2, 3), (4, 5), (6, 7)] in layers
 
 
-def test_from_edges_normalises_and_validates():
+def test_from_edges_normalizes_and_validates():
     np.testing.assert_array_equal(graphs.from_edges([(3, 1), (1, 3), (0, 2)]), [[0, 2], [1, 3]])
     with pytest.raises(ValueError, match="self-loops"):
         graphs.from_edges([(1, 1)])

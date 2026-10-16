@@ -8,7 +8,7 @@
 - CI gates fail as soon as a regression is introduced.
 
 **Architecture:**
-- **Phase 1** adds gates and oracle tests. Its only behaviour change is the JIT-free kernel fallbacks.
+- **Phase 1** adds gates and oracle tests. Its only behavior change is the JIT-free kernel fallbacks.
 - **Phase 2** fixes the confirmed review findings (IDs such as N1 and A1 refer to the review reports), each starting with a failing test.
 - **Phase 3** updates the docs and the version, and re-runs the audit's mutants.
 
@@ -40,8 +40,8 @@
   - The whole suite must stay under 150 s on this machine (the baseline is 71 s). Report the new total.
 - **Oracle independence:** an oracle never computes its expected value with the function under test, or with `sparsegf2._kernel`. The deliberate exceptions are the Python transcriptions under `tests/` written for that purpose: `_reference_rng.py`, `_protocol_oracle.py` and `_gf2_oracle.py`.
 - **Text files** are read and written with `encoding="utf-8"`.
-- **Behaviour changes:**
-  - Public behaviour changes only in Phase 2.
+- **Behavior changes:**
+  - Public behavior changes only in Phase 2.
   - Every Phase 2 task adds its bullets to an `## Unreleased` section at the top of `CHANGELOG.md` (create it if it is missing). Task 24 turns that section into the dev12 entry.
 - **Protected files:**
   - Edit `.github/workflows/` only in Tasks 2, 3 and 10.
@@ -239,7 +239,7 @@ class Xoshiro:
 **Requirements:**
 - **The oracle.** `_protocol_oracle.py` transcribes the documented draw order: the `_kernel/ensemble.py` module docstring, items 1-4, plus the `MonitoredCircuit` docstring for setup and the schedules. It uses only `_reference_rng.py`, numpy's `SeedSequence` (to derive the keys exactly as `mipt._keys` does; read it), and plain Python. It must not import `sparsegf2._kernel` or call `MonitoredCircuit.circuit`. It may read the spec's public fields and graph arrays.
   - It must cover:
-    - every schedule (`matching`, including the colour cycle continuing from scramble layers into the dynamics; `random_edges` unweighted and weighted, with the cumulative search; `all_edges`);
+    - every schedule (`matching`, including the color cycle continuing from scramble layers into the dynamics; `random_edges` unweighted and weighted, with the cumulative search; `all_edges`);
     - `gates_per_layer`;
     - scramble pairs, matchings (Fisher-Yates) and layers;
     - every reference mode (none, single fixed, single random, purification);
@@ -252,7 +252,7 @@ class Xoshiro:
   - The oracle equals `spec.circuit(t, seed)` for t in {0, 1, 7}, over a grid of at least 12 specs covering every option above (small n, few layers).
   - The laws of the draws, with fixed seeds and bands of at least 4.5 sigma:
     - **Per-qubit measured fraction:** n=12, p=0.3, 400 layers over 5 trajectories. Each qubit's count, including qubit n-1, is within 4.5 sigma of the binomial mean, and so is the total.
-    - **Gates per layer:** `random_edges` gives exactly `gates_per_layer`; `all_edges` gives |E|; `matching` gives exactly one colour class per layer, and each class is a matching.
+    - **Gates per layer:** `random_edges` gives exactly `gates_per_layer`; `all_edges` gives |E|; `matching` gives exactly one color class per layer, and each class is a matching.
     - **Gate index:** a chi-square over 64 buckets (`index % 64`) and over 64 buckets (`index // 180`) for 20 000 draws gives p-value > 1e-6.
     - **Unweighted edge choice:** chi-square uniform. **Random partner:** uniform. **Orientation flip fraction:** 1/2 within 4.5 sigma.
 - **Additions to `tests/test_mipt.py` SPECS** (engine against its exported circuits):
@@ -340,7 +340,7 @@ def entropy(gens, n, region) -> int                   # pure state (n independen
 - **Mutant check:** temporarily drop the `s % 64 == 0` case of the first-failure last-word mask in `_kernel/entropy.py` (the reviewer's mutant `fmask_word_first_failure`). The new tests must fail. Revert, and report it.
 - **Fix the vacuous tests in `tests/test_codes.py`:**
   - `test_hybrid_estimator_uses_exact_counts_for_small_regions` uses a k = 0 code. Use a fixture with k > 0 and nonzero counts, and assert that it is not trivial.
-  - `test_counts_on_codes_wider_than_one_word` uses a 0.15 sampling tolerance. Replace it with the exact oracle comparison, or delete it in favour of the new file, and say which.
+  - `test_counts_on_codes_wider_than_one_word` uses a 0.15 sampling tolerance. Replace it with the exact oracle comparison, or delete it in favor of the new file, and say which.
   - Where `_engine_codes` fixtures can be k = 0, assert that at least one used code has k > 0 and nonzero counts.
 
 **Steps:**
@@ -400,10 +400,10 @@ def entropy(gens, n, region) -> int                   # pure state (n independen
   - For n=100, k=4, beta=0.2, compare 300 sparsegf2 graphs with 300 `networkx.watts_strogatz_graph` graphs:
     - the mean shortcut fraction (`graphs.shortcut_fraction`, also applied to the networkx edges) and the mean average clustering (`networkx.average_clustering`) agree within 4.5 pooled standard errors;
     - the degree histograms agree by a chi-square two-sample test with p > 1e-6.
-  - Edge cases: n = k + 1 and n = k + 2. Odd k and k >= n behave as documented. If the docs say nothing, add the documented behaviour to the docstring and test it.
+  - Edge cases: n = k + 1 and n = k + 2. Odd k and k >= n behave as documented. If the docs say nothing, add the documented behavior to the docstring and test it.
 - **`random_regular`:** every degree equals d, the graph is simple, and the mean clustering is within 4.5 sigma of networkx's `random_regular_graph` over 200 samples.
 - **`newman_watts` and `erdos_renyi`:** the mean edge count is within 4.5 sigma of its expectation (compute the expectation from the model).
-- **`lattice_2d`:** degrees are 4 (periodic), with the documented open-boundary behaviour.
+- **`lattice_2d`:** degrees are 4 (periodic), with the documented open-boundary behavior.
 - **`graphs.stats` against independent computations on 10 graphs,** including a disconnected one and one with an isolated node:
   - `mean_path_length` against `networkx.average_shortest_path_length` (connected graphs);
   - `clustering` against whichever networkx quantity matches the docstring definition (`average_clustering` or `transitivity`; read the docstring);
@@ -1083,7 +1083,7 @@ def uncorrectable_region_counts(
 
 **Requirements:**
 - Cover `code_snapshot`, the packed generator format, `EnsembleResult.code`, and `StabilizerCode` (`from_simulator`, `from_packed`, `from_strings`, every method).
-- Cover re-analysing a saved code with more orderings, replay to get a code at a new depth, and saving and loading.
+- Cover re-analyzing a saved code with more orderings, replay to get a code at a new depth, and saving and loading.
 
 **Commit:** `docs: codes after the run, from snapshot to StabilizerCode`
 

@@ -560,7 +560,7 @@ def exact_correlated_failure(failed, total, couplings) -> np.ndarray:
     neither changes nothing), so rows of :func:`sparsegf2.erasures.boundary_counts`,
     each trimmed to its own largest boundary, can be padded and stacked into a
     ``total``. ``couplings``: one finite J or a 1-D list, any order (negative J
-    favours spread-out regions).
+    favors spread-out regions).
 
     Numerically stable for any finite J: each sum is shifted by the smallest
     boundary with N_m(b) > 0 when J >= 0 (the largest when J < 0), so every
@@ -710,12 +710,12 @@ def correlated_failure_curve(
 
     Returns ``(curve, interpolated)``, ``interpolated`` a boolean array of
     length n + 1, True where step 4 filled the entry (so a report can say that
-    those sizes were not measured). The interpolation is a modelling choice,
-    a value between the neighbours. P_0(m) is nondecreasing in m (a uniform
+    those sizes were not measured). The interpolation is a modeling choice,
+    a value between the neighbors. P_0(m) is nondecreasing in m (a uniform
     (m + 1)-region is a uniform m-region plus one more qubit, and a superset
     of a failing region fails), and so are the J -> +inf limits on the ring
     and the path; for other J and graphs P_J(m) need not be (the regions
-    favoured at size m + 1 need not contain those favoured at size m).
+    favored at size m + 1 need not contain those favored at size m).
     :func:`binomial_window` says which sizes matter for Phi. NaN in the inputs
     propagates.
     """

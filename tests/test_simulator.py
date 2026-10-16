@@ -148,7 +148,7 @@ def test_lockstep_sees_both_outcome_types(rng):
     assert ls.num_deterministic > 50
 
 
-# -- API behaviour -------------------------------------------------------------------------
+# -- API behavior -------------------------------------------------------------------------
 
 
 def test_ghz_example():

@@ -56,9 +56,9 @@ q+: fraction with k > 0. d_cont: smallest failing interval (k > 0). ⟨l⟩: Gul
 
 ## 2. Scaling with n (mixed phase)
 
-Weighted least squares of log Q against log n (the error is scaled by sqrt(χ²/dof) when that exceeds 1), and the local slopes between neighbouring n. Literature: Li-Fisher γ1 ≈ 0.38 for \|A\|* (p = 0.04, 0.08, 0.12; L up to 1024; depths 6L-8L); Li-Vijay-Fisher β = 1/3 (directed polymer theory); Gullans-Huse a ∈ [1/3, 1/2] for ⟨l⟩ deep in the mixed phase and ⟨l⟩ ∝ L near p_c, with ⟨l_min⟩ (= d_cont, k = 0 as 0) scaling like ⟨l⟩. Watts-Strogatz rows use the qubit labels' ring.
+Weighted least squares of log Q against log n (the error is scaled by sqrt(χ²/dof) when that exceeds 1), and the local slopes between neighboring n. Literature: Li-Fisher γ1 ≈ 0.38 for \|A\|* (p = 0.04, 0.08, 0.12; L up to 1024; depths 6L-8L); Li-Vijay-Fisher β = 1/3 (directed polymer theory); Gullans-Huse a ∈ [1/3, 1/2] for ⟨l⟩ deep in the mixed phase and ⟨l⟩ ∝ L near p_c, with ⟨l_min⟩ (= d_cont, k = 0 as 0) scaling like ⟨l⟩. Watts-Strogatz rows use the qubit labels' ring.
 
-| geometry | p | length | exponent, all n | exponent, n ≥ 128 | local slopes (neighbouring n) | literature |
+| geometry | p | length | exponent, all n | exponent, n ≥ 128 | local slopes (neighboring n) | literature |
 |---|---|---|---|---|---|---|
 | ring | 0.04 | \|A\|* | 0.41 ± 0.02 (χ²/dof 8.9) | 0.35 ± 0.02 (χ²/dof 1.4) | 0.53±0.04, 0.43±0.04, 0.40±0.04, 0.33±0.04, 0.31±0.05 | Li-Fisher 0.38; Li-Vijay-Fisher 1/3 |
 | ring | 0.04 | ⟨l⟩ | 0.47 ± 0.01 (χ²/dof 7.2) | 0.43 ± 0.01 (χ²/dof 0.5) | 0.58±0.03, 0.48±0.03, 0.45±0.03, 0.43±0.03, 0.41±0.03 | Gullans-Huse 1/3 to 1/2 (deep), ~1 (near p_c) |
