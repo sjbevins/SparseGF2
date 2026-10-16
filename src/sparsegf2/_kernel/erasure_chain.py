@@ -7,11 +7,11 @@ boundary ``b(A) = #{{u, v} in E : u in A, v not in A}``. The target law at a
 real coupling ``J`` is ``Q_J(A) = exp(-J b(A)) / Z_m(J)`` on the ``C(n, m)``
 regions of size ``m``.
 
-* :func:`csr`: the graph in compressed sparse rows, neighbours sorted.
+* :func:`csr`: the graph in compressed sparse rows, neighbors sorted.
 * :func:`region_boundary` and :func:`swap_delta`: ``b(A)`` and the change of
   ``b`` when one erased node is swapped for one unerased node.
 * :func:`sample_chain`: the Metropolis swap chain (Kawasaki dynamics) at fixed
-  ``m``, one chain per coupling, with replica exchange between neighbouring
+  ``m``, one chain per coupling, with replica exchange between neighboring
   couplings. Its draw order (the docstring) is a contract: a probe's stream
   in the ensemble engine is made of it.
 * :func:`enumerate_boundaries`: every ``m``-subset in lexicographic order with
@@ -45,7 +45,7 @@ def csr(n, edges):
     Distinct matters: a repeated edge would appear twice in both rows, and
     every boundary, ``Δb`` (its ``u ~ v`` flag) and count here would treat it as
     two edges. So build it only from :func:`sparsegf2.graphs.from_edges` output,
-    which removes repeats (as :mod:`sparsegf2.erasures` does). The neighbours
+    which removes repeats (as :mod:`sparsegf2.erasures` does). The neighbors
     of ``v`` are ``indices[indptr[v]:indptr[v+1]]``, sorted ascending; every
     edge appears in the rows of both its ends. The compiled twin of
     ``graphs._csr``, which does not sort the rows.
@@ -381,7 +381,7 @@ def geometry_order(indptr, indices, n):
     cycle through all nodes, ``n >= 3``), 2 when exactly two nodes have degree
     1, the others degree 2, and the graph is connected (a Hamiltonian path; a
     single node, ``n = 1``, counts as a path), else 0. ``order`` lists the
-    nodes along the cycle (from node 0 towards its smaller neighbour) or along
+    nodes along the cycle (from node 0 toward its smaller neighbor) or along
     the path (from its smaller end); for kind 0 it is ``0..n-1``. The labels
     may be anything: the order is read from the edges. Cost ``O(n + E)``.
     """

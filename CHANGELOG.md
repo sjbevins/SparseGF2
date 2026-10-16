@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+* **American spelling everywhere** (code, comments, docstrings, messages, private names and
+  documents): neighbor, color, normalized, favors, behavior, analyze, centered, labeled and
+  the rest. `tests/test_spelling.py` (Clank's word list plus the forms this repository had
+  used) fails on a British spelling; Markdown code blocks and inline code are not scanned,
+  and a line may keep a British form with the marker `spelling: keep` (one does: a paper's
+  title). Public interface is not renamed: the job status value `cancelled` (job_status,
+  list_jobs, the MCP tools, the CLI) stays, and the test allows it only as a literal. The
+  compiled kernels' comments changed, so the first import after updating recompiles them.
 * **A thread count on the MCP simulation tools.** `run_ensemble` and `start_ensemble_job`
   take `num_threads`, passed to the API's own `num_threads`. Its default is
   `numba.config.NUMBA_NUM_THREADS`, read when the server is built, so the schema and the
@@ -14,7 +22,7 @@
 * **Geometry-correlated erasures** (the study "Geometry-correlated erasures in monitored
   quantum circuits"): an m-qubit erasure strikes a region A with probability
   proportional to exp(-J b(A)), b(A) the edges of an interaction graph leaving A, so
-  J = 0 is the uniform (independent-erasure) case and J > 0 favours compact regions.
+  J = 0 is the uniform (independent-erasure) case and J > 0 favors compact regions.
   * `sparsegf2.erasures` (new), the graph side: boundaries, exact densities of states
     N_m(b) and their moments, minimum-boundary regions (the J -> inf support), the
     uniform law's mean and variance of b in closed form, exact independent samplers for
@@ -425,7 +433,7 @@ v3 is now developed for its own simulation campaigns: the v2 production
 protocol, the cross-check against v2 and the v2 speed comparisons are gone
 (see "Removed"). The old package still lives in the repository root.
 
-Behaviour changes (some existing scripts and results change):
+Behavior changes (some existing scripts and results change):
 
 * **Graph collections replace `t mod G`.** `MonitoredCircuit(edges=[g0, g1,
   ...], circuits_per_graph=c)` runs `c` random circuits on each of the `G`
@@ -559,14 +567,14 @@ probe, graph collections, and the erasure kernels; `README.md`, `AGENTS.md`,
 
 ## 3.0.0.dev8: fixes from the review
 
-Behaviour changes (results of some existing seeds change):
+Behavior changes (results of some existing seeds change):
 
-* **`scramble_layers` with `schedule="matching"`**: the colour cycle now runs on
+* **`scramble_layers` with `schedule="matching"`**: the color cycle now runs on
   from the scramble layers into the measured layers. It used to restart, so
-  when `scramble_layers` was 1 more than a multiple of the number of colours
+  when `scramble_layers` was 1 more than a multiple of the number of colors
   the first measured layer repeated the last scramble matching and absorbed it
   (`scramble_layers=1` on a brickwork did nothing). Unchanged when
-  `scramble_layers` is a multiple of the number of colours (e.g. `2n` on an
+  `scramble_layers` is a multiple of the number of colors (e.g. `2n` on an
   even ring) and for the other schedules.
 * The `contiguous_distance` probe records NaN, not 0, where the code
   dimension is 0, so `EnsembleResult.mean` and the API summaries average only
@@ -581,7 +589,7 @@ Fixes:
   cache is per instance (a derived spec ran the original's graph, partner or
   probes, and could write past its result buffers), and `"final"`,
   `"every_layer"` and strides follow a new `layers`.
-* `MonitoredCircuit` normalises numpy scalars (sizes from numpy arrays, numpy
+* `MonitoredCircuit` normalizes numpy scalars (sizes from numpy arrays, numpy
   seeds), so `EnsembleResult.save` no longer fails after the run; it copies
   `system_order`, `gate_set` and `edge_weights` and keeps them read-only.
 * `EnsembleResult` records the `SeedSequence` actually used
@@ -608,13 +616,13 @@ Fixes:
 * `examples/purification_time.py` saves the result before printing, and
   reports the median as "> T_max" when more than half the trajectories are
   censored (it crashed and lost the run).
-* Graph banks: the engine colours graphs only for `schedule="matching"`, and
-  `graphs.from_edges` skips re-sorting an already normalised edge array, so
+* Graph banks: the engine colors graphs only for `schedule="matching"`, and
+  `graphs.from_edges` skips re-sorting an already normalized edge array, so
   preparing a Watts-Strogatz bank for `schedule="random_edges"` costs about
   13 us per graph at n = 32 and 20 us at n = 256 (it was 190 us and 970 us).
   `EnsembleResult.elapsed_seconds` now includes that preparation.
 * API: list `edge_weights` follow their edges when an explicit edge list is
-  normalised (they were applied in the user's order to the sorted edges), and
+  normalized (they were applied in the user's order to the sorted edges), and
   are refused with random graph families; `spec.json` stores the spec
   exactly and resumes compare it exactly; resuming keeps the original
   provenance, records each resume, and refuses another package version;

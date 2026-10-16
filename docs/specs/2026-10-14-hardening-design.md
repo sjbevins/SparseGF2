@@ -88,7 +88,7 @@ Each ruling: what was decided, why, and what it costs if it is wrong.
 * **R5: the MCP server fixes that the current server needs now are made here**
   (A6: errors reach the client with their message; A13: strict integer and
   boolean arguments). The agent-interface branch (`agent-stacks`) replaces the
-  server later and must carry both behaviours. The agent-interface ledger
+  server later and must carry both behaviors. The agent-interface ledger
   records them as inherited requirements.
 * **R6: the JIT-free fallbacks for `popcount` and `ctz` are kept in the
   package.** With them, `NUMBA_DISABLE_JIT=1` runs the kernels as Python. That
@@ -142,7 +142,7 @@ Each ruling: what was decided, why, and what it costs if it is wrong.
 ## 6. Acceptance
 
 * Every confirmed finding is fixed, or explicitly documented as intended with
-  a test pinning the documented behaviour.
+  a test pinning the documented behavior.
 * The seven surviving mutants of the audit are caught by the suite. The audit
   driver's mutants are re-run at the end.
 * CI is green on all legs, and the weekly workflow passes once

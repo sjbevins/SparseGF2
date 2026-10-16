@@ -206,9 +206,9 @@ def test_one_trajectory_per_thread_costs_at_most_its_estimate():
     A busy thread runs slower than a thread alone (all-core clocks, SMT siblings, shared
     memory bandwidth); ``api._parallel_threads`` prices each of T busy threads at
     1 / (1 + 0.04 (T - 1)) of a lone one, and that model is what this checks. The measured
-    time is normalised with the one-thread reference workload, as above. At 32 threads on
+    time is normalized with the one-thread reference workload, as above. At 32 threads on
     the fitting machine, with other processes running, the estimate was 4.0 and 3.8 times
-    the normalised wall time. A runner with 2 to 4 threads cannot make this flaky: the model
+    the normalized wall time. A runner with 2 to 4 threads cannot make this flaky: the model
     gives a busy thread 0.89 or more of a lone one there, so even SMT siblings at half speed
     leave these probes' one-thread margin (3.5 or more) at 1.75 or more.
     """

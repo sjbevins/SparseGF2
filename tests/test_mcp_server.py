@@ -317,16 +317,16 @@ def test_job_tools_lifecycle(tmp_path):
         ))  # fmt: skip
         listed = ok(await client.call_tool("list_jobs", {}))
         loaded = ok(await client.call_tool("load_results", {"path": out_dir}))
-        cancelled = ok(await client.call_tool("cancel_job", {"job_id": started["job_id"]}))
+        canceled = ok(await client.call_tool("cancel_job", {"job_id": started["job_id"]}))
         missing = await client.call_tool("job_status", {"job_id": "nope"})
-        return started, status, listed, loaded, cancelled, missing
+        return started, status, listed, loaded, canceled, missing
 
-    started, status, listed, loaded, cancelled, missing = session(lifecycle)
+    started, status, listed, loaded, canceled, missing = session(lifecycle)
     assert status["status"] == "completed" and status["trajectories_done"] == 30
     assert started["job_id"] in {j["job_id"] for j in listed["jobs"]}
     assert loaded["num_trajectories"] == 30
     assert loaded["purification"] == api.run_ensemble(SPEC, 30, seed=9)["purification"]
-    assert cancelled["status"] == "completed"  # cancelling a finished job is harmless
+    assert canceled["status"] == "completed"  # canceling a finished job is harmless
     assert "unknown job_id" in error_text(missing)
 
 

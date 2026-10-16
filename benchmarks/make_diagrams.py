@@ -11,7 +11,7 @@ Three figures, each written as ``<name>-light.png`` and ``<name>-dark.png``:
 * ``erasure-analysis``: from the code a circuit generated to P_C(m), Phi(e) and
   e_delta. The curves come from a small run with fixed seeds (about a second).
 
-The look (colours, fonts, ``save``) is shared with ``make_figures.py``.
+The look (colors, fonts, ``save``) is shared with ``make_figures.py``.
 
 Usage (from the repository root)::
 
@@ -55,7 +55,7 @@ MONO = "DejaVu Sans Mono"
 WIDTH = 8.4  # inches, like the other README figures
 FS = 8.5  # body text size (pt)
 
-# Semantic colour slots, the same as in the circuit figure of make_figures.py:
+# Semantic color slots, the same as in the circuit figure of make_figures.py:
 GATE, MEAS, REF = 0, 1, 2  # blue = gates / system, orange = measurement, green = reference
 
 
@@ -578,7 +578,7 @@ def fig_engine(theme, mode):
     # right side: the flat output row of one trajectory
     oy = yb1 - 1.8
     label(ax, rx, oy + 0.4, "Each trajectory writes one flat row of floats:", theme, size=8.2)
-    segments = [  # (probe, evaluations, length per evaluation, colour)
+    segments = [  # (probe, evaluations, length per evaluation, color)
         ("code_dimension", 4, 1, theme["series"][0]),
         ("erasure_first_failure", 2, 4, theme["series"][3]),
         ("code_snapshot", 1, 1, theme["series"][4]),
@@ -643,7 +643,7 @@ def fig_engine(theme, mode):
     )  # fmt: skip
     outs = [
         ("analysis", "P_C(m), Φ(e), e_δ, Kaplan-Meier"),
-        ("StabilizerCode", "re-analyse a saved code"),
+        ("StabilizerCode", "re-analyze a saved code"),
         ("save / load / concatenate", "chunks merge exactly"),
     ]
     oh = 0.3

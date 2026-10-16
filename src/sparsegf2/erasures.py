@@ -1,7 +1,7 @@
 """Geometry-correlated erasure regions on a graph (the graph side: no codes here).
 
 An erasure that strikes qubits close to each other in the interaction graph is
-modelled by a law on regions of a fixed size that favours small edge boundaries.
+modeled by a law on regions of a fixed size that favors small edge boundaries.
 
 **Notation.** ``G = (V, E)`` is the interaction graph, ``V = {0, ..., n-1}``
 (the qubit labels), ``E`` a set of undirected edges without self-loops (an
@@ -16,8 +16,8 @@ region ``A`` of ``V`` has size ``m = |A|`` and edge boundary::
     Q_J(A | m) = exp(-J b(A)) / Z_m(J),        Z_m(J) = sum over |A| = m of exp(-J b(A))
 
 on the ``C(n, m)`` regions of size ``m``. ``J = 0`` is the uniform law (the
-independent-erasure observable ``P_C(m)``); ``J > 0`` favours compact regions,
-whose erased qubits cluster along the graph; ``J < 0`` favours spread-out ones.
+independent-erasure observable ``P_C(m)``); ``J > 0`` favors compact regions,
+whose erased qubits cluster along the graph; ``J < 0`` favors spread-out ones.
 With ``s_v = -1`` on ``A`` and ``+1`` off it, ``b(A) = sum over {u,v} in E of
 (1 - s_u s_v) / 2``, so ``Q_J`` is the Ising model with coupling ``K = J / 2``
 on ``G`` at fixed magnetization ``sum_v s_v = n - 2m`` (ferromagnetic for
@@ -486,7 +486,7 @@ def coupling_ladder(couplings, max_step: float) -> np.ndarray:
     chain samples at once), with couplings inserted evenly in every gap
     wider than ``max_step``: a gap ``(a, b)`` gets ``ceil((b - a) / max_step) - 1``
     of them, at ``a + (b - a) j / (k + 1)``, ``j = 1..k``. ``max_step =
-    math.inf`` inserts none. Neighbouring rungs exchange their states with
+    math.inf`` inserts none. Neighboring rungs exchange their states with
     probability about ``exp(-ΔJ Δb)``, and ``Δb`` is of the order of
     ``ΔJ Var_J(b)``, so ``ΔJ <~ 1 / sqrt(Var_J b)`` keeps exchanges frequent.
     :func:`sample_regions` starts from ``max_step = 1 / sqrt(Var_0(b))``
@@ -603,7 +603,7 @@ class RegionSample:
     * ``acceptance``: float64[c], the fraction of swap proposals accepted at
       each requested coupling (NaN for exact samples, and when ``m = 0`` or
       ``m = n``: nothing to propose).
-    * ``exchange_pairs``: float64[L-1, 2], the neighbouring rungs
+    * ``exchange_pairs``: float64[L-1, 2], the neighboring rungs
       ``(ladder[i], ladder[i+1])``; ``exchange_acceptance``: float64[L-1], the
       fraction of accepted replica exchanges between them (NaN without
       exchanges). Below about 0.1 the pair barely exchanges: add rungs between.
@@ -790,7 +790,7 @@ def sample_regions(
     ``{u, v}`` is a boundary edge before and after). A sweep is ``n`` proposals.
 
     **Replica exchange** (``tempering``): after every sweep, the chains at
-    neighbouring rungs ``J_i < J_{i+1}`` exchange their states with probability
+    neighboring rungs ``J_i < J_{i+1}`` exchange their states with probability
     ``min(1, exp((J_i - J_{i+1}) (b_i - b_{i+1})))`` (Swendsen and Wang 1986;
     Geyer 1991; Hukushima and Nemoto 1996). The product of the laws is
     invariant, so each chain still samples exactly its own ``Q_J``, while states
@@ -1002,11 +1002,11 @@ def sample_regions(
 # ---------------------------------------------------------------------------------------
 
 
-def _autocovariance(centred: np.ndarray) -> np.ndarray:
+def _autocovariance(centered: np.ndarray) -> np.ndarray:
     """``C(t) = (1/N) sum_{s < N-t} x_s x_{s+t}`` per row, ``t = 0..N-1`` (FFT, zero-padded)."""
-    draws = centred.shape[1]
+    draws = centered.shape[1]
     size = 1 << (2 * draws - 1).bit_length()
-    spectrum = np.fft.rfft(centred, n=size, axis=1)
+    spectrum = np.fft.rfft(centered, n=size, axis=1)
     power = spectrum.real**2 + spectrum.imag**2
     return np.fft.irfft(power, n=size, axis=1)[:, :draws] / draws
 
@@ -1125,11 +1125,11 @@ def chain_diagnostics(series) -> dict[str, Any]:
     num_chains, draws = chains.shape
     total = num_chains * draws
     # "No variation" is decided exactly (a constant 0.1 has a mean an ulp off, and its
-    # centred values are 1e-17, not 0); constant chains are centred to exact zeros.
+    # centered values are 1e-17, not 0); constant chains are centered to exact zeros.
     flat = np.ptp(chains, axis=1) == 0
     constant = bool(np.all(flat)) and bool(np.ptp(chains[:, 0]) == 0)
-    centred = np.where(flat[:, None], 0.0, chains - chains.mean(axis=1, keepdims=True))
-    acov = _autocovariance(centred).mean(axis=0)
+    centered = np.where(flat[:, None], 0.0, chains - chains.mean(axis=1, keepdims=True))
+    acov = _autocovariance(centered).mean(axis=0)
     if acov[0] > 0:
         taus = 2.0 * np.cumsum(acov / acov[0]) - 1.0
         ok = np.arange(draws) >= SOKAL_WINDOW * taus

@@ -33,7 +33,7 @@ region; per budget B in {1e4, 5e4, 1e5, 1e6, 1e7} the cutoff m*(n) and the expec
 code (engine path, what an ensemble pays; library alongside); an example study total, which
 divides by the effective threads measured in ``results/thread_scaling.json``. Levels that were
 not measured are extrapolated with the walk model of docs/observables/random-region-erasure.md
-§3.3 and labelled as extrapolations; a per-code model check shows how far to trust them.
+§3.3 and labeled as extrapolations; a per-code model check shows how far to trust them.
 
     python benchmarks/erasure_cost.py                      # about 20 minutes, idle machine
     python benchmarks/erasure_cost.py --quick --out <dir>  # smoke test, a few seconds

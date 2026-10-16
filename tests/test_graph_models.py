@@ -43,7 +43,7 @@ def _within_sigma(x, y):
 
 
 def _gamma_q(a, x):
-    """Regularised upper incomplete gamma Q(a, x) (series / continued fraction)."""
+    """Regularized upper incomplete gamma Q(a, x) (series / continued fraction)."""
     if x <= 0:
         return 1.0
     lg = math.lgamma(a)
@@ -173,7 +173,7 @@ def test_watts_strogatz_n_close_to_k(extra, beta):
 
 def test_watts_strogatz_odd_k_and_k_at_least_n_are_rejected():
     # The docstring says k is even; the code also requires 2 <= k < n, which the docstring
-    # does not state (reported as a concern). Current behaviour: ValueError.
+    # does not state (reported as a concern). Current behavior: ValueError.
     for n, k in [(10, 3), (10, 5), (10, 1), (10, 0), (6, 6), (6, 8), (4, 4)]:
         with pytest.raises(ValueError, match="k must be even"):
             graphs.watts_strogatz(n, k, 0.1, seed=0)

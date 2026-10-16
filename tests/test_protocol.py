@@ -16,7 +16,7 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from _protocol_oracle import colour_classes, cumulative, oracle_circuit_text
+from _protocol_oracle import color_classes, cumulative, oracle_circuit_text
 from sparsegf2 import graphs, mipt
 
 SEED = 2024
@@ -27,7 +27,7 @@ ORACLE_SPECS = {
     ),
     "matching_scramble_layers_purification": dict(
         num_system=9,
-        edges=graphs.lattice_2d(3, 3),  # 5 colours, so 3 scramble layers shift the cycle
+        edges=graphs.lattice_2d(3, 3),  # 5 colors, so 3 scramble layers shift the cycle
         layers=7,
         measurement_rate=0.2,
         reference="purification",
@@ -217,7 +217,7 @@ def test_oracle_agrees_for_other_seeds_and_far_trajectories(name, trajectory, se
 
 
 def test_oracle_weights_are_bit_exact():
-    # The engine normalises with numpy: a pairwise sum, then a sequential cumsum. Python's
+    # The engine normalizes with numpy: a pairwise sum, then a sequential cumsum. Python's
     # sum rounds differently (naively on 3.11, compensated from 3.12): on one or the other,
     # each total below differs from numpy's in the last bit. The oracle's must not.
     gen = np.random.default_rng(1)
@@ -362,15 +362,15 @@ def test_all_edges_places_every_edge_once_in_order():
             assert [(a, b) for a, b, _ in _layer_gates(segment)] == list(map(tuple, edges.tolist()))
 
 
-def test_matching_places_one_colour_class_per_layer():
+def test_matching_places_one_color_class_per_layer():
     n, scramble = 12, 3
     edges = graphs.watts_strogatz(n, 4, 0.3, seed=2)
     edge_list = list(map(tuple, edges.tolist()))
-    classes = colour_classes(edge_list, n)
-    num_colours = len(classes)
-    # 3 scramble layers are not a whole number of 6-colour cycles, so the dynamics start
-    # mid-cycle (layer 1 uses colour 3)
-    assert num_colours == 6
+    classes = color_classes(edge_list, n)
+    num_colors = len(classes)
+    # 3 scramble layers are not a whole number of 6-color cycles, so the dynamics start
+    # mid-cycle (layer 1 uses color 3)
+    assert num_colors == 6
     spec = mipt.MonitoredCircuit(
         num_system=n, edges=edges, layers=20, measurement_rate=0.2, scramble_layers=scramble
     )
@@ -381,12 +381,12 @@ def test_matching_places_one_colour_class_per_layer():
     for count, gates in enumerate(layers):
         qubits = [q for a, b, _ in gates for q in (a, b)]
         assert len(qubits) == len(set(qubits))  # each layer is a matching
-        assert sets[count] == {edge_list[e] for e in classes[count % num_colours]}
+        assert sets[count] == {edge_list[e] for e in classes[count % num_colors]}
         assert len(sets[count]) == len(gates)
     # one period of layers covers every edge exactly once, and the cycle repeats
-    assert sum(len(s) for s in sets[:num_colours]) == len(edge_list)
-    assert frozenset().union(*sets[:num_colours]) == set(edge_list)
-    assert all(sets[c] == sets[c + num_colours] for c in range(len(sets) - num_colours))
+    assert sum(len(s) for s in sets[:num_colors]) == len(edge_list)
+    assert frozenset().union(*sets[:num_colors]) == set(edge_list)
+    assert all(sets[c] == sets[c + num_colors] for c in range(len(sets) - num_colors))
 
 
 def test_gate_indices_and_unweighted_edges_are_uniform():

@@ -91,13 +91,13 @@ class CorrelatedFailure:
     * ``acceptance``: float64[c, s], the fraction of swap proposals accepted
       (NaN for exact samples).
     * ``exchange_pairs``: float64[c-1, 2], the requested couplings in
-      increasing order, as neighbouring pairs (shape ``(0, 2)`` for one
+      increasing order, as neighboring pairs (shape ``(0, 2)`` for one
       coupling); ``exchange_acceptance``: float64[c-1, s], for each pair the
       smallest replica-exchange acceptance among the rungs of the ladder
-      between them (they are neighbours in the ladder only with
+      between them (they are neighbors in the ladder only with
       ``ladder="given"``; NaN without exchanges, as for exact samples).
     * ``min_exchange_acceptance``: float64[s], the smallest exchange acceptance
-      over every neighbouring pair of the whole ladder of each size, including
+      over every neighboring pair of the whole ladder of each size, including
       the links to inserted rungs such as ``J = 0`` (the one number to check;
       NaN without exchanges). ``rungs``: int64[s], how many couplings the
       ladder of each size ran (the cost is proportional to it).
@@ -546,8 +546,8 @@ class StabilizerCode:
         The erasure law on the regions ``A`` of size ``m`` is
         ``Q_J(A | m) = exp(-J b(A)) / Z_m(J)``, with ``b(A)`` the number of edges
         of the graph ``edges`` (on this code's ``n`` qubits, ``(E, 2)`` as in
-        :mod:`sparsegf2.graphs`) with exactly one end in ``A``: ``J > 0`` favours
-        compact regions, ``J = 0`` is uniform, ``J < 0`` favours spread-out
+        :mod:`sparsegf2.graphs`) with exactly one end in ``A``: ``J > 0`` favors
+        compact regions, ``J = 0`` is uniform, ``J < 0`` favors spread-out
         ones. With ``l(A) = I(A:R)`` the bits of logical information erasing
         ``A`` destroys (:meth:`lost_information`), the failure probability is::
 

@@ -513,12 +513,12 @@ def test_job_cancel_and_resume(tmp_path):
     while api.job_status(status["job_id"])["trajectories_done"] == 0:
         assert time.monotonic() < deadline
         time.sleep(0.005)
-    cancelled = api.cancel_job(status["job_id"])
-    assert cancelled["job_id"] == status["job_id"]
+    canceled = api.cancel_job(status["job_id"])
+    assert canceled["job_id"] == status["job_id"]
     final = api.job_status(status["job_id"], wait_seconds=60)
     assert final["status"] == "cancelled"
     assert 0 < final["trajectories_done"] < 2000
-    assert not (out / ".lock").exists()  # a cancelled job lets the next writer in
+    assert not (out / ".lock").exists()  # a canceled job lets the next writer in
     partial = api.load_results(str(out))
     assert partial["num_trajectories"] == final["trajectories_done"]
 
@@ -893,7 +893,7 @@ def test_explicit_edge_weights_stay_with_their_edges():
     out = api.run_ensemble(spec, 200, seed=1)
     assert out["probes"]["S0"]["mean"] == [0.0] and out["probes"]["S2"]["mean"][0] > 0
     assert _gate_pairs(api._build_spec(spec).circuit(0, seed=1)) == {(2, 3)}
-    # reversed pairs and a ring listed nearest neighbours first, then next-nearest
+    # reversed pairs and a ring listed nearest neighbors first, then next-nearest
     n = 8
     edges = [[(i + 1) % n, i] for i in range(n)] + [[i, (i + 2) % n] for i in range(n)]
     ring = {**spec, "num_system": n, "edges": edges, "edge_weights": [1.0] * n + [0.0] * n}
@@ -1593,7 +1593,7 @@ _PENDING = (
     "load_results or start_ensemble_job merges them"
 )
 
-# a long job (2000 chunks of one trajectory), cancelled by the test that starts it
+# a long job (2000 chunks of one trajectory), canceled by the test that starts it
 _LONG_SPEC = dict(SMALL_SPEC, num_system=24, layers=200, stop_when_purified=False,
                   graph={"family": "cycle"}, measurement_rate=0.05)  # fmt: skip
 

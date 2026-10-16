@@ -44,7 +44,7 @@ __all__ = [
 
 
 def from_edges(edges: Iterable[tuple[int, int]], num_nodes: int | None = None) -> np.ndarray:
-    """Normalise any edge list: orient ``a < b``, drop duplicates, sort; reject self-loops."""
+    """Normalize any edge list: orient ``a < b``, drop duplicates, sort; reject self-loops."""
     raw = edges if isinstance(edges, np.ndarray) else list(edges)
     arr = np.asarray(raw, dtype=np.int64).reshape(-1, 2)
     if arr.size and np.min(arr) < 0:
@@ -53,13 +53,13 @@ def from_edges(edges: Iterable[tuple[int, int]], num_nodes: int | None = None) -
         raise ValueError(f"edge endpoint {int(np.max(arr))} out of range for {num_nodes} nodes")
     if np.any(arr[:, 0] == arr[:, 1]):
         raise ValueError("self-loops are not allowed")
-    if _is_normalised(arr):  # e.g. a graph from this module: skip the (slow) row-wise unique
+    if _is_normalized(arr):  # e.g. a graph from this module: skip the (slow) row-wise unique
         return arr.copy()
     arr = np.sort(arr, axis=1)
     return np.unique(arr, axis=0) if arr.size else arr
 
 
-def _is_normalised(arr: np.ndarray) -> bool:
+def _is_normalized(arr: np.ndarray) -> bool:
     """Every pair oriented ``a < b``, and the pairs strictly increasing (sorted, no repeats)."""
     a, b = arr[:, 0], arr[:, 1]
     if not np.all(a < b):
@@ -119,7 +119,7 @@ def _ring_lattice(n: int, k: int) -> list[tuple[int, int]]:
 def watts_strogatz(n: int, k: int, beta: float, *, seed) -> np.ndarray:
     """Watts-Strogatz small world (Nature 393, 440): ring lattice, then rewiring.
 
-    Start from a ring where each node links to its ``k`` nearest neighbours
+    Start from a ring where each node links to its ``k`` nearest neighbors
     (``k / 2`` on each side). ``k`` must be even with ``2 <= k < n``; anything
     else raises ``ValueError``. Visiting edges ``(i, i + j)`` for
     ``j = 1 .. k/2`` and ``i = 0 .. n-1`` in that order, each is rewired with
@@ -152,7 +152,7 @@ def watts_strogatz(n: int, k: int, beta: float, *, seed) -> np.ndarray:
 def newman_watts(n: int, k: int, p: float, *, seed) -> np.ndarray:
     """Newman-Watts small world (Phys. Lett. A 263, 341): ring lattice plus shortcuts.
 
-    Start from the ``k``-nearest-neighbour ring (``k`` even with ``2 <= k < n``;
+    Start from the ``k``-nearest-neighbor ring (``k`` even with ``2 <= k < n``;
     anything else raises ``ValueError``); for each of its edges
     ``(i, i + j)`` (same order as :func:`watts_strogatz`), with probability
     ``p`` add a shortcut ``(i, w)`` with ``w`` uniform among nodes not ``i``
@@ -204,9 +204,9 @@ def random_regular(n: int, d: int, *, seed, max_tries: int = 1000) -> np.ndarray
         pairs = perm.reshape(-1, 2)
         if np.any(pairs[:, 0] == pairs[:, 1]):
             continue
-        normalised = np.sort(pairs, axis=1)
-        if len(np.unique(normalised, axis=0)) == len(normalised):
-            return from_edges(normalised)
+        normalized = np.sort(pairs, axis=1)
+        if len(np.unique(normalized, axis=0)) == len(normalized):
+            return from_edges(normalized)
     raise RuntimeError(f"no simple {d}-regular graph found in {max_tries} tries")
 
 
@@ -247,24 +247,24 @@ def degrees(edges: np.ndarray, n: int) -> np.ndarray:
 def edge_coloring(edges: np.ndarray, n: int) -> list[np.ndarray]:
     """Split the edges into matchings (no two edges in a matching share a node).
 
-    Applying one matching per time step generalises the brickwork circuit to any
+    Applying one matching per time step generalizes the brickwork circuit to any
     graph: on a cycle with even ``n`` this gives the usual even/odd bonds. Uses
-    greedy colouring in edge order, so at most ``2 * max_degree - 1`` matchings
+    greedy coloring in edge order, so at most ``2 * max_degree - 1`` matchings
     (often ``max_degree`` or ``max_degree + 1``). Returns a list of index arrays
     into ``edges``.
     """
     edges = np.asarray(edges, dtype=np.int64)
-    colours_at: list[set[int]] = [set() for _ in range(n)]
-    colour_of = np.zeros(len(edges), dtype=np.int64)
+    colors_at: list[set[int]] = [set() for _ in range(n)]
+    color_of = np.zeros(len(edges), dtype=np.int64)
     for e, (a, b) in enumerate(edges):
         c = 0
-        while c in colours_at[a] or c in colours_at[b]:
+        while c in colors_at[a] or c in colors_at[b]:
             c += 1
-        colour_of[e] = c
-        colours_at[a].add(c)
-        colours_at[b].add(c)
-    num = int(np.max(colour_of)) + 1 if len(edges) else 0
-    return [np.flatnonzero(colour_of == c) for c in range(num)]
+        color_of[e] = c
+        colors_at[a].add(c)
+        colors_at[b].add(c)
+    num = int(np.max(color_of)) + 1 if len(edges) else 0
+    return [np.flatnonzero(color_of == c) for c in range(num)]
 
 
 MAX_STATS_NODES = 4096
@@ -334,7 +334,7 @@ def shortcut_fraction(edges: np.ndarray, n: int, k: int) -> float:
     ``newman_watts``), so its own edges reach k/2 sites each way.
     """
     if k % 2:
-        raise ValueError(f"k must be even (k/2 neighbours per side), got {k}")
+        raise ValueError(f"k must be even (k/2 neighbors per side), got {k}")
     e = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
     if not len(e):
         return 0.0
@@ -358,7 +358,7 @@ def _checked(edges, n: int, where: str) -> np.ndarray:
     return arr
 
 
-def _normalised(arr: np.ndarray, weights, where: str):
+def _normalized(arr: np.ndarray, weights, where: str):
     oriented = np.sort(arr, axis=1)
     order = np.lexsort((oriented[:, 1], oriented[:, 0]))
     ranked = oriented[order]
@@ -386,7 +386,7 @@ def save(path, graphs_, num_nodes: int, weights=None) -> Path:
     ws = None if weights is None else list(weights)
     n = int(num_nodes)
     pairs = [
-        _normalised(_checked(g, n, f"graph {i}"), None if ws is None else ws[i], f"graph {i}")
+        _normalized(_checked(g, n, f"graph {i}"), None if ws is None else ws[i], f"graph {i}")
         for i, g in enumerate(gs)
     ]
     if path.suffix == ".json":
@@ -440,7 +440,7 @@ def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
     JSON: ``{"num_nodes": n, "graphs": [[[a, b], ...], ...], "weights": [[w, ...], ...]}``,
     or ``"edges"`` for a single graph. NPZ: ``num_nodes``, ``edges`` (E x 2), ``ptr``
     (G + 1 offsets; optional for one graph), optionally ``weights`` (E). Returns
-    ``(num_nodes, graphs, weights or None)`` with edges normalised as by
+    ``(num_nodes, graphs, weights or None)`` with edges normalized as by
     :func:`from_edges` and the weights permuted with them. A ``.npz`` that is not a zip
     archive (empty, truncated, text, a renamed ``.npy``) is a ``ValueError`` that says so.
     """
@@ -473,7 +473,7 @@ def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
     out_g, out_w = [], []
     for i, g in enumerate(raw):
         where = f"{path.name}, graph {i}"
-        e, w = _normalised(_checked(g, n, where), None if weights is None else weights[i], where)
+        e, w = _normalized(_checked(g, n, where), None if weights is None else weights[i], where)
         out_g.append(e)
         out_w.append(w)
     return n, out_g, (out_w if weights is not None else None)

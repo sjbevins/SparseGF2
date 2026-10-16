@@ -149,7 +149,7 @@ MAX_INT = 2**62
 SCHEDULES = ("matching", "random_edges", "all_edges")
 REFERENCES = ("none", "purification", "single")
 
-# Compiled kernels run in parallel over all cores; serialise them so that a
+# Compiled kernels run in parallel over all cores; serialize them so that a
 # background job and an interactive call never run two parallel regions at
 # once (Numba's threading layers are not all re-entrant).
 _COMPUTE_LOCK = threading.Lock()
@@ -883,7 +883,7 @@ def inspect_circuit(circuit: str) -> dict[str, Any]:
     ``num_ticks``, ``repeat_blocks``, an ``instruction_histogram`` (number of
     applications of each instruction, REPEAT blocks unrolled), the
     ``extensions`` used (``CLIFFORD_1Q``/``CLIFFORD_2Q``, which Stim lacks) and
-    the normalised circuit text (``text``, truncated if long). For an invalid
+    the normalized circuit text (``text``, truncated if long). For an invalid
     circuit, ``errors`` lists ``{"line", "message"}`` for every bad line,
     including record lookbacks before the first measurement; ``line`` is
     ``None`` for whole-circuit problems (an unclosed REPEAT, or more than
@@ -1449,7 +1449,7 @@ _GENERATION_OVERHEAD = 64 * 1024
 
 def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
     """At most how many edges one graph of ``family`` on ``n`` nodes keeps, and how many
-    pairs or edges generating it materialises, from its parameters alone (before it exists).
+    pairs or edges generating it materializes, from its parameters alone (before it exists).
 
     None for a family not listed here, or when the family rejects its parameters at this n
     (a degree that is not an integer in its range, an odd ``n * d``): the family itself then
@@ -1476,7 +1476,7 @@ def _graph_edges(family: str, params: dict, n: int) -> tuple[int, int] | None:
     if family == "lattice_2d":
         return 2 * n, 2 * n
     if family == "erdos_renyi":
-        # every pair is drawn (so materialised); the edges kept are binomial: mean plus
+        # every pair is drawn (so materialized); the edges kept are binomial: mean plus
         # six standard deviations
         p = number("p")
         if p is None or not 0.0 <= p <= 1.0:
@@ -1552,7 +1552,7 @@ def _largest_fitting_n(family: str, params: dict, n: int, limit: float) -> int |
         return _graph_edges(family, params, m) is not None
 
     def small(m: int) -> bool:
-        # A size the family rejects is priced as its neighbour below (random_regular rejects
+        # A size the family rejects is priced as its neighbor below (random_regular rejects
         # an odd n * d) or, when that is rejected too, counts as small: below the range.
         size = _generation_bytes(family, params, m)
         if size is None:
@@ -1737,7 +1737,7 @@ def _build_spec(spec: Any) -> mipt.MonitoredCircuit:
         raw_edges = _edge_list(spec["edges"])
         edges = graphs.from_edges(raw_edges, n)
         if isinstance(weights, list):
-            weights = _weights_in_normalised_order(raw_edges, weights)
+            weights = _weights_in_normalized_order(raw_edges, weights)
     kwargs["edges"] = edges
     if weights is not None:
         kwargs["edge_weights"] = (
@@ -1765,8 +1765,8 @@ def _random_family(graph: Any) -> bool:
     return fn is not None and "seed" in _params(fn)
 
 
-def _weights_in_normalised_order(raw_edges: np.ndarray, weights: list) -> list:
-    """Reorder per-edge weights given for ``raw_edges`` to match the normalised edge list.
+def _weights_in_normalized_order(raw_edges: np.ndarray, weights: list) -> list:
+    """Reorder per-edge weights given for ``raw_edges`` to match the normalized edge list.
 
     The engine stores edges as ``graphs.from_edges`` returns them (each pair
     oriented ``a < b``, the pairs sorted), so a weight list in the caller's
@@ -2016,17 +2016,17 @@ def _setup_us(spec: dict, mc: mipt.MonitoredCircuit) -> float:
     """Pessimistic one-thread microseconds to build ``mc`` from ``spec`` and preprocess its graphs.
 
     Graph generation, validation and (for the matching schedule) edge
-    colouring run in Python, once per graph, so a large graph bank
+    coloring run in Python, once per graph, so a large graph bank
     (``realizations``) costs seconds before the first trajectory starts.
     Fitted to measured runs (n = 64..16384, every random family) and rounded
     up: at least 2 times the cost measured on an AMD Ryzen 9 9950X3D.
     """
     edges = sum(len(g) for g in mc.graphs)
-    us = 50.0 * mc.num_graphs + 0.5 * edges  # normalising and validating every graph
+    us = 50.0 * mc.num_graphs + 0.5 * edges  # normalizing and validating every graph
     if "graph" in spec:  # generating the graphs
         us += mc.num_graphs * _generation_us(spec["graph"], mc.num_system) + 2.5 * edges
     if mc.schedule == "matching":
-        us += 2.5 * edges  # edge colouring
+        us += 2.5 * edges  # edge coloring
     return us
 
 
@@ -2427,7 +2427,7 @@ def benchmark_ensemble(
     notes.append("seconds are for the trajectories; building the spec and its graphs is extra")
 
     rate_p = r1 if rp is None else rp
-    modelled = _trajectory_us(mc) * 1e-6 / _parallel_threads(p)  # seconds per trajectory
+    modeled = _trajectory_us(mc) * 1e-6 / _parallel_threads(p)  # seconds per trajectory
     with tempfile.TemporaryDirectory(prefix="sparsegf2-benchmark-") as folder:
         one_bytes = _file_bytes(first, Path(folder))
         big_bytes = _file_bytes(sample, Path(folder))
@@ -2474,7 +2474,7 @@ def benchmark_ensemble(
             for t, count, elapsed in measured
         ],
         "projected": projected,
-        "estimate_ratio": _num(1.0 / rate_p / modelled),
+        "estimate_ratio": _num(1.0 / rate_p / modeled),
         "storage": {
             "sample_trajectories": k,
             "disk_megabytes": _num(disk / 1e6),
@@ -2752,7 +2752,7 @@ _CORRELATED_COUPLINGS = 12  # couplings shown in a correlated_erasure summary (e
 _CORRELATED_MEANING = (
     "P_{C,G,J}(m): the fraction of m-qubit erasure regions A, drawn with probability "
     "proportional to exp(-J b_G(A)) (b_G(A): edges of the erasure graph G leaving A; J > 0 "
-    "favours compact regions, J = 0 is uniform), that lose logical information; mean[i][j] "
+    "favors compact regions, J = 0 is uniform), that lose logical information; mean[i][j] "
     "is couplings[i] at sizes[j], and vs_depth.mean[i][d][j] is couplings[i] at "
     "vs_depth.layers[d] and vs_depth.sizes[j]"
 )
@@ -3829,7 +3829,7 @@ def _held_message(out: Path, holder: dict) -> str:
     """The refusal for a writer while ``holder`` holds the lock of ``out``."""
     if holder["pid"] == os.getpid() and _this_machine(holder):
         job = _running_job(out)
-        if job is not None:  # a job of this process: name it, so it can be polled or cancelled
+        if job is not None:  # a job of this process: name it, so it can be polled or canceled
             return f"job {job.job_id} is already writing to {str(out)!r}; poll it or cancel it"
         who = "this process"
     else:
@@ -4040,7 +4040,7 @@ def load_results(path: str) -> dict[str, Any]:
     """Summarize a saved ensemble: a ``.npz`` written by ``EnsembleResult.save`` or an output directory.
 
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
-    included, so this also reads partial results of a running or cancelled
+    included, so this also reads partial results of a running or canceled
     job. The chunks of a finished run that its job could not merge (a reader
     held ``result.npz``) are merged now, unless another writer holds the
     directory. The summary has the same form as :func:`run_ensemble`'s, plus
@@ -5200,7 +5200,7 @@ def sample_erasure_regions(
     """Sample geometry-correlated erasure regions on a graph and check how well they mix.
 
     A region ``A`` of ``size`` nodes is drawn with probability ``exp(-J b(A)) / Z``, ``b(A)``
-    the edges of the graph leaving ``A`` (``J > 0`` favours compact regions, ``J = 0`` is
+    the edges of the graph leaving ``A`` (``J > 0`` favors compact regions, ``J = 0`` is
     uniform). This is the graph side of the ``correlated_erasure`` probe, with no circuit:
     ``chains`` independent runs of :func:`sparsegf2.erasures.sample_regions` (chain ``i``
     seeded ``[seed, i]``; exact independent samples when the graph is a cycle or a path,

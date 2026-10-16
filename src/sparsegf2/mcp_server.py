@@ -76,7 +76,7 @@ Example: {"section": "probes"}"""
 _INSPECT = """\
 Parse a circuit written in Stim's text format without running it. Returns valid, qubit /
 measurement / detector / tick counts, an instruction histogram (REPEAT unrolled) and the
-normalised text; for invalid text, errors lists every bad line as {"line", "message"}.
+normalized text; for invalid text, errors lists every bad line as {"line", "message"}.
 Use it to check a circuit before run_circuit.
 
 Example: {"circuit": "H 0\\nCX 0 1\\nREPEAT 10 {\\n  M 0\\n}"}"""
@@ -184,7 +184,7 @@ Example: {}"""
 
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
-cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
+canceled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
 spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run, and
 storage, the disk use in megabytes of each file and each array (compressed). A "merge
 pending" left by a finished job is completed here.
@@ -195,7 +195,7 @@ Example: {"path": "runs/n128_p012"}"""
 _SAMPLE_REGIONS = """\
 Sample geometry-correlated erasure regions on a graph (no circuit) and check how well they mix.
 A region A of `size` nodes is drawn with probability proportional to exp(-J b(A)), b(A) the
-graph edges leaving A (J > 0 favours compact regions, J = 0 is uniform): the sampler of the
+graph edges leaving A (J > 0 favors compact regions, J = 0 is uniform): the sampler of the
 correlated_erasure probe, to try before a long run. graph: {"family": "watts_strogatz", "k": 4,
 "beta": 0.1, "seed": 1} with num_nodes (beside it or inside), {"family": "cycle"|"path"},
 {"family": "file", "path": ...} or {"edges": [[0, 1], ...], "num_nodes": n}. `chains` runs

@@ -242,7 +242,7 @@ setup and scramble.
 
 | `schedule` | gates in one layer |
 |---|---|
-| `"matching"` (default) | one colour class of an edge colouring of the graph, cycling through the colours; on an even ring this is the standard brickwork |
+| `"matching"` (default) | one color class of an edge coloring of the graph, cycling through the colors; on an even ring this is the standard brickwork |
 | `"random_edges"` | `gates_per_layer` edges (default n // 2) drawn uniformly with replacement, or with probabilities `edge_weights` |
 | `"all_edges"` | every edge of the graph, in order |
 
@@ -465,7 +465,7 @@ The `sparse` depths are taken from `depths` itself, so the erasure probes'
 layers are a subset of the `code_dimension` layers: at each of them we know k
 and can condition on k > 0.
 
-### 4.3 Analyse it
+### 4.3 Analyze it
 
 Load a point back and pull out the arrays:
 
@@ -603,10 +603,10 @@ print(sorted(f.name for f in workdir.glob("*.png")))
 
 Cells where no circuit holds a code are left blank in the e_δ map.
 
-### 4.4 Re-analyse a saved code
+### 4.4 Re-analyze a saved code
 
 The codes saved by `code_snapshot` come back with the result. Take one, check
-it against what the engine recorded, and analyse it with many more orderings
+it against what the engine recorded, and analyze it with many more orderings
 than the run used:
 
 ```python
@@ -884,7 +884,7 @@ assert all(np.array_equal(single.values[k], merged.values[k], equal_nan=True) fo
 print("three chunks == one run")
 ```
 
-At full size, merge each point once all its chunks exist, then analyse the
+At full size, merge each point once all its chunks exist, then analyze the
 merged file exactly as in section 4.3:
 
 <!-- not run -->

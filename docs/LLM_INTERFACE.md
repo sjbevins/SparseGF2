@@ -145,7 +145,7 @@ printing the errors.
 For a valid circuit it returns `num_qubits`, `num_measurements`, `num_detectors`,
 `num_observables`, `num_ticks`, `num_operations`, `repeat_blocks`,
 `instruction_histogram` (applications per instruction with REPEAT blocks unrolled; the
-64 most frequent), `kind_totals`, `extensions`, `stim_compatible` and the normalised
+64 most frequent), `kind_totals`, `extensions`, `stim_compatible` and the normalized
 `text` (first 3000 characters).
 
 ### 3.2 `run_circuit`
@@ -222,7 +222,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `graph` | `{"family": F, params...}`. `F` is one of `cycle`, `path`, `complete`, `lattice_2d` (`rows`, `cols`, `periodic`), `watts_strogatz` (`k`, `beta`, `seed`), `newman_watts` (`k`, `p`, `seed`), `erdos_renyi` (`p`, `seed`), `random_regular` (`d`, `seed`). Random families require their own `seed`. Add `"realizations": G` (at most 100,000) for graph disorder: a collection of `G` independent graphs, graph `i` from seed `[seed, i]`. `{"family": "file", "path": P}` reads a graph file (`.json` or `.npz`, as `graphs.save` writes it); a file with several graphs is a collection |
 | `circuits_per_graph` | int, default 1: random circuits per graph of a collection. Trajectory `t` runs on graph `t // circuits_per_graph`, so the collection has `G * circuits_per_graph` trajectories; omit `trajectories` to run them all (asking for more is an error). Must be 1 for a single graph |
 | `edges` | instead of `graph`: `[[a, b], ...]` |
-| `edge_weights` | list (one per edge, in the order of `edges`; each weight stays with its edge when the edge list is normalised) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"`. A list needs explicit `edges` or a deterministic family (whose edges come sorted, `a < b`); random families and `realizations` take a weight family |
+| `edge_weights` | list (one per edge, in the order of `edges`; each weight stays with its edge when the edge list is normalized) or `{"family": "power_law", "alpha": 2.0, "periodic": true}`, for `schedule="random_edges"`. A list needs explicit `edges` or a deterministic family (whose edges come sorted, `a < b`); random families and `realizations` take a weight family |
 | `schedule` | `matching` (default), `random_edges`, `all_edges`; `gates_per_layer` for `random_edges` |
 | `reference`, `reference_partner` | `none`/`purification`/`single`; an int or `"random"` |
 | `scramble_gates`, `scramble_matchings`, `scramble_layers` | ints: random all-to-all gates, layers on random perfect matchings, then gate-only layers on the graph |
@@ -602,7 +602,7 @@ chunks before merging, so its peak disk use is about twice the final result.
 
 An m-qubit erasure that clusters on the erasure graph G strikes a region A with
 probability exp(-J b(A)) / Z_m(J), b(A) the number of edges of G leaving A: J = 0 is the
-uniform case of section 3.4, J > 0 favours compact regions, J < 0 spread-out ones. The
+uniform case of section 3.4, J > 0 favors compact regions, J < 0 spread-out ones. The
 probe estimates P_{C,G,J}(m), the probability that such an erasure fails, for the code
 each trajectory holds. The mathematics, the samplers with their proofs, costs and
 worked examples are in

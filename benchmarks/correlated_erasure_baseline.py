@@ -1,4 +1,4 @@
-"""The nearest-neighbour brickwork baseline of the geometry-correlated erasures, against the literature.
+"""The nearest-neighbor brickwork baseline of the geometry-correlated erasures, against the literature.
 
 **Circuit** (the literature's monitored Clifford brickwork): the periodic ring ``graphs.cycle(n)``
 with ``schedule="matching"`` (even bonds, then odd bonds), uniform random two-qubit Cliffords,
@@ -894,14 +894,14 @@ def render_markdown(r: dict) -> str:
         "## 2. Scaling with n (mixed phase)",
         "",
         "Weighted least squares of log Q against log n (the error is scaled by sqrt(χ²/dof) when "
-        "that exceeds 1), and the local slopes between neighbouring n. Literature: Li-Fisher "
+        "that exceeds 1), and the local slopes between neighboring n. Literature: Li-Fisher "
         "γ1 ≈ 0.38 for \\|A\\|* (p = 0.04, 0.08, 0.12; L up to 1024; depths 6L-8L); "
         "Li-Vijay-Fisher β = 1/3 (directed polymer theory); Gullans-Huse a ∈ [1/3, 1/2] for ⟨l⟩ "
         "deep in the mixed phase and ⟨l⟩ ∝ L near p_c, with ⟨l_min⟩ (= d_cont, k = 0 as 0) "
         "scaling like ⟨l⟩. Watts-Strogatz rows use the qubit labels' ring.",
         "",
         f"| geometry | p | length | exponent, all n | exponent, n ≥ {LARGE_N} | local slopes "
-        "(neighbouring n) | literature |",
+        "(neighboring n) | literature |",
         "|---|---|---|---|---|---|---|",
     ]
     literature = {

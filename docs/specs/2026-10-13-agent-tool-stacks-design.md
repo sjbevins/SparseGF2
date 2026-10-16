@@ -14,9 +14,9 @@ An agent driving SparseGF2 through MCP should be able to do **anything a
 person can do with the Python library**: prepare and manipulate stabilizer
 states gate by gate, run, sample, convert and cross-check Stim-language
 circuits, run ensembles of monitored circuits with every protocol option and
-every probe, pull out and re-probe single trajectories, analyse any code,
-build and characterise interaction graphs (built-in families or any
-geometry from a file), and analyse, compare, slice and plot saved results,
+every probe, pull out and re-probe single trajectories, analyze any code,
+build and characterize interaction graphs (built-in families or any
+geometry from a file), and analyze, compare, slice and plot saved results,
 with long work running in the background.
 
 The clients are Sam's own local-model agent **Clank** (mid-size models that
@@ -190,7 +190,7 @@ checkpoints := final | every_layer | int (a stride) | list of layers
   `lattice_2d`, `watts_strogatz`, `newman_watts`, `erdos_renyi`,
   `random_regular`, `file`; default `cycle`).
 * `graph_k` (total degree K for `watts_strogatz` / `newman_watts`, so K/2
-  neighbours per side), `graph_beta`, `graph_p` (`newman_watts`,
+  neighbors per side), `graph_beta`, `graph_p` (`newman_watts`,
   `erdos_renyi`), `graph_d` (`random_regular`), `graph_rows`, `graph_cols`,
   `graph_periodic` (`lattice_2d`).
 * `graph_file`: a JSON or NPZ collection (section 7.3), any geometry.
@@ -223,7 +223,7 @@ request reuses and resumes the same directory), `background` (enum `auto` |
 `always` | `never`, on long-running tools, section 5.6).
 
 **Source** (tools that read saved work): `source`, a path under `--root` to
-any artifact, recognised by its marker files:
+any artifact, recognized by its marker files:
 
 | artifact | files |
 |---|---|
@@ -247,7 +247,7 @@ escape it.
   (the saved files, `result_get`). The data dict is attached as
   `structuredContent`.
 * **Your mistakes.** A `ValueError` from a handler becomes a tool error
-  saying what to change, e.g. `graph_k must be even (K/2 neighbours per
+  saying what to change, e.g. `graph_k must be even (K/2 neighbors per
   side), got 5`.
 * **Internal errors.** Anything else is reported as an internal error with
   its exception type and logged to stderr unless `--quiet`.
@@ -376,7 +376,7 @@ job's status contains the tool's result.
   `survival`, `histogram`), `sources`, `quantity` (a probe name or metric
   call string), `depth`, `where`, `output_file` (`.png`), `title`, `logx`,
   `logy`.
-* **Behaviour:** it draws one or several runs (overlaid, with error bars)
+* **Behavior:** it draws one or several runs (overlaid, with error bars)
   and returns the file path.
 * **Dependency:** needs matplotlib, from a new optional extra `plot`. The
   stack is left out of `all` when matplotlib is missing, and a note says
@@ -576,7 +576,7 @@ This is how the server keeps up with the simulator.
    `stacks show` warns when a custom stack names a tool or parameter that no
    longer exists.
 
-## 10. Server behaviour
+## 10. Server behavior
 
 Flags:
 * `--stack NAME` (default `all`);

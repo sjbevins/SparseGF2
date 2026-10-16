@@ -118,7 +118,7 @@ def test_the_chain_on_a_ring_matches_the_closed_form_too():
     assert out["ladder"]["rungs"] >= 3 and out["tempering"] is True
 
 
-def test_relabelled_ring_and_path_use_their_closed_forms():
+def test_relabeled_ring_and_path_use_their_closed_forms():
     n = 12
     labels = np.random.default_rng(4).permutation(n)
     ring = [[int(labels[i]), int(labels[(i + 1) % n])] for i in range(n)]
@@ -1145,10 +1145,10 @@ def test_the_mean_tolerance_comes_with_a_band(run_dir):
     low, high = uniform["of_mean_phi_range"]
     assert low < uniform["of_mean_phi"] < high  # the higher curve tolerates less
     correlated = out["correlated"]["correlated_erasure"]["e_delta"]
-    for centre, (low, high) in zip(
+    for center, (low, high) in zip(
         correlated["of_mean_phi"], correlated["of_mean_phi_range"], strict=True
     ):
-        assert low <= centre <= high and low < high
+        assert low <= center <= high and low < high
     note = " ".join(out["notes"])  # the note on the two tolerances is always there
     assert "of_mean_phi is the tolerance of the ensemble-mean Phi" in note and "headline" in note
     only = api.erasure_curves(str(run_dir.parent / "run" / "result.npz"))

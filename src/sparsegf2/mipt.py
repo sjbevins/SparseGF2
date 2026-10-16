@@ -39,10 +39,10 @@ follow):
 3. **Dynamics**, ``layers`` times. Gates on edges of the graph, chosen by
    ``schedule``:
 
-   * ``"matching"``: cycle through an edge colouring of the graph (on an even
+   * ``"matching"``: cycle through an edge coloring of the graph (on an even
      ring this is the standard brickwork, alternating even and odd bonds). The
      cycle runs on through the scramble layers into the dynamics, so with
-     ``scramble_layers=s`` the first measured layer uses colour ``s mod C``;
+     ``scramble_layers=s`` the first measured layer uses color ``s mod C``;
    * ``"random_edges"``: ``gates_per_layer`` edges drawn with replacement,
      uniformly or with probabilities ``edge_weights`` (long-range circuits:
      ``graphs.complete(n)`` with ``graphs.power_law_weights``);
@@ -582,7 +582,7 @@ def correlated_erasure(
     An erasure of ``m`` system qubits strikes a region ``A`` with probability
     ``Q_J(A | m) = exp(-J b_G(A)) / Z_m(J)``, where ``b_G(A)`` is the number of
     edges of the erasure graph ``G`` with exactly one end in ``A`` (``J > 0``
-    favours compact regions, ``J = 0`` is the uniform law, ``J < 0`` favours
+    favors compact regions, ``J = 0`` is the uniform law, ``J < 0`` favors
     spread-out ones), and it fails when it loses logical information,
     ``F_C(A) = 1[I(A:R) > 0]``. The probe estimates
     ``P_{C,G,J}(m) = sum over |A| = m of Q_J(A | m) F_C(A)`` for the code ``C``
@@ -956,7 +956,7 @@ class MonitoredCircuit:
     scramble_gates, scramble_matchings, scramble_layers
         Optional pre-scrambling, in this order: gates on random distinct pairs,
         layers of random all-to-all perfect matchings, gate-only layers of the
-        dynamics (the ``"matching"`` colour cycle continues from them into the
+        dynamics (the ``"matching"`` color cycle continues from them into the
         measured layers).
     gate_set
         Canonical two-qubit Clifford indices to draw gates from uniformly
@@ -1418,8 +1418,8 @@ class MonitoredCircuit:
                 color_ptr = np.concatenate(ptr_parts).astype(np.int64)
                 color_idx = np.concatenate(idx_parts).astype(np.int64)
             else:
-                # Only the matching schedule reads the colouring: give every graph
-                # one colour holding all its edges instead of colouring it (pure
+                # Only the matching schedule reads the coloring: give every graph
+                # one color holding all its edges instead of coloring it (pure
                 # Python, and the main cost of a large graph bank).
                 color_ptr = np.stack([np.zeros_like(sizes), sizes], axis=1).ravel()
                 color_ptr_ptr = 2 * np.arange(self.num_graphs + 1, dtype=np.int64)
@@ -1808,13 +1808,13 @@ def _checked_weights(weights, raw_edges: np.ndarray, edges: np.ndarray) -> np.nd
     w = np.array(weights, dtype=np.float64).ravel()  # a copy: never the caller's array
     if w.shape != (len(raw_edges),) or len(raw_edges) != len(edges):
         raise ValueError(
-            "edge_weights needs one weight per edge of an already normalised edge "
+            "edge_weights needs one weight per edge of an already normalized edge "
             "list (pass edges from sparsegf2.graphs)"
         )
     if np.any(w < 0) or not np.isfinite(w).all() or w.sum() <= 0:
         raise ValueError("edge_weights must be finite, non-negative and not all zero")
     if not np.array_equal(raw_edges, edges):
-        raise ValueError("edge_weights requires edges in normalised order (sorted, a < b)")
+        raise ValueError("edge_weights requires edges in normalized order (sorted, a < b)")
     return _read_only(w)
 
 

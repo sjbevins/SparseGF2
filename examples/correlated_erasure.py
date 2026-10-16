@@ -2,11 +2,11 @@
 
 An erasure of m qubits strikes a region A with probability proportional to
 exp(-J b(A)), b(A) the number of edges of an interaction graph G leaving A:
-J = 0 is the uniform (independent-erasure) case, J > 0 favours compact
+J = 0 is the uniform (independent-erasure) case, J > 0 favors compact
 regions, and J -> inf keeps only the regions of smallest boundary. For two
 ensembles in the purification picture,
 
-* the nearest-neighbour brickwork ring (graphs.cycle, schedule "matching"),
+* the nearest-neighbor brickwork ring (graphs.cycle, schedule "matching"),
   whose regions are drawn exactly (no Markov chain), and
 * a Watts-Strogatz graph (schedule "random_edges"), whose regions come from a
   swap chain with replica exchange,

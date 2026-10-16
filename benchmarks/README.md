@@ -11,9 +11,9 @@ them directly).
 | [`physics_data.py`](physics_data.py) | the three physics figures: −I₃ crossing, single-reference purification, code rate and erasure protection | `results/physics.json` |
 | [`why_data.py`](why_data.py) | the two "why this simulator" figures: the cost of measuring the state after every layer (SparseGF2 vs Stim, same circuits), and the cost of erasure screening per code (SparseGF2 kernels vs a compiled from-scratch baseline) | `results/why.json` |
 | [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling (four workloads in all; the run is timed, result digests are not) at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
-| [`erasure_cost.py`](erasure_cost.py) | one-thread seconds per code of the exhaustive erasure counts (w = 1, 2, ... per n and p, through `StabilizerCode` and through the engine probe) and of first-failure orderings (M = 100, 512, 2048), on codes from Watts–Strogatz trajectories, n = 32 to 512; the cutoff m\*(n) and seconds per code of region budgets B; an example study total; levels it does not run are extrapolated and labelled so | `results/erasure_cost.json`, `results/erasure_cost.md` |
+| [`erasure_cost.py`](erasure_cost.py) | one-thread seconds per code of the exhaustive erasure counts (w = 1, 2, ... per n and p, through `StabilizerCode` and through the engine probe) and of first-failure orderings (M = 100, 512, 2048), on codes from Watts–Strogatz trajectories, n = 32 to 512; the cutoff m\*(n) and seconds per code of region budgets B; an example study total; levels it does not run are extrapolated and labeled so | `results/erasure_cost.json`, `results/erasure_cost.md` |
 | [`probe_cost.py`](probe_cost.py) | one-thread seconds per evaluation of every probe kind, n = 64 to 2048, in the states that make each expensive (single reference with k = 1 and erasures failing near n / 2; purification, k = n; a monitored purification code), set against `estimate_ensemble`'s cost model (`api._trajectory_us`); `--from-json` prices saved measurements with the current model | `results/probe_cost.json`, `results/probe_cost.md` |
-| [`correlated_erasure_baseline.py`](correlated_erasure_baseline.py) | the geometry-correlated erasure baseline on nearest-neighbour brickwork ring codes (n = 32 to 256, p = 0.04 to 0.3; the contiguous lengths to n = 1024) against the literature: P_{C,J}(m) for J = 0, 0.5, 1, 2 and the exact J -> inf intervals, q+ and the code rate, the smallest failing interval, Gullans-Huse's ⟨l⟩ and Li-Fisher's \|A\|* with fitted exponents in n, distance bounds, Φ_J(ε) and ε_δ(J); Watts-Strogatz circuits (β = 0.1, 1) for contrast; physics, not timing | `results/correlated_erasure_baseline.json`, `results/correlated_erasure_baseline.md` |
+| [`correlated_erasure_baseline.py`](correlated_erasure_baseline.py) | the geometry-correlated erasure baseline on nearest-neighbor brickwork ring codes (n = 32 to 256, p = 0.04 to 0.3; the contiguous lengths to n = 1024) against the literature: P_{C,J}(m) for J = 0, 0.5, 1, 2 and the exact J -> inf intervals, q+ and the code rate, the smallest failing interval, Gullans-Huse's ⟨l⟩ and Li-Fisher's \|A\|* with fitted exponents in n, distance bounds, Φ_J(ε) and ε_δ(J); Watts-Strogatz circuits (β = 0.1, 1) for contrast; physics, not timing | `results/correlated_erasure_baseline.json`, `results/correlated_erasure_baseline.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -54,7 +54,7 @@ minute including compilation); pass that file to `make_figures.py --why <file>
   circuit. SparseGF2 runs a prebuilt `Circuit` whose compilation is cached by a
   warm-up run.
 * **One thread each**, median of repeated runs after a warm-up. The ensemble
-  rows are labelled with their thread count.
+  rows are labeled with their thread count.
 * **Correctness first.** For every size, SparseGF2's final stabilizer group is
   compared with Stim's; the script aborts on any mismatch.
 * **Stim's build is recorded.** The PyPI wheel of Stim 1.16 ships only an SSE2
@@ -142,7 +142,7 @@ costs, per code, on one thread.
   is not run when N_exact(n, w) exceeds 1e9, or when the walk model predicts
   over 90 s per evaluation. Slow levels are measured on the first two to four
   codes only. The next level is extrapolated with the walk model and
-  labelled as an extrapolation; a per-code model check beside it shows how
+  labeled as an extrapolation; a per-code model check beside it shows how
   far to trust it.
 * **Derived tables.** m\*(n) and the seconds per code for budgets B = 1e4 to
   1e7, and an example study total that divides by the effective threads of

@@ -86,7 +86,7 @@ def test_erasure_cost_quick(tmp_path):
         assert case["codes"] and all(c["k"] > 0 for c in case["codes"])
         for c in case["codes"]:
             assert 1 <= c["distance_low"] <= c["distance_high"] <= n
-        # quick mode stops at w = 3 and extrapolates w = 4, labelled as such
+        # quick mode stops at w = 3 and extrapolates w = 4, labeled as such
         assert [lv["w"] for lv in case["levels"]] == [1, 2, 3]
         assert case["next_level"]["w"] == 4 and "not measured" in case["next_level"]["basis"]
         for lv in case["levels"]:

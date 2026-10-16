@@ -38,7 +38,7 @@ Handlers build on the existing library and `sparsegf2.api` (its validators and e
 - Stim is imported only in tests and lazily in `sparsegf2.crosscheck`; matplotlib only lazily in the plot tool.
 - Commits: plain messages with no Co-Authored-By or other AI attribution trailers (Sam is the sole author).
 - Tests: `python -m pytest` from the repo root (Windows: `.venv\Scripts\python -m pytest`); lint: `ruff check src tests && ruff format --check src tests`.
-- Do not modify the existing JSON API's public functions' behaviour (`sparsegf2.api.run_circuit`, `run_ensemble`, ... and the CLI commands); only add.
+- Do not modify the existing JSON API's public functions' behavior (`sparsegf2.api.run_circuit`, `run_ensemble`, ... and the CLI commands); only add.
 
 ## Review Focus
 
@@ -46,7 +46,7 @@ Handlers build on the existing library and `sparsegf2.api` (its validators and e
 2. **Numbers sent as strings or as integral floats** (`"64"`, `64.0`, `"0.1"`, `"true"`). Local models do this. These should be coerced when unambiguous (`64.0` becomes 64), and anything else rejected with a message naming the parameter and the expected type. The test goes in Task 9.
 3. **Malformed call strings**: unbalanced brackets, a trailing comma, empty strings, unicode letters, `@` with nothing after it, or a very long string. Each must give a `GrammarError` (a `ValueError`) with a column, never another exception type. The test (fuzz) goes in Task 8.
 4. **NaN and infinity in results** (stopped trajectories, undefined statistics). The text shows `nan`, and `structured_content` carries `null`, never NaN, which is invalid JSON. The test goes in Task 10.
-5. **The same request twice while a background job for it is still running.** The second call returns the running job's id rather than failing obscurely, and cancelling one job never corrupts another's `output_dir`. The test goes in Task 15.
+5. **The same request twice while a background job for it is still running.** The second call returns the running job's id rather than failing obscurely, and canceling one job never corrupts another's `output_dir`. The test goes in Task 15.
 
 ## File Map
 
@@ -513,7 +513,7 @@ git commit -m "graphs: stats (lambda_2, mean path length, clustering, degrees) a
 - Consumes: `graphs.from_edges`.
 - Produces:
   - `graphs.save(path, graphs_, num_nodes, weights=None) -> pathlib.Path`.
-  - `graphs.load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]`. Edges come back normalised as by `from_edges` (pairs `a < b`, sorted), with weights permuted to match.
+  - `graphs.load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]`. Edges come back normalized as by `from_edges` (pairs `a < b`, sorted), with weights permuted to match.
   - JSON API: `"graph": {"family": "file", "path": PATH}`. Weights stored in the file become the spec's `edge_weights`, and giving `edge_weights` as well is an error.
 
 - [ ] **Step 1: Write the failing tests**
@@ -4587,7 +4587,7 @@ Each is 150-400 words of plain markdown that the model reads as is. Write them f
 - `purification.md`: the single reference; `stop_when_purified`; tau and censoring; survival, Kaplan-Meier, `tau_median_all`; `analysis_purification`; finding the transition via a sweep over `measurement_rate` and `analysis_compare(metrics=[survival(layer=...)])`.
 - `entanglement.md`: `entropy`, `half_cut_entropy`, `mutual_information`, `tripartite_information` (-I3 crossing near p_c ~ 0.16 for brickwork on a ring), and `entropy_profile`.
 - `graphs.md`:
-  - The families with their `graph_*` parameters; `graph_k` is the total degree, even, with K/2 neighbours per side.
+  - The families with their `graph_*` parameters; `graph_k` is the total degree, even, with K/2 neighbors per side.
   - Collections are seeded `(graph_seed, i)`.
   - `graph=file` with `graph_file`. The JSON format: `{"num_nodes": n, "graphs": [[[a,b],...],...], "weights": [...]}`.
   - `graph_build`, and `graph_stats` (lambda_2, path length, clustering, shortcuts).

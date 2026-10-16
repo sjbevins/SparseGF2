@@ -30,7 +30,7 @@ beats both by a wide margin (see `DESIGN.md`).
 
 The research campaign's physics fits in about 150 lines
 (`studies/prl_production/single_ref/raw_tau/engine.py:128-270`). About 90% of
-the studies code is provenance, locking, journalling and validation.
+the studies code is provenance, locking, journaling and validation.
 
 ## 2. The core simulator (`core/sparse_tableau.py`, `core/numba_kernels.py`)
 

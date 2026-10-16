@@ -28,7 +28,7 @@ from matplotlib.patches import FancyBboxPatch  # noqa: E402
 HERE = Path(__file__).resolve().parent
 FIGURES = HERE.parent / "docs" / "figures"
 
-# Colour roles (validated categorical order, and one-hue ordinal ramps per mode).
+# Color roles (validated categorical order, and one-hue ordinal ramps per mode).
 THEMES = {
     "light": {
         "surface": "#fcfcfb",
@@ -119,7 +119,7 @@ def end_labels(ax, items, theme, *, log=True, min_gap=0.055):
 
     ``items`` is a list of (x, y, text). Only labels that end at the same x can
     collide, so each such group is spread out separately, keeping every label
-    inside the axes. Labels use the secondary text colour; the line ending
+    inside the axes. Labels use the secondary text color; the line ending
     beside each label carries the series identity.
     """
     if not items:
@@ -451,7 +451,7 @@ def why_machine_line(env: dict, with_stim: bool = True) -> str:
 
 
 def _log_axis(axis) -> None:
-    """Decade ticks labelled as plain numbers (0.01, 1, 100), no minor labels."""
+    """Decade ticks labeled as plain numbers (0.01, 1, 100), no minor labels."""
     axis.set_major_locator(matplotlib.ticker.LogLocator(base=10, numticks=12))
     axis.set_minor_locator(matplotlib.ticker.NullLocator())
     axis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
@@ -534,7 +534,7 @@ def fig_why_observe(why: dict, theme: dict, mode: str) -> None:
     axes[0].set_ylabel("milliseconds per layer")
     _log_axis(axes[0].yaxis)
     low = min(line.get_ydata().min() for ax in axes for line in ax.get_lines())
-    axes[0].set_ylim(bottom=10 ** np.floor(np.log10(low)))  # a labelled tick below the lowest point
+    axes[0].set_ylim(bottom=10 ** np.floor(np.log10(low)))  # a labeled tick below the lowest point
     _figure_legend(fig, axes[0], ncol=2)
     fig.suptitle(
         "Measuring the state while it evolves: cost per layer, same circuits",

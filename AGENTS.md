@@ -92,7 +92,7 @@ claude mcp add sparsegf2 -- sparsegf2-mcp
    it adds `by_threads`, the estimate at each count, and it always gives `layout`: the
    arrays and files that `output_dir` will hold, with shapes, dtypes and uncompressed
    megabytes (disk use is lower). `benchmark_ensemble(spec, trajectories, threads=[1, 32])`
-   measures instead of modelling: it times the first trajectories of the run on this
+   measures instead of modeling: it times the first trajectories of the run on this
    machine (one thread, and all of them), projects the seconds of the whole run to each
    count in `threads` (counts beyond the machine's threads are marked as projected),
    and measures the size of `result.npz`. It writes nothing and takes about twice its
@@ -124,7 +124,7 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   `scramble_matchings` layers of gates on random perfect matchings, then
   `scramble_layers` gate-only layers on the graph.
 * **Layer:** gates on graph edges, placed by `schedule`:
-  * `matching`: edge colouring; on an even ring this is brickwork;
+  * `matching`: edge coloring; on an even ring this is brickwork;
   * `random_edges`: `gates_per_layer` edges drawn with replacement, weighted by
     `edge_weights` if given;
   * `all_edges`.
@@ -336,7 +336,7 @@ such as `"counts"` so the key is the same at every n.
 
 An erasure of m qubits that clusters on a graph G: the region A is drawn with probability
 Q_J(A | m) = exp(-J b(A)) / Z_m(J), b(A) the number of edges of G leaving A. J = 0 is the
-uniform case above (P_{C,G,0}(m) = P_C(m) exactly), J > 0 favours compact regions, J < 0
+uniform case above (P_{C,G,0}(m) = P_C(m) exactly), J > 0 favors compact regions, J < 0
 spread-out ones, and J -> inf keeps only the regions of smallest boundary. The probe
 estimates P_{C,G,J}(m), the probability that such an erasure fails, per trajectory,
 coupling and size; Phi_J(e) mixes it with Bin(n, e) sizes as Phi does for J = 0.
@@ -497,7 +497,7 @@ crosscheck.compare_measurements(circuit, seed=0)
   `spec.replay(t, seed=...)`, `spec.circuit(t, seed=...)` and rerunning a saved
   `spec.json` do not check, so prefer `result.replay`.
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
-  (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbours
+  (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbors
   per side).
 
 ## Where things are

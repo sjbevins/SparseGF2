@@ -159,7 +159,7 @@ def _check_csr(indptr, indices, n_sys):
         for j in range(indptr[v], indptr[v + 1]):
             w = indices[j]
             if w < 0 or w >= n_sys or w == v:
-                raise ValueError("the graph's neighbours must be other nodes in 0..n_sys-1")
+                raise ValueError("the graph's neighbors must be other nodes in 0..n_sys-1")
 
 
 @njit(cache=True)

@@ -10,7 +10,7 @@ in Stim, and its text form *is* Stim's text form::
         M 0 1
         DETECTOR rec[-1] rec[-2]
     ''')
-    print(circuit)            # the same text back, normalised
+    print(circuit)            # the same text back, normalized
     circuit.to_stim()         # a stim.Circuit (needs Stim installed)
     Circuit.from_stim(stim_circuit)
 

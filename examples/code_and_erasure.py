@@ -10,7 +10,7 @@ random circuits each. At every checkpoint this records
   m qubits of an ordering is uncorrectable exactly when m >= D;
 * exhaustive counts of the uncorrectable erasures of 1..w qubits (exact
   P_C(m) for m <= w);
-* the code itself at the final layer, to analyse again later.
+* the code itself at the final layer, to analyze again later.
 
 From these, :mod:`sparsegf2.analysis` gives the failure probability under
 independent erasure of each qubit with probability e,
@@ -100,7 +100,7 @@ def main() -> None:
             line += f"   {phi_code:11.3f}   {e_delta:9.3f}"
         print(line)
 
-    # The saved codes can be analysed again, e.g. with many more orderings.
+    # The saved codes can be analyzed again, e.g. with many more orderings.
     alive = np.flatnonzero(res.snapshots["code_snapshot"][1][:, 0] >= 0)
     if alive.size and k[alive[0], -1] > 0:
         code = res.code(int(alive[0]), 0)

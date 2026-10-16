@@ -48,7 +48,7 @@ ones below it ([DESIGN.md §4](DESIGN.md#4-architecture) has the module map):
 | circuits | `circuit.py`, `_compile.py`, `sampling.py`, `result.py` | `Circuit` (Stim's circuit language), its compilation to flat op arrays, `Simulator.run` (one shot) and `sample` (many shots in parallel) |
 | observables | `observables.py` | entropies, mutual and tripartite information, code dimension, lost information, erasure statistics, contiguous distance, clipped gauge, for any `Simulator` |
 | ensembles | `mipt.py`, `graphs.py` | `MonitoredCircuit`: a frozen description of a random monitored-circuit protocol, run for many trajectories inside one compiled parallel kernel; probes record what you ask for; `EnsembleResult` holds the arrays |
-| codes and analysis | `codes.py`, `analysis.py` | `StabilizerCode`: a saved code analysed after the run; estimators for P_C(m), Phi(e), e_delta, survival curves, means with errors |
+| codes and analysis | `codes.py`, `analysis.py` | `StabilizerCode`: a saved code analyzed after the run; estimators for P_C(m), Phi(e), e_delta, survival curves, means with errors |
 | interfaces | `api.py`, `cli.py`, `mcp_server.py` | a JSON-in, JSON-out service layer, and two thin front ends on it: the `sparsegf2` command and the `sparsegf2-mcp` server |
 
 Two execution paths share the same kernels. A **single circuit** (any
@@ -476,8 +476,8 @@ module docstring is the reference; in short, each trajectory does:
 3. **Layers**, `layers` times: two-qubit gates on edges of the interaction
    graph, placed by `schedule`, then each system qubit measured in Z with
    probability `measurement_rate`:
-   * `"matching"`: cycle through an edge colouring of the graph (on an even
-     ring, the usual brickwork of even and odd bonds); the colour cycle runs on
+   * `"matching"`: cycle through an edge coloring of the graph (on an even
+     ring, the usual brickwork of even and odd bonds); the color cycle runs on
      from the scramble layers into the dynamics;
    * `"random_edges"`: `gates_per_layer` edges (default n // 2) drawn with
      replacement, uniformly or with probabilities `edge_weights`;
@@ -791,7 +791,7 @@ is exactly the engine's situation, so the same kernels compute `l(A)`
 (`lost_information`), first-failure sizes (`first_failure_sizes`) and
 exhaustive counts (`uncorrectable_counts`). Redundant generators are
 harmless: `code_columns` discards them. A saved code can therefore be
-re-analysed later with more orderings or a larger exhaustive search than the
+re-analyzed later with more orderings or a larger exhaustive search than the
 run used. The five-qubit code makes a good check, since its distance is 3 and
 every 3-qubit erasure destroys the logical qubit:
 
@@ -973,7 +973,7 @@ automatically. Add it to a spec in `tests/test_mipt.py` and its value on a
 field.
 
 **A new graph family.** Write a function in `graphs.py` that returns an
-`(m, 2)` int64 edge array normalised like the others (`a < b`, sorted, no
+`(m, 2)` int64 edge array normalized like the others (`a < b`, sorted, no
 duplicates or self-loops; `from_edges` does this), takes the number of nodes as
 `n` and, if random, an explicit `seed` used through SparseGF2's own PRNG
 (`seed_state`, `next_below`, `next_double` from `_kernel/rng.py`, as
