@@ -92,7 +92,10 @@ def test_a_file_named_npz_that_is_not_an_archive_gets_a_plain_message(tmp_path):
         (tmp_path / name).write_bytes(content)
     np.save(tmp_path / "array.npy", np.arange(6).reshape(3, 2))
     (tmp_path / "array.npy").replace(tmp_path / "array.npz")  # one array, not an archive
-    for name in ("text.npz", "empty.npz", "cut.npz", "array.npz"):
+    ragged = np.empty(2, dtype=object)
+    ragged[0], ragged[1] = [0, 1], [1, 2, 3]
+    np.savez(tmp_path / "objects.npz", num_nodes=8, edges=ragged)  # a zip of object arrays
+    for name in ("text.npz", "empty.npz", "cut.npz", "array.npz", "objects.npz"):
         path = tmp_path / name
         regions = {"family": "file", "path": str(path)}
         for call in (

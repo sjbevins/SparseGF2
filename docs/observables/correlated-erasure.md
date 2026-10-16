@@ -405,7 +405,9 @@ missing value in $Z_{C_n,0} = Z_{C_n,n} = 1$, the missing bar in
 $1/\lvert\mathcal{M}_{G,m}\rvert$, a missing parenthesis in
 $-\partial_J \log Z_{G,m}(J)$, and "large $j$" for large $J$.
 
-What the simulator generalizes: $J$ may be any finite real number. Every
+What the simulator generalizes: $J$ may be any real number with
+$\lvert J\rvert \le 10^6$ (`erasures.MAX_ABS_COUPLING`; beyond it use the exact
+$J \to \infty$ routes of §3.7). Every
 identity above holds for $J \lt 0$ too; Proposition 1 then favours the larger
 boundary (spread-out regions), and Proposition 2 still says that
 $\langle b\rangle$ falls as $J$ grows. $J \to \pm\infty$ is a limit, never a

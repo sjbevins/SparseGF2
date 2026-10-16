@@ -208,7 +208,7 @@ def coupling_bound_message(value: float, position: int | None = None) -> str:
     point (the graph side, the code side, the probe and the tools)."""
     where = "" if position is None else f" at position {position}"
     return (
-        f"coupling must satisfy |J| <= {MAX_ABS_COUPLING:,.0f}, got {value:g}{where}: a coupling "
+        f"coupling must satisfy |J| <= {MAX_ABS_COUPLING:,.0f}, got {float(value)!r}{where}: a coupling "
         "that large is the J -> inf limit, which the samplers cannot resolve (and the ring "
         "sampler's weights overflow); use the exact routes: StabilizerCode."
         "interval_failure_by_size (ring), end_window_failure_by_size (open path), "
@@ -370,7 +370,7 @@ def boundary_moments(counts, couplings) -> dict[str, np.ndarray]:
     """``log Z_m(J)``, ``<b>_J`` and ``Var_J(b)`` from the density of states, per coupling.
 
     ``counts[b] = N_m(b)`` (from :func:`boundary_counts` or a closed form);
-    ``couplings`` one finite ``J`` or a list. With ``w_J(b) = N_m(b)
+    ``couplings`` one ``J`` with ``|J| <= MAX_ABS_COUPLING`` or a list. With ``w_J(b) = N_m(b)
     exp(-J b)``::
 
         log_partition = log Z_m(J) = log sum_b w_J(b)        (natural log; log C(n, m) at J = 0)
@@ -378,7 +378,7 @@ def boundary_moments(counts, couplings) -> dict[str, np.ndarray]:
         variance      = Var_J(b)   = sum_b (b - <b>_J)^2 w_J(b) / Z_m(J) = -d<b>_J / dJ
 
     computed exactly (in floating point; the sums are shifted by their largest
-    term, so any finite ``J`` is safe). Returns a dict of float64 arrays, one
+    term, so any allowed ``J`` is safe). Returns a dict of float64 arrays, one
     entry per coupling: ``couplings``, ``log_partition``, ``mean``,
     ``variance``. ``<b>_J`` is nonincreasing in ``J`` (``Var >= 0``).
     """
@@ -765,7 +765,7 @@ def sample_regions(
 ) -> RegionSample:
     """Draw regions of size ``m`` from ``Q_J(A) ∝ exp(-J b(A))`` at each coupling.
 
-    ``couplings``: finite, distinct, any order. ``method``:
+    ``couplings``: distinct, ``|J| <= MAX_ABS_COUPLING``, any order. ``method``:
 
     * ``"auto"`` (default): ``"exact"`` when the graph is one cycle or one path
       through all ``n`` nodes, in any labeling (the ring and the open chain, the
@@ -1315,7 +1315,7 @@ def ring_boundary_distribution(n: int, m: int, coupling: float) -> tuple[np.ndar
         P_J(b = 2r) = N(n, m, r) exp(-2 J r) / Z_m(J)
 
     with ``N`` from :func:`ring_run_count`, computed in log space (any ``n``,
-    any finite ``J``).
+    any ``|J| <= MAX_ABS_COUPLING``).
     """
     n, m = _ring_args(n, m)
     runs, logw = _ring_log_weights(n, m, _coupling(coupling))
@@ -1457,7 +1457,7 @@ def path_boundary_distribution(n: int, m: int, coupling: float) -> tuple[np.ndar
 
         P_J(b) = sum over (r, e) with 2r - e = b of path_run_count(n, m, r, e) exp(-J b) / Z_m(J)
 
-    computed in log space (any ``n``, any finite ``J``).
+    computed in log space (any ``n``, any ``|J| <= MAX_ABS_COUPLING``).
     """
     n, m = _path_args(n, m)
     bvals, logw = _path_log_weights(n, m, _coupling(coupling))

@@ -4843,7 +4843,7 @@ def _region_graph(graph: Any, num_nodes: Any) -> tuple[np.ndarray, int, str, lis
 
 
 def _region_couplings(couplings: Any) -> np.ndarray:
-    """The couplings of :func:`sample_erasure_regions` as given: finite, distinct, a few."""
+    """The couplings of :func:`sample_erasure_regions` as given: distinct, |J| <= 1e6, a few."""
     if isinstance(couplings, (int, float, np.number)) and not isinstance(couplings, bool):
         couplings = [couplings]
     if not isinstance(couplings, (list, tuple)):
@@ -5987,7 +5987,7 @@ def _correlated_curves(
             "e_delta itself (interpolated_mass_at_e_delta: at of_mean_phi, then at both ends "
             "of of_mean_phi_range), so the tolerance leans on the interpolation even where "
             f"complete is {str(entry['complete']).lower()} (that is at the e asked for only); "
-            f"sample the sizes {low} to {high} that e_delta needs"
+            f"sample the sizes {max(low, 1)} to {min(high, n - 1)} that e_delta needs"
         )
     if sampler["method"] != "exact":
         notes.append(
@@ -6037,7 +6037,8 @@ def erasure_curves(
     only those given: ``e_delta.interpolated_mass_at_e_delta`` is, per coupling, the mass at
     ``of_mean_phi`` and at the two ends of ``of_mean_phi_range`` (in that order), and
     ``e_delta_complete`` is false, with a note, when any of them exceeds 0.1%: the tolerance
-    then leans on the interpolation even where ``complete`` is true. (The ``uniform`` rows
+    then leans on the interpolation even where ``complete`` is true (it is null when no
+    trajectory holds a code, since there is no tolerance). (The ``uniform`` rows
     have none of these fields: their curve is sampled or exact at every size.) A curve that
     is exact for small sizes at every coupling needs the
     saved codes (``StabilizerCode.boundary_failure_counts``). The standard errors treat

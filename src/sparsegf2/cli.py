@@ -825,6 +825,9 @@ def _human_curves(result: dict[str, Any]) -> list[str]:
             lines.append(
                 f"  exact up to size {entry['exact_counts']['max_size']} ({entry['exact_counts']['probe']})"
             )
+        flag = d.get("of_mean_phi_monotone")
+        if flag is not None and not flag:
+            lines.append("  the mean curve steps down in m: e_delta is its last crossing")
     for name, entry in result.get("correlated", {}).items():
         head(name, entry, "correlated erasure")
         lines.append(

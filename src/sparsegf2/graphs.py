@@ -426,7 +426,12 @@ def _read_npz(path: Path) -> dict[str, np.ndarray]:
         if not isinstance(archive, np.lib.npyio.NpzFile):  # a .npy file renamed
             raise ValueError(problem.format(why="it holds one array (.npy), not an archive"))
         with archive as z:
-            return {name: z[name] for name in z.files}
+            try:
+                return {name: z[name] for name in z.files}
+            except ValueError:  # object arrays, which numpy refuses without allow_pickle
+                raise ValueError(
+                    problem.format(why="it holds arrays of Python objects, not numbers")
+                ) from None
 
 
 def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:

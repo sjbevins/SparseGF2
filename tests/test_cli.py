@@ -624,6 +624,18 @@ def test_curves_table(capsys, erasure_run):
     assert "hold a code" in out
 
 
+def test_curves_table_says_when_the_uniform_mean_curve_steps_down(erasure_run):
+    # a hybrid uniform curve (exact counts up to w, orderings above) can dip at the junction
+    result = json.loads(json.dumps(api.erasure_curves(str(erasure_run), [0.05, 0.1])))
+    line = "the mean curve steps down in m: e_delta is its last crossing"
+    for entry in result["uniform"].values():
+        entry["e_delta"]["of_mean_phi_monotone"] = True
+    assert line not in "\n".join(cli._human_curves(result))
+    for entry in result["uniform"].values():
+        entry["e_delta"]["of_mean_phi_monotone"] = False
+    assert line in "\n".join(cli._human_curves(result))
+
+
 def test_curves_table_says_when_the_tolerance_rests_on_interpolated_sizes(capsys, tmp_path):
     spec = {
         "num_system": 16, "graph": {"family": "cycle"}, "layers": 48, "measurement_rate": 0.1,

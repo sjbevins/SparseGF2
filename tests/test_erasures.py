@@ -1628,7 +1628,7 @@ def test_couplings_beyond_the_bound_are_refused_on_the_graph_side():
             with pytest.raises(ValueError, match=message):
                 call()
     # the position of the offender is named in a list
-    with pytest.raises(ValueError, match=r"got 1e\+07 at position 2"):
+    with pytest.raises(ValueError, match=r"got 10000000\.0 at position 2"):
         erasures.sample_regions(ring, 8, 3, [0.0, 1.0, 1e7], 5, seed=1)
     # the bound itself is allowed, and the ring still gives its (finite) answers there
     top = erasures.MAX_ABS_COUPLING
