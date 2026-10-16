@@ -51,6 +51,8 @@ error messages are identical everywhere.
 | `cancel_job` | Stops a job after its current chunk; saved chunks are kept. | `job_id` |
 | `list_jobs` | The jobs started by this server process. | none |
 | `load_results` | Summarizes a saved run (an output directory, including the chunks of an unfinished job, or a `.npz` file), in the same format as `run_ensemble`, plus the stored spec. | `path` |
+| `sample_erasure_regions` | Geometry-correlated erasure regions on a graph, with no circuit: the mean boundary against its exact value, chain diagnostics (effective sample size, R-hat) and notes on mixing, to check the sampler of the `correlated_erasure` probe before a long run. Refuses calls estimated above 60 s; writes nothing. | `graph`, `size`, `couplings`, `samples`, `num_nodes`, `chains`, `burn_in`, `seed` |
+| `erasure_curves` | The failure probability Phi(e) and the tolerance e_delta of the independent and the correlated erasure channels of a saved run, per coupling, over the trajectories that hold a code. Reads only. | `path`, `e`, `delta`, `layer` |
 
 Each tool's description, which the model reads, contains a worked example of its
 arguments. The lists of spec keys, probe kinds and graph families inside the

@@ -28,7 +28,9 @@ circuits (measurement-induced phase transitions, purification, dynamically gener
 codes, erasure protection). Typical flow: capabilities -> inspect_circuit/run_circuit for
 single circuits (Stim syntax), or run_ensemble for many random trajectories; use
 estimate first and start_ensemble_job + job_status + load_results for long runs. Outputs
-are compact summaries; pass output_dir to save full arrays. Read the resource
+are compact summaries; pass output_dir to save full arrays. For geometry-correlated erasures,
+check the sampler on the graph with sample_erasure_regions before a run and read Phi(e) and
+the tolerance from a saved run with erasure_curves. Read the resource
 docs://sparsegf2/quickstart for conventions (seeds, qubit layout, censoring)."""
 
 _INSTALL_HINT = (
@@ -187,6 +189,42 @@ storage, the disk use in megabytes of each file and each array (compressed). A "
 pending" left by a finished job is completed here.
 
 Example: {"path": "runs/n128_p012"}"""
+
+
+_SAMPLE_REGIONS = """\
+Sample geometry-correlated erasure regions on a graph (no circuit) and check how well they mix.
+A region A of `size` nodes is drawn with probability proportional to exp(-J b(A)), b(A) the
+graph edges leaving A (J > 0 favours compact regions, J = 0 is uniform): the sampler of the
+correlated_erasure probe, to try before a long run. graph: {"family": "watts_strogatz", "k": 4,
+"beta": 0.1, "seed": 1} with num_nodes, {"family": "cycle"|"path"}, {"family": "file", "path":
+...} or {"edges": [[0, 1], ...], "num_nodes": n}. `chains` independent runs (chain i seeded
+[seed, i]): exact samples on a cycle or path, else a swap chain with replica exchange. Returns,
+per coupling: the mean boundary with stderr, variance, acceptance, exchange_acceptance, tau_int,
+ess, r_hat (the slowest of the boundary and the membership of a few nodes), min_boundary_seen
+and the exact mean/variance (ring or path closed form, enumeration, or the uniform law at J = 0:
+exact_source); nonincreasing_in_J (Proposition 2); mixing notes (R-hat above 1.01, ESS below
+400, exchange acceptance below 5%, mean far from exact) saying what to change; the sampler's
+warnings; three example regions. No note is no proof: repeat with another seed and a longer
+burn_in. Refused if estimated above 60 s (shrink samples, chains, burn_in). Writes nothing.
+
+Example: {"graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
+ "num_nodes": 64, "size": 16, "couplings": [0, 0.5, 1, 2], "samples": 200, "seed": 7}"""
+
+_ERASURE_CURVES = """\
+Failure probability and tolerance of the erasure channels of a saved run (output directory or
+result.npz). For its erasure_first_failure probe (independent erasure; exact for m <= w where an
+uncorrectable_region_counts probe was evaluated at the same layer) and its correlated_erasure
+probes (one curve per coupling J), at `layer` (default: each probe's last evaluation), over the
+trajectories that hold a code (k > 0): q_plus and count_with_code; phi, Phi(e) = sum_m C(n,m)
+e^m (1-e)^(n-m) P(m), the probability that erasing each qubit with probability e loses logical
+information, mean and stderr at each e (default eight values from 1/n to 1/2); e_delta, the
+tolerance sup{e : Phi(e) <= delta}, of each code's own curve (per_code_mean, _median, _stderr)
+and of the mean curve (of_mean_phi). For correlated curves, interpolated_sizes are the sizes the
+probe did not sample, interpolated_mass the binomial probability they carry at each e, complete
+whether that is under 0.1%. The run needs an erasure_first_failure or correlated_erasure probe.
+At most 12 couplings are shown (truncated). Reads only; writes nothing.
+
+Example: {"path": "runs/erasure", "e": [0.02, 0.05, 0.1], "delta": 0.01, "layer": 128}"""
 
 
 def _purification_prompt(num_system: int, graph_family: str, rates: str, trajectories: int) -> str:
@@ -401,6 +439,48 @@ def build_server() -> Any:
     @server.tool(description=_LOAD_RESULTS, annotations=read_only)
     def load_results(path: str) -> Result:
         return call(api.load_results, path)
+
+    @server.tool(description=_SAMPLE_REGIONS, annotations=read_only)
+    def sample_erasure_regions(
+        graph: dict[str, Any],
+        size: Int,
+        couplings: StrictFloat | list[StrictFloat],
+        samples: Int = 200,
+        num_nodes: Int | None = None,
+        burn_in: Int | None = None,
+        thin: Int = 1,
+        tempering: StrictBool = True,
+        chains: Int = 4,
+        seed: Int | None = None,
+        method: str = "auto",
+        ladder: str | list[StrictFloat] = "auto",
+        max_step: StrictFloat | None = None,
+    ) -> Result:
+        return call(
+            api.sample_erasure_regions,
+            graph,
+            size,
+            couplings,
+            samples,
+            num_nodes=num_nodes,
+            burn_in=burn_in,
+            thin=thin,
+            tempering=tempering,
+            chains=chains,
+            seed=seed,
+            method=method,
+            ladder=ladder,
+            max_step=max_step,
+        )
+
+    @server.tool(description=_ERASURE_CURVES, annotations=read_only)
+    def erasure_curves(
+        path: str,
+        e: StrictFloat | list[StrictFloat] | None = None,
+        delta: StrictFloat = 0.01,
+        layer: Int | None = None,
+    ) -> Result:
+        return call(api.erasure_curves, path, e, delta, layer)
 
     @server.resource(
         "docs://sparsegf2/quickstart",

@@ -33,6 +33,8 @@ EXPECTED_TOOLS = {
     "cancel_job",
     "list_jobs",
     "load_results",
+    "sample_erasure_regions",
+    "erasure_curves",
 }
 
 
@@ -75,6 +77,31 @@ def test_tools_are_listed_with_good_descriptions():
     for kind in api.capabilities("probes")["probes"]:
         assert kind in ensemble.description  # generated from the library, never stale
     assert all(t.output_schema and t.output_schema["type"] == "object" for t in tools)
+
+
+def test_the_erasure_tools_are_read_only_and_say_what_they_return():
+    tools = {t.name: t for t in session(lambda c: c.list_tools()).tools}
+    for name in ("sample_erasure_regions", "erasure_curves"):
+        tool = tools[name]
+        assert tool.annotations.read_only_hint is True, name  # they write nothing
+        assert tool.annotations.open_world_hint is False, name
+        assert 1000 < len(tool.description) < 2000, name  # a full description, within the limit
+    regions = tools["sample_erasure_regions"]
+    assert regions.input_schema["required"] == ["graph", "size", "couplings"]
+    for field in ("samples", "num_nodes", "burn_in", "thin", "tempering", "chains", "seed",
+                  "method", "ladder", "max_step"):  # fmt: skip
+        assert field in regions.input_schema["properties"], field
+    assert (
+        "max_seconds" not in regions.input_schema["properties"]
+    )  # a call must fit a client's wait
+    for word in ("mean boundary", "exact_source", "mixing", "nonincreasing_in_J", "[seed, i]"):
+        assert word in regions.description, word
+    curves = tools["erasure_curves"]
+    assert curves.input_schema["required"] == ["path"]
+    for word in ("Phi(e)", "e_delta", "of_mean_phi", "interpolated_mass", "truncated"):
+        assert word in curves.description, word
+    # the run_ensemble description keeps its room
+    assert len(tools["run_ensemble"].description) < 2000
 
 
 def test_results_fit_the_size_budget_as_sent():
@@ -179,6 +206,100 @@ def test_benchmark_tool(tmp_path):
     assert "seconds" in text and "at most 30" in text
     assert "seconds" in error_text(call("benchmark_ensemble", {**args, "seconds": 0}))
     assert "threads" in error_text(call("benchmark_ensemble", {**args, "threads": [0]}))
+
+
+REGIONS_ARGS = {
+    "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 3},
+    "num_nodes": 20, "size": 5, "couplings": [0, 1.5], "samples": 40, "burn_in": 30, "seed": 6,
+}  # fmt: skip
+
+
+def _without_timing(result: dict) -> dict:
+    return {k: v for k, v in result.items() if k not in ("elapsed_seconds", "estimated_seconds")}
+
+
+def test_sample_erasure_regions_tool_matches_the_api():
+    out = ok(call("sample_erasure_regions", REGIONS_ARGS))
+    args = dict(REGIONS_ARGS)
+    expected = api.sample_erasure_regions(
+        args.pop("graph"), args.pop("size"), args.pop("couplings"), args.pop("samples"), **args
+    )
+    assert _without_timing(out) == _without_timing(json.loads(json.dumps(expected)))
+    assert out["seed"] == 6 and [r["coupling"] for r in out["couplings"]] == [0, 1.5]
+    # a lone number is a list of one coupling, and the graph may be edges
+    ring = [[i, (i + 1) % 8] for i in range(8)]
+    one = ok(call("sample_erasure_regions",
+                  {"graph": {"edges": ring, "num_nodes": 8}, "size": 3, "couplings": 1.0,
+                   "samples": 20, "seed": 1}))  # fmt: skip
+    assert one["graph"]["geometry"] == "cycle" and len(one["couplings"]) == 1
+
+
+def test_sample_erasure_regions_errors_are_actionable():
+    def err(**change):
+        return error_text(call("sample_erasure_regions", {**REGIONS_ARGS, **change}))
+
+    assert "size must be between 1 and 19" in err(size=20)
+    assert "couplings must be distinct" in err(couplings=[1, 1])
+    assert "samples must be at least 8" in err(samples=3)
+    assert "unknown graph family" in err(graph={"family": "moebius"})
+    assert "estimated at about" in err(  # too costly: refused before anything runs
+        graph={"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1}, num_nodes=2000,
+        size=500, couplings=[0, 1, 2], samples=2000, chains=8, burn_in=None,
+    )  # fmt: skip
+    # schema violations: the SDK reports them as tool errors too
+    for bad in ({"samples": True}, {"chains": "4"}, {"tempering": 1}, {"seed": 1.5},
+                {"couplings": ["a"]}, {"max_step": True}):  # fmt: skip
+        assert err(**bad), bad
+    assert "max_seconds" not in err(samples=3)  # not an argument of the tool
+
+
+@pytest.fixture(scope="module")
+def curves_run(tmp_path_factory):
+    spec = {**SPEC, "num_system": 12, "reference": "purification", "checkpoints": [8, 16],
+            "stop_when_purified": False, "measurement_rate": 0.1, "schedule": "matching",
+            "probes": [{"kind": "code_dimension"},
+                       {"kind": "erasure_first_failure", "samples": 80},
+                       {"kind": "correlated_erasure", "couplings": [0, 1], "samples": 40}]}  # fmt: skip
+    out = tmp_path_factory.mktemp("mcp_curves") / "run"
+    api.run_ensemble(spec, 20, seed=2, output_dir=str(out))
+    return out
+
+
+def test_erasure_curves_tool_matches_the_api(curves_run):
+    args = {"path": str(curves_run), "e": [0.05, 0.2], "delta": 0.05, "layer": 8}
+    out = ok(call("erasure_curves", args))
+    expected = api.erasure_curves(str(curves_run), [0.05, 0.2], 0.05, 8)
+    assert out == json.loads(json.dumps(expected))
+    assert out["uniform"]["erasure_first_failure"]["layer"] == 8
+    default = ok(call("erasure_curves", {"path": str(curves_run)}))
+    assert default["layer"] is None and default["uniform"]["erasure_first_failure"]["layer"] == 16
+    assert ok(call("erasure_curves", {"path": str(curves_run), "e": 0.1}))["e"] == [0.1]
+
+
+def test_erasure_curves_errors_are_actionable(curves_run, tmp_path):
+    assert "no such file or directory" in error_text(
+        call("erasure_curves", {"path": str(tmp_path / "nowhere")})
+    )
+    text = error_text(call("erasure_curves", {"path": str(curves_run), "layer": 7}))
+    assert "layer 7 was not evaluated" in text
+    assert "delta must be in [0, 1]" in error_text(
+        call("erasure_curves", {"path": str(curves_run), "delta": 2})
+    )
+    for bad in ({"layer": True}, {"layer": "8"}, {"delta": "x"}, {"e": "all"}, {"e": [True]}):
+        assert error_text(call("erasure_curves", {"path": str(curves_run), **bad})), bad
+    api.run_ensemble(SPEC, 3, seed=1, output_dir=str(tmp_path / "plain"))
+    text = error_text(call("erasure_curves", {"path": str(tmp_path / "plain")}))
+    assert "no erasure_first_failure or correlated_erasure probe" in text
+
+
+def test_the_erasure_tools_write_nothing(curves_run, tmp_path, monkeypatch):
+    before = sorted(p.name for p in curves_run.rglob("*"))
+    ok(call("erasure_curves", {"path": str(curves_run)}))
+    ok(call("sample_erasure_regions", REGIONS_ARGS))
+    assert sorted(p.name for p in curves_run.rglob("*")) == before
+    monkeypatch.chdir(tmp_path)
+    ok(call("sample_erasure_regions", REGIONS_ARGS))
+    assert not list(tmp_path.iterdir())
 
 
 def test_job_tools_lifecycle(tmp_path):

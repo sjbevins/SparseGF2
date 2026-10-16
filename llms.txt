@@ -33,7 +33,7 @@ Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) and `erasure_tolerance` gives e_del
 
 ## Code
 
-- [src/sparsegf2/api.py](src/sparsegf2/api.py): JSON service layer (capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results)
+- [src/sparsegf2/api.py](src/sparsegf2/api.py): JSON service layer (capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results, sample_erasure_regions, erasure_curves)
 - [src/sparsegf2/mipt.py](src/sparsegf2/mipt.py): MonitoredCircuit protocol (graph collections, circuits_per_graph), probes with their own checkpoints, EnsembleResult (values, layers, graph_index, snapshots, code)
 - [src/sparsegf2/codes.py](src/sparsegf2/codes.py): StabilizerCode, a code from generators, Pauli strings or a saved snapshot: lost information l(A) = I(A:R), first-failure sizes, exhaustive uncorrectable counts
 - [src/sparsegf2/analysis.py](src/sparsegf2/analysis.py): failure_by_size, exact_failure_by_size, erasure_failure_probability (hybrid exact/sampled), erasure_tolerance, Kaplan-Meier survival, mean_and_error
