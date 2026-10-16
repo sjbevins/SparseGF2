@@ -17,7 +17,11 @@ import pytest
 from sparsegf2 import Simulator, StabilizerCode, analysis, gate, graphs, mipt
 from sparsegf2 import observables as ob
 
-RANDOM_KINDS = ("erasure_first_failure", "erasure_lost_profile")  # checked separately
+RANDOM_KINDS = (  # checked separately (tests/test_replay.py, tests/test_correlated_probe.py)
+    "erasure_first_failure",
+    "erasure_lost_profile",
+    "correlated_erasure",
+)
 
 
 def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):

@@ -20,8 +20,9 @@ python -c "import sparsegf2; print(sparsegf2.__version__)"
 ```
 
 This installs two commands: `sparsegf2` (CLI) and `sparsegf2-mcp` (MCP server). The first
-simulation after installing or updating compiles the Numba kernels. That takes 10 to 30 s
-once; later runs load the compiled kernels from cache.
+simulation after installing or updating compiles the Numba kernels. That takes about 30 s
+once on the development machine (the ensemble kernel's cold compile was measured at 29 s
+there), longer on a slower one; later runs load the compiled kernels from cache.
 
 ## Which entry point to use
 
@@ -102,6 +103,11 @@ claude mcp add sparsegf2 -- sparsegf2-mcp
    array). Every chunk is saved as soon as it finishes. To resume
    after a crash or cancel, or to extend a finished run, call `start_ensemble_job` again
    with the same spec and `output_dir`.
+7. **Correlated erasures.** The probe `correlated_erasure` measures how the code fails
+   when the erased qubits cluster on the interaction graph (section "Correlated erasures"
+   below). Two read-only tools go with it: `sample_erasure_regions` checks the region
+   sampler on a graph alone (no circuit) before a long run, and `erasure_curves` turns a
+   saved run into Phi(e) and e_delta, for independent and for correlated erasure.
 
 ## The protocol behind `run_ensemble`
 
@@ -156,7 +162,11 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   * `code_snapshot`: saves the code's stabilizer generators; its value is their number,
     n - k. At most one per spec; give it its own `"checkpoints": "final"`, since codes are
     large. The summary shows only the generator count; the codes are in the saved result
-    (`output_dir`; `EnsembleResult.code(t, c)` in Python).
+    (`output_dir`; `EnsembleResult.code(t, c)` in Python);
+  * `correlated_erasure` (needs a reference; `couplings` required): for each coupling J and
+    size m, the fraction of `samples` m-qubit regions, drawn with probability proportional
+    to exp(-J b(A)) (b(A): edges of the erasure graph leaving A), whose erasure loses
+    logical information. Section "Correlated erasures" below.
 
   Every probe takes an optional `"name"`, its key in the results. The summary shows a
   vector probe as a curve over m (`index`) at the last checkpoint with data, with a `what`
@@ -248,7 +258,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   left by a process that has ended on this machine is taken over.
 * Compiled kernels are cached on disk and recompiled automatically whenever any kernel
   source (or the Numba or Python version) changes, so the first import and run after an
-  update is slower (10 to 30 s). Kernels that a process started before the update saves
+  update is slower (about 30 s on the development machine, longer on slower ones). Kernels
+  that a process started before the update saves
   afterwards are ignored and recompiled. That process itself, such as a running MCP
   server, keeps the code it loaded: restart it to use the new code. If cached kernels
   ever look stale, delete the `sparsegf2-kernels.*.sha256` marker next to the cache
@@ -321,6 +332,118 @@ depends on n and w, and every evaluation also pays a fixed elimination. For a sw
 n, give `budget` or `max_size` per size, `{"64": 20000, "256": 50000}`, with a `name`
 such as `"counts"` so the key is the same at every n.
 
+## Correlated erasures
+
+An erasure of m qubits that clusters on a graph G: the region A is drawn with probability
+Q_J(A | m) = exp(-J b(A)) / Z_m(J), b(A) the number of edges of G leaving A. J = 0 is the
+uniform case above (P_{C,G,0}(m) = P_C(m) exactly), J > 0 favours compact regions, J < 0
+spread-out ones, and J -> inf keeps only the regions of smallest boundary. The probe
+estimates P_{C,G,J}(m), the probability that such an erasure fails, per trajectory,
+coupling and size; Phi_J(e) mixes it with Bin(n, e) sizes as Phi does for J = 0.
+[`docs/observables/correlated-erasure.md`](docs/observables/correlated-erasure.md) has the
+mathematics, the samplers with proofs, costs and worked examples.
+
+```json
+{"spec": {"num_system": 64,
+          "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
+          "layers": 256, "measurement_rate": 0.1, "schedule": "random_edges",
+          "reference": "purification", "checkpoints": 64,
+          "probes": [{"kind": "code_dimension"},
+                     {"kind": "erasure_first_failure", "samples": 200},
+                     {"kind": "correlated_erasure", "couplings": [0, 1, 2],
+                      "sizes": "1:31:2", "samples": 200, "checkpoints": "final"}]},
+ "trajectories": 200, "seed": 1, "output_dir": "runs/correlated"}
+```
+
+* **The probe's keys:** `couplings` (distinct, each |J| <= 10^6; J -> inf is refused: see the
+  exact routes below), `sizes` (a list, a range string `"a:b[:step]"` with Python slice
+  semantics, or null for every m in 1..n-1), `samples` (default 100), `geometry`
+  (`"interaction"`, the trajectory's own graph, default; or `"cycle"` / `"path"` over the
+  qubit labels), and the sampler's `method` (`"auto"`: exact independent samples when the
+  erasure graph is one cycle or one path through all qubits, in any labeling; otherwise a
+  Metropolis swap chain with replica exchange), `burn_in` (null: max(200, 8 n) sweeps),
+  `thin`, `tempering`, `ladder` (`"auto"`: rungs at most `max_step` = 1/sqrt(Var_0 b)
+  apart; `"given"`; or a list of extra couplings), `max_step`; plus `name` and
+  `checkpoints`. A code with k = 0 records 0.
+* **Layout:** `values[name]` is `(trajectories, evaluations, len(couplings) * len(sizes))`,
+  coupling-major; `res.correlated(name)` returns `(couplings, sizes, values)` with values
+  `(trajectories, evaluations, c, s)`. The summary shows `mean[i][j]` and `stderr` at
+  `couplings[i]`, `sizes[j]` over the trajectories with k > 0 (`count_with_code`, from a
+  `code_dimension` or `erasure_first_failure` probe on the same layers), at most 12
+  couplings and 17 sizes, a `sampler` line and `vs_depth` (`mean[i][d][j]`).
+* **Streams:** each size of each evaluation draws from its own stream, so a size's values
+  do not depend on the other sizes, and `result.replay` reproduces them, also for a probe
+  with a subset of the sizes. A saved run pins the sizes, burn-in and ladders it resolved.
+* **`sample_erasure_regions(graph, size, couplings, samples=200, *, num_nodes, burn_in,
+  thin, tempering, chains=4, seed, method, ladder, max_step)`** (CLI `sparsegf2 regions`):
+  the sampler alone on a graph, `chains` independent runs (chain i seeded `[seed, i]`), at
+  most 12 couplings. Per coupling: `mean_boundary` with `stderr = sqrt(variance /
+  ess_boundary)`, `acceptance`, `exchange_acceptance`, `tau_int` and `ess` (the slowest of
+  the boundary and of a few nodes' membership: on a ring the boundary looks mixed long
+  before the regions move), `r_hat` with its `r_hat_limit` and `r_hat_at`, the `exact` mean
+  and variance where known and `deviation_se`. On a cycle or a path the draws are exact and
+  independent: `tau_int` is 1, `ess` is `chains x samples`, and R-hat and the acceptances are
+  null. `nonincreasing_in_J` tests Proposition 2 on the estimates, each step to the next
+  coupling against a normal quantile `z_critical` that shares a 1% false-alarm chance over
+  the steps (`proposition2` gives the worst and the failed steps with their z); `False`
+  means the estimates are off, not the proposition. The `r_hat_limit` is what stationary
+  draws of that series' own autocorrelation allow, shared over all the series tested; the
+  note fires on about 2% of correct chain calls at 200 samples, and when it does the chains
+  differ more than that: not in equilibrium, in different regions, or too short for their
+  autocorrelation (more `burn_in`, then `thin` or `samples` or `chains`). `mixing` lists
+  what looks wrong and what to change, one note per kind. The chain does not depend on the
+  code, so run it with the probe's graph, sizes, couplings and settings, on several seeds,
+  before a long run: the probe stores only failure fractions, so its summary cannot warn
+  about bad mixing. An empty `mixing` list is no proof.
+* **`erasure_curves(path, e=None, delta=0.01, layer=None)`** (CLI `sparsegf2 curves RUN`):
+  from a saved run, per `erasure_first_failure` probe (`uniform`) and per coupling of a
+  `correlated_erasure` probe (`correlated`): `q_plus`, `phi` (mean, stderr and the number of
+  `codes` at each e), `e_delta` (`of_mean_phi`, the tolerance of the ensemble-mean Phi and the
+  headline, with `of_mean_phi_range` for a one-standard-error shift of the curve and
+  `of_mean_phi_monotone`, false where the mean curve steps down in m; the `per_code_*`
+  summarize each code's own tolerance and are biased upward), and for the correlated channel
+  the `interpolated_sizes` with the binomial mass they carry at the requested e
+  (`interpolated_mass`, `complete`), the mass they carry at `e_delta` itself
+  (`e_delta.interpolated_mass_at_e_delta`, with `e_delta_complete` false when it exceeds
+  0.1%: the tolerance then leans on interpolation even if `complete` is true; the uniform
+  channel has neither field) and the `binomial_window` worth sampling. The work is
+  bounded (curves of at most 10^8 values, tolerances of at most 10^10 multiply-adds): beyond
+  that evenly spaced codes are used and a note says so; `elapsed_seconds` reports the time.
+* **Exact routes** (saved codes, `code_snapshot`): `code.boundary_failure_counts(edges, w)`
+  gives every region of size <= w by boundary, and `.exact(couplings)` the exact P_J(m)
+  for any J; `code.interval_failure_by_size()` is the ring's J -> inf limit (the n
+  intervals), `code.end_window_failure_by_size()` the open path's (the two end intervals
+  only), and on small graphs `erasures.minimum_boundary_regions` lists the
+  minimum-boundary regions (on Watts–Strogatz graphs they need not be contiguous).
+
+```python
+import numpy as np
+from sparsegf2 import analysis, mipt
+
+res = mipt.EnsembleResult.load("runs/correlated/result.npz")
+n = res.spec.num_system
+couplings, sizes, values = res.correlated()                   # values[t, e, c, i]
+holds = res.values["code_dimension"][:, -1] > 0
+mean, err, count = analysis.mean_over_codes(values[:, -1], holds)  # P_J(m), (c, s)
+curves, filled = analysis.correlated_failure_curve(values[holds, -1], sizes, n)
+e = np.array([0.02, 0.05, 0.1])
+phi = analysis.failure_probability_from_curve(curves, n, e).mean(axis=0)  # (c, len(e))
+e01 = analysis.tolerance_from_curve(curves.mean(axis=0), n, 0.01, return_monotone=True)
+lo, hi = analysis.binomial_window(n, e, 1e-6)  # the sizes Phi needs at these rates
+```
+
+* **Cost:** every size of every evaluation runs a fresh sampler with a full burn-in. With
+  the chain that is about rungs x (burn_in + samples x thin) x n proposals, about 20 ns
+  each: measured one size at n = 256 about 0.2 s, every size 1..255 about 52 s per
+  evaluation on one thread. Keep `sizes` to the binomial window (sampled with a stride if
+  need be), give the probe its own few `checkpoints`, and read `estimate_ensemble`.
+  Exact samples (rings, paths, `geometry: "cycle"`) cost little.
+* **Pitfalls:** condition on k > 0; sizes the probe did not sample are interpolated
+  (`filled`), and for J != 0 P_J(m) need not be monotone in m, so interpolation can miss
+  a step; `tolerance_from_curve(..., return_monotone=True)` says whether a curve was
+  monotone. On the open path the J -> inf limit is the two end intervals, not every
+  interval. A chain at a huge J only finds local minima: use the exact routes.
+
 ## Distances, graphs, saved states and cross-checks
 
 ```python
@@ -385,8 +508,10 @@ crosscheck.compare_measurements(circuit, seed=0)
 | `src/sparsegf2/cli.py` | `sparsegf2` command line |
 | `src/sparsegf2/mcp_server.py` | `sparsegf2-mcp` MCP server: tools, `docs://` resources, prompts |
 | `src/sparsegf2/mipt.py` | `MonitoredCircuit`, probes, `EnsembleResult` |
-| `src/sparsegf2/codes.py` | `StabilizerCode`: erasure analysis of a saved code, contiguous distance |
-| `src/sparsegf2/analysis.py` | P_C(m), Phi(e), e_delta, mu_D, distance bounds, Kaplan-Meier, means with errors |
+| `src/sparsegf2/codes.py` | `StabilizerCode`: erasure analysis of a saved code, contiguous distance, correlated erasures (exact counts, J -> inf limits, sampled estimates) |
+| `src/sparsegf2/erasures.py` | geometry-correlated erasure regions on a graph: boundaries, exact densities of states, exact ring and path samplers, the swap chain with replica exchange, diagnostics |
+| `docs/observables/` | one document per observable family, from definition to kernel (`correlated-erasure.md` for correlated erasures) |
+| `src/sparsegf2/analysis.py` | P_C(m), Phi(e), e_delta, mu_D, distance bounds, Kaplan-Meier, means with errors; correlated curves P_J(m), Phi_J(e), e_delta(J) |
 | `src/sparsegf2/graphs.py` | graph families, statistics, graph files (`.json`, `.npz`) |
 | `src/sparsegf2/crosscheck.py` | tick-by-tick comparison of any circuit with Stim |
 | `src/sparsegf2/observables.py` | entanglement, code and erasure observables of one state |

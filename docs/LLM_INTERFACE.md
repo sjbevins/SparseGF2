@@ -116,6 +116,8 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `cancel_job(job_id)` | Ctrl-C | stop after the current chunk |
 | `list_jobs()` | | jobs in this process |
 | `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks) |
+| `sample_erasure_regions(graph, size, couplings, samples=200, num_nodes=None, burn_in=None, thin=1, tempering=True, chains=4, seed=None, method="auto", ladder="auto", max_step=None)` | `sparsegf2 regions --family F --n N ... --size M --couplings J... [...]` | read-only: geometry-correlated erasure regions on a graph alone (no circuit), with mixing diagnostics against exact values (section 3.7) |
+| `erasure_curves(path, e=None, delta=0.01, layer=None)` | `sparsegf2 curves RUN [--eps E...] [--delta D] [--layer L]` | read-only: Phi(e) and e_delta of a saved run's erasure probes, independent and correlated (section 3.7) |
 
 `trajectories` may be omitted for a collection of graphs (`graph.realizations`, or a
 graph file holding several graphs), which then runs all of its circuits, and when
@@ -226,7 +228,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `scramble_gates`, `scramble_matchings`, `scramble_layers` | ints: random all-to-all gates, layers on random perfect matchings, then gate-only layers on the graph |
 | `gate_set` | list of two-qubit gate names (`["CX", "SWAP"]`) or CLIFFORD_2Q indices |
 | `checkpoints` | `"final"`, `"every_layer"`, an int stride, or a list of layers: where purification is tested and where probes without their own `checkpoints` are evaluated |
-| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
+| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`, `correlated_erasure` with `couplings` (required), `sizes`, `samples` (default 100), `geometry` and the sampler's settings (section 3.7)). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
 | types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`, `num_system` at most `MAX_QUBITS` (65,536, checked before any graph is generated). Errors name the key. The MCP tools check their own arguments the same way (section 5) |
 | `stop_when_purified`, `system_order`, `periodic`, `random_orientation` | as in the library |
 
@@ -244,6 +246,7 @@ What each probe records per evaluation (n system qubits), and its value after
 | `erasure_first_failure` | `samples` numbers: for each random ordering of the system qubits, the smallest m such that erasing the first m loses logical information (n + 1 if k = 0) | n + 1 |
 | `uncorrectable_region_counts` | w numbers (w = `max_size`, or the cutoff a `budget` allows): the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion | 0 |
 | `code_snapshot` | n - k, the number of stabilizer generators; the generators are stored in the saved result | n (no code stored) |
+| `correlated_erasure` | len(couplings) x len(sizes) numbers, coupling-major: for coupling J and size m, the fraction of `samples` m-qubit regions, drawn with probability proportional to exp(-J b(A)), whose erasure loses logical information (0 if k = 0) | 0 |
 
 All probes except the entanglement ones and `code_snapshot` need a reference. Code
 probes are exact after a stop, so their averages need no correction; entanglement probes
@@ -595,6 +598,133 @@ without running anything; its `notes` say when `disk_megabytes` is rough (a smal
 or a sample file no larger than the one-trajectory file) and that a background job writes
 chunks before merging, so its peak disk use is about twice the final result.
 
+### 3.7 Correlated erasures: the `correlated_erasure` probe and two read-only tools
+
+An m-qubit erasure that clusters on the erasure graph G strikes a region A with
+probability exp(-J b(A)) / Z_m(J), b(A) the number of edges of G leaving A: J = 0 is the
+uniform case of section 3.4, J > 0 favours compact regions, J < 0 spread-out ones. The
+probe estimates P_{C,G,J}(m), the probability that such an erasure fails, for the code
+each trajectory holds. The mathematics, the samplers with their proofs, costs and
+worked examples are in
+[`observables/correlated-erasure.md`](observables/correlated-erasure.md).
+
+```json
+{"kind": "correlated_erasure", "couplings": [0, 1, 2], "sizes": "8:57:8", "samples": 100,
+ "burn_in": null, "thin": 1, "tempering": true, "method": "auto", "ladder": "auto",
+ "max_step": null, "geometry": "interaction", "checkpoints": "final"}
+```
+
+* `couplings`: one number or a list of distinct ones, each with |J| <= 10^6 (J -> inf is a
+  limit, not a coupling, and is refused with the exact routes to use). `sizes`: a list, a range string `"a:b[:step]"` (Python slice
+  semantics) or null for every m = 1..n-1. `geometry`: `"interaction"` (each trajectory's
+  own graph, default), `"cycle"` or `"path"` over the qubit labels.
+* The sampler is `erasures.sample_regions`: with `method="auto"`, exact independent
+  samples when the erasure graph is one cycle or one path through all qubits (any
+  labeling), otherwise a Metropolis swap chain per rung of a replica-exchange ladder
+  (`ladder="auto"`: the couplings, 0 and rungs at most `max_step` = 1/sqrt(Var_0 b) apart;
+  `"given"`; or extra couplings), started from uniform regions, `burn_in` sweeps (null:
+  max(200, 8 n)) then `samples` records `thin` sweeps apart. `"chain"` forces the chain,
+  `"exact"` refuses other graphs.
+* Values: `len(couplings) * len(sizes)` per evaluation, coupling-major;
+  `EnsembleResult.correlated(name)` returns `(couplings, sizes, values)` with `values`
+  shaped `(trajectories, evaluations, c, s)`. A code with k = 0 gives 0 and draws nothing.
+* Summary entry: `what`, `at_layer`, `count`, `count_with_code` (when a `code_dimension`
+  or `erasure_first_failure` probe covers the layers; without one the mean is over every
+  trajectory, k = 0 counting as 0, with a note), `couplings` and `sizes` (at most 12
+  couplings and 17 sizes, evenly spaced with the ends kept, the couplings in increasing
+  order of J with the smallest and the largest included when some are left out, fewer with a
+  note when the summary must shrink), `mean` and `stderr` (`mean[i][j]` is `couplings[i]` at
+  `sizes[j]`), `sampler` (one line) and `vs_depth` (`layers`, `count_with_code`, `sizes`,
+  and `mean[i][d][j]` at `couplings[i]`, `layers[d]`, `sizes[j]`). `estimate_ensemble`
+  adds `working_megabytes` (the regions the running threads hold at once) and a note.
+  For a chain a note says to check its mixing
+  with `sample_erasure_regions`: the probe stores only failure fractions, so the summary
+  cannot warn about a chain that has not mixed.
+* Randomness: each size of each evaluation has its own stream, so a size's values do not
+  depend on the other sizes, and `EnsembleResult.replay` reproduces them. A saved run
+  pins the sizes, burn-in and replica-exchange ladders it resolved; a resume under rules
+  that now resolve otherwise is refused as another protocol.
+* Cost: every size of every evaluation runs a fresh sampler with a full burn-in, about
+  rungs x (burn_in + samples x thin) x n swap proposals for the chain (one size at
+  n = 256 about 0.2 s on one thread, every size about 52 s); exact samples cost little.
+  `estimate_ensemble` prices it. Keep `sizes` to `analysis.binomial_window(n, e, tol)` of
+  the rates you need and give the probe its own few `checkpoints`.
+
+`sample_erasure_regions` runs the probe's sampler on a graph alone, so its settings can
+be checked before a long run (the chain does not depend on the code). `graph` is
+`{"family": ..., params}` with `num_nodes` (beside it or inside it),
+`{"family": "file", "path": ...}` (the first graph of a file) or
+`{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains` independent chains (chain i
+seeded `[seed, i]`) for at most 12 couplings and returns `graph` (with its `geometry`),
+`size`, `samples`, `chains`, `method`, for chains `burn_in`, `thin`, `tempering` and
+`ladder` (`rungs`, `lowest`, `highest`, `max_step`), `seed`, and
+
+* `couplings`, one row per coupling in the order given: `coupling`, `mean_boundary`,
+  `stderr`, `variance`, `acceptance`, `exchange_acceptance`, `tau_int`, `ess`,
+  `ess_boundary`, `slowest`, `r_hat`, `r_hat_limit`, `r_hat_at`, `min_boundary_seen`,
+  `exact` and `deviation_se`. `stderr = sqrt(variance / ess_boundary)`, the effective
+  sample size of the boundary itself; `tau_int` (largest) and `ess` (smallest) are over the
+  boundary and the membership of 8 spread nodes, `slowest` says which. `ess` and
+  `ess_boundary` are capped at `chains x samples` (the estimated `tau_int` of a short
+  series can fall below 1 from noise; `tau_int` is left as estimated). `r_hat` is the
+  R-hat of the series (the boundary or a node, `r_hat_at`) furthest above its own
+  `r_hat_limit`: the 99% point of the F distribution of the split R-hat for stationary
+  draws of that series' autocorrelation, shared over the `2 x 9 x couplings` series
+  tested, never below 1.01. On a cycle or a path the samples are exact and independent:
+  `tau_int` is 1, `ess` and `ess_boundary` are `chains x samples`, and `r_hat`,
+  `r_hat_limit`, `r_hat_at`, `slowest` and the acceptances are null;
+* `exact_source` (the ring or path closed form, the enumeration of every region up to
+  10^8 of them, or the uniform law at J = 0), `nonincreasing_in_J` and `proposition2`:
+  each step to the next coupling against `z_critical`, the normal quantile that shares a
+  1% false-alarm chance over the `steps` (3.1 for 12 couplings), with the `worst` step and
+  the `failed` ones as `{"J": [from, to], "increase", "z"}`; `False` means the estimates
+  are off, not the proposition (measured false alarms with a correct sampler: 1.5% of 400
+  calls with 12 couplings 0.001 apart);
+* `mixing`, one note per kind with what to change: R-hat above its limit (the chains
+  differ more than one stationary distribution allows: not in equilibrium, in different
+  regions, or too short for their autocorrelation), an effective sample size below 100 per
+  chain (400 for the default four chains),
+  exchange acceptance below 5%, a mean more than 5 standard errors from its exact value, a
+  failed Proposition-2 step. On correct swap chains the R-hat note fired in about 2% of
+  calls at 200 samples (a ring of 32 nodes, a 14-node Watts-Strogatz graph) and in none at
+  800; a record too short for its autocorrelation fires it, and thinning clears it.
+  An `r_hat` of 1000 stands for infinity (chains stuck apart);
+* `warnings` (the sampler's own), `examples` (three regions at the largest coupling),
+  `estimated_seconds`, `elapsed_seconds` and `notes`.
+
+The call is refused when its estimate exceeds `max_seconds` (60; the MCP tool has no such
+argument). An empty `mixing` list is no proof of mixing: repeat with another seed and a
+longer burn-in.
+
+`erasure_curves` reads a saved run (an output directory or `result.npz`) and returns, at
+`layer` (default each probe's last evaluation), over the trajectories that hold a code:
+`uniform` (per `erasure_first_failure` probe, the independent channel, exact for
+m <= w where `uncorrectable_region_counts` was evaluated at the same layer) and
+`correlated` (per `correlated_erasure` probe, one row per coupling), each with `count`,
+`count_with_code`, `q_plus`, `phi` (`mean`, `stderr` and the number of `codes` used, per
+`e`; default eight values log-spaced from 1/n to 1/2) and `e_delta`: `of_mean_phi`, the
+tolerance of the ensemble-mean Phi and the headline, with `of_mean_phi_range` (its value
+when the mean curve moves by plus and minus its standard error at every size), and
+`per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own tolerance (they
+describe the spread across codes and are biased upward for noisy curves);
+`of_mean_phi_monotone` (false where the mean curve steps down in m: `of_mean_phi` is then
+the last crossing of delta); `monotone_fraction` for the correlated rows. A correlated entry
+adds `couplings` (at most 12 shown), `sampled_sizes`, `interpolated_sizes`,
+`interpolated_mass` (the binomial probability the interpolated sizes carry at each e),
+`complete` (that mass below 0.1% at the e asked for), `e_delta_complete` (false, with a
+note, when the interpolated sizes carry more than 0.1% at `e_delta` itself, which the
+tolerance searches over every e: `e_delta.interpolated_mass_at_e_delta`, per coupling, the
+mass at `of_mean_phi` and at both ends of `of_mean_phi_range`; the `uniform` rows have none
+of these fields), `binomial_window` and `sampler`. Phi erases each qubit independently only
+for the `uniform` rows and for J = 0; a row with J != 0 erases Bin(n, e) qubits as one
+region drawn from Q_J. Without a code probe on the layer every trajectory counts
+and one that stored only zeros loses nothing (P(n) = 0). The standard errors treat
+trajectories as independent; a note warns when they ran on a few graphs (circuits on one
+graph are correlated). The work is bounded: the curves are at most 10^8 values (codes x
+couplings x (n + 1)) and the per-code tolerances at most 10^10 multiply-adds and 4,000
+codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
+`e_delta.codes`), and `elapsed_seconds` reports the time. Both tools write nothing.
+
 ---
 
 ## 4. CLI details
@@ -618,6 +748,18 @@ chunks before merging, so its peak disk use is about twice the final result.
 * `sparsegf2 benchmark SPEC.json --trajectories N --threads 1 32 [--seconds S] [--seed S]`
   reads the spec as `ensemble` does and calls `benchmark_ensemble` (section 3.6); without
   `--json` it prints a short table.
+* `sparsegf2 regions` calls `sample_erasure_regions` (section 3.7). The graph is
+  `--graph FILE` (its first graph) or `--family F` with `--n`, `--k`, `--beta`,
+  `--graph-seed` and `--graph-param KEY=VALUE` (a JSON value, repeatable); then `--size`,
+  `--couplings J [J ...]` (negative values work), `--samples`, `--chains`, `--burn-in`,
+  `--thin`, `--tempering/--no-tempering`, `--method`, `--ladder`, `--max-step`, `--seed`
+  and `--max-seconds`. For example
+  `sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1 --size 16 --couplings 0 0.5 1 2 --samples 400 --chains 8 --seed 7`.
+  Without `--json` it prints one row per coupling: the mean boundary against its exact
+  value, the diagnostics and the mixing notes.
+* `sparsegf2 curves RUN [--eps E [E ...]] [--delta D] [--layer L]` calls
+  `erasure_curves`; without `--json` it prints Phi(e) and e_delta per channel and
+  coupling.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---
@@ -626,7 +768,10 @@ chunks before merging, so its peak disk use is about twice the final result.
 
 * Tools: `capabilities`, `inspect_circuit`, `run_circuit`, `run_ensemble`,
   `estimate_ensemble`, `benchmark_ensemble`, `start_ensemble_job`, `job_status`,
-  `cancel_job`, `list_jobs` and `load_results`. Each description includes a worked example of its arguments; the spec
+  `cancel_job`, `list_jobs`, `load_results`, `sample_erasure_regions` and
+  `erasure_curves` (the last two read-only, marked so for the client; section 3.7;
+  `sample_erasure_regions` has no `max_seconds` argument and keeps the 60-second
+  limit). Each description includes a worked example of its arguments; the spec
   keys, graph families and probe kinds in the `run_ensemble` description are generated
   from the library, so they never go stale. Tools return structured content (the API
   dict) plus the same JSON as compact text, so the text stays within the 8000-character

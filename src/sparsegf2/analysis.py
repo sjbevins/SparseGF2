@@ -19,6 +19,22 @@ random ordering of the qubits; see :func:`sparsegf2.mipt.erasure_first_failure`)
 * ``exhaustive_cutoff``: the cutoff w = m*(n) that an enumeration budget of B
   regions allows, max{w : sum_{m=1}^{w} C(n, m) <= B}, and
   ``exhaustive_region_count`` that sum.
+
+Geometry-correlated erasures (:mod:`sparsegf2.erasures`): a region A of fixed
+size m is erased with probability Q_J(A | m) = exp(-J b(A)) / Z_m(J), b(A) the
+number of edges of the interaction graph leaving A, and
+P_J(m) = sum_{|A| = m} Q_J(A | m) 1[A is uncorrectable] (P_0 is P_C):
+
+* ``exact_correlated_failure``: P_J(m) exactly for m <= w and every J at once,
+  sum_b U_m(b) e^{-J b} / sum_b N_m(b) e^{-J b}, from the boundary-resolved
+  counts of :meth:`sparsegf2.codes.StabilizerCode.boundary_failure_counts`;
+* ``correlated_failure_curve``: a full curve P_J(m), m = 0..n, from exact and
+  sampled sizes (linear interpolation in between, flagged), and
+  ``binomial_window``: the sizes a binomial number of erasures can reach;
+* ``failure_probability_from_curve``: Phi_J(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_J(m),
+  and ``tolerance_from_curve``: e_delta(J) = sup{e : Phi_J(e) <= delta};
+* ``mean_over_codes``: ensemble means and standard errors over the codes with
+  logical qubits (k > 0).
 """
 
 from __future__ import annotations
@@ -26,23 +42,31 @@ from __future__ import annotations
 import math
 import operator
 from fractions import Fraction
+from typing import Any
 
 import numpy as np
 
 __all__ = [
+    "MONOTONE_SLACK",
     "bernoulli_erasure_curve",
+    "binomial_window",
+    "correlated_failure_curve",
     "distance_bounds",
     "erasure_failure_probability",
     "erasure_tolerance",
+    "exact_correlated_failure",
     "exact_failure_by_size",
     "exhaustive_cutoff",
     "exhaustive_region_count",
     "failure_by_size",
+    "failure_probability_from_curve",
     "hybrid_failure_by_size",
     "junction_dip",
     "kaplan_meier",
     "mean_and_error",
     "mean_first_failure",
+    "mean_over_codes",
+    "tolerance_from_curve",
 ]
 
 
@@ -478,3 +502,457 @@ def erasure_tolerance(first_failure, num_qubits: int, delta: float, *, exact_cou
         else:
             hi = mid
     return lo
+
+
+# -- geometry-correlated erasures ------------------------------------------------------
+
+
+def _couplings_1d(couplings) -> np.ndarray:
+    try:
+        js = np.atleast_1d(np.asarray(couplings, dtype=np.float64))
+    except (TypeError, ValueError):
+        raise ValueError(f"couplings must be numbers, got {couplings!r}") from None
+    if js.ndim != 1 or js.size == 0 or not np.all(np.isfinite(js)):
+        raise ValueError(
+            "couplings must be one finite number J or a 1-D list of them (J -> +inf is a "
+            "limit: on the ring use StabilizerCode.interval_failure_by_size)"
+        )
+    return js
+
+
+def _count_array(values, name: str) -> np.ndarray:
+    try:
+        arr = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an array of counts") from None
+    if arr.ndim < 2:
+        raise ValueError(
+            f"{name} needs shape (..., w, B + 1): region size m = 1..w on the second-to-last "
+            f"axis, boundary b = 0..B on the last (BoundaryCounts.{name}); got shape {arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)) or np.any(arr < 0) or np.any(arr != np.round(arr)):
+        raise ValueError(f"{name} must hold non-negative whole numbers (counts of regions)")
+    return arr
+
+
+def exact_correlated_failure(failed, total, couplings) -> np.ndarray:
+    """P_J(m) exactly, for every coupling J and every size m = 1..w, from boundary-resolved counts.
+
+    ``failed[..., m - 1, b] = U_m(b)``, the number of uncorrectable regions of
+    size m with edge boundary b, and ``total[..., m - 1, b] = N_m(b)``, the
+    number of all regions of size m with boundary b (the density of states of
+    the graph), as :meth:`sparsegf2.codes.StabilizerCode.boundary_failure_counts`
+    returns them. Under the correlated law Q_J(A | m) = exp(-J b(A)) / Z_m(J)
+    the failure probability is, exactly and for every J at once::
+
+        P_J(m) = sum_b U_m(b) exp(-J b) / sum_b N_m(b) exp(-J b)
+
+    J = 0 gives sum_b U_m(b) / C(n, m), the uniform P_C(m)
+    (:func:`exact_failure_by_size` of the summed counts, equal to it bit for
+    bit while the counts are below 2**53). As J -> +inf it tends to
+    U_m(b_min) / N_m(b_min), the failing fraction of the regions of smallest
+    boundary; as J -> -inf to U_m(b_max) / N_m(b_max).
+
+    Leading axes (``...``, for example one row per trajectory) broadcast
+    between ``failed`` and ``total``, so one ``total`` (shape ``(w, B + 1)``)
+    serves every code on the same graph. The boundary axes may differ in
+    length: the shorter is padded with zeros (a boundary that occurs in
+    neither changes nothing), so rows of :func:`sparsegf2.erasures.boundary_counts`,
+    each trimmed to its own largest boundary, can be padded and stacked into a
+    ``total``. ``couplings``: one finite J or a 1-D list, any order (negative J
+    favours spread-out regions).
+
+    Numerically stable for any finite J: each sum is shifted by the smallest
+    boundary with N_m(b) > 0 when J >= 0 (the largest when J < 0), so every
+    exponent is <= 0 and the denominator is at least 1. The counts are
+    converted to float64 first, which is exact below 2**53 (far above any
+    enumeration budget; larger counts would be rounded before the checks).
+    Returns float64 of shape ``(..., c, w)``: entry ``[..., i, m - 1]`` is P at
+    ``couplings[i]`` and size m.
+    """
+    u = _count_array(failed, "failed")
+    t = _count_array(total, "total")
+    if u.shape[-2] != t.shape[-2]:
+        raise ValueError(
+            f"failed and total must cover the same sizes m = 1..w (second-to-last axis): "
+            f"got {u.shape[-2]} and {t.shape[-2]}"
+        )
+    width = max(u.shape[-1], t.shape[-1])
+    u = np.concatenate([u, np.zeros(u.shape[:-1] + (width - u.shape[-1],))], axis=-1)
+    t = np.concatenate([t, np.zeros(t.shape[:-1] + (width - t.shape[-1],))], axis=-1)
+    try:
+        u, t = np.broadcast_arrays(u, t)
+    except ValueError:
+        raise ValueError(
+            f"the leading axes of failed {u.shape[:-2]} and total {t.shape[:-2]} do not broadcast"
+        ) from None
+    if np.any(u > t):
+        raise ValueError(
+            "failed[..., m - 1, b] (the failing regions) cannot exceed total[..., m - 1, b] "
+            "(all regions of that size and boundary)"
+        )
+    present = t > 0
+    if not np.all(present.any(axis=-1)):
+        raise ValueError("total has a size m with no region at all: every row needs N_m(b) > 0")
+    js = _couplings_1d(couplings)
+    b = np.arange(width, dtype=np.float64)
+    first = np.argmax(present, axis=-1).astype(np.float64)
+    last = (width - 1 - np.argmax(present[..., ::-1], axis=-1)).astype(np.float64)
+    out = np.empty(u.shape[:-2] + (js.size, u.shape[-2]))
+    for i, coupling in enumerate(js.tolist()):
+        shift = first if coupling >= 0 else last
+        with np.errstate(over="ignore"):
+            exponent = -coupling * (b - shift[..., None])
+        weight = np.exp(np.where(present, exponent, -np.inf))  # <= 1 where N_m(b) > 0
+        out[..., i, :] = (u * weight).sum(axis=-1) / (t * weight).sum(axis=-1)
+    return out
+
+
+def _probabilities(e, what: str = "e") -> np.ndarray:
+    try:
+        es = np.atleast_1d(np.asarray(e, dtype=np.float64))
+    except (TypeError, ValueError):
+        es = np.array([np.nan])
+    if es.ndim != 1 or es.size == 0 or not np.all((es >= 0) & (es <= 1)):
+        raise ValueError(f"{what} must be a number or a 1-D array of probabilities in [0, 1]")
+    return es
+
+
+def _curve_qubits(num_qubits) -> int:
+    n = _qubit_count(num_qubits)
+    if n < 1:
+        raise ValueError("num_qubits must be at least 1")
+    return n
+
+
+def binomial_window(num_qubits: int, e, tol: float = 1e-12) -> tuple[int, int]:
+    """The sizes ``(m_lo, m_hi)`` that a Bin(n, e) number of erased qubits can reach, up to ``tol``.
+
+    With every one of n qubits erased independently with probability e, the
+    number erased M follows Bin(n, e), and Phi(e) = sum_m Pr[M = m] P(m) only
+    needs P(m) for m_lo <= m <= m_hi: the window is chosen so that each tail
+    has probability at most tol / 2::
+
+        Pr[M < m_lo] <= tol / 2    and    Pr[M > m_hi] <= tol / 2
+
+    with m_lo as large and m_hi as small as that allows, so the sizes outside
+    it carry at most ``tol`` in total and change Phi by at most ``tol`` (P lies
+    in [0, 1]). ``e`` is a number or a 1-D array; for an array the window
+    covers every e (the smallest m_lo and the largest m_hi). The binomial
+    probabilities are computed in log space (lgamma), so large n is safe;
+    e = 0 gives (0, 0), e = 1 gives (n, n), and tol = 0 gives (0, n) for any
+    other e. ``tol`` must lie in [0, 1).
+    """
+    n = _qubit_count(num_qubits)
+    es = _probabilities(e)
+    try:
+        cut = float(tol)
+    except (TypeError, ValueError):
+        cut = math.nan
+    if not 0.0 <= cut < 1.0:
+        raise ValueError(f"tol must be a number in [0, 1), got {tol!r}")
+    log_binom = _log_binomial(n)
+    lo, hi = n, 0
+    for ei in es.tolist():
+        if ei == 0.0:
+            window = (0, 0)
+        elif ei == 1.0:
+            window = (n, n)
+        elif cut == 0.0:
+            window = (0, n)
+        else:
+            pmf = _binomial_weights(n, ei, log_binom)
+            below = np.cumsum(pmf)  # below[m] = Pr[M <= m]
+            beyond = np.append(np.cumsum(pmf[::-1])[::-1][1:], 0.0)  # beyond[m] = Pr[M > m]
+            m_lo = int(np.count_nonzero(below <= cut / 2))  # Pr[M < m_lo] = below[m_lo - 1]
+            m_hi = int(np.count_nonzero(beyond > cut / 2))  # first m with Pr[M > m] <= tol / 2
+            window = (min(m_lo, m_hi), m_hi)
+        lo, hi = min(lo, window[0]), max(hi, window[1])
+    return lo, hi
+
+
+def _unit_values(values, name: str) -> np.ndarray:
+    try:
+        arr = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an array of probabilities") from None
+    known = arr[~np.isnan(arr)]
+    if np.any((known < 0) | (known > 1)):
+        raise ValueError(f"{name} must hold probabilities in [0, 1] (NaN marks a missing value)")
+    return arr
+
+
+def correlated_failure_curve(
+    sampled, sizes, num_qubits: int, *, exact=None, holds_code=None
+) -> tuple[np.ndarray, np.ndarray]:
+    """A full failure curve P_J(m), m = 0..n, per coupling, from exact and sampled sizes.
+
+    ``sampled`` has shape ``(..., c, s)``: estimates of P_J(m) at the ``s``
+    region sizes ``sizes`` (distinct integers in [0, n], any order; for example
+    ``CorrelatedFailure.failure``, or the mean of such over codes), one row per
+    coupling. ``exact`` (optional) has shape ``(..., c, w)``: the exact P_J(m)
+    for m = 1..w (:func:`exact_correlated_failure`). ``holds_code`` (optional,
+    shape ``(...)``, booleans or code dimensions k, nonzero meaning a code)
+    gives P(n). Leading axes broadcast. The curve, float64 ``(..., c, n + 1)``,
+    takes each entry from the first source that has it:
+
+    1. P(0) = 0 (erasing nothing never fails), and P(n) = 1[k > 0] (erasing
+       everything fails exactly when there is logical information): from
+       ``holds_code`` when given, else from ``exact`` when it covers m = n
+       (w = n), else 1 (codes already conditioned on k > 0; pass
+       ``holds_code`` for any other ensemble);
+    2. the exact values for 1 <= m <= min(w, n - 1);
+    3. the sampled values at the other sizes;
+    4. linear interpolation in m between the nearest sizes known by 1-3 on
+       either side, P(m) = P(m_left) + t (P(m_right) - P(m_left)),
+       t = (m - m_left) / (m_right - m_left), which is exactly P(m_left) on a
+       plateau.
+
+    Returns ``(curve, interpolated)``, ``interpolated`` a boolean array of
+    length n + 1, True where step 4 filled the entry (so a report can say that
+    those sizes were not measured). The interpolation is a modelling choice,
+    a value between the neighbours. P_0(m) is nondecreasing in m (a uniform
+    (m + 1)-region is a uniform m-region plus one more qubit, and a superset
+    of a failing region fails), and so are the J -> +inf limits on the ring
+    and the path; for other J and graphs P_J(m) need not be (the regions
+    favoured at size m + 1 need not contain those favoured at size m).
+    :func:`binomial_window` says which sizes matter for Phi. NaN in the inputs
+    propagates.
+    """
+    n = _curve_qubits(num_qubits)
+    s = _unit_values(sampled, "sampled")
+    if s.ndim < 2:
+        raise ValueError(
+            f"sampled needs shape (..., c, s): couplings on the second-to-last axis and sizes on "
+            f"the last (use [values] for a single coupling); got shape {s.shape}"
+        )
+    try:
+        m_sampled = np.asarray(sizes, dtype=np.int64).ravel()
+        same = np.array_equal(m_sampled, np.asarray(sizes, dtype=np.float64).ravel())
+    except (TypeError, ValueError):
+        same = False
+    if (
+        not same
+        or m_sampled.size != s.shape[-1]
+        or np.any((m_sampled < 0) | (m_sampled > n))
+        or np.unique(m_sampled).size != m_sampled.size
+    ):
+        raise ValueError(
+            f"sizes must list {s.shape[-1]} distinct integers in [0, {n}], one per entry of the "
+            f"last axis of sampled; got {sizes!r}"
+        )
+    lead = s.shape[:-1]
+    ex = None
+    if exact is not None:
+        ex = _unit_values(exact, "exact")
+        if ex.ndim < 2 or ex.shape[-1] > n:
+            raise ValueError(
+                f"exact needs shape (..., c, w) with w <= n = {n} (sizes m = 1..w); got {ex.shape}"
+            )
+        try:
+            lead = np.broadcast_shapes(lead, ex.shape[:-1])
+        except ValueError:
+            raise ValueError(
+                f"the leading axes of sampled {s.shape[:-1]} and exact {ex.shape[:-1]} do not "
+                "broadcast"
+            ) from None
+    top: Any = 1.0
+    if holds_code is not None:
+        h = np.asarray(holds_code)
+        try:
+            top = np.broadcast_to((h != 0).astype(np.float64)[..., None], lead)
+        except ValueError:
+            raise ValueError(
+                f"holds_code needs the shape of the leading axes {lead[:-1]} (one entry per code, "
+                f"no coupling axis); got {h.shape}"
+            ) from None
+    elif ex is not None and ex.shape[-1] == n:
+        top = np.broadcast_to(ex[..., n - 1], lead)  # the exact P(n) = 1[k > 0]
+    curve = np.full(lead + (n + 1,), np.nan)
+    known = np.zeros(n + 1, dtype=bool)
+    curve[..., 0] = 0.0
+    curve[..., n] = top
+    known[[0, n]] = True
+    if ex is not None:
+        for m in range(1, min(ex.shape[-1], n - 1) + 1):
+            curve[..., m] = ex[..., m - 1]
+            known[m] = True
+    for j, m in enumerate(m_sampled.tolist()):
+        if not known[m]:
+            curve[..., m] = s[..., j]
+            known[m] = True
+    idx = np.flatnonzero(known)
+    gaps = np.flatnonzero(~known)
+    if gaps.size:
+        place = np.searchsorted(idx, gaps)
+        left, right = idx[place - 1], idx[place]
+        frac = (gaps - left) / (right - left)
+        start = curve[..., left]
+        curve[..., gaps] = start + frac * (curve[..., right] - start)
+    return curve, ~known
+
+
+_CHUNK = 1 << 22
+"""Largest number of binomial weights held at once (32 MB of float64)."""
+
+MONOTONE_SLACK = 1e-12
+"""A step down in P(m) no larger than this still counts as monotone (:func:`tolerance_from_curve`)."""
+
+
+def _weight_rows(n: int, es: np.ndarray, log_binom: np.ndarray) -> np.ndarray:
+    """``W[i, m] = C(n, m) e_i^m (1 - e_i)^(n - m)`` in log space, shape ``(len(es), n + 1)``."""
+    w = np.zeros((es.size, n + 1))
+    w[es == 0.0, 0] = 1.0
+    w[es == 1.0, n] = 1.0
+    inner = (es > 0.0) & (es < 1.0)
+    if inner.any():
+        m = np.arange(n + 1)
+        e = es[inner][:, None]
+        w[inner] = np.exp(log_binom[None, :] + m * np.log(e) + (n - m) * np.log1p(-e))
+    return w
+
+
+def _phi_grid(flat: np.ndarray, n: int, es: np.ndarray) -> np.ndarray:
+    """Phi of every row of ``flat`` (``(r, n + 1)``) at every e: ``(r, len(es))``, in chunks of e."""
+    log_binom = _log_binomial(n)
+    step = max(1, _CHUNK // (n + 1))
+    out = np.empty((flat.shape[0], es.size))
+    for a in range(0, es.size, step):
+        out[:, a : a + step] = flat @ _weight_rows(n, es[a : a + step], log_binom).T
+    return out
+
+
+def _phi_rows(flat: np.ndarray, n: int, es: np.ndarray, log_binom: np.ndarray) -> np.ndarray:
+    """Phi of row i of ``flat`` at ``es[i]``: ``(r,)``, in chunks of rows."""
+    step = max(1, _CHUNK // (n + 1))
+    out = np.empty(flat.shape[0])
+    for a in range(0, flat.shape[0], step):
+        weights = _weight_rows(n, es[a : a + step], log_binom)
+        out[a : a + step] = np.einsum("rm,rm->r", flat[a : a + step], weights)
+    return out
+
+
+def _curve_array(curve, n: int) -> np.ndarray:
+    p = _unit_values(curve, "curve")
+    if p.ndim < 1 or p.shape[-1] != n + 1:
+        raise ValueError(
+            f"curve needs a last axis of n + 1 = {n + 1} sizes m = 0..n "
+            f"(correlated_failure_curve gives one); got shape {p.shape}"
+        )
+    return p
+
+
+def failure_probability_from_curve(curve, num_qubits: int, e):
+    """Phi(e) = sum_m C(n, m) e^m (1 - e)^(n - m) P(m): the failure probability of a binomial erasure.
+
+    ``curve`` has shape ``(..., n + 1)``: P(m) for m = 0..n, for example
+    P_J(m) from :func:`correlated_failure_curve`. Erasing every qubit
+    independently with probability e erases M ~ Bin(n, e) qubits; with the
+    region of that size drawn from Q_J(. | M) (the binomially mixed correlated
+    channel), the probability of losing logical information is Phi_J(e). At
+    J = 0 this is the independent-erasure Phi_C(e) of
+    :func:`erasure_failure_probability` (equal to it up to rounding for the
+    same exact P_C(m)). ``e`` is a number or a 1-D array; returns float64 of
+    shape ``(...)`` or ``(..., len(e))``. The weights are those of
+    :func:`erasure_failure_probability`, in log space (lgamma), computed a
+    few million at a time, so large n is safe.
+    """
+    n = _curve_qubits(num_qubits)
+    p = _curve_array(curve, n)
+    es = _probabilities(e)
+    out = _phi_grid(p.reshape(-1, n + 1), n, es).reshape(p.shape[:-1] + (es.size,))
+    return out if np.ndim(e) else out[..., 0]
+
+
+def tolerance_from_curve(curve, num_qubits: int, delta: float, *, return_monotone: bool = False):
+    """e_delta = sup{e in [0, 1] : Phi(e) <= delta} for each failure curve P(m), m = 0..n.
+
+    ``curve`` has shape ``(..., n + 1)`` (one curve per code, per coupling, or
+    an ensemble mean: Phi is linear in P, so the mean curve gives the mean
+    Phi). Phi is :func:`failure_probability_from_curve`. When P(m) is
+    nondecreasing in m, Phi is nondecreasing in e (a binomial count grows
+    stochastically with e), {e : Phi(e) <= delta} is an interval [0, e_delta]
+    and e_delta is its end. P_0(m) is monotone; a sampled or interpolated
+    curve need not be, nor need P_J(m) for J != 0 on every graph
+    (:func:`correlated_failure_curve`). The method works either way: Phi is
+    evaluated on a grid of 2048
+    steps in e, the last grid point with Phi <= delta is located (the
+    supremum, up to excursions narrower than a step when Phi is not
+    monotone), and the crossing after it is refined by 50 bisection steps
+    (to about 1e-18). Returns 1.0 when Phi(1) = P(n) <= delta and, for
+    delta = 0, 0.0 unless P is 0 everywhere (then 1.0). P(0) must be 0.
+
+    Returns a float for a 1-D curve, else an array of shape ``(...)`` (NaN
+    for a curve with a NaN entry). With ``return_monotone=True`` returns
+    ``(e_delta, monotone)``, ``monotone`` True where the curve is
+    nondecreasing in m up to rounding (no step down by more than
+    :data:`MONOTONE_SLACK`, 1e-12, so a plateau that went through floating
+    point still counts), so that e_delta is the unique crossing; where it is
+    False, say so (the curve was sampled or interpolated and is not monotone,
+    so Phi may cross delta more than once and e_delta is the last crossing).
+    Memory stays below a few tens of MB at any n (Phi is evaluated in chunks).
+    """
+    n = _curve_qubits(num_qubits)
+    p = _curve_array(curve, n)
+    try:
+        level = float(delta)
+    except (TypeError, ValueError):
+        level = math.nan
+    if not 0.0 <= level <= 1.0:
+        raise ValueError(f"delta must be in [0, 1], got {delta!r}")
+    flat = p.reshape(-1, n + 1)
+    finite = ~np.isnan(flat).any(axis=1)
+    if np.any(flat[finite, 0] != 0):
+        raise ValueError("curve[..., 0] = P(0) must be 0: erasing no qubit never fails")
+    monotone = np.all(np.diff(flat, axis=1) >= -MONOTONE_SLACK, axis=1) & finite
+    out = np.full(flat.shape[0], np.nan)
+    rows = np.flatnonzero(finite)
+    if level == 0.0:  # Phi(e) > 0 for every e > 0 as soon as some P(m) > 0
+        out[rows] = np.where(np.any(flat[rows] > 0, axis=1), 0.0, 1.0)
+    elif rows.size:
+        grid = np.linspace(0.0, 1.0, 2049)
+        below = _phi_grid(flat[rows], n, grid) <= level  # (rows, 2049)
+        last = 2048 - np.argmax(below[:, ::-1], axis=1)  # Phi(0) = 0 <= delta: always found
+        done = below[:, -1]
+        out[rows[done]] = 1.0
+        todo = np.flatnonzero(~done)
+        lo = grid[last[todo]]
+        hi = grid[last[todo] + 1]
+        values = flat[rows[todo]]
+        log_binom = _log_binomial(n)
+        for _ in range(50 if todo.size else 0):
+            mid = 0.5 * (lo + hi)
+            ok = _phi_rows(values, n, mid, log_binom) <= level
+            lo = np.where(ok, mid, lo)
+            hi = np.where(ok, hi, mid)
+        out[rows[todo]] = lo
+    shaped = out.reshape(p.shape[:-1])
+    flags = monotone.reshape(p.shape[:-1])
+    result: Any = float(shaped) if p.ndim == 1 else shaped
+    mono: Any = bool(flags) if p.ndim == 1 else flags
+    return (result, mono) if return_monotone else result
+
+
+def mean_over_codes(values, holds_code) -> tuple[np.ndarray, np.ndarray, int]:
+    """Ensemble mean and standard error over the trajectories that hold a code (k > 0).
+
+    ``values`` has shape ``(t, ...)``, one row per trajectory (for example
+    per-trajectory curves P_J(m), shape ``(t, c, n + 1)``); ``holds_code`` has
+    shape ``(t,)``: booleans or the code dimensions k (nonzero means a code).
+    Returns ``(mean, std_error, count)``: the mean over the selected rows and
+    its standard error (:func:`mean_and_error`, ignoring NaN entries), each of
+    shape ``values.shape[1:]``, and how many rows were selected. Rows of codes
+    with k = 0 are left out, as the summaries do: such a code loses nothing
+    under any erasure, and averaging it in would mix the probability of having
+    a code with how well a code protects. NaN when no row is selected (the
+    error also when only one is).
+    """
+    v = np.asarray(values, dtype=np.float64)
+    h = np.asarray(holds_code)
+    if v.ndim < 1 or h.shape != v.shape[:1]:
+        raise ValueError(
+            f"holds_code needs one entry per row of values ({v.shape[:1]}), got shape {h.shape}"
+        )
+    chosen = v[h != 0]
+    mean, error = mean_and_error(chosen, axis=0)
+    return mean, error, int(chosen.shape[0])

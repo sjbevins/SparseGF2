@@ -13,6 +13,7 @@ every platform and every version of numpy or networkx.
 from __future__ import annotations
 
 import json
+import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -407,6 +408,32 @@ def save(path, graphs_, num_nodes: int, weights=None) -> Path:
     return path
 
 
+def _read_npz(path: Path) -> dict[str, np.ndarray]:
+    """Every array of a ``.npz`` graph file, with a plain message for what is not an archive
+    (numpy's own text for a non-zip file talks about pickles, and it leaves the file open when
+    a zip is truncated, so the handle is ours)."""
+    problem = (
+        f"{path.name}: not a readable .npz graph file ({{why}}); a graph file is a zip archive "
+        "written by graphs.save or numpy.savez with the arrays num_nodes and edges"
+    )
+    with path.open("rb") as handle:
+        try:
+            archive = np.load(handle, allow_pickle=False)
+        except (ValueError, EOFError, zipfile.BadZipFile):
+            raise ValueError(
+                problem.format(why="it is not a zip archive: empty, truncated or in another format")
+            ) from None
+        if not isinstance(archive, np.lib.npyio.NpzFile):  # a .npy file renamed
+            raise ValueError(problem.format(why="it holds one array (.npy), not an archive"))
+        with archive as z:
+            try:
+                return {name: z[name] for name in z.files}
+            except ValueError:  # object arrays, which numpy refuses without allow_pickle
+                raise ValueError(
+                    problem.format(why="it holds arrays of Python objects, not numbers")
+                ) from None
+
+
 def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
     """Load a collection saved by :func:`save` (or written by hand in the same format).
 
@@ -414,7 +441,8 @@ def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
     or ``"edges"`` for a single graph. NPZ: ``num_nodes``, ``edges`` (E x 2), ``ptr``
     (G + 1 offsets; optional for one graph), optionally ``weights`` (E). Returns
     ``(num_nodes, graphs, weights or None)`` with edges normalised as by
-    :func:`from_edges` and the weights permuted with them.
+    :func:`from_edges` and the weights permuted with them. A ``.npz`` that is not a zip
+    archive (empty, truncated, text, a renamed ``.npy``) is a ``ValueError`` that says so.
     """
     path = Path(path)
     if path.suffix == ".json":
@@ -428,19 +456,17 @@ def load(path) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
         if weights is not None and "edges" in doc and "graphs" not in doc:
             weights = [weights]
     elif path.suffix == ".npz":
-        with np.load(path, allow_pickle=False) as z:
-            if "num_nodes" not in z or "edges" not in z:
-                raise ValueError(f"{path.name}: needs arrays num_nodes and edges")
-            doc = {"num_nodes": int(z["num_nodes"])}
-            edges = z["edges"]
-            ptr = z["ptr"] if "ptr" in z else np.array([0, len(edges)])
-            raw = [edges[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
-            flat_w = z.get("weights")
-            weights = (
-                None
-                if flat_w is None
-                else [flat_w[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
-            )
+        z = _read_npz(path)
+        if "num_nodes" not in z or "edges" not in z:
+            raise ValueError(f"{path.name}: needs arrays num_nodes and edges")
+        doc = {"num_nodes": int(z["num_nodes"])}
+        edges = z["edges"]
+        ptr = z["ptr"] if "ptr" in z else np.array([0, len(edges)])
+        raw = [edges[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
+        flat_w = z.get("weights")
+        weights = (
+            None if flat_w is None else [flat_w[ptr[i] : ptr[i + 1]] for i in range(len(ptr) - 1)]
+        )
     else:
         raise ValueError(f"graph files end in .json or .npz, got {path.name!r}")
     n = int(doc["num_nodes"])

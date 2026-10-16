@@ -14,13 +14,15 @@ verified against Stim.
 1. **MCP tools (preferred).** This repository's `.mcp.json` registers the `sparsegf2`
    server (`sparsegf2-mcp`). Its tools are `capabilities`, `inspect_circuit`,
    `run_circuit`, `run_ensemble`, `estimate_ensemble`, `benchmark_ensemble`,
-   `start_ensemble_job`, `job_status`, `cancel_job`, `list_jobs` and `load_results`. Read the resource
+   `start_ensemble_job`, `job_status`, `cancel_job`, `list_jobs`, `load_results`,
+   `sample_erasure_regions` and `erasure_curves`. Read the resource
    `docs://sparsegf2/quickstart` once. Prompts `study_purification_transition` and
    `study_erasure_protection` are ready-made study plans.
 2. **Shell.** `sparsegf2 <command> --json` prints one JSON object on stdout and exits with
    0 (ok), 2 (fix your input; also `inspect` of an invalid circuit), 1 (bug) or 130
    (interrupted). Commands: `capabilities`, `inspect FILE|-`,
-   `run FILE|-`, `ensemble SPEC.json`, `benchmark SPEC.json`, `results PATH`.
+   `run FILE|-`, `ensemble SPEC.json`, `benchmark SPEC.json`, `results PATH`,
+   `regions --family ... --size m --couplings ...`, `curves RUN`.
 3. **Python.** `from sparsegf2 import api` gives the same functions with JSON in and
    out. For full arrays use the library: `sparsegf2.Simulator`, `Circuit`,
    `mipt.MonitoredCircuit(...).run(...)`.
@@ -72,6 +74,13 @@ connecting the server (Claude Code, Claude Desktop, other clients) is described 
     `analysis.erasure_failure_probability(first[:, c], n, e, exact_counts=counts[:, c])`
     and `analysis.erasure_tolerance(first[sel, c], n, delta, exact_counts=counts[sel, c])`
     with `sel = k[:, c] > 0`; `EnsembleResult.code(t, c)` returns a `StabilizerCode`.
+    `erasure_curves(path, e, delta, layer)` (tool, `sparsegf2 curves`) returns the same
+    Phi(e) and e_delta from a saved run, with errors, for the independent channel and for
+    each coupling of a `correlated_erasure` probe;
+  - `{"kind": "correlated_erasure", "couplings": [0, 1, 2]}`: the failure fraction of
+    m-qubit regions drawn with weight exp(-J b(A)) (b: graph edges leaving the region).
+    Check its sampler first with `sample_erasure_regions` (`sparsegf2 regions`): exact
+    values where they exist, and `mixing` notes saying what to change;
 - Results above 8 GB are refused: give the large probes fewer checkpoints or split the
   run into several output directories.
 - Use `capabilities` for exact names (probes, observables, graph families, spec keys).

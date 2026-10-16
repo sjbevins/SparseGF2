@@ -80,6 +80,21 @@ def test_transition_scan(tmp_path, monkeypatch):
     assert out.exists()
 
 
+def test_correlated_erasure(tmp_path, monkeypatch, capsys):
+    args = ["--n", "12", "--trajectories", "8", "--samples", "40", "--couplings", "0", "2"]
+    _run("correlated_erasure.py", [*args, "--out-dir", str(tmp_path)], monkeypatch)
+    printed = capsys.readouterr().out
+    for name, method in (("ring", "exact"), ("small_world", "chain")):
+        res = mipt.EnsembleResult.load(tmp_path / f"{name}.npz")
+        couplings, sizes, values = res.correlated()
+        assert couplings.tolist() == [0.0, 2.0] and values.shape == (8, 1, 2, sizes.size)
+        assert res.spec.correlated_sampler("correlated_erasure")["method"] == method
+        assert np.all((values >= 0) & (values <= 1))
+        assert f"== {name}: n = 12" in printed
+    assert printed.count("inf (exact)") == 2  # the J -> inf limit on both graphs
+    assert "mixing check, m = " in printed and "exact P_J(m), m <= 3" in printed
+
+
 @pytest.mark.parametrize("p", [0.02, 0.4])  # codes survive / mostly purify
 def test_code_and_erasure(tmp_path, monkeypatch, capsys, p):
     out = tmp_path / "code.npz"

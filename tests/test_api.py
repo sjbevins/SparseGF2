@@ -645,7 +645,7 @@ def test_every_probe_accepts_a_name():
     for kind, info in caps.items():
         assert "name" in info["params"]
         args = {k: v for k, v in info["params"].items() if v == "required"}
-        params = {"region": [0, 1], "a": [0, 1], "b": [2, 3], "size": 2}
+        params = {"region": [0, 1], "a": [0, 1], "b": [2, 3], "size": 2, "couplings": [0.0, 1.0]}
         probes.append({"kind": kind, "name": f"my_{kind}", **{k: params[k] for k in args}})
     out = api.run_ensemble(dict(spec, probes=probes), 2, seed=1)
     assert set(out["probes"]) == {f"my_{kind}" for kind in caps}

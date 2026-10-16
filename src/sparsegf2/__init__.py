@@ -11,13 +11,16 @@ Verified against Stim. The main pieces:
   checkpoints), and :mod:`~sparsegf2.graphs` for the interaction graphs.
 * :mod:`~sparsegf2.codes`: :class:`StabilizerCode`, the code a circuit
   generated, for erasure analysis after the run.
+* :mod:`~sparsegf2.erasures`: geometry-correlated erasure regions on a
+  graph (regions of fixed size drawn with probability proportional to
+  ``exp(-J * boundary)``, exact densities of states, ring closed forms).
 * :mod:`~sparsegf2.analysis`: estimators (survival, erasure failure
   probability Phi(e), tolerance e_delta, means with errors).
 * :class:`PauliString`, :class:`Clifford` and :func:`gate`: Pauli operators,
   small Cliffords with stable indices, and the gate library under Stim's names.
 """
 
-from sparsegf2 import analysis, codes, graphs, mipt, observables
+from sparsegf2 import analysis, codes, erasures, graphs, mipt, observables
 from sparsegf2._version import __version__
 from sparsegf2.circuit import (
     Circuit,
@@ -62,6 +65,7 @@ __all__ = [
     "all_gates",
     "analysis",
     "codes",
+    "erasures",
     "gate",
     "graphs",
     "mipt",

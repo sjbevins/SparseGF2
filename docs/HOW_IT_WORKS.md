@@ -518,8 +518,10 @@ Trajectory t draws its circuit from stream t of the first key: a xoshiro256**
 state computed from `(key, t)` alone (`stream_state` in `_kernel/rng.py`, which
 mixes all 128 key bits). Each evaluation of a sampled probe draws from its
 own stream under the second key, indexed by the trajectory, the probe's name
-and the layer, so its samples never depend on the other probes or the
-checkpoints (randomness contract 2, `mipt.RANDOMNESS_CONTRACT`). Within a
+and the layer (the `correlated_erasure` probe's also by the region size: each
+size draws from a stream of its own), so its samples never depend on the other
+probes, the other sizes or the checkpoints (randomness contract 2,
+`mipt.RANDOMNESS_CONTRACT`). Within a
 trajectory the draws come in a fixed order (module docstring of
 `_kernel/ensemble.py`): the random reference partner if any, the scramble,
 then per layer the gates (an

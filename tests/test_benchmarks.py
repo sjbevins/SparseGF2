@@ -163,3 +163,92 @@ def test_probe_cost_quick(tmp_path):
     assert [a["estimate_seconds"] for a in repriced["all_threads"]] == [
         a["estimate_seconds"] for a in data["all_threads"]
     ]
+
+
+def test_correlated_erasure_baseline_quick(tmp_path):
+    out = tmp_path / "ceb"
+    script = str(ROOT / "benchmarks" / "correlated_erasure_baseline.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--quick", "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "correlated_erasure_baseline.json").read_text(encoding="utf-8"))
+    md = (out / "correlated_erasure_baseline.md").read_text(encoding="utf-8")
+    assert md.startswith("# Correlated-erasure baseline: the brickwork ring against the literature")
+    for heading in ("## Summary", "## 2. Scaling with n", "## 5. Φ_{C,J}(ε) and ε_δ(J)"):
+        assert heading in md
+    cfg = data["settings"]
+    assert data["quick"] is True
+    ring = [c for c in data["cases"] if c["family"] == "ring"]
+    assert [(c["n"], c["p"]) for c in ring] == [
+        (n, p) for n in cfg["sizes"] + cfg["scaling_sizes"] for p in cfg["rates"]
+    ]
+    for c in ring:
+        assert c["correlated"] == (c["n"] in cfg["sizes"])
+        if c["q_plus"] == 0:
+            continue
+        # l_x >= d_cont for every site, and the J -> inf (interval) curve grows with m
+        assert c["d_cont"]["mean"] <= c["gh_l_code"]["mean"] + 1e-12
+        limit = c["curves"]["J = inf"]["mean"]
+        assert limit == sorted(limit)
+    for row in data["interval_probability"]:
+        probs = [row[f"J = {j}"] for j in ("0.5", "1", "2", "4", "8")]
+        assert probs == sorted(probs) and probs[0] > 0 and probs[-1] <= 1
+    assert any(f["lf_star"] for f in data["fits"])
+    # re-rendering the saved results gives the same report
+    again = tmp_path / "again"
+    proc = subprocess.run(
+        [sys.executable, script, "--from-json", str(out / "correlated_erasure_baseline.json"),
+         "--out", str(again)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (again / "correlated_erasure_baseline.md").read_text(encoding="utf-8") == md
+
+
+def test_committed_correlated_erasure_report_is_the_rendering_of_its_results(tmp_path):
+    # no simulation: the committed report is what the script makes of the committed numbers,
+    # and says what the numbers support (the p = 0.12 exponent is an open question, not a finding)
+    results = ROOT / "benchmarks" / "results"
+    script = str(ROOT / "benchmarks" / "correlated_erasure_baseline.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--from-json", str(results / "correlated_erasure_baseline.json"),
+         "--out", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rendered = (tmp_path / "correlated_erasure_baseline.md").read_text(encoding="utf-8")
+    committed = (results / "correlated_erasure_baseline.md").read_text(encoding="utf-8")
+    assert rendered == committed
+    assert "p = 0.12 is a crossover" not in committed
+    assert "p = 0.12, an open question" in committed and "not tested here" in committed
+    assert "the literature memo" not in committed
+    # the Gullans-Huse guide is printed only inside its range (p from 0.1 to p_c)
+    rows = [line.split(" | ") for line in committed.splitlines() if line.startswith("| 256 | 0.")]
+    guide = {row[1]: row[4] for row in rows}  # p -> the GH column
+    assert guide["0.04"] == guide["0.08"] == guide["0.3"] == "-" and guide["0.12"] != "-"
+    # one format for the J columns of section 4 (scientific where small, four digits kept)
+    table = committed.split("## 4.")[1].split("## 5.")[0]
+    rows = [
+        line.split("|")[3:8]
+        for line in table.splitlines()
+        if line.startswith("| ") and line[2].isdigit()
+    ]
+    cells = [c.strip() for row in rows for c in row]
+    assert len(cells) == 5 * 12
+    assert all(("e" in c) == (float(c) < 1e-4) for c in cells)  # one format: scientific if small
+    assert "1.671e-10" in table and "0.000 " not in table
+    assert "Only J = 0 is compared with an exact value" in committed

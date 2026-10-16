@@ -18,6 +18,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+REGIONS_MAX_SECONDS = 60.0  # api.SYNC_ENSEMBLE_MAX_SECONDS (api is imported lazily; a test checks)
 EXIT_OK = 0
 EXIT_INTERNAL = 1
 EXIT_USAGE = 2
@@ -33,6 +34,9 @@ examples:
   sparsegf2 ensemble spec.json --trajectories 1000 --seed 7 --output-dir runs/p010
   sparsegf2 benchmark spec.json --trajectories 100000 --threads 1 32
   sparsegf2 results runs/p010
+  sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1 --size 16 \\
+      --couplings 0 0.5 1 2
+  sparsegf2 curves runs/erasure --eps 0.05 0.1 0.2 --delta 0.01
   sparsegf2 mcp                   # MCP server over stdio (for Claude and other agents)
 
 Every command accepts --json: one JSON object on stdout, logs on stderr.
@@ -88,6 +92,39 @@ _RESULTS_HELP = """\
 examples:
   sparsegf2 results runs/a              # an output directory (includes partial chunks)
   sparsegf2 results runs/a/result.npz --json
+"""
+
+_REGIONS_HELP = """\
+examples:
+  sparsegf2 regions --family cycle --n 64 --size 16 --couplings 0 1 2
+  sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1 \\
+      --size 16 --couplings 0 0.5 1 2 --samples 400 --chains 8 --seed 7 --json
+  sparsegf2 regions --graph graphs.npz --size 20 --couplings 0 1.5
+
+Draws regions of --size nodes with probability proportional to exp(-J b(A)), b(A) the edges
+of the graph leaving the region, at each of --couplings, in --chains independent runs
+(chain i is seeded [--seed, i]): exact independent samples on a cycle or a path, otherwise a
+swap chain with replica exchange. Prints the mean boundary against its exact value, the
+chain diagnostics and notes on mixing. No circuit is run; nothing is written. --graph names a
+graph file (.json or .npz, its first graph); a family takes its parameters from --n, --k,
+--beta, --graph-seed and --graph-param KEY=VALUE (JSON values: --graph-param p=0.1).
+"""
+
+_CURVES_HELP = """\
+examples:
+  sparsegf2 curves runs/erasure
+  sparsegf2 curves runs/erasure --eps 0.02 0.05 0.1 --delta 0.01 --layer 128 --json
+
+Reads a saved run (an output directory or result.npz; nothing is written) and prints, for
+its erasure_first_failure probes (independent erasure, exact up to the counts' w where
+uncorrectable_region_counts was evaluated at the same layer) and correlated_erasure probes
+(one row per coupling): the fraction of trajectories holding a code, the failure probability
+Phi(e) at each --eps (default: eight values from 1/n to 1/2) and the tolerance
+e_delta = sup{e : Phi(e) <= delta}. Erasure is independent per qubit only for the
+erasure_first_failure rows and for J = 0; for J != 0 the Bin(n, e) erased qubits form one
+region drawn with probability proportional to exp(-J b(A)). A correlated row whose sizes were
+not all sampled is interpolated, and says when e_delta itself rests on that
+(e_delta_complete). --layer picks the evaluation (default: each probe's last).
 """
 
 _CAPABILITIES_HELP = """\
@@ -225,6 +262,89 @@ def _build_parser() -> _Parser:
         "results", "Summarize a saved ensemble (result.npz or an output directory).", _RESULTS_HELP
     )
     p.add_argument("path", metavar="PATH", help="result .npz file or output directory")
+
+    p = add(
+        "regions",
+        "Sample geometry-correlated erasure regions on a graph and check how well they mix.",
+        _REGIONS_HELP,
+    )
+    p.add_argument("--graph", metavar="FILE", help="graph file (.json or .npz); its first graph")
+    p.add_argument("--family", help="graph family (cycle, path, watts_strogatz, ...)")
+    p.add_argument("--n", type=int, default=None, help="number of nodes (qubits) of a family")
+    p.add_argument("--k", type=int, default=None, help="degree k of watts_strogatz/newman_watts")
+    p.add_argument("--beta", type=float, default=None, help="rewiring probability (watts_strogatz)")
+    p.add_argument("--graph-seed", type=int, default=None, help="seed of a random graph family")
+    p.add_argument(
+        "--graph-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="another family parameter, VALUE as JSON (repeatable), e.g. p=0.1 or d=3",
+    )
+    p.add_argument("--size", type=int, required=True, help="number of erased nodes m")
+    p.add_argument(
+        "--couplings",
+        type=float,
+        nargs="+",
+        required=True,
+        metavar="J",
+        help="couplings J (distinct, |J| <= 1e6; J > 0 favours compact regions, 0 is uniform)",
+    )
+    p.add_argument(
+        "--samples", type=int, default=200, help="recorded regions per chain and coupling (200)"
+    )
+    p.add_argument("--chains", type=int, default=4, help="independent chains (4)")
+    p.add_argument(
+        "--burn-in", type=int, default=None, help="sweeps before recording (default max(200, 8 n))"
+    )
+    p.add_argument("--thin", type=int, default=1, help="sweeps between recorded regions (1)")
+    p.add_argument(
+        "--tempering",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replica exchange between couplings (default); --no-tempering runs lone chains",
+    )
+    p.add_argument(
+        "--method",
+        default="auto",
+        help="auto (exact on a cycle or path, else a chain), chain or exact",
+    )
+    p.add_argument(
+        "--ladder",
+        nargs="+",
+        default=["auto"],
+        metavar="J",
+        help="auto (default), given (only the couplings), or extra couplings to add",
+    )
+    p.add_argument(
+        "--max-step", type=float, default=None, help="largest gap of the automatic ladder"
+    )
+    p.add_argument("--seed", type=int, default=None, help="random seed (default: fresh, reported)")
+    p.add_argument(
+        "--max-seconds",
+        type=float,
+        default=REGIONS_MAX_SECONDS,
+        help=f"refuse a call estimated above this many seconds ({REGIONS_MAX_SECONDS:g})",
+    )
+
+    p = add(
+        "curves",
+        "Failure probability Phi(e) and tolerance e_delta of the erasure channels of a saved run.",
+        _CURVES_HELP,
+    )
+    p.add_argument("path", metavar="RUN", help="output directory or result.npz of a saved run")
+    p.add_argument(
+        "--eps",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="E",
+        help="erasure probabilities e (default: eight values from 1/n to 1/2)",
+    )
+    p.add_argument("--delta", type=float, default=0.01, help="failure level delta (0.01)")
+    p.add_argument(
+        "--layer", type=int, default=None, help="layer to read (default: each probe's last)"
+    )
 
     add("mcp", "Start the MCP server over stdio.", _MCP_HELP)
     return parser
@@ -507,6 +627,254 @@ def _command_line() -> str:
     return shlex.join(["sparsegf2", *sys.argv[1:]])
 
 
+def _graph_param(text: str) -> tuple[str, Any]:
+    """``KEY=VALUE`` of ``--graph-param``: the value as JSON where it is JSON, else a string."""
+    key, sep, value = text.partition("=")
+    if not sep or not key.strip():
+        raise ValueError(f"--graph-param needs KEY=VALUE (for example p=0.1), got {text!r}")
+    try:
+        return key.strip(), json.loads(value)
+    except json.JSONDecodeError:
+        return key.strip(), value
+
+
+def _regions_graph(args: argparse.Namespace) -> dict[str, Any]:
+    """The ``graph`` object of ``sparsegf2 regions`` from ``--graph`` or ``--family`` and friends."""
+    if args.graph is not None:
+        others = [
+            flag
+            for flag, value in (
+                ("--family", args.family),
+                ("--k", args.k),
+                ("--beta", args.beta),
+                ("--graph-seed", args.graph_seed),
+                ("--graph-param", args.graph_param or None),
+            )
+            if value is not None
+        ]
+        if others:
+            raise ValueError(f"--graph FILE carries its own graph: drop {', '.join(others)}")
+        return {"family": "file", "path": args.graph}
+    if args.family is None:
+        raise ValueError(
+            "give the graph: --graph FILE, or --family NAME with --n (and --k, --beta, "
+            "--graph-seed or --graph-param KEY=VALUE for the family's parameters)"
+        )
+    graph: dict[str, Any] = {"family": args.family}
+    for key, value in (("k", args.k), ("beta", args.beta), ("seed", args.graph_seed)):
+        if value is not None:
+            graph[key] = value
+    for text in args.graph_param:
+        key, value = _graph_param(text)
+        graph[key] = value
+    return graph
+
+
+def _ladder_arg(tokens: list[str]) -> str | list[float]:
+    """``--ladder``: ``auto``, ``given`` or extra couplings."""
+    if len(tokens) == 1 and tokens[0] in ("auto", "given"):
+        return tokens[0]
+    try:
+        return [float(t) for t in tokens]
+    except ValueError:
+        raise ValueError(
+            f"--ladder takes auto, given or extra couplings (numbers), got {' '.join(tokens)!r}"
+        ) from None
+
+
+def _cmd_regions(args: argparse.Namespace) -> _Outcome:
+    from sparsegf2 import api
+
+    result = api.sample_erasure_regions(
+        _regions_graph(args),
+        args.size,
+        args.couplings,
+        args.samples,
+        num_nodes=args.n,
+        burn_in=args.burn_in,
+        thin=args.thin,
+        tempering=args.tempering,
+        chains=args.chains,
+        seed=args.seed,
+        method=args.method,
+        ladder=_ladder_arg(args.ladder),
+        max_step=args.max_step,
+        max_seconds=args.max_seconds,
+    )
+    return result, EXIT_OK
+
+
+def _cmd_curves(args: argparse.Namespace) -> _Outcome:
+    from sparsegf2 import api
+
+    return api.erasure_curves(args.path, args.eps, args.delta, args.layer), EXIT_OK
+
+
+def _g(value: Any, digits: int = 4) -> str:
+    """A number for a table cell (``-`` for null)."""
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}g}"
+    return str(value)
+
+
+def _row(cells: Sequence[str], widths: Sequence[int]) -> str:
+    return "  ".join(c.rjust(w) for c, w in zip(cells, widths, strict=True)).rstrip()
+
+
+def _human_regions(result: dict[str, Any]) -> list[str]:
+    """A table of a :func:`sparsegf2.api.sample_erasure_regions` result."""
+    graph = result["graph"]
+    lines = [
+        f"{graph['family']} graph, {graph['num_nodes']} nodes, {graph['num_edges']} edges "
+        f"({graph['geometry']}); regions of {result['size']} nodes; {result['chains']} chains x "
+        f"{result['samples']} samples; method {result['method']}; seed {result['seed']}",
+    ]
+    if result["method"] == "chain":
+        ladder = result["ladder"]
+        lines.append(
+            f"swap chain, burn-in {result['burn_in']} sweeps, thin {result['thin']}, "
+            f"{'replica exchange' if result['tempering'] else 'no exchanges'} over "
+            f"{ladder['rungs']} rungs from J = {_g(ladder['lowest'])} to {_g(ladder['highest'])}"
+        )
+    lines.append(f"exact values: {result['exact_source']}")
+    head = ["J", "mean b", "stderr", "exact", "variance", "accept", "exch", "tau", "ESS", "R-hat",
+            "limit", "min b", "slowest"]  # fmt: skip
+    body = []
+    for r in result["couplings"]:
+        exact = None if r["exact"] is None else r["exact"]["mean_boundary"]
+        body.append([_g(r["coupling"]), _g(r["mean_boundary"]), _g(r["stderr"]), _g(exact),
+                     _g(r["variance"]), _g(r["acceptance"]), _g(r["exchange_acceptance"]),
+                     _g(r["tau_int"]), _g(r["ess"], 3), _g(r["r_hat"], 4), _g(r["r_hat_limit"], 4),
+                     _g(r["min_boundary_seen"]), r["slowest"] or "-"])  # fmt: skip
+    widths = [max(len(head[i]), *(len(row[i]) for row in body)) for i in range(len(head))]
+    lines += ["", _row(head, widths), *(_row(row, widths) for row in body), ""]
+    check, detail = result["nonincreasing_in_J"], result["proposition2"]
+    if detail is None:
+        lines.append("mean boundary nonincreasing in J (Proposition 2): not checked (one coupling)")
+    else:
+        worst = detail["worst"]
+        lines.append(
+            f"mean boundary nonincreasing in J (Proposition 2, each step to the next coupling "
+            f"against z = {_g(detail['z_critical'], 3)}): {'yes' if check else 'NO'}; the step "
+            f"nearest a rise, J = {_g(worst['J'][0])} to {_g(worst['J'][1])}, changes the mean "
+            f"by {_g(worst['increase'])} (z = {_g(worst['z'], 3)})"
+        )
+        lines += [
+            f"  failed step J = {_g(s['J'][0])} to {_g(s['J'][1])}: {_g(s['increase'])} "
+            f"(z = {_g(s['z'], 3)})"
+            for s in detail["failed"]
+        ]
+    if result["mixing"]:
+        lines += ["mixing:", *(f"  - {note}" for note in result["mixing"])]
+    else:
+        lines.append("mixing: no problem noted (no note is no proof: compare another seed)")
+    if result["warnings"]:
+        lines += ["sampler warnings:", *(f"  - {w}" for w in result["warnings"])]
+    ex = result["examples"]
+    lines.append(f"example regions at J = {_g(ex['coupling'])}:")
+    lines += [f"  b = {r['boundary']}: {r['nodes']}" for r in ex["regions"]]
+    lines.append(
+        f"estimated {_g(result['estimated_seconds'], 3)} s, took {_g(result['elapsed_seconds'], 3)} s"
+    )
+    lines += [f"note: {note}" for note in result.get("notes", [])]
+    return lines
+
+
+def _human_curves(result: dict[str, Any]) -> list[str]:
+    """Tables of a :func:`sparsegf2.api.erasure_curves` result."""
+    es = result["e"]
+    lines = [
+        f"{result['path']}: {result['num_trajectories']} trajectories, n = {result['num_system']}; "
+        f"delta = {_g(result['delta'])}"
+    ]
+
+    def head(name: str, entry: dict[str, Any], what: str) -> None:
+        shown = entry.get("count_with_code")
+        holds = "" if shown is None else f", {shown} hold a code (q+ = {_g(entry['q_plus'])})"
+        lines.extend(
+            ["", f"{name}: {what}, layer {entry['layer']}, {entry['count']} trajectories{holds}"]
+        )
+
+    def table(rows: list[tuple[str, list[Any]]]) -> None:
+        cells = [
+            ["e", *(_g(x) for x in es)],
+            *([label, *(_g(v) for v in values)] for label, values in rows),
+        ]
+        widths = [max(len(row[i]) for row in cells) for i in range(len(cells[0]))]
+        lines.extend(
+            "  " + "  ".join(c.rjust(w) for c, w in zip(row, widths, strict=True)).rstrip()
+            for row in cells
+        )
+
+    for name, entry in result.get("uniform", {}).items():
+        head(name, entry, "independent erasure")
+        if entry["phi"] is None:
+            lines.append("  no trajectory holds a code")
+            continue
+        table([("Phi", entry["phi"]["mean"]), ("stderr", entry["phi"]["stderr"])])
+        d = entry["e_delta"]
+        low, high = d["of_mean_phi_range"]
+        lines.append(
+            f"  e_delta: of the mean Phi {_g(d['of_mean_phi'])} (range {_g(low)} to {_g(high)}); "
+            f"per code mean {_g(d['per_code_mean'])} +- {_g(d['per_code_stderr'])}, median "
+            f"{_g(d['per_code_median'])}"
+        )
+        if entry["exact_counts"]:
+            lines.append(
+                f"  exact up to size {entry['exact_counts']['max_size']} ({entry['exact_counts']['probe']})"
+            )
+        flag = d.get("of_mean_phi_monotone")
+        if flag is not None and not flag:
+            lines.append("  the mean curve steps down in m: e_delta is its last crossing")
+    for name, entry in result.get("correlated", {}).items():
+        head(name, entry, "correlated erasure")
+        lines.append(
+            f"  sizes sampled {entry['sampled_sizes']}; {entry['num_interpolated']} interpolated"
+            + (
+                ""
+                if entry["complete"]
+                else f" (they carry up to {_g(max(entry['interpolated_mass']))} of the binomial mass)"
+            )
+            + f"; sampler: {entry['sampler']}"
+        )
+        if entry["phi"] is None:
+            lines.append("  no trajectory holds a code")
+            continue
+        js = entry["couplings"]
+        table([(f"Phi J={_g(j)}", row) for j, row in zip(js, entry["phi"]["mean"], strict=True)])
+        d = entry["e_delta"]
+        lines.append(
+            "  e_delta      J   of mean Phi (range)       per code mean +- stderr   median  monotone"
+        )
+        for i, j in enumerate(js):
+            low, high = d["of_mean_phi_range"][i]
+            span = f"{_g(d['of_mean_phi'][i])} ({_g(low, 3)} to {_g(high, 3)})"
+            lines.append(
+                f"          {_g(j):>6}   {span:<26}{_g(d['per_code_mean'][i]):>10} +- "
+                f"{_g(d['per_code_stderr'][i]):<10}{_g(d['per_code_median'][i]):>7}  "
+                f"{_g(d['monotone_fraction'][i], 3):>8}"
+            )
+        if entry["e_delta_complete"] is False:
+            worst = max(
+                x for row in d["interpolated_mass_at_e_delta"] for x in row if x is not None
+            )
+            lines.append(
+                "  e_delta rests on interpolated sizes: they carry up to "
+                f"{_g(worst)} of the binomial mass at e_delta"
+            )
+        if not all(d["of_mean_phi_monotone"]):
+            lines.append(
+                "  the mean curve steps down in m for some J: e_delta is its last crossing"
+            )
+    if result.get("truncated"):
+        lines.append("")
+        lines.append("(truncated: some couplings are not shown)")
+    lines += [f"note: {note}" for note in result.get("notes", [])]
+    return lines
+
+
 _COMMANDS = {
     "capabilities": _cmd_capabilities,
     "inspect": _cmd_inspect,
@@ -514,10 +882,16 @@ _COMMANDS = {
     "ensemble": _cmd_ensemble,
     "benchmark": _cmd_benchmark,
     "results": _cmd_results,
+    "regions": _cmd_regions,
+    "curves": _cmd_curves,
 }
 
 # Commands whose result is shown as a table rather than as the generic listing.
-_TABLES: dict[str, Callable[[dict[str, Any]], list[str]]] = {"benchmark": _human_benchmark}
+_TABLES: dict[str, Callable[[dict[str, Any]], list[str]]] = {
+    "benchmark": _human_benchmark,
+    "regions": _human_regions,
+    "curves": _human_curves,
+}
 
 
 def _error(kind: str, message: str, as_json: bool) -> None:

@@ -88,8 +88,8 @@ required, not optional.
 
 **First-call compilation and the cache.** The simulation kernels are compiled
 by Numba the first time each one is called. That takes a few seconds per
-kernel (on the machine used for this guide, about 30 s for the ensemble
-engine in the smoke test above), once: the machine code
+kernel (on the development machine, about 30 s for the ensemble
+engine in the smoke test above, longer on slower machines), once: the machine code
 is cached on disk in the `__pycache__` folders next to the source, and every
 later process loads it in a fraction of a second. So the first run after
 installing or updating is slow and the rest are not. If the source tree is

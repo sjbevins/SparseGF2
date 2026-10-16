@@ -28,7 +28,9 @@ circuits (measurement-induced phase transitions, purification, dynamically gener
 codes, erasure protection). Typical flow: capabilities -> inspect_circuit/run_circuit for
 single circuits (Stim syntax), or run_ensemble for many random trajectories; use
 estimate first and start_ensemble_job + job_status + load_results for long runs. Outputs
-are compact summaries; pass output_dir to save full arrays. Read the resource
+are compact summaries; pass output_dir to save full arrays. For geometry-correlated erasures,
+check the sampler on the graph with sample_erasure_regions before a run and read Phi(e) and
+the tolerance from a saved run with erasure_curves. Read the resource
 docs://sparsegf2/quickstart for conventions (seeds, qubit layout, censoring)."""
 
 _INSTALL_HINT = (
@@ -187,6 +189,50 @@ storage, the disk use in megabytes of each file and each array (compressed). A "
 pending" left by a finished job is completed here.
 
 Example: {"path": "runs/n128_p012"}"""
+
+
+_SAMPLE_REGIONS = """\
+Sample geometry-correlated erasure regions on a graph (no circuit) and check how well they mix.
+A region A of `size` nodes is drawn with probability proportional to exp(-J b(A)), b(A) the
+graph edges leaving A (J > 0 favours compact regions, J = 0 is uniform): the sampler of the
+correlated_erasure probe, to try before a long run. graph: {"family": "watts_strogatz", "k": 4,
+"beta": 0.1, "seed": 1} with num_nodes (beside it or inside), {"family": "cycle"|"path"},
+{"family": "file", "path": ...} or {"edges": [[0, 1], ...], "num_nodes": n}. `chains` runs
+(chain i seeded [seed, i]): exact independent samples on a cycle or path (tau_int 1, no R-hat),
+else a swap chain with replica exchange. Per coupling: mean_boundary, stderr = sqrt(variance /
+ess_boundary); acceptance, exchange_acceptance; tau_int, ess (the slowest of the boundary and a
+few nodes' membership); r_hat and its r_hat_limit (what stationary draws of that
+autocorrelation allow, shared over the series tested); min_boundary_seen; exact mean/variance
+(ring or path closed form, enumeration, or the uniform law at J = 0: exact_source) and
+deviation_se. nonincreasing_in_J: no step to the next coupling rises beyond z_critical (1%,
+Bonferroni; a test of the estimates, not of Proposition 2); proposition2 gives the worst and
+failed steps. mixing: one note per problem with what to change. No note is no proof: repeat
+with another seed and a longer burn_in. At most 12 couplings, each |J| <= 1e6; refused if
+estimated above 60 s.
+
+Example: {"graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
+ "num_nodes": 64, "size": 16, "couplings": [0, 0.5, 1, 2], "samples": 200, "seed": 7}"""
+
+_ERASURE_CURVES = """\
+Failure probability and tolerance of the erasure channels of a saved run (output directory or
+result.npz). For its erasure_first_failure probe (independent erasure; exact for m <= w where an
+uncorrectable_region_counts probe was evaluated at the same layer) and its correlated_erasure
+probes (one curve per coupling J), at `layer` (default: each probe's last evaluation), over the
+trajectories that hold a code (k > 0): q_plus and count_with_code; phi, Phi(e) = sum_m C(n,m)
+e^m (1-e)^(n-m) P(m), mean and stderr at each e (default eight values from 1/n to 1/2): the
+uniform rows and J = 0 erase each qubit independently with probability e; a row with J != 0
+erases Bin(n, e) qubits as one region drawn from Q_J. e_delta, the tolerance sup{e : Phi(e) <=
+delta}: of_mean_phi is the headline, the tolerance of the ensemble-mean Phi, with
+of_mean_phi_range for a one-standard-error shift and of_mean_phi_monotone (false: the mean
+curve steps down in m, so e_delta is its last crossing); per_code_* describe the spread across
+codes (biased upward). For correlated curves, interpolated_sizes are the sizes the probe did not
+sample, interpolated_mass the binomial probability they carry at each e, complete whether that
+is under 0.1% at those e; e_delta_complete is false when they carry more at e_delta itself
+(interpolated_mass_at_e_delta). Needs an erasure_first_failure or correlated_erasure probe. Work
+is bounded (a long run uses evenly spaced codes, with a note); at most 12 couplings are shown
+(truncated). Writes nothing.
+
+Example: {"path": "runs/erasure", "e": [0.02, 0.05, 0.1], "delta": 0.01, "layer": 128}"""
 
 
 def _purification_prompt(num_system: int, graph_family: str, rates: str, trajectories: int) -> str:
@@ -401,6 +447,48 @@ def build_server() -> Any:
     @server.tool(description=_LOAD_RESULTS, annotations=read_only)
     def load_results(path: str) -> Result:
         return call(api.load_results, path)
+
+    @server.tool(description=_SAMPLE_REGIONS, annotations=read_only)
+    def sample_erasure_regions(
+        graph: dict[str, Any],
+        size: Int,
+        couplings: StrictFloat | list[StrictFloat],
+        samples: Int = 200,
+        num_nodes: Int | None = None,
+        burn_in: Int | None = None,
+        thin: Int = 1,
+        tempering: StrictBool = True,
+        chains: Int = 4,
+        seed: Int | None = None,
+        method: str = "auto",
+        ladder: str | list[StrictFloat] = "auto",
+        max_step: StrictFloat | None = None,
+    ) -> Result:
+        return call(
+            api.sample_erasure_regions,
+            graph,
+            size,
+            couplings,
+            samples,
+            num_nodes=num_nodes,
+            burn_in=burn_in,
+            thin=thin,
+            tempering=tempering,
+            chains=chains,
+            seed=seed,
+            method=method,
+            ladder=ladder,
+            max_step=max_step,
+        )
+
+    @server.tool(description=_ERASURE_CURVES, annotations=read_only)
+    def erasure_curves(
+        path: str,
+        e: StrictFloat | list[StrictFloat] | None = None,
+        delta: StrictFloat = 0.01,
+        layer: Int | None = None,
+    ) -> Result:
+        return call(api.erasure_curves, path, e, delta, layer)
 
     @server.resource(
         "docs://sparsegf2/quickstart",
