@@ -90,7 +90,7 @@ undirected. Region `A ⊆ V`, size `m = |A|`. Edge boundary `∂A = {{u,v} ∈ E
   (a new sampled probe draws only from its own per-evaluation stream).
 - **R9. Exact samplers wherever the erasure graph is a cycle or a path** (detected from its structure, under any
   labeling: one cycle through all `n` vertices, or a Hamiltonian path), chosen automatically (`method="auto"`; `"chain"`
-  forces the Metropolis chain, `"exact"` refuses other graphs). Reason (the literature memo, by exact diagonalization):
+  forces the Metropolis chain, `"exact"` refuses other graphs). Reason (the spectral gap of the ring walk, `docs/observables/correlated-erasure.md` §4.8):
   on the ring at large `J` the swap chain equilibrates the boundary at once but the interval's *position* only diffuses,
   about `m(n-m) / (2(1 - cos(2π/n)))` proposals (≈ 8·10^4 sweeps at n = 256, m = 64); on the open path the two
   minimum-boundary states (the end intervals) are separated by a barrier of `Δb = 1` (an interior interval), so leaving

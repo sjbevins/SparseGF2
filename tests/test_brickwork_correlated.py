@@ -552,7 +552,7 @@ def _scrambled_code(n: int, k: int, gates: int, rng: np.random.Generator) -> Sta
 
 
 def test_rmt_formula_reproduces_the_published_values():
-    """Eq. (23) at N = 64, k = 32 (ns = 32): the values the literature memo lists, and the
+    """Eq. (23) at N = 64, k = 32 (ns = 32): the values Gullans et al. publish with it (PRX 10, 041020), and the
     critical 0.38968 = 1 - r_c of the paper; the ansatz gives P[I > 0] = 0.71121 there."""
     ns = 32
     published = {14: 0.0308, 15: 0.1174, 16: 0.3897, 17: 0.7794}

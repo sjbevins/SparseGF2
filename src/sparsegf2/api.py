@@ -1930,7 +1930,7 @@ def _region_failure_us(n: int, columns: int, single: bool) -> float:
     qubits, priced at 3 times a fit to measurements.
 
     Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-16, n = 64..512, m = n/8, n/4,
-    n/2, scratchpad ``t3fix2_cost.py``): about ``m'^2 (12 + 0.024 n)`` ns in the
+    n/2): about ``m'^2 (12 + 0.024 n)`` ns in the
     single-reference picture (a scrambled state, k = 1: the costliest), and
     ``m'^2 (9.5 + 0.0049 n)`` ns in the purification picture at its costliest (the scrambled
     state before any measurement, k = n; codes of monitored dynamics on a Watts-Strogatz graph
