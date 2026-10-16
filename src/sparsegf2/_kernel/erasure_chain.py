@@ -17,13 +17,19 @@ regions of size ``m``.
 * :func:`enumerate_boundaries`: every ``m``-subset in lexicographic order with
   its boundary (the exact density of states ``N_m(b)``, and the subsets of a
   given boundary).
-* :func:`ring_regions`: the exact sampler of ``Q_J`` on the ring ``C_n``.
+* :func:`geometry_order`: whether the graph is one cycle or one path through
+  all nodes (under any labeling), and the nodes in that order.
+* :func:`ring_exact_sample` and :func:`path_exact_sample`: independent exact
+  samples of ``Q_J`` on such a cycle or path (no Markov chain). Their draw
+  orders (the docstrings) are contracts too.
 
 Every random number comes from a xoshiro256** state (:mod:`.rng`) that the
 caller passes in and that the kernel advances; nothing else is random.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 from numba import njit
@@ -360,48 +366,265 @@ def _composition(total, parts, prng, gaps, cuts):
 
 
 @njit(cache=True)
-def ring_regions(n, m, cdf, samples, prng, out):
-    """Exact samples of ``Q_J`` on the ring ``C_n``: ``out[s]`` = the erased nodes, sorted.
+def geometry_order(indptr, indices, n):
+    """Is the graph one cycle or one path through all ``n`` nodes? ``(order int64[n], kind)``.
 
-    ``cdf[r-1]`` is the probability of at most ``r`` runs of erased nodes,
-    ``r = 1..len(cdf)`` (the last entry 1), from
-    :func:`sparsegf2.erasures.ring_boundary_distribution`. Per sample: one
-    ``next_double`` picks ``r`` (the first ``r`` with the draw below
-    ``cdf[r-1]``); ``r - 1`` draws give a uniform composition of ``m`` into the
-    ``r`` run lengths and ``r - 1`` more one of ``n - m`` into the ``r`` gap
-    lengths (:func:`_composition`); ``next_below(n)`` gives the start of the
-    first run. Runs and gaps then alternate around the ring from there. Every
-    region with ``r`` runs comes from exactly ``r`` such triples (one per
-    choice of which run is the first), so the regions with ``r`` runs are
-    uniform. ``m = 0`` or ``m = n`` draws nothing.
+    ``kind`` is 1 when every node has degree 2 and the graph is connected (a
+    cycle through all nodes, ``n >= 3``), 2 when exactly two nodes have degree
+    1, the others degree 2, and the graph is connected (a Hamiltonian path; a
+    single node, ``n = 1``, counts as a path), else 0. ``order`` lists the
+    nodes along the cycle (from node 0 towards its smaller neighbour) or along
+    the path (from its smaller end); for kind 0 it is ``0..n-1``. The labels
+    may be anything: the order is read from the edges. Cost ``O(n + E)``.
+    """
+    order = np.empty(n, dtype=np.int64)
+    for v in range(n):
+        order[v] = v
+    if n == 1:
+        return order, 2
+    ends = 0
+    start = 0
+    for v in range(n - 1, -1, -1):
+        degree = indptr[v + 1] - indptr[v]
+        if degree == 1:
+            ends += 1
+            start = v
+        elif degree != 2:
+            return order, 0
+    if ends != 0 and ends != 2:
+        return order, 0
+    kind = 1 if ends == 0 else 2
+    seen = np.zeros(n, dtype=np.uint8)
+    walk = np.empty(n, dtype=np.int64)
+    walk[0] = start
+    seen[start] = 1
+    previous = -1
+    current = start
+    for k in range(1, n):
+        following = -1
+        for j in range(indptr[current], indptr[current + 1]):
+            if indices[j] != previous:
+                following = indices[j]
+                break
+        if following < 0 or seen[following]:
+            return order, 0  # the walk ended or closed before n nodes: several components
+        seen[following] = 1
+        walk[k] = following
+        previous = current
+        current = following
+    return walk, kind
+
+
+@njit(cache=True)
+def _log_comb(a, k):
+    """``log C(a, k)`` for ``0 <= k <= a``, by ``lgamma``."""
+    return math.lgamma(a + 1.0) - math.lgamma(k + 1.0) - math.lgamma(a - k + 1.0)
+
+
+@njit(cache=True)
+def _cumulative(logw, cdf):
+    """``cdf[k] = sum_{j <= k} w_j / sum_j w_j`` with ``w = exp(logw - max logw)``; last entry 1.
+
+    Entries of ``logw`` equal to ``-inf`` weigh 0.
+    """
+    top = -np.inf
+    for k in range(logw.shape[0]):
+        top = max(top, logw[k])
+    total = 0.0
+    for k in range(logw.shape[0]):
+        if logw[k] > -np.inf:
+            total += np.exp(logw[k] - top)
+        cdf[k] = total
+    for k in range(logw.shape[0]):
+        cdf[k] /= total
+    cdf[logw.shape[0] - 1] = 1.0
+
+
+@njit(cache=True)
+def _pick(prng, cdf):
+    """One ``next_double`` ``x``; the first ``k`` with ``x < cdf[k]`` (the last if none)."""
+    x = next_double(prng)
+    k = 0
+    while k < cdf.shape[0] - 1 and not x < cdf[k]:
+        k += 1
+    return k
+
+
+@njit(cache=True)
+def _single_region(m, out_regions, out_boundary):
+    """``m = 0`` or ``m = n``: every record is ``0..m-1``, boundary 0."""
+    for i in range(out_regions.shape[0]):
+        for s in range(out_regions.shape[1]):
+            out_boundary[i, s] = 0
+            for k in range(m):
+                out_regions[i, s, k] = k
+
+
+@njit(cache=True)
+def _write_sorted(member, n, out_regions, i, s):
+    k = 0
+    for v in range(n):
+        if member[v]:
+            out_regions[i, s, k] = v
+            k += 1
+
+
+@njit(cache=True)
+def ring_exact_sample(n, m, couplings, samples, prng, order, out_regions, out_boundary):
+    """Independent exact samples of ``Q_J`` on a cycle through all ``n`` nodes, per coupling.
+
+    ``order`` (int64[n]) lists the nodes in cyclic order (:func:`geometry_order`),
+    so any labeling works; ``couplings`` float64[c], any finite values, any order.
+    Fills ``out_regions[i, s]`` (the erased nodes, sorted) and
+    ``out_boundary[i, s] = 2 r`` for coupling ``i`` and sample ``s``.
+
+    On the ring a region with ``r`` runs (maximal blocks of consecutive erased
+    places) has ``b = 2 r``, and there are ``N(n, m, r) = (n / r) C(m-1, r-1)
+    C(n-m-1, r-1)`` of them, ``r = 1..min(m, n-m)``. So ``r`` is drawn with
+    probability ``N(n, m, r) exp(-2 J r) / Z`` (weights in log space,
+    ``lgamma``), then the ``r`` run lengths (a uniform composition of ``m``
+    into ``r`` positive parts: a uniform ``(r-1)``-subset of the ``m - 1``
+    places between consecutive units) and the ``r`` gap lengths (one of
+    ``n - m``), and the place of the first run, uniform among the ``n``;
+    runs and gaps then alternate round the cycle. Each region with ``r`` runs
+    comes from exactly ``r`` of these equally likely triples (one per choice
+    of which of its runs is laid first), so given ``r`` it is uniform.
+
+    **Draw order (the contract).** Coupling by coupling in the order given; for
+    each sample: one ``next_double`` picks ``r`` (the first ``r`` whose
+    cumulative probability exceeds it); ``r - 1`` draws for the run lengths
+    and ``r - 1`` for the gap lengths (:func:`_composition`);
+    ``next_below(n)`` for the place of the first run, which then covers the
+    places ``p, p+1, ...`` (mod ``n``) of ``order``. ``m = 0`` or ``m = n``
+    draws nothing.
     """
     if m == 0 or m == n:
-        for s in range(samples):
-            for k in range(m):
-                out[s, k] = k
+        _single_region(m, out_regions, out_boundary)
         return
-    rmax = cdf.shape[0]
+    rmax = min(m, n - m)
+    logw = np.empty(rmax, dtype=np.float64)
+    cdf = np.empty(rmax, dtype=np.float64)
     member = np.zeros(n, dtype=np.uint8)
     gaps = np.empty(n, dtype=np.int64)
     run_cuts = np.empty(rmax + 1, dtype=np.int64)
     gap_cuts = np.empty(rmax + 1, dtype=np.int64)
-    for s in range(samples):
-        x = next_double(prng)
-        r = 1
-        while r < rmax and not x < cdf[r - 1]:
-            r += 1
-        _composition(m, r, prng, gaps, run_cuts)
-        _composition(n - m, r, prng, gaps, gap_cuts)
-        position = next_below(prng, n)
-        for v in range(n):
-            member[v] = 0
-        for j in range(r):
-            for _ in range(run_cuts[j + 1] - run_cuts[j]):
-                member[position % n] = 1
-                position += 1
-            position += gap_cuts[j + 1] - gap_cuts[j]
-        k = 0
-        for v in range(n):
-            if member[v]:
-                out[s, k] = v
-                k += 1
+    for i in range(couplings.shape[0]):
+        coupling = couplings[i]
+        for r in range(1, rmax + 1):
+            logw[r - 1] = (
+                math.log(n / r)
+                + _log_comb(m - 1, r - 1)
+                + _log_comb(n - m - 1, r - 1)
+                - 2 * coupling * r
+            )
+        _cumulative(logw, cdf)
+        for s in range(samples):
+            r = _pick(prng, cdf) + 1
+            _composition(m, r, prng, gaps, run_cuts)
+            _composition(n - m, r, prng, gaps, gap_cuts)
+            place = next_below(prng, n)
+            for v in range(n):
+                member[v] = 0
+            for j in range(r):
+                for _ in range(run_cuts[j + 1] - run_cuts[j]):
+                    member[order[place % n]] = 1
+                    place += 1
+                place += gap_cuts[j + 1] - gap_cuts[j]
+            _write_sorted(member, n, out_regions, i, s)
+            out_boundary[i, s] = 2 * r
+
+
+@njit(cache=True)
+def path_exact_sample(n, m, couplings, samples, prng, order, out_regions, out_boundary):
+    """Independent exact samples of ``Q_J`` on a path through all ``n`` nodes, per coupling.
+
+    ``order`` (int64[n]) lists the nodes from one end of the path to the other
+    (:func:`geometry_order`), so any labeling works. Fills ``out_regions[i, s]``
+    (sorted) and ``out_boundary[i, s]`` as :func:`ring_exact_sample`.
+
+    A region with ``r`` runs of which ``e`` (0, 1 or 2) touch an end of the path
+    has ``b = 2 r - e``. Its ``n - m`` unerased places form ``r + 1`` gaps: the
+    ``r - 1`` between runs are positive, the two end gaps positive or zero as
+    ``e`` says. So the number of such regions is ``C(m-1, r-1) C(n-m-1, r)``
+    (``e = 0``: ``n - m`` into ``r + 1`` positive parts),
+    ``2 C(m-1, r-1) C(n-m-1, r-1)`` (``e = 1``: either end, ``n - m`` into
+    ``r`` parts) and ``C(m-1, r-1) C(n-m-1, r-2)`` (``e = 2``, ``r >= 2``:
+    ``n - m`` into the ``r - 1`` inner gaps). ``(r, e)`` is drawn with
+    probability proportional to that count times ``exp(-J (2 r - e))``, then
+    the end (``e = 1``), the run lengths and the gap lengths uniformly: one
+    region per choice, so the region is uniform given ``(r, e)``.
+
+    **Draw order (the contract).** Coupling by coupling in the order given; the
+    categories ``(r, e)`` are listed ``r = 1..min(m, n-m+1)``, ``e = 0, 1, 2``
+    within each ``r``. For each sample: one ``next_double`` picks ``(r, e)``
+    (the first category whose cumulative probability exceeds it); for
+    ``e = 1`` one ``next_below(2)`` (0: the run touches ``order[0]``, 1:
+    ``order[n-1]``); ``r - 1`` draws for the run lengths (:func:`_composition`
+    of ``m`` into ``r``); then the gaps: ``e = 0``, ``n - m`` into ``r + 1``
+    parts (``r`` draws); ``e = 1``, into the ``r`` gaps other than the touched
+    end's (``r - 1`` draws); ``e = 2``, into the ``r - 1`` inner gaps
+    (``r - 2`` draws). Gap 0 comes first, then run 1, gap 1, ..., run ``r``,
+    gap ``r``, along ``order``. ``m = 0`` or ``m = n`` draws nothing.
+    """
+    if m == 0 or m == n:
+        _single_region(m, out_regions, out_boundary)
+        return
+    rmax = min(m, n - m + 1)
+    logw = np.empty(3 * rmax, dtype=np.float64)
+    cdf = np.empty(3 * rmax, dtype=np.float64)
+    member = np.zeros(n, dtype=np.uint8)
+    gaps = np.empty(n, dtype=np.int64)
+    run_cuts = np.empty(rmax + 1, dtype=np.int64)
+    gap_cuts = np.empty(rmax + 2, dtype=np.int64)
+    gap = np.zeros(
+        rmax + 1, dtype=np.int64
+    )  # gap[j]: unerased places before run j+1 (j = r: after run r)
+    for i in range(couplings.shape[0]):
+        coupling = couplings[i]
+        for r in range(1, rmax + 1):
+            for e in range(3):
+                k = r - e  # C(n-m-1, r), C(n-m-1, r-1), C(n-m-1, r-2)
+                if 0 <= k <= n - m - 1:
+                    extra = math.log(2.0) if e == 1 else 0.0
+                    logw[3 * (r - 1) + e] = (
+                        _log_comb(m - 1, r - 1)
+                        + _log_comb(n - m - 1, k)
+                        + extra
+                        - coupling * (2 * r - e)
+                    )
+                else:
+                    logw[3 * (r - 1) + e] = -np.inf
+        _cumulative(logw, cdf)
+        for s in range(samples):
+            category = _pick(prng, cdf)
+            r = category // 3 + 1
+            e = category % 3
+            side = next_below(prng, 2) if e == 1 else 0
+            _composition(m, r, prng, gaps, run_cuts)
+            if e == 0:
+                _composition(n - m, r + 1, prng, gaps, gap_cuts)
+                for j in range(r + 1):
+                    gap[j] = gap_cuts[j + 1] - gap_cuts[j]
+            elif e == 1:
+                _composition(n - m, r, prng, gaps, gap_cuts)
+                shift = 1 - side  # side 0: gap 0 is empty; side 1: gap r is empty
+                gap[0] = 0
+                gap[r] = 0
+                for j in range(r):
+                    gap[j + shift] = gap_cuts[j + 1] - gap_cuts[j]
+            else:
+                _composition(n - m, r - 1, prng, gaps, gap_cuts)
+                gap[0] = 0
+                gap[r] = 0
+                for j in range(r - 1):
+                    gap[j + 1] = gap_cuts[j + 1] - gap_cuts[j]
+            for v in range(n):
+                member[v] = 0
+            place = gap[0]
+            for j in range(r):
+                for _ in range(run_cuts[j + 1] - run_cuts[j]):
+                    member[order[place]] = 1
+                    place += 1
+                place += gap[j + 1]
+            _write_sorted(member, n, out_regions, i, s)
+            out_boundary[i, s] = 2 * r - e

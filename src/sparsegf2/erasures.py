@@ -38,19 +38,28 @@ What is here:
 * :func:`boundary`; :func:`boundary_counts` (exact ``N_m(b)`` by enumeration),
   :func:`boundary_moments` (``log Z``, ``<b>``, ``Var b`` from ``N_m``),
   :func:`minimum_boundary_regions` (the ``J -> +inf`` support);
-* :func:`sample_regions`: regions drawn from ``Q_J`` by a Metropolis swap
-  chain per coupling with replica exchange between couplings
-  (:class:`RegionSample`), and :func:`chain_diagnostics` (integrated
-  autocorrelation time, effective sample size, R-hat);
-* the ring ``C_n`` in closed form: :func:`ring_run_count`,
-  :func:`ring_boundary_distribution`, :func:`ring_partition_function`, and
-  :func:`sample_ring_regions`, an exact sampler.
+* :func:`sample_regions` (:class:`RegionSample`): regions drawn from ``Q_J``,
+  exactly and independently when the graph is one cycle or one path through
+  all nodes (in any labeling), otherwise by a Metropolis swap chain per
+  coupling with replica exchange between couplings;
+* :func:`chain_diagnostics` (integrated autocorrelation time, effective sample
+  size, R-hat) and :func:`region_diagnostics` (the same for the membership of
+  a few nodes: on a ring the boundary looks mixed long before the regions have
+  moved);
+* the ring ``C_n`` and the open path ``P_n`` in closed form:
+  :func:`ring_run_count`, :func:`ring_boundary_distribution`,
+  :func:`ring_partition_function`, :func:`path_run_count`,
+  :func:`path_boundary_distribution`, :func:`path_partition_function`, and
+  the exact samplers :func:`sample_ring_regions` and
+  :func:`sample_path_regions`.
 
 >>> from sparsegf2 import erasures, graphs
 >>> erasures.boundary(graphs.cycle(8), 8, [2, 3, 4])
 2
 >>> erasures.ring_run_count(8, 3, 2)
 32
+>>> erasures.path_run_count(8, 3, 1, 1)  # the prefix {0, 1, 2} and the suffix {5, 6, 7}
+2
 """
 
 from __future__ import annotations
@@ -71,6 +80,8 @@ from sparsegf2._kernel.rng import seed_state
 
 __all__ = [
     "ENUMERATION_BUDGET",
+    "METHODS",
+    "REGION_PROBES",
     "RegionSample",
     "SOKAL_WINDOW",
     "boundary",
@@ -78,9 +89,14 @@ __all__ = [
     "boundary_moments",
     "chain_diagnostics",
     "minimum_boundary_regions",
+    "path_boundary_distribution",
+    "path_partition_function",
+    "path_run_count",
+    "region_diagnostics",
     "ring_boundary_distribution",
     "ring_partition_function",
     "ring_run_count",
+    "sample_path_regions",
     "sample_regions",
     "sample_ring_regions",
 ]
@@ -332,25 +348,31 @@ def boundary_moments(counts, couplings) -> dict[str, np.ndarray]:
 
 @dataclass(frozen=True, eq=False)
 class RegionSample:
-    """Regions drawn from ``Q_J`` by :func:`sample_regions`, with the chains' move statistics.
+    """Regions drawn from ``Q_J`` by :func:`sample_regions`, with how they were drawn.
 
-    With ``c`` couplings, ``S`` recorded states per chain and region size ``m``
-    (every array is read-only, and every per-coupling axis follows the order of
-    ``couplings`` as given):
+    With ``c`` couplings, ``S`` recorded states per coupling and region size
+    ``m`` (every array is read-only, and every per-coupling axis follows the
+    order of ``couplings`` as given):
 
     * ``couplings``: float64[c], the couplings ``J`` as given.
     * ``size``: ``m``; ``num_nodes``: ``n``.
     * ``regions``: int64[c, S, m]; ``regions[i, s]`` is the ``s``-th recorded
-      region of the chain at ``couplings[i]``, nodes sorted ascending.
+      region at ``couplings[i]``, nodes sorted ascending.
     * ``boundaries``: int64[c, S], ``b`` of each recorded region.
+    * ``method``: ``"chain"`` (the swap chain: records of one coupling are
+      correlated) or ``"exact"`` (independent exact samples: a cycle or a path).
+    * ``geometry``: ``"cycle"`` or ``"path"`` when the graph is one cycle or one
+      path through all nodes (in any labeling), else ``"other"``.
     * ``acceptance``: float64[c], the fraction of swap proposals accepted at
-      each coupling (NaN when ``m = 0`` or ``m = n``: nothing to propose).
+      each coupling (NaN for exact samples, and when ``m = 0`` or ``m = n``:
+      nothing to propose).
     * ``exchange_acceptance``: float64[c-1]; entry ``i`` is the fraction of
       accepted replica exchanges between the ``i``-th and ``(i+1)``-th
       smallest couplings (``np.sort(couplings)``), NaN without exchanges.
     * ``seed``: the seed used (a fresh one when ``seed=None`` was passed).
-    * ``burn_in``, ``thin``: as passed; ``tempering``: whether exchanges ran
-      (False with one coupling).
+    * ``burn_in``, ``thin``: as passed (the exact samplers ignore them);
+      ``tempering``: whether exchanges ran (False with one coupling and for
+      exact samples).
     """
 
     couplings: np.ndarray
@@ -358,6 +380,8 @@ class RegionSample:
     num_nodes: int
     regions: np.ndarray
     boundaries: np.ndarray
+    method: str
+    geometry: str
     acceptance: np.ndarray
     exchange_acceptance: np.ndarray
     seed: int | tuple[int, ...]
@@ -372,6 +396,12 @@ class RegionSample:
                 value.flags.writeable = False
 
 
+METHODS = ("auto", "chain", "exact")
+"""The ``method`` values of :func:`sample_regions`."""
+
+_GEOMETRIES = {0: "other", 1: "cycle", 2: "path"}
+
+
 def sample_regions(
     edges,
     num_nodes: int,
@@ -383,17 +413,28 @@ def sample_regions(
     thin: int = 1,
     tempering: bool = True,
     seed: int | Sequence[int] | None = None,
+    method: str = "auto",
 ) -> RegionSample:
     """Draw regions of size ``m`` from ``Q_J(A) ∝ exp(-J b(A))`` at each coupling.
 
-    One Metropolis swap chain (Kawasaki dynamics) per coupling ``J`` in
-    ``couplings`` (finite, distinct, any order). A proposal picks ``u``
-    uniformly in ``A`` and ``v`` uniformly outside it and moves to ``A' = A \\
-    {u} ∪ {v}``; the proposal probability ``1 / (m (n - m))`` is symmetric, and
-    the move is accepted with probability ``min(1, exp(-J Δb))``, ``Δb = b(A') -
-    b(A)``, so ``Q_J`` is stationary (detailed balance). Swaps connect all
-    ``m``-subsets whatever the graph, so the chain is irreducible. ``Δb`` costs
-    ``O(deg u + deg v)``::
+    ``couplings``: finite, distinct, any order. ``method``:
+
+    * ``"auto"`` (default): ``"exact"`` when the graph is one cycle or one path
+      through all ``n`` nodes, in any labeling (the ring and the open chain, the
+      brickwork geometries), else ``"chain"``.
+    * ``"exact"``: independent exact samples (:func:`sample_ring_regions` and
+      :func:`sample_path_regions`, laid along the cycle or path the edges
+      form); refused for any other graph. ``burn_in``, ``thin`` and
+      ``tempering`` do not apply.
+    * ``"chain"``: the swap chain below, on any graph.
+
+    **The chain.** One Metropolis swap chain (Kawasaki dynamics) per coupling.
+    A proposal picks ``u`` uniformly in ``A`` and ``v`` uniformly outside it and
+    moves to ``A' = A \\ {u} ∪ {v}``; the proposal probability
+    ``1 / (m (n - m))`` is symmetric, and the move is accepted with probability
+    ``min(1, exp(-J Δb))``, ``Δb = b(A') - b(A)``, so ``Q_J`` is stationary
+    (detailed balance). Swaps connect all ``m``-subsets whatever the graph, so
+    the chain is irreducible. ``Δb`` costs ``O(deg u + deg v)``::
 
         Δb = (deg_A(u) - deg_Ā(u)) + (deg_Ā(v) - deg_A(v)) + 2 * 1[u ~ v]
 
@@ -407,21 +448,26 @@ def sample_regions(
     Nemoto 1996). The product of the laws is invariant, so each chain still
     samples exactly its own ``Q_J``, but states cross barriers at low ``J`` and
     climb the ladder: at large ``J`` a lone chain can stay for very long in one
-    of several separated minima (on the open path, at one end), which
-    :func:`chain_diagnostics`' R-hat over seeds reveals.
+    of several separated minima (on the open path, at one end), which R-hat
+    over seeds reveals.
 
     **Recording.** Each chain starts from a uniformly random region (exact at
     ``J = 0``), runs ``burn_in`` sweeps, then records its state ``samples``
     times, ``thin`` sweeps apart. Records of one chain are correlated: use
-    :func:`chain_diagnostics` for errors.
+    :func:`chain_diagnostics` on ``boundaries`` and :func:`region_diagnostics`
+    on ``regions`` for errors and mixing. The boundary alone can mislead: at
+    large ``J`` on a ring every state is an interval (``b = 2``) long before the
+    interval has moved round the ring (about ``m (n - m) n / (4 pi^2)`` sweeps),
+    which is why ``"auto"`` samples cycles and paths exactly.
 
     **Randomness.** The only source is the xoshiro256** state
-    ``seed_state(seed)`` (:mod:`sparsegf2._kernel.rng`), drawn in the order
-    documented in :func:`sparsegf2._kernel.erasure_chain.sample_chain` (start
-    states, then per sweep each chain's ``n`` proposals in increasing coupling
-    order, then the exchanges). The same arguments and seed give the same
-    result on every platform. ``seed=None`` draws a fresh seed, reported as
-    ``seed`` in the result.
+    ``seed_state(seed)`` (:mod:`sparsegf2._kernel.rng`), drawn in the orders
+    documented in :mod:`sparsegf2._kernel.erasure_chain`: ``sample_chain``
+    (start states, then per sweep each chain's ``n`` proposals in increasing
+    coupling order, then the exchanges), or ``ring_exact_sample`` /
+    ``path_exact_sample`` (coupling by coupling in increasing order, sample by
+    sample). The same arguments and seed give the same result on every
+    platform. ``seed=None`` draws a fresh seed, reported as ``seed``.
 
     Returns a :class:`RegionSample`. Arrays are in the order of ``couplings``
     as given; ``exchange_acceptance`` follows the sorted couplings.
@@ -434,32 +480,48 @@ def sample_regions(
     thin = _integer(thin, "thin", 1)
     if not isinstance(tempering, (bool, np.bool_)):
         raise ValueError(f"tempering must be True or False, got {tempering!r}")
+    if not isinstance(method, str) or method not in METHODS:
+        raise ValueError(f"method must be 'auto', 'chain' or 'exact', got {method!r}")
     used = _seed(seed)
+
+    indptr, indices = _csr(n, e)
+    path_order, kind = _chain.geometry_order(indptr, indices, n)
+    if method == "exact" and kind == 0:
+        raise ValueError(
+            "method='exact' needs a graph that is one cycle or one path through all "
+            f"{n} nodes (in any labeling); this one is neither: use method='chain' (or 'auto')"
+        )
+    exact = method == "exact" or (method == "auto" and kind != 0)
 
     c = len(given)
     order = np.argsort(given, kind="stable")
     ladder = np.ascontiguousarray(given[order])
     regions = np.empty((c, samples, m), dtype=np.int64)
     bounds = np.empty((c, samples), dtype=np.int64)
-    moves = np.zeros((c, 4), dtype=np.int64)
-    indptr, indices = _csr(n, e)
-    _chain.sample_chain(
-        indptr,
-        indices,
-        n,
-        m,
-        ladder,
-        samples,
-        burn_in,
-        thin,
-        bool(tempering),
-        seed_state(used),
-        regions,
-        bounds,
-        moves,
-    )
-    local = np.where(moves[:, 0] > 0, moves[:, 1] / np.maximum(moves[:, 0], 1), np.nan)
-    exchange = np.where(moves[:-1, 2] > 0, moves[:-1, 3] / np.maximum(moves[:-1, 2], 1), np.nan)
+    if exact:
+        sampler = _chain.ring_exact_sample if kind == 1 else _chain.path_exact_sample
+        sampler(n, m, ladder, samples, seed_state(used), path_order, regions, bounds)
+        local = np.full(c, np.nan)
+        exchange = np.full(max(c - 1, 0), np.nan)
+    else:
+        moves = np.zeros((c, 4), dtype=np.int64)
+        _chain.sample_chain(
+            indptr,
+            indices,
+            n,
+            m,
+            ladder,
+            samples,
+            burn_in,
+            thin,
+            bool(tempering),
+            seed_state(used),
+            regions,
+            bounds,
+            moves,
+        )
+        local = np.where(moves[:, 0] > 0, moves[:, 1] / np.maximum(moves[:, 0], 1), np.nan)
+        exchange = np.where(moves[:-1, 2] > 0, moves[:-1, 3] / np.maximum(moves[:-1, 2], 1), np.nan)
     out_regions = np.empty_like(regions)
     out_bounds = np.empty_like(bounds)
     acceptance = np.empty(c, dtype=np.float64)
@@ -472,12 +534,14 @@ def sample_regions(
         num_nodes=n,
         regions=out_regions,
         boundaries=out_bounds,
+        method="exact" if exact else "chain",
+        geometry=_GEOMETRIES[int(kind)],
         acceptance=acceptance,
         exchange_acceptance=exchange.astype(np.float64),
         seed=used,
         burn_in=burn_in,
         thin=thin,
-        tempering=bool(tempering) and c >= 2,
+        tempering=bool(tempering) and c >= 2 and not exact,
     )
 
 
@@ -509,8 +573,12 @@ def _rank_normal(x: np.ndarray) -> np.ndarray:
 def _rhat(z: np.ndarray) -> float:
     """Gelman-Rubin ``sqrt(((N-1)/N W + B/N) / W)`` on rows (chains) of ``N`` draws."""
     draws = z.shape[1]
-    within = float(np.mean(np.var(z, axis=1, ddof=1)))
-    between_over_n = float(np.var(np.mean(z, axis=1), ddof=1))
+    # A constant row has variance 0 and mean equal to its value exactly (float sums
+    # would leave a rounding residue of about 1e-32, turning inf into 1e15).
+    constant = np.ptp(z, axis=1) == 0
+    means = np.where(constant, z[:, 0], np.mean(z, axis=1))
+    within = float(np.mean(np.where(constant, 0.0, np.var(z, axis=1, ddof=1))))
+    between_over_n = 0.0 if np.ptp(means) == 0 else float(np.var(means, ddof=1))
     if within == 0.0:
         return math.nan if between_over_n == 0.0 else math.inf
     return math.sqrt(((draws - 1) / draws * within + between_over_n) / within)
@@ -566,7 +634,10 @@ def chain_diagnostics(series) -> dict[str, Any]:
       the halves differ.
 
     ``tau_int`` and ``ess`` describe the correlation inside the chains; across
-    chains that disagree (R-hat well above 1) they are not to be trusted.
+    chains that disagree (R-hat well above 1) they are not to be trusted. For
+    the swap chain, diagnostics of the boundary alone can say "mixed" while the
+    regions have not moved (a ring at large ``J``): check
+    :func:`region_diagnostics` too.
     """
     try:
         x = np.asarray(series, dtype=np.float64)
@@ -614,6 +685,96 @@ def chain_diagnostics(series) -> dict[str, Any]:
     }
     if x.ndim == 2:
         out["rhat"] = _split_rhat(chains)
+    return out
+
+
+REGION_PROBES = 8
+"""How many nodes :func:`region_diagnostics` follows by default."""
+
+
+def _nodes(values: Any, n: int, what: str) -> list[int]:
+    arr = np.asarray(values)
+    if arr.ndim != 1 or arr.size == 0 or not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"{what} must be a non-empty list of node indices, got {values!r}")
+    bad = arr[(arr < 0) | (arr >= n)]
+    if bad.size:
+        raise ValueError(f"{what}: node {int(bad[0])} outside [0, {n})")
+    return sorted({int(v) for v in arr})
+
+
+def region_diagnostics(regions, num_nodes: int, *, vertices=None) -> dict[str, Any]:
+    """Mixing diagnostics of where the regions are: the membership of a few nodes over the draws.
+
+    ``regions``: int array ``(draws, m)``, the records of one chain
+    (``RegionSample.regions[i]``), or ``(chains, draws, m)``, independent
+    chains of one coupling stacked (for example from several seeds). For each
+    followed node ``v`` the series ``x_s = 1[v in A_s]`` goes through
+    :func:`chain_diagnostics`. ``vertices``: the nodes to follow (default
+    :data:`REGION_PROBES` = 8 spread evenly in label order, ``floor(k n / 8)``
+    for ``k = 0..7``, or every node when ``n < 8``).
+
+    Why: the boundary ``b`` can look mixed while the regions have not moved.
+    On a ring at large ``J`` every state is an interval (``b = 2``) almost at
+    once, but the swap chain moves an interval by one place at a time, so its
+    position relaxes only after about ``m (n - m) n / (4 pi^2)`` sweeps
+    (``1.2e3`` at ``n = 64, m = 16``; ``8e4`` at ``n = 256, m = 64``). The
+    membership of fixed nodes follows the position.
+
+    Returns a dict (arrays have one entry per followed node, in ``vertices``
+    order):
+
+    * ``vertices``: the followed nodes (sorted).
+    * ``mean``: the fraction of draws containing each node (its marginal).
+    * ``tau_int``, ``ess``: per node, as in :func:`chain_diagnostics`.
+    * ``changes``: how often each node's membership changed between
+      consecutive draws (summed over chains).
+    * ``slowest``: the node with the largest ``tau_int``; ``tau_int_max`` and
+      ``ess_min`` over the nodes.
+    * ``frozen``: the nodes whose membership never changed. A frozen node says
+      nothing about mixing (``tau_int`` is 1 for a constant series): the run
+      may be too short to see the region move. Several chains settle it.
+    * ``rhat`` and ``rhat_max`` (several chains only): per node and the
+      largest (ignoring NaN), as in :func:`chain_diagnostics`. Far above 1 when
+      the chains hold their regions in different places.
+    """
+    n = _integer(num_nodes, "num_nodes", 1)
+    arr = np.asarray(regions)
+    if arr.ndim not in (2, 3) or (arr.size and not np.issubdtype(arr.dtype, np.integer)):
+        raise ValueError(
+            "regions must be an integer array of shape (draws, m) for one chain or "
+            f"(chains, draws, m) for several, got shape {arr.shape}"
+        )
+    chains = arr[None] if arr.ndim == 2 else arr
+    bad = chains[(chains < 0) | (chains >= n)]
+    if bad.size:
+        raise ValueError(f"regions: node {int(bad[0])} outside [0, {n})")
+    if vertices is None:
+        probes = sorted({k * n // REGION_PROBES for k in range(REGION_PROBES)})
+    else:
+        probes = _nodes(vertices, n, "vertices")
+    member = np.stack([np.any(chains == v, axis=2) for v in probes], axis=-1).astype(np.float64)
+    per = [
+        chain_diagnostics(member[0, :, k] if arr.ndim == 2 else member[:, :, k])
+        for k in range(len(probes))
+    ]
+    tau = np.array([d["tau_int"] for d in per])
+    changes = np.count_nonzero(np.diff(member, axis=1), axis=(0, 1)).astype(np.int64)
+    out: dict[str, Any] = {
+        "vertices": probes,
+        "mean": np.array([d["mean"] for d in per]),
+        "tau_int": tau,
+        "ess": np.array([d["ess"] for d in per]),
+        "changes": changes,
+        "slowest": probes[int(np.argmax(tau))],
+        "tau_int_max": float(tau.max()),
+        "ess_min": float(min(d["ess"] for d in per)),
+        "frozen": [v for v, c in zip(probes, changes.tolist(), strict=True) if c == 0],
+    }
+    if arr.ndim == 3:
+        rhat = np.array([d["rhat"] for d in per])
+        out["rhat"] = rhat
+        known = rhat[~np.isnan(rhat)]
+        out["rhat_max"] = float(known.max()) if known.size else math.nan
     return out
 
 
@@ -706,6 +867,15 @@ def ring_partition_function(n: int, m: int, coupling: float) -> float:
     return top + math.log(float(np.sum(np.exp(logw - top))))
 
 
+def _exact_samples(kind: int, n: int, m: int, coupling: float, samples: int, seed) -> np.ndarray:
+    regions = np.empty((1, samples, m), dtype=np.int64)
+    bounds = np.empty((1, samples), dtype=np.int64)
+    sampler = _chain.ring_exact_sample if kind == 1 else _chain.path_exact_sample
+    order = np.arange(n, dtype=np.int64)
+    sampler(n, m, np.array([coupling]), samples, seed_state(_seed(seed)), order, regions, bounds)
+    return regions[0]
+
+
 def sample_ring_regions(n: int, m: int, coupling: float, samples: int, *, seed) -> np.ndarray:
     """Exact independent samples of ``Q_J`` on the ring ``C_n``: int64 ``[samples, m]``, rows sorted.
 
@@ -719,20 +889,139 @@ def sample_ring_regions(n: int, m: int, coupling: float, samples: int, *, seed) 
     exactly ``r`` of the ``n C(m-1, r-1) C(n-m-1, r-1)`` equally likely triples
     (one per choice of which of its runs is laid first, which fixes the start
     and both compositions), so given ``r`` the region is uniform, and overall it
-    has probability ``exp(-2 J r) / Z = Q_J(A)``. No Markov chain: an oracle for
-    tests of :func:`sample_regions`. ``seed`` as in :func:`sample_regions`
-    (``None``: a fresh, unreported seed); the draw order is in
-    :func:`sparsegf2._kernel.erasure_chain.ring_regions`.
+    has probability ``exp(-2 J r) / Z = Q_J(A)``. No Markov chain, so no burn-in
+    and no correlation between samples. The ring is ``graphs.cycle(n)`` (node
+    ``i`` next to ``i +- 1 mod n``); :func:`sample_regions` uses the same
+    sampler on any graph that is a cycle, whatever its labels. ``seed`` as in
+    :func:`sample_regions` (``None``: a fresh, unreported seed); the draw order
+    is in :func:`sparsegf2._kernel.erasure_chain.ring_exact_sample`.
     """
     n, m = _ring_args(n, m)
     value = _coupling(coupling)
     samples = _integer(samples, "samples", 1)
-    out = np.empty((samples, m), dtype=np.int64)
+    return _exact_samples(1, n, m, value, samples, seed)
+
+
+# ---------------------------------------------------------------------------------------
+# The open path P_n in closed form
+# ---------------------------------------------------------------------------------------
+
+
+def _path_args(n: Any, m: Any) -> tuple[int, int]:
+    n = _integer(n, "n")
+    if n < 2:
+        raise ValueError(f"the path closed forms need n >= 2 nodes, got n = {n}")
+    m = _integer(m, "m")
+    if not 0 <= m <= n:
+        raise ValueError(f"m must be in [0, {n}] (the number of erased nodes), got {m}")
+    return n, m
+
+
+def path_run_count(n: int, m: int, r: int, ends: int) -> int:
+    """The number of regions of size ``m`` on the path ``P_n`` with ``r`` runs touching ``ends`` ends.
+
+    A run is a maximal block of consecutive erased nodes; ``ends`` (0, 1 or 2)
+    counts the ends of the path (nodes 0 and ``n - 1``) the region contains. On
+    the path ``b(A) = 2 r - ends``. For ``1 <= m <= n-1``::
+
+        ends = 0:  C(m-1, r-1) C(n-m-1, r)
+        ends = 1:  2 C(m-1, r-1) C(n-m-1, r-1)
+        ends = 2:  C(m-1, r-1) C(n-m-1, r-2)          (r >= 2)
+
+    (an exact integer, 0 where a binomial is out of range). Reason: the ``r``
+    run lengths are a composition of ``m`` (``C(m-1, r-1)``); the ``n - m``
+    unerased nodes fill ``r + 1`` gaps, the ``r - 1`` inner ones positive and
+    the two end gaps positive or empty as ``ends`` says, so ``n - m`` is split
+    into ``r + 1``, ``r`` (either end empty: the factor 2) or ``r - 1`` positive
+    parts. The empty region has ``(r, ends) = (0, 0)`` and the full one
+    ``(1, 2)`` (both ``b = 0``): 1 each. Requires ``n >= 2``.
+    """
+    n, m = _path_args(n, m)
+    r = _integer(r, "r")
+    ends = _integer(ends, "ends")
+    if ends not in (0, 1, 2):
+        raise ValueError(
+            f"ends must be 0, 1 or 2 (how many ends of the path the region touches), got {ends}"
+        )
+    if m == 0:
+        return 1 if (r, ends) == (0, 0) else 0
+    if m == n:
+        return 1 if (r, ends) == (1, 2) else 0
+    k = r - ends
+    if not 1 <= r <= m or not 0 <= k <= n - m - 1:
+        return 0
+    count = math.comb(m - 1, r - 1) * math.comb(n - m - 1, k)
+    return 2 * count if ends == 1 else count
+
+
+def _path_log_weights(n: int, m: int, coupling: float) -> tuple[np.ndarray, np.ndarray]:
+    """``b = 2r - e`` and ``log(count(r, e) exp(-J b))`` over the possible ``(r, e)``."""
     if m in (0, n):
-        cdf = np.ones(1)
-    else:
-        _, probs = ring_boundary_distribution(n, m, value)
-        cdf = np.cumsum(probs)
-        cdf[-1] = 1.0
-    _chain.ring_regions(n, m, cdf, samples, seed_state(_seed(seed)), out)
-    return out
+        return np.zeros(1, dtype=np.int64), np.zeros(1)
+    values, logs = [], []
+    for r in range(1, min(m, n - m + 1) + 1):
+        for e in range(3):
+            k = r - e
+            if not 0 <= k <= n - m - 1:
+                continue
+            if n <= 1000:
+                log_count = math.log(path_run_count(n, m, r, e))
+            else:
+                log_count = _log_comb(m - 1, r - 1) + _log_comb(n - m - 1, k)
+                log_count += math.log(2) if e == 1 else 0.0
+            values.append(2 * r - e)
+            logs.append(log_count - coupling * (2 * r - e))
+    return np.array(values, dtype=np.int64), np.array(logs)
+
+
+def path_boundary_distribution(n: int, m: int, coupling: float) -> tuple[np.ndarray, np.ndarray]:
+    """The law of ``b`` under ``Q_J`` on the path ``P_n``: ``(values, probabilities)``.
+
+    ``values`` (int64, increasing) are the boundaries that occur, ``b = 2r - e``
+    (``1..2m`` at most; ``[0]`` when ``m = 0`` or ``m = n``), and
+    ``probabilities`` (float64, summing to 1)::
+
+        P_J(b) = sum over (r, e) with 2r - e = b of path_run_count(n, m, r, e) exp(-J b) / Z_m(J)
+
+    computed in log space (any ``n``, any finite ``J``).
+    """
+    n, m = _path_args(n, m)
+    bvals, logw = _path_log_weights(n, m, _coupling(coupling))
+    values, inverse = np.unique(bvals, return_inverse=True)
+    w = np.exp(logw - logw.max())
+    return values.astype(np.int64), np.bincount(inverse.ravel(), weights=w) / w.sum()
+
+
+def path_partition_function(n: int, m: int, coupling: float) -> float:
+    """``log Z_m(J)`` on the path ``P_n``: ``log sum_{r, e} path_run_count(n, m, r, e) exp(-J (2r - e))``.
+
+    The natural logarithm, in log space; ``log C(n, m)`` at ``J = 0`` and 0 for
+    ``m = 0`` or ``m = n``.
+    """
+    n, m = _path_args(n, m)
+    _, logw = _path_log_weights(n, m, _coupling(coupling))
+    top = float(logw.max())
+    return top + math.log(float(np.sum(np.exp(logw - top))))
+
+
+def sample_path_regions(n: int, m: int, coupling: float, samples: int, *, seed) -> np.ndarray:
+    """Exact independent samples of ``Q_J`` on the path ``P_n``: int64 ``[samples, m]``, rows sorted.
+
+    Each sample: draw ``(r, e)`` (runs, ends touched) with probability
+    ``path_run_count(n, m, r, e) exp(-J (2r - e)) / Z``; for ``e = 1`` the
+    touched end, uniformly; the run lengths, a uniform composition of ``m``
+    into ``r`` positive parts; the gap lengths, a uniform composition of
+    ``n - m`` into the gaps that must be positive (``r + 1``, ``r`` or ``r - 1``
+    of them: the inner gaps and the untouched ends); then lay gap 0, run 1,
+    gap 1, ..., run ``r``, gap ``r`` from node 0. Each region arises from
+    exactly one such choice, so given ``(r, e)`` it is uniform, and overall it
+    has probability ``exp(-J b) / Z = Q_J(A)``. The path is
+    ``graphs.path(n)``; :func:`sample_regions` uses the same sampler on any
+    graph that is a path, whatever its labels. ``seed`` as in
+    :func:`sample_regions` (``None``: a fresh, unreported seed); the draw order
+    is in :func:`sparsegf2._kernel.erasure_chain.path_exact_sample`.
+    """
+    n, m = _path_args(n, m)
+    value = _coupling(coupling)
+    samples = _integer(samples, "samples", 1)
+    return _exact_samples(2, n, m, value, samples, seed)

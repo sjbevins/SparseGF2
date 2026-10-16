@@ -31,6 +31,16 @@ region A, Q_J(A) = exp(-J b(A)) / Z_m(J) on the regions of size m):
    equals a plain-Python transcription of the documented order, and a pinned digest
    guards the chain's stream.
 9. Validation messages.
+10. Exact samplers on cycles and paths (spec ruling R9): the path counts by runs r and ends
+    touched e (b = 2r - e) against brute force for n = 2..13; the path's law and log Z;
+    ``geometry_order`` finds a cycle or a path through all nodes under any labeling and
+    nothing else (Watts–Strogatz, two cycles, a cycle with a chord, a path plus a cycle,
+    ...); the exact samplers follow Q_J on every region of small rings and paths, relabeled
+    too, and the law of r or (r, e) on larger ones; they equal a plain-Python transcription
+    of their documented draw order; ``method="auto"`` picks them exactly on cycles and paths.
+11. Positional diagnostics (ruling R10): on C_64 at J = 6 a short swap chain has a
+    boundary that looks mixed while its interval has not moved; ``region_diagnostics``
+    (membership indicators of spread-out nodes) flags it, and passes the exact sampler.
 """
 
 from __future__ import annotations
@@ -346,16 +356,19 @@ def test_chain_records_regions_of_size_m_with_their_boundaries(tempering):
         assert res.couplings.tolist() == couplings
 
 
-def test_degenerate_sizes_record_the_single_region_and_draw_nothing():
-    edges = graphs.cycle(5)
-    for m in (0, 5):
-        res = erasures.sample_regions(edges, 5, m, [0.0, 2.0], 3, seed=1)
-        assert res.regions.shape == (2, 3, m)
-        assert np.all(res.regions == np.arange(m))
-        assert np.all(res.boundaries == 0)
-        assert np.all(np.isnan(res.acceptance)) and np.all(np.isnan(res.exchange_acceptance))
-    for m in (0, 1):
-        res = erasures.sample_regions(np.zeros((0, 2), dtype=np.int64), 1, m, 0.5, 2, seed=0)
+@pytest.mark.parametrize("method", ["chain", "exact"])
+def test_degenerate_sizes_record_the_single_region_and_draw_nothing(method):
+    for edges, n in ((graphs.cycle(5), 5), (graphs.path(5), 5)):
+        for m in (0, n):
+            res = erasures.sample_regions(edges, n, m, [0.0, 2.0], 3, seed=1, method=method)
+            assert res.regions.shape == (2, 3, m) and res.method == method
+            assert np.all(res.regions == np.arange(m))
+            assert np.all(res.boundaries == 0)
+            assert np.all(np.isnan(res.acceptance)) and np.all(np.isnan(res.exchange_acceptance))
+    for m in (0, 1):  # one node: a path of length 0
+        res = erasures.sample_regions(
+            np.zeros((0, 2), dtype=np.int64), 1, m, 0.5, 2, seed=0, method=method
+        )
         assert res.regions.shape == (1, 2, m) and np.all(res.boundaries == 0)
         assert res.exchange_acceptance.shape == (0,)
     indptr, indices = kernel.csr(4, graphs.cycle(4))
@@ -395,8 +408,10 @@ def test_chain_samples_the_exact_law(name, tempering):
     edges, n, m = STATIONARY[name]
     draws = _size(20_000, 1_500)
     res = erasures.sample_regions(
-        edges, n, m, COUPLINGS, draws, burn_in=100, thin=_size(3, 2), tempering=tempering, seed=11
-    )
+        edges, n, m, COUPLINGS, draws, burn_in=100, thin=_size(3, 2), tempering=tempering,
+        seed=11, method="chain",
+    )  # fmt: skip
+    assert res.method == "chain"
     for i, coupling in enumerate(COUPLINGS):
         subsets, b, p = _exact_law(edges, n, m, coupling)
         if coupling == 0.0:
@@ -518,13 +533,15 @@ def _ring_moments(n, m, coupling):
     return mean, float(np.sum((values - mean) ** 2 * probs))
 
 
-def test_chain_on_the_ring_matches_the_closed_form_moments():
+@pytest.mark.parametrize("method", ["chain", "exact"])
+def test_samples_on_the_ring_match_the_closed_form_moments(method):
     n, m = 64, 16
     couplings = [0.0, 0.5, 1.0, 2.0]
     draws = _size(20_000, 500)
     res = erasures.sample_regions(
-        graphs.cycle(n), n, m, couplings, draws, burn_in=_size(500, 100), seed=21
+        graphs.cycle(n), n, m, couplings, draws, burn_in=_size(500, 100), seed=21, method=method
     )
+    assert res.method == method and res.geometry == "cycle"
     for i, coupling in enumerate(couplings):
         mean, var = _ring_moments(n, m, coupling)
         b = res.boundaries[i].astype(np.float64)
@@ -539,25 +556,28 @@ def test_chain_on_the_ring_matches_the_closed_form_moments():
 # ---------------------------------------------------------------------------------------
 
 
-def test_ring_states_at_large_coupling_are_intervals():
+@pytest.mark.parametrize("method", ["chain", "exact"])
+def test_ring_states_at_large_coupling_are_intervals(method):
     n, m = 32, 8
     ladder = [0.0, 1.0, 2.0, 4.0, 8.0]
     res = erasures.sample_regions(
-        graphs.cycle(n), n, m, ladder, _size(2_000, 300), burn_in=200, seed=8
+        graphs.cycle(n), n, m, ladder, _size(2_000, 300), burn_in=200, seed=8, method=method
     )
     top = res.regions[-1]
     assert np.all(res.boundaries[-1] == 2)
     assert all(_is_ring_interval(a, n) for a in top)
     assert len({tuple(a) for a in top.tolist()}) > 1  # the interval moves around the ring
-    assert np.all(res.exchange_acceptance > 0)
+    assert np.all(res.exchange_acceptance > 0) == (method == "chain")
 
 
-def test_open_path_at_large_coupling_keeps_only_the_two_end_intervals():
+@pytest.mark.parametrize("method", ["chain", "exact"])
+def test_open_path_at_large_coupling_keeps_only_the_two_end_intervals(method):
     n, m = 24, 6
     edges = graphs.path(n)
     ladder = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0]
     draws = _size(4_000, 400)
-    res = erasures.sample_regions(edges, n, m, ladder, draws, burn_in=200, seed=12)
+    res = erasures.sample_regions(edges, n, m, ladder, draws, burn_in=200, seed=12, method=method)
+    assert res.geometry == "path"
     left, right = list(range(m)), list(range(n - m, n))
     top = res.regions[-1].tolist()
     assert all(a in (left, right) for a in top)  # J = 16: P(other) < 2e-6 per draw
@@ -574,8 +594,9 @@ def test_open_path_at_large_coupling_keeps_only_the_two_end_intervals():
 
 def _left_share_at_top(seed, tempering, n, m, ladder, draws):
     res = erasures.sample_regions(
-        graphs.path(n), n, m, ladder, draws, burn_in=100, tempering=tempering, seed=seed
-    )
+        graphs.path(n), n, m, ladder, draws, burn_in=100, tempering=tempering, seed=seed,
+        method="chain",
+    )  # fmt: skip
     return np.mean(res.regions[-1] < n // 2, axis=1), res
 
 
@@ -703,6 +724,13 @@ def test_chain_diagnostics_of_constant_series():
     assert math.isnan(same["rhat"])
     apart = erasures.chain_diagnostics(np.repeat([[1.0], [2.0]], 20, axis=1))
     assert apart["rhat"] == math.inf
+    # Constant chains whose normal scores do not sum exactly: still inf, not ~1e15.
+    for draws in (201, 400, 999):
+        many = erasures.chain_diagnostics(np.repeat([[1.0], [2.0], [3.0], [4.0]], draws, axis=1))
+        assert many["rhat"] == math.inf
+    stuck = np.repeat([[0.0], [1.0], [0.0], [0.0]], 400, axis=1)
+    stuck[2, 7] = 1.0  # one chain moves once: large but finite
+    assert 10 < erasures.chain_diagnostics(stuck)["rhat"] < math.inf
 
 
 # ---------------------------------------------------------------------------------------
@@ -900,3 +928,390 @@ def test_other_validation_messages():
         erasures.chain_diagnostics(np.zeros((2, 2, 2)))
     with pytest.raises(ValueError, match="finite"):
         erasures.chain_diagnostics([1.0, math.nan, 2.0])
+
+
+# ---------------------------------------------------------------------------------------
+# 10. Exact samplers on cycles and paths, geometry detection, method="auto"
+# ---------------------------------------------------------------------------------------
+
+
+def _path_runs_and_ends(n, region) -> tuple[int, int]:
+    inside = {int(q) for q in region}
+    runs = sum(1 for q in inside if q - 1 not in inside)
+    return runs, (0 in inside) + (n - 1 in inside)
+
+
+@pytest.mark.parametrize("n", range(2, 14))
+def test_path_run_count_matches_brute_force(n):
+    counts: Counter = Counter()
+    path = graphs.path(n)
+    for m in range(n + 1):
+        for a in itertools.combinations(range(n), m):
+            r, e = _path_runs_and_ends(n, a)
+            assert _brute_boundary(path, a) == 2 * r - e  # b = 2r - e on the path
+            counts[m, r, e] += 1
+    for m in range(n + 1):
+        for r in range(n + 2):
+            for e in range(3):
+                value = erasures.path_run_count(n, m, r, e)
+                assert isinstance(value, int) and value == counts[m, r, e], (m, r, e)
+
+
+@pytest.mark.parametrize("n", [2, 3, 6, 9, 12])
+def test_path_law_and_partition_function_match_brute_force(n):
+    path = graphs.path(n)
+    for m in range(n + 1):
+        bs = np.array([_brute_boundary(path, a) for a in itertools.combinations(range(n), m)])
+        for coupling in (-1.3, 0.0, 0.4, 2.0):
+            weights = np.exp(-coupling * bs)
+            assert erasures.path_partition_function(n, m, coupling) == pytest.approx(
+                math.log(weights.sum()), rel=1e-12, abs=1e-12
+            )
+            values, probs = erasures.path_boundary_distribution(n, m, coupling)
+            assert values.dtype == np.int64 and np.all(np.diff(values) > 0)
+            assert set(values.tolist()) == set(bs.tolist())
+            expected = [weights[bs == v].sum() / weights.sum() for v in values]
+            assert probs == pytest.approx(expected, rel=1e-12, abs=1e-15)
+
+
+def test_path_closed_forms_at_large_n():
+    n, m = 100_000, 30_000
+    assert erasures.path_partition_function(n, m, 0.0) == pytest.approx(
+        math.lgamma(n + 1) - math.lgamma(m + 1) - math.lgamma(n - m + 1), rel=1e-12
+    )
+    values, probs = erasures.path_boundary_distribution(n, m, 1.5)
+    assert np.all(np.isfinite(probs)) and probs.sum() == pytest.approx(1.0)
+    assert values[0] == 1 and values[-1] == 2 * m
+    assert erasures.path_run_count(n, m, 1, 1) == 2  # the prefix and the suffix
+    assert erasures.path_run_count(n, 0, 0, 0) == erasures.path_run_count(n, n, 1, 2) == 1
+
+
+def _union(*parts):
+    """Disjoint union of edge arrays, each shifted past the previous ones: (edges, n)."""
+    out, offset = [], 0
+    for edges, size in parts:
+        out.append(np.asarray(edges, dtype=np.int64).reshape(-1, 2) + offset)
+        offset += size
+    return graphs.from_edges(np.concatenate(out), offset), offset
+
+
+_EMPTY = np.zeros((0, 2), dtype=np.int64)
+GEOMETRIES = [
+    ("cycle_3", graphs.cycle(3), 3, 1),
+    ("cycle_10", graphs.cycle(10), 10, 1),
+    ("path_2", graphs.path(2), 2, 2),
+    ("path_11", graphs.path(11), 11, 2),
+    ("one_node", _EMPTY, 1, 2),
+    ("two_nodes_no_edge", _EMPTY, 2, 0),
+    ("watts_strogatz_12", graphs.watts_strogatz(12, 4, 0.2, seed=1), 12, 0),
+    ("two_cycles", *_union((graphs.cycle(4), 4), (graphs.cycle(5), 5)), 0),
+    ("path_and_cycle", *_union((graphs.path(3), 3), (graphs.cycle(4), 4)), 0),
+    ("two_paths", *_union((graphs.path(3), 3), (graphs.path(4), 4)), 0),
+    ("path_and_node", *_union((graphs.path(5), 5), (_EMPTY, 1)), 0),
+    ("cycle_and_chord", graphs.from_edges([*graphs.cycle(8).tolist(), (0, 4)], 8), 8, 0),
+    ("star_5", graphs.from_edges([(0, v) for v in range(1, 5)], 5), 5, 0),
+    ("complete_4", graphs.complete(4), 4, 0),
+]
+
+
+@pytest.mark.parametrize(("name", "edges", "n", "kind"), GEOMETRIES, ids=[g[0] for g in GEOMETRIES])
+def test_geometry_order_finds_cycles_and_paths_under_any_labeling(name, edges, n, kind, rng):
+    for perm in (np.arange(n), rng.permutation(n)):
+        relabeled = graphs.from_edges(perm[edges], n)
+        indptr, indices = kernel.csr(n, relabeled)
+        order, found = kernel.geometry_order(indptr, indices, n)
+        assert found == kind
+        if not kind:
+            continue
+        assert sorted(order.tolist()) == list(range(n))
+        pairs = {frozenset(map(int, e)) for e in relabeled}
+        steps = n if kind == 1 else n - 1
+        assert len(pairs) == steps
+        for k in range(steps):  # consecutive nodes of the order are the edges
+            assert frozenset((int(order[k]), int(order[(k + 1) % n]))) in pairs
+
+
+EXACT = {
+    "cycle_8": (graphs.cycle(8), 8, 3),
+    "path_8": (graphs.path(8), 8, 3),
+    "path_7": (graphs.path(7), 7, 4),
+}
+
+
+@pytest.mark.parametrize("relabel", [False, True], ids=["labels", "relabeled"])
+@pytest.mark.parametrize("name", list(EXACT))
+def test_exact_samplers_follow_the_law_of_every_region(name, relabel):
+    edges, n, m = EXACT[name]
+    if relabel:
+        edges = graphs.from_edges(np.random.default_rng(3).permutation(n)[edges], n)
+    draws = _size(20_000, 4_000)
+    res = erasures.sample_regions(edges, n, m, COUPLINGS, draws, seed=4, method="exact")
+    assert res.method == "exact" and res.geometry == name.split("_")[0]
+    assert np.all(np.isnan(res.acceptance)) and np.all(np.isnan(res.exchange_acceptance))
+    assert not res.tempering
+    for i, coupling in enumerate(COUPLINGS):
+        subsets, b, p = _exact_law(edges, n, m, coupling)
+        ids = _state_ids(res.regions[i], subsets, n)
+        assert np.array_equal(b[ids], res.boundaries[i])
+        _assert_follows(ids, res.boundaries[i], p, f"exact {name} J={coupling}")
+
+
+def test_exact_samplers_follow_the_law_of_runs_on_larger_relabeled_graphs():
+    n, m, coupling = 40, 12, 0.4
+    perm = np.random.default_rng(8).permutation(n)
+    position = np.argsort(perm)  # node perm[i] sits at place i of the cycle or the path
+    draws = _size(20_000, 3_000)
+
+    ring = graphs.from_edges(perm[graphs.cycle(n)], n)
+    res = erasures.sample_regions(ring, n, m, [coupling], draws, seed=9, method="exact")
+    runs = np.array([_ring_runs(n, position[a].tolist()) for a in res.regions[0]])
+    assert np.array_equal(res.boundaries[0], 2 * runs)
+    values, probs = erasures.ring_boundary_distribution(n, m, coupling)
+    counts = np.array([np.count_nonzero(runs == v // 2) for v in values])
+    assert counts.sum() == draws
+    assert _chi2_sf(*_chi_square(counts, probs, draws, draws)) > 1e-4
+
+    path = graphs.from_edges(perm[graphs.path(n)], n)
+    res = erasures.sample_regions(path, n, m, [coupling], draws, seed=10, method="exact")
+    found = [_path_runs_and_ends(n, position[a].tolist()) for a in res.regions[0]]
+    assert res.boundaries[0].tolist() == [2 * r - e for r, e in found]
+    keys = [
+        (r, e) for r in range(1, m + 1) for e in range(3) if erasures.path_run_count(n, m, r, e)
+    ]
+    weights = np.array(
+        [erasures.path_run_count(n, m, r, e) * math.exp(-coupling * (2 * r - e)) for r, e in keys]
+    )
+    tally = Counter(found)
+    assert set(tally) <= set(keys)
+    observed = np.array([tally[k] for k in keys])
+    assert _chi2_sf(*_chi_square(observed, weights / weights.sum(), draws, draws)) > 1e-4
+
+
+def _reference_composition(gen, total, parts):
+    gaps = list(range(1, total))
+    for t in range(parts - 1):
+        j = t + gen.next_below(total - 1 - t)
+        gaps[t], gaps[j] = gaps[j], gaps[t]
+    cuts = [0, *sorted(gaps[: parts - 1]), total]
+    return [cuts[j + 1] - cuts[j] for j in range(parts)]
+
+
+def _log_comb(a, k):
+    return math.lgamma(a + 1) - math.lgamma(k + 1) - math.lgamma(a - k + 1)
+
+
+def _reference_log_weights(kind, n, m, coupling):
+    """Categories (r, e) and their log weights, as the exact kernels list them."""
+    if kind == "cycle":
+        cats = [(r, 0) for r in range(1, min(m, n - m) + 1)]
+        logw = [
+            math.log(n / r) + _log_comb(m - 1, r - 1) + _log_comb(n - m - 1, r - 1)
+            - 2 * coupling * r
+            for r, _ in cats
+        ]  # fmt: skip
+        return cats, logw
+    cats, logw = [], []
+    for r in range(1, min(m, n - m + 1) + 1):
+        for e, (k, extra) in enumerate(((r, 0.0), (r - 1, math.log(2)), (r - 2, 0.0))):
+            cats.append((r, e))
+            if 0 <= k <= n - m - 1:
+                runs = _log_comb(m - 1, r - 1)
+                logw.append(runs + _log_comb(n - m - 1, k) + extra - coupling * (2 * r - e))
+            else:
+                logw.append(-math.inf)
+    return cats, logw
+
+
+def _reference_exact(kind, n, m, couplings, samples, order, state):
+    """The exact samplers transcribed from the draw order in their docstrings."""
+    gen = ref.Xoshiro([int(w) for w in state])
+    regions = np.zeros((len(couplings), samples, m), dtype=np.int64)
+    bounds = np.zeros((len(couplings), samples), dtype=np.int64)
+    for i, coupling in enumerate(couplings):
+        cats, logw = _reference_log_weights(kind, n, m, coupling)
+        top = max(logw)
+        cdf = list(itertools.accumulate(math.exp(x - top) for x in logw))
+        cdf = [c / cdf[-1] for c in cdf]
+        cdf[-1] = 1.0
+        for s in range(samples):
+            x = gen.next_double()
+            k = 0
+            while k < len(cats) - 1 and not x < cdf[k]:
+                k += 1
+            r, e = cats[k]
+            if kind == "cycle":
+                runs = _reference_composition(gen, m, r)
+                gaps = _reference_composition(gen, n - m, r)
+                place = gen.next_below(n)
+            else:
+                side = gen.next_below(2) if e == 1 else 0
+                runs = _reference_composition(gen, m, r)
+                if e == 0:
+                    gaps = _reference_composition(gen, n - m, r + 1)
+                elif e == 1:
+                    inner = _reference_composition(gen, n - m, r)
+                    gaps = [0, *inner] if side == 0 else [*inner, 0]
+                else:
+                    gaps = [0, *_reference_composition(gen, n - m, r - 1), 0]
+                place, gaps = gaps[0], gaps[1:]
+            chosen = []
+            for length, gap in zip(runs, gaps, strict=True):
+                chosen += [int(order[(place + t) % n]) for t in range(length)]
+                place += length + gap
+            regions[i, s] = sorted(chosen)
+            bounds[i, s] = 2 * r - e
+    return regions, bounds, gen.s
+
+
+@pytest.mark.parametrize("kind", ["cycle", "path"])
+def test_exact_kernels_follow_their_documented_draw_order(kind):
+    n, m, samples = 13, 5, 40
+    order = np.random.default_rng(2).permutation(n)
+    couplings = np.array([-0.6, 0.0, 0.9, 2.5])
+    state = seed_state(123)
+    expected = _reference_exact(kind, n, m, couplings.tolist(), samples, order, state)
+    regions = np.empty((4, samples, m), dtype=np.int64)
+    bounds = np.empty((4, samples), dtype=np.int64)
+    sampler = kernel.ring_exact_sample if kind == "cycle" else kernel.path_exact_sample
+    sampler(n, m, couplings, samples, state, order, regions, bounds)
+    assert np.array_equal(regions, expected[0]) and np.array_equal(bounds, expected[1])
+    assert [int(w) for w in state] == expected[2]
+
+
+@pytest.mark.parametrize("kind", ["cycle", "path"])
+def test_exact_kernels_draw_nothing_for_the_single_region(kind):
+    sampler = kernel.ring_exact_sample if kind == "cycle" else kernel.path_exact_sample
+    for m in (0, 6):
+        state = seed_state(5)
+        before = state.copy()
+        regions = np.full((2, 3, m), -1, dtype=np.int64)
+        bounds = np.full((2, 3), -1, dtype=np.int64)
+        order = np.arange(6)[::-1].copy()
+        sampler(6, m, np.array([0.0, 1.0]), 3, state, order, regions, bounds)
+        assert np.array_equal(state, before)
+        assert np.all(regions == np.arange(m)) and np.all(bounds == 0)
+
+
+def test_exact_samples_are_independent_so_burn_in_and_thin_do_not_matter():
+    edges = graphs.cycle(20)
+    a = erasures.sample_regions(edges, 20, 5, [0.5, 1.5], 30, seed=3, method="exact")
+    b = erasures.sample_regions(
+        edges, 20, 5, [0.5, 1.5], 30, seed=3, method="exact", burn_in=0, thin=7, tempering=False
+    )
+    assert np.array_equal(a.regions, b.regions) and a.burn_in == 200 and b.thin == 7
+    assert erasures.sample_ring_regions(20, 5, 1.5, 30, seed=3).shape == (30, 5)
+    path = erasures.sample_path_regions(20, 5, 1.5, 30, seed=3)
+    assert path.shape == (30, 5) and np.all(np.diff(path, axis=1) > 0)
+    assert np.array_equal(path, erasures.sample_path_regions(20, 5, 1.5, 30, seed=3))
+    full = erasures.sample_path_regions(9, 9, 1.0, 2, seed=1)
+    assert np.array_equal(full, np.tile(np.arange(9), (2, 1)))
+
+
+def test_method_auto_uses_the_exact_samplers_exactly_on_cycles_and_paths():
+    n = 12
+    perm = np.random.default_rng(1).permutation(n)
+    cases = [
+        (graphs.cycle(n), "cycle", "exact"),
+        (graphs.from_edges(perm[graphs.cycle(n)], n), "cycle", "exact"),
+        (graphs.path(n), "path", "exact"),
+        (graphs.from_edges(perm[graphs.path(n)], n), "path", "exact"),
+        (graphs.watts_strogatz(n, 4, 0.2, seed=1), "other", "chain"),
+        (graphs.from_edges([*graphs.cycle(n).tolist(), (0, 6)], n), "other", "chain"),
+    ]
+    for edges, geometry, method in cases:
+        res = erasures.sample_regions(edges, n, 4, [0.0, 1.0], 5, seed=1)
+        assert (res.geometry, res.method) == (geometry, method)
+        forced = erasures.sample_regions(edges, n, 4, [0.0, 1.0], 5, seed=1, method="chain")
+        assert (forced.geometry, forced.method) == (geometry, "chain")
+        assert np.all(forced.acceptance > 0)
+    with pytest.raises(ValueError, match="method='exact' needs a graph that is one cycle"):
+        erasures.sample_regions(cases[4][0], n, 4, [1.0], 5, seed=1, method="exact")
+    with pytest.raises(ValueError, match="method must be 'auto', 'chain' or 'exact'"):
+        erasures.sample_regions(graphs.cycle(n), n, 4, [1.0], 5, seed=1, method="mcmc")
+
+
+# The exact samplers' stream contract (their docstrings in sparsegf2._kernel.erasure_chain).
+PINNED_EXACT_DIGEST = "cf8e84042e3b0245a0004118ef1b860bb5558dca212b7d508e772210ea4f7083"
+
+
+def test_pinned_digest_of_the_exact_samplers():
+    perm = np.random.default_rng(6).permutation(10)
+    h = hashlib.sha256()
+    for base in (graphs.cycle(10), graphs.path(10)):
+        res = erasures.sample_regions(
+            graphs.from_edges(perm[base], 10), 10, 4, [1.2, -0.3, 0.0], 6, seed=99, method="exact"
+        )
+        h.update(res.regions.astype("<i8").tobytes())
+        h.update(res.boundaries.astype("<i8").tobytes())
+    assert h.hexdigest() == PINNED_EXACT_DIGEST
+
+
+# ---------------------------------------------------------------------------------------
+# 11. Positional diagnostics
+# ---------------------------------------------------------------------------------------
+
+
+def test_positional_diagnostics_flag_a_slow_ring_chain_that_the_boundary_misses():
+    """At J = 8 on C_64 (m = 16), after a 500-sweep burn-in, every recorded state of the
+    swap chain is an interval (b = 2: the boundary diagnostics see no correlation at
+    all), but an interval only diffuses round the ring (relaxation about
+    m (n - m) n / (4 pi^2) ~ 1.2e3 sweeps), so four chains from different seeds disagree on
+    where it is. (At J = 6 a short chain still has rare two-interval excursions lasting
+    hundreds of sweeps, which the boundary does catch; J = 8 makes the case clean.)"""
+    n, m, coupling = 64, 16, 8.0
+    ring = graphs.cycle(n)
+    draws = _size(400, 150)
+    runs = [
+        erasures.sample_regions(ring, n, m, [coupling], draws, burn_in=500, seed=s, method="chain")
+        for s in range(4)
+    ]
+    bounds = np.stack([r.boundaries[0] for r in runs])
+    on_b = erasures.chain_diagnostics(bounds)
+    assert np.all(bounds == 2)
+    assert on_b["tau_int"] == 1.0 and on_b["ess"] == bounds.size  # "independent draws"
+    assert not on_b["rhat"] > 1.1  # NaN: nothing to compare
+    slow = erasures.region_diagnostics(np.stack([r.regions[0] for r in runs]), n)
+    assert slow["rhat_max"] > 1.5
+    assert slow["tau_int_max"] > 3 * on_b["tau_int"]
+    assert slow["slowest"] in slow["vertices"]
+
+    exact = [
+        erasures.sample_regions(ring, n, m, [coupling], draws, seed=s, method="exact")
+        for s in range(4)
+    ]
+    fine = erasures.region_diagnostics(np.stack([r.regions[0] for r in exact]), n)
+    assert fine["rhat_max"] < 1.1 and fine["tau_int_max"] < 2.0
+    assert fine["mean"] == pytest.approx(np.full(len(fine["vertices"]), m / n), abs=0.1)
+    assert fine["frozen"] == []
+
+
+def test_region_diagnostics_of_one_chain_and_its_outputs():
+    n, m = 20, 5
+    res = erasures.sample_regions(graphs.cycle(n), n, m, [0.0], 500, seed=2, method="exact")
+    one = erasures.region_diagnostics(res.regions[0], n)
+    assert one["vertices"] == [0, 2, 5, 7, 10, 12, 15, 17]  # eight, spread in label order
+    assert "rhat" not in one and "rhat_max" not in one
+    assert one["tau_int"].shape == one["ess"].shape == one["changes"].shape == (8,)
+    assert one["ess_min"] == pytest.approx(one["ess"].min())
+    assert one["tau_int_max"] == pytest.approx(one["tau_int"].max())
+    assert erasures.region_diagnostics(res.regions[0], n, vertices=[3, 4])["vertices"] == [3, 4]
+    small = erasures.region_diagnostics(np.array([[0], [1], [2], [0]]), 3)  # n < 8: every node
+    assert small["vertices"] == [0, 1, 2]
+    frozen = erasures.region_diagnostics(np.tile(np.arange(m), (30, 1)), n)
+    assert frozen["frozen"] == frozen["vertices"]  # no membership ever changes
+
+
+def test_region_diagnostics_validation():
+    regions = np.tile(np.arange(3), (10, 1))
+    with pytest.raises(ValueError, match="regions must be"):
+        erasures.region_diagnostics(np.zeros(5, dtype=np.int64), 8)
+    with pytest.raises(ValueError, match=r"regions: node 8 outside \[0, 8\)"):
+        erasures.region_diagnostics(regions + 6, 8)
+    with pytest.raises(ValueError, match=r"vertices: node 8 outside \[0, 8\)"):
+        erasures.region_diagnostics(regions, 8, vertices=[1, 8])
+    with pytest.raises(ValueError, match="num_nodes must be at least 1"):
+        erasures.region_diagnostics(regions, 0)
+    with pytest.raises(ValueError, match="path closed forms need n >= 2"):
+        erasures.path_run_count(1, 1, 1, 2)
+    with pytest.raises(ValueError, match="ends must be 0, 1 or 2"):
+        erasures.path_run_count(5, 2, 1, 3)
