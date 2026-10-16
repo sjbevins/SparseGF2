@@ -13,6 +13,7 @@ them directly).
 | [`thread_scaling.py`](thread_scaling.py) | wall time, throughput, speedup and parallel efficiency of ensembles (three workloads) and shot sampling (four workloads in all; the run is timed, result digests are not) at 1, 2, 4, 8, 16 and `NUMBA_NUM_THREADS` threads; aborts if results differ between thread counts | `results/thread_scaling.json`, `results/thread_scaling.md` |
 | [`erasure_cost.py`](erasure_cost.py) | one-thread seconds per code of the exhaustive erasure counts (w = 1, 2, ... per n and p, through `StabilizerCode` and through the engine probe) and of first-failure orderings (M = 100, 512, 2048), on codes from Watts–Strogatz trajectories, n = 32 to 512; the cutoff m\*(n) and seconds per code of region budgets B; an example study total; levels it does not run are extrapolated and labelled so | `results/erasure_cost.json`, `results/erasure_cost.md` |
 | [`probe_cost.py`](probe_cost.py) | one-thread seconds per evaluation of every probe kind, n = 64 to 2048, in the states that make each expensive (single reference with k = 1 and erasures failing near n / 2; purification, k = n; a monitored purification code), set against `estimate_ensemble`'s cost model (`api._trajectory_us`); `--from-json` prices saved measurements with the current model | `results/probe_cost.json`, `results/probe_cost.md` |
+| [`correlated_erasure_baseline.py`](correlated_erasure_baseline.py) | the geometry-correlated erasure baseline on nearest-neighbour brickwork ring codes (n = 32 to 256, p = 0.04 to 0.3; the contiguous lengths to n = 1024) against the literature: P_{C,J}(m) for J = 0, 0.5, 1, 2 and the exact J -> inf intervals, q+ and the code rate, the smallest failing interval, Gullans-Huse's ⟨l⟩ and Li-Fisher's \|A\|* with fitted exponents in n, distance bounds, Φ_J(ε) and ε_δ(J); Watts-Strogatz circuits (β = 0.1, 1) for contrast; physics, not timing | `results/correlated_erasure_baseline.json`, `results/correlated_erasure_baseline.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -23,11 +24,13 @@ python benchmarks/why_data.py          # about 4 minutes, one thread
 python benchmarks/thread_scaling.py    # about 15 minutes, all cores; idle machine
 python benchmarks/erasure_cost.py      # about 20 minutes, one thread; idle machine
 python benchmarks/probe_cost.py        # about 6 minutes, one thread; idle machine
+python benchmarks/correlated_erasure_baseline.py  # about 20 minutes, all cores
 python benchmarks/make_figures.py
 ```
 
 `thread_scaling.py --quick --out <dir>` is its smoke test (a few seconds once compiled), and so
-are `erasure_cost.py --quick --out <dir>` and `probe_cost.py --quick --out <dir>`.
+are `erasure_cost.py --quick --out <dir>`, `probe_cost.py --quick --out <dir>` and
+`correlated_erasure_baseline.py --quick --out <dir>`.
 
 `why_data.py --quick --out <file>` is a smoke test (tiny sizes, under a
 minute including compilation); pass that file to `make_figures.py --why <file>

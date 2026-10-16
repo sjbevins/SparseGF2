@@ -163,3 +163,53 @@ def test_probe_cost_quick(tmp_path):
     assert [a["estimate_seconds"] for a in repriced["all_threads"]] == [
         a["estimate_seconds"] for a in data["all_threads"]
     ]
+
+
+def test_correlated_erasure_baseline_quick(tmp_path):
+    out = tmp_path / "ceb"
+    script = str(ROOT / "benchmarks" / "correlated_erasure_baseline.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--quick", "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "correlated_erasure_baseline.json").read_text(encoding="utf-8"))
+    md = (out / "correlated_erasure_baseline.md").read_text(encoding="utf-8")
+    assert md.startswith("# Correlated-erasure baseline: the brickwork ring against the literature")
+    for heading in ("## Summary", "## 2. Scaling with n", "## 5. Φ_{C,J}(ε) and ε_δ(J)"):
+        assert heading in md
+    cfg = data["settings"]
+    assert data["quick"] is True
+    ring = [c for c in data["cases"] if c["family"] == "ring"]
+    assert [(c["n"], c["p"]) for c in ring] == [
+        (n, p) for n in cfg["sizes"] + cfg["scaling_sizes"] for p in cfg["rates"]
+    ]
+    for c in ring:
+        assert c["correlated"] == (c["n"] in cfg["sizes"])
+        if c["q_plus"] == 0:
+            continue
+        # l_x >= d_cont for every site, and the J -> inf (interval) curve grows with m
+        assert c["d_cont"]["mean"] <= c["gh_l_code"]["mean"] + 1e-12
+        limit = c["curves"]["J = inf"]["mean"]
+        assert limit == sorted(limit)
+    for row in data["interval_probability"]:
+        probs = [row[f"J = {j}"] for j in ("0.5", "1", "2", "4", "8")]
+        assert probs == sorted(probs) and probs[0] > 0 and probs[-1] <= 1
+    assert any(f["lf_star"] for f in data["fits"])
+    # re-rendering the saved results gives the same report
+    again = tmp_path / "again"
+    proc = subprocess.run(
+        [sys.executable, script, "--from-json", str(out / "correlated_erasure_baseline.json"),
+         "--out", str(again)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (again / "correlated_erasure_baseline.md").read_text(encoding="utf-8") == md
