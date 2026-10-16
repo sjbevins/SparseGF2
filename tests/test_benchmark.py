@@ -38,6 +38,36 @@ def test_projection_arithmetic():
     assert api._projected_rate(10.0, 30.0, 4, 2) == pytest.approx(10.0 * f(2) / f(1) * c)
 
 
+def test_the_thread_model_is_monotone_when_calibrated():
+    f = api._parallel_threads
+    r1, p = 100.0, 16
+    rp = r1 * f(p) / f(1)  # the measured p-thread rate is the model's own: the scale is 1
+    rates = [api._projected_rate(r1, rp, p, busy) for busy in (1, 2, 4, 8, 16, 32, 64)]
+    assert rates == sorted(rates) and rates[0] == r1 and rates[4] == pytest.approx(rp)
+    # more threads never project slower than fewer, for any single-thread rate and any p
+    for r1, p in ((7.0, 2), (250.0, 8), (3.0, 64)):
+        rp = r1 * f(p) / f(1)
+        rates = [api._projected_rate(r1, rp, p, busy) for busy in range(1, 65)]
+        assert all(a <= b * (1 + 1e-12) for a, b in zip(rates, rates[1:], strict=False))
+
+
+def test_projected_seconds_fall_with_threads_when_the_timings_are_fixed(monkeypatch):
+    # benchmark_ensemble with its two timings replaced by fixed ones that follow the model
+    f = api._parallel_threads
+    real = api._measure
+
+    def measure(mc, threads, first, limit, seconds, seed):
+        result, _ = real(mc, threads, first, limit, 0.0, seed)
+        count = result.num_trajectories
+        rate = 100.0 * f(threads) / f(1)  # trajectories per second the model predicts
+        return result, count / rate
+
+    monkeypatch.setattr(api, "_measure", measure)
+    out = api.benchmark_ensemble(SPEC, trajectories=40, threads=[1, 2, 4], seconds=1)
+    seconds = [row["seconds"] for row in out["projected"]]
+    assert seconds == sorted(seconds, reverse=True) and len(set(seconds)) == 3
+
+
 def test_the_structure_and_invariants(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     out = api.benchmark_ensemble(SPEC, trajectories=50, threads=[1, 64], seconds=1)
@@ -55,7 +85,9 @@ def test_the_structure_and_invariants(tmp_path, monkeypatch):
     assert [row["threads"] for row in projected] == [1, 64]
     assert all(row["seconds"] > 0 for row in projected)
     assert projected[0]["basis"] == "measured"
-    assert projected[0]["seconds"] >= projected[1]["seconds"]
+    # No order between the two is asserted: they come from two separate timings of a tiny run,
+    # and under load the p-thread rate can come out below the one-thread rate. That the
+    # model is monotone is checked on its own, with its own calibration, below.
     busy = min(64, 50)  # threads beyond the trajectories stay idle
     assert projected[1]["basis"] == ("measured" if busy in (1, p) else "projected")
     notes = " ".join(out.get("notes", []))
