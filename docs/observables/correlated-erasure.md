@@ -1821,7 +1821,9 @@ the last evaluation where some trajectory holds a code: `what`, `at_layer`,
 `code_dimension` or `erasure_first_failure` probe covers the layers; without
 one the mean is over every trajectory, $k = 0$ counting as 0, and a note says
 so), `couplings` and `sizes` (at most 12 couplings and 17 sizes shown, evenly
-spaced with the ends kept; fewer when the summary must shrink, with a note),
+spaced with the ends kept, the couplings in increasing order of $J$ with the
+smallest and the largest included when some are left out; fewer when the
+summary must shrink, with a note),
 `mean` and `stderr` (`mean[i][j]` is `couplings[i]` at `sizes[j]`), `sampler`
 (one line: the exact samplers, or the chain's rungs, burn-in and thinning) and
 `vs_depth` (`layers`, `count_with_code`, `sizes`, and `mean[i][d][j]` at
@@ -1912,7 +1914,8 @@ couplings, and returns per coupling (`couplings`, in the order given):
   2 \cdot 9 \cdot c$ series: bulk and folded, the boundary and 8 nodes, $c$
   couplings), $\tau$ the series' own estimate (at least 1), and never below
   1.01. For independent draws, 4 chains of 200, it is 1.0136 for one
-  coupling, 1.0172 for 8 and 1.0184 for 16; a chain's own $\tau$ raises it,
+  coupling, 1.0172 for 8 and 1.0179 for 12 (the most a call takes); a chain's
+  own $\tau$ raises it,
   so that autocorrelation alone, which the effective sample size reports,
   does not trip it;
 * `min_boundary_seen`, and `exact` (`mean_boundary`, `variance`) with
@@ -1943,7 +1946,9 @@ At the top level: `graph` (with its `geometry`), `method`, the `ladder`
   limit (the chains differ more than one stationary distribution allows: not in
   equilibrium yet, in different regions, or too short for their
   autocorrelation; more `burn_in`, then `thin` or `samples` or `chains`), an
-  effective sample size below 400, an exchange acceptance below 5%, a mean more
+  effective sample size below 100 per chain (400 for the default four chains,
+  Vehtari et al.'s rule; the threshold scales with `chains`), an exchange
+  acceptance below 5%, a mean more
   than 5 standard errors from its exact value, a failed Proposition-2 step.
   Measured on correct swap chains (4 chains, default burn-in, $J = 0$ to 2),
   the R-hat note fired in 2.7% and 2.3% of 300 calls at 200 samples on a ring of
@@ -2023,7 +2028,8 @@ $10^{10}$ multiply-adds (codes $\times$ couplings $\times$ $(n + 1) \times
 2049$ grid points, about 3 s) and 4,000 codes; beyond that evenly spaced codes
 are used, with a note (`phi.codes`, `e_delta.codes`), at least 100 and 10 codes.
 `elapsed_seconds` reports the time. At most 12 couplings are shown
-(`truncated`).
+(`truncated`): all of them in the probe's order when there are no more, else
+evenly spaced in increasing order of $J$, the smallest and the largest included.
 
 A call of the first on the Watts–Strogatz graph of §3.5 (fast at $n = 16$;
 §9(e) calls the second on a saved run):

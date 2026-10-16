@@ -12,6 +12,7 @@ The CLI and MCP tests for the same functions are in ``test_cli.py`` and ``test_m
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 
@@ -307,11 +308,11 @@ def test_poor_mixing_is_reported_with_what_to_change():
 
 def test_the_mixing_thresholds():
     def notes(method="chain", *, r_hat=1.005, limit=1.03, ess=500.0, deviation=0.0, exchange=0.5,
-              proposition=None):  # fmt: skip
+              proposition=None, chains=4):  # fmt: skip
         rows = [{"coupling": 1.0, "ess": ess, "deviation_se": deviation}]
         details = [{"r_hat": r_hat, "r_hat_limit": limit, "r_hat_node": 7, "slowest": None}]
         return api._regions_mixing_notes(
-            rows, details, method=method, chains=4, samples=200, burn_in=100,
+            rows, details, method=method, chains=chains, samples=200, burn_in=100,
             pair_acceptance=np.array([exchange]), ladder=np.array([0.0, 1.0]),
             proposition=proposition,
         )  # fmt: skip
@@ -325,8 +326,15 @@ def test_the_mixing_thresholds():
     assert notes(r_hat=1.029) == [] and notes(r_hat=1.04, method="exact") == []  # no chain
     assert notes(r_hat=1.02, limit=1.01) != []  # the limit is per series, not 1.01 or 1.03
     (note,) = notes(ess=399.0)
-    assert note.startswith("effective sample size below 400 at J = 1 (399, boundary)")
+    assert note.startswith(
+        "effective sample size below 400 (100 per chain) at J = 1 (399, boundary)"
+    )
     assert notes(ess=401.0) == [] and len(notes(ess=399.0, method="exact")) == 1  # all samplers
+    # the threshold is 100 per chain: 200 for two chains, 800 for eight
+    assert notes(ess=250.0, chains=2) == [] and len(notes(ess=150.0, chains=2)) == 1
+    (note,) = notes(ess=700.0, chains=8)
+    assert note.startswith("effective sample size below 800 (100 per chain) at J = 1 (700,")
+    assert notes(ess=801.0, chains=8) == []
     (note,) = notes(deviation=-5.5)
     assert "more than 5 standard errors" in note and "(-5.5)" in note and "burn_in" in note
     assert notes(deviation=4.9) == []
@@ -718,6 +726,31 @@ def test_curves_stay_within_the_size_cap_with_many_couplings(tmp_path):
     assert len(entry["phi"]["mean"]) == len(entry["couplings"])
 
 
+def test_curves_keep_the_smallest_and_largest_coupling_whatever_the_order(tmp_path):
+    couplings = [2.5, -1.0, 0.5, 3.0, 0.0, 1.5, 2.0, -0.5, 1.0, 0.25, 0.75, 1.25, 1.75, -2.0]
+    spec = dict(CURVE_SPEC, checkpoints="final", probes=[
+        {"kind": "code_dimension"},
+        {"kind": "correlated_erasure", "couplings": couplings, "samples": 10},
+    ])  # fmt: skip
+    api.run_ensemble(spec, 10, seed=2, output_dir=str(tmp_path / "unsorted"))
+    out = api.erasure_curves(str(tmp_path / "unsorted"), e=[0.1, 0.3])
+    entry = out["correlated"]["correlated_erasure"]
+    assert entry["num_couplings"] == 14 and out["truncated"] is True
+    shown = entry["couplings"]
+    assert shown == sorted(shown) and shown[0] == -2.0 and shown[-1] == 3.0
+    assert len(entry["phi"]["mean"]) == len(shown) <= api.MAX_CURVE_COUPLINGS
+    assert any("increasing order of J" in note for note in out["notes"])
+    # the curve shown for J = 3 is J = 3's: it equals the one-coupling analysis of that column
+    result = mipt.EnsembleResult.load(tmp_path / "unsorted" / "result.npz")
+    c, sizes, values = result.correlated()
+    held = result.values["code_dimension"][:, -1] > 0
+    curve, _ = analysis.correlated_failure_curve(
+        values[held, -1][:, [c.tolist().index(3.0)]], sizes, N, holds_code=np.ones(int(held.sum()))
+    )
+    phi = analysis.failure_probability_from_curve(curve, N, [0.1, 0.3]).mean(axis=0)
+    np.testing.assert_allclose(entry["phi"]["mean"][-1], phi[0], rtol=1e-5)
+
+
 def test_curves_report_what_was_interpolated(tmp_path):
     spec = dict(CURVE_SPEC, probes=[
         {"kind": "code_dimension"},
@@ -910,6 +943,23 @@ def test_capabilities_and_quickstart_list_the_tools():
     assert len(json.dumps(caps)) <= api.MAX_OUTPUT_CHARS
 
 
+def test_capabilities_give_an_example_of_each_erasure_tool(tmp_path):
+    examples = api.capabilities()["examples"]
+    regions = examples["sample_erasure_regions"]
+    assert set(regions) <= set(inspect.signature(api.sample_erasure_regions).parameters)
+    out = api.sample_erasure_regions(**regions)  # the example runs as written
+    assert out["size"] == 16 and len(out["couplings"]) == 4
+    curves = examples["erasure_curves"]
+    assert set(curves) <= set(inspect.signature(api.erasure_curves).parameters)
+    # and the example's call works on a saved run once its path names one
+    spec = dict(CURVE_SPEC, probes=[{"kind": "code_dimension"},
+                                    {"kind": "erasure_first_failure", "samples": 50}])  # fmt: skip
+    api.run_ensemble(spec, 8, seed=1, output_dir=str(tmp_path / "erasure"))
+    done = api.erasure_curves(**{**curves, "path": str(tmp_path / "erasure")})
+    assert done["e"] == curves["e"] and done["delta"] == curves["delta"]
+    assert len(json.dumps(examples)) < 1500  # the overview keeps its other sections
+
+
 # ---------------------------------------------------------------------------
 # the corrections of the review (fix round 1)
 # ---------------------------------------------------------------------------
@@ -919,6 +969,10 @@ def test_the_r_hat_limit_is_the_f_quantile_and_scales_with_autocorrelation():
     # Monte Carlo values for 4 chains of 200 draws: 18 series (one coupling), 144, 288
     for series, expected in ((18, 1.0136), (144, 1.0173), (288, 1.0185)):
         assert api._rhat_limit(4, 200, series) == pytest.approx(expected, abs=3e-4)
+    # the figures quoted in the docstring are for the most couplings a call takes (12), not 16
+    series = 2 * (1 + 8) * api.MAX_REGION_COUPLINGS
+    assert api._rhat_limit(4, 200, series) == pytest.approx(1.0179, abs=5e-5)
+    assert "1.0179 for 12" in api._rhat_limit.__doc__ and "for 16" not in api._rhat_limit.__doc__
     f = np.random.default_rng(0).f(7, 792, size=2_000_000)  # M - 1 and M (L - 1) degrees
     for value in (1.0, 2.0, 3.0):
         tail = api._f_upper_tail(value, 7, 792)

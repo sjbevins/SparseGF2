@@ -451,6 +451,16 @@ def _subsample(count: int, limit: int) -> np.ndarray:
     return np.unique(np.linspace(0, count - 1, limit).round().astype(np.int64))
 
 
+def _spread_by_value(values: np.ndarray, limit: int) -> np.ndarray:
+    """Indices of at most ``limit`` of ``values`` for display: the given order if they all fit,
+    else evenly spaced *in increasing order of the value*, always including the smallest and
+    the largest (couplings come in any order, so positions alone could drop an extreme)."""
+    if values.size <= limit:
+        return np.arange(values.size)
+    order = np.argsort(values, kind="stable")
+    return order[_subsample(values.size, limit)]
+
+
 def _bits(arr: np.ndarray) -> str:
     return "".join("1" if b else "0" for b in np.asarray(arr).ravel())
 
@@ -2792,7 +2802,9 @@ def _correlated_summary(
     per coupling shown) are at the last evaluation, or the last one with a code.
     ``vs_depth`` gives the mean per coupling on a grid of at most ``depths_shown``
     evaluations by fewer sizes, indexed ``[coupling][depth][size]``. Couplings and sizes
-    are subsampled evenly, both ends kept, to the counts of :func:`_correlated_shown`
+    are subsampled evenly to the counts of :func:`_correlated_shown` (sizes in their order,
+    both ends kept; couplings in increasing order of J when some are left out, the smallest
+    and the largest J kept)
     (``shown`` and ``sizes_shown`` are the summary's budgets). Returns the entry and, when
     couplings, sizes or evaluations were left out, the sentence that says so (else None).
     """
@@ -2816,7 +2828,7 @@ def _correlated_summary(
     chosen = rows(last)
     mean, err = analysis.mean_and_error(values[chosen, last], axis=0)  # (couplings, sizes)
     most_couplings, most_sizes, grid_most = _correlated_shown(shown, sizes_shown)
-    picked = _subsample(couplings.size, most_couplings)
+    picked = _spread_by_value(couplings, most_couplings)
     columns = _subsample(sizes.size, most_sizes)
     entry: dict[str, Any] = {
         "what": what,
@@ -2841,7 +2853,8 @@ def _correlated_summary(
     parts = []
     if left_out:
         parts.append(
-            f"{' and '.join(left_out)} are shown (evenly spaced, both ends kept; listed in "
+            f"{' and '.join(left_out)} are shown (evenly spaced, both ends kept; the couplings "
+            "in increasing order of J, the smallest and the largest included; listed in "
             "'couplings' and 'sizes')"
         )
     if evaluations > 1:
@@ -4708,8 +4721,10 @@ TEST_ALPHA = 0.01
 """The chance of a false note from the R-hat series or from Proposition 2's steps in one call
 of :func:`sample_erasure_regions` with a correct sampler (Bonferroni over everything tested)."""
 
-ESS_WARNING = 400
-"""An effective sample size below this gets a note."""
+ESS_WARNING_PER_CHAIN = 100
+"""An effective sample size below this *per chain* gets a note: 100 per chain is the least
+Vehtari et al. (2021) ask of an effective sample size, 400 for their four chains, so the
+threshold of a call is this times its ``chains``."""
 
 EXCHANGE_MIXING_WARNING = 0.05
 """A replica-exchange acceptance below this between two rungs gets a note."""
@@ -4960,7 +4975,8 @@ def _rhat_limit(chains: int, samples: int, series: int, tau: float = 1.0) -> flo
     ``1 - alpha / series`` quantile, ``alpha = TEST_ALPHA``, so that ``series`` series tested
     together raise a false alarm with chance ``alpha``, and never below
     :data:`RHAT_WARNING`. With ``tau = 1`` (independent draws) and 4 chains of 200 draws it is
-    1.0136 for one coupling (18 series), 1.0172 for 8 and 1.0184 for 16; a chain's own
+    1.0136 for one coupling (18 series), 1.0172 for 8 and 1.0179 for 12 (the most a call
+    takes); a chain's own
     ``tau`` (at least 1) raises it, so that autocorrelation alone, which the effective sample
     size reports, does not raise it. The rank-normalized R-hat is approximated by the plain one.
     """
@@ -5078,7 +5094,8 @@ def _regions_mixing_notes(
     """The notes on how well the chains mixed: one per kind of problem, with what to change.
 
     R-hat above its limit (:func:`_rhat_limit`; chains only: exact samples are independent),
-    an effective sample size below :data:`ESS_WARNING`, a mean boundary more than
+    an effective sample size below :data:`ESS_WARNING_PER_CHAIN` per chain (the threshold is
+    that times ``chains``: 400 for the default four), a mean boundary more than
     :data:`DEVIATION_WARNING` standard errors from its exact value, a replica-exchange
     acceptance below :data:`EXCHANGE_MIXING_WARNING` between two rungs, and a rise of the mean
     boundary with the coupling beyond chance (``proposition``, from :func:`_proposition_two`).
@@ -5092,7 +5109,7 @@ def _regions_mixing_notes(
         if chain and info["r_hat"] is not None and info["r_hat"] > info["r_hat_limit"]:
             shown = "infinite" if info["r_hat"] >= R_HAT_INFINITE else f"{info['r_hat']:.3f}"
             rhat.append(f"{j} ({shown} > {info['r_hat_limit']:.3f}, {_where(info['r_hat_node'])})")
-        if row["ess"] is not None and row["ess"] < ESS_WARNING:
+        if row["ess"] is not None and row["ess"] < ESS_WARNING_PER_CHAIN * chains:
             ess.append(f"{j} ({row['ess']:.0f}, {_where(info['slowest'])})")
         dev = row["deviation_se"]
         if dev is not None and abs(dev) > DEVIATION_WARNING:
@@ -5109,7 +5126,8 @@ def _regions_mixing_notes(
         )
     if ess:
         notes.append(
-            f"effective sample size below {ESS_WARNING} at {_listed(ess)}: raise samples (now "
+            f"effective sample size below {ESS_WARNING_PER_CHAIN * chains} "
+            f"({ESS_WARNING_PER_CHAIN} per chain) at {_listed(ess)}: raise samples (now "
             f"{samples}) or chains (now {chains}), or thin more"
         )
     if off:
@@ -5226,7 +5244,7 @@ def sample_erasure_regions(
     at 1.5% false alarms over 400 calls with 12 couplings 0.001 apart on a ring); ``proposition2``
     gives that ``z_critical``, the ``worst`` step and the ``failed`` steps with their z. A
     failure means the estimates are off. ``mixing`` lists what looks wrong (R-hat above its
-    limit, effective sample size below 400, exchange acceptance below 5%, a mean far from its
+    limit, effective sample size below 100 per chain, exchange acceptance below 5%, a mean far from its
     exact value, a failed Proposition-2 step) and what to change; ``warnings`` passes on the
     sampler's own. No note is no proof of equilibrium: repeat with another seed and a longer
     burn-in. Three example regions at the largest coupling are written as node runs
@@ -5865,7 +5883,8 @@ def _correlated_curves(
 ) -> dict[str, Any]:
     """The correlated channel of a ``correlated_erasure`` probe at one layer, per coupling.
 
-    At most :data:`MAX_CURVE_COUPLINGS` couplings (evenly spaced, ends included) are computed.
+    At most :data:`MAX_CURVE_COUPLINGS` couplings are computed: all, in the probe's order,
+    or else evenly spaced in increasing order of J, the smallest and the largest included.
     """
     n = result.spec.num_system
     layer = int(result.layers(probe.name)[column])
@@ -5880,7 +5899,7 @@ def _correlated_curves(
     unknown[[0, n]] = False  # P(0) = 0 and P(n) = 1[k > 0] are known
     interpolated = np.flatnonzero(unknown)
     mass = _binomial_mass(n, es, interpolated)
-    shown = _subsample(int(couplings.size), MAX_CURVE_COUPLINGS)
+    shown = _spread_by_value(couplings, MAX_CURVE_COUPLINGS)
     sampler = result.spec.correlated_sampler(probe.name)
     entry: dict[str, Any] = {
         "layer": layer,
@@ -6030,7 +6049,8 @@ def erasure_curves(
     :data:`MAX_TOLERANCE_WORK` multiply-adds (and :data:`MAX_TOLERANCE_CODES` codes) are
     computed, with evenly spaced codes beyond that and a note; about 10 seconds at the most
     on the machine measured (``elapsed_seconds`` says). The output is bounded too: at most
-    :data:`MAX_CURVE_COUPLINGS` couplings are shown (evenly spaced, ends included;
+    :data:`MAX_CURVE_COUPLINGS` couplings are shown (all of them in the probe's order, or
+    evenly spaced in increasing order of J with the smallest and the largest included;
     ``truncated`` is then set). Writes nothing.
     """
     start = time.perf_counter()
@@ -6120,7 +6140,8 @@ def _fit_curves(out: dict[str, Any]) -> dict[str, Any]:
     if not entries:
         return out
     cut_note = (
-        "only some couplings are shown (evenly spaced, ends included) to fit the size limit; "
+        "only some couplings are shown (evenly spaced in increasing order of J, the smallest "
+        "and the largest included) to fit the size limit; "
         "result.npz holds every value (EnsembleResult.correlated(), and "
         "analysis.correlated_failure_curve computes any curve)"
     )
@@ -6128,7 +6149,7 @@ def _fit_curves(out: dict[str, Any]) -> dict[str, Any]:
     for keep in (MAX_CURVE_COUPLINGS, 8, 6, 4, 3, 2, 1):
         shown: dict[str, Any] = {}
         for name, entry in entries.items():
-            pick = _subsample(len(entry["couplings"]), keep)
+            pick = _spread_by_value(np.asarray(entry["couplings"]), keep)
             row = dict(entry)
             row["couplings"] = entry["couplings"][pick]
             if entry["phi"] is not None:
@@ -6319,6 +6340,19 @@ def _capability_sections() -> dict[str, Any]:
                 },
                 "trajectories": 200,
                 "seed": 1,
+            },
+            "sample_erasure_regions": {
+                "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
+                "num_nodes": 64,
+                "size": 16,
+                "couplings": [0, 0.5, 1, 2],
+                "samples": 200,
+                "seed": 7,
+            },
+            "erasure_curves": {
+                "path": "runs/erasure",
+                "e": [0.02, 0.05, 0.1],
+                "delta": 0.01,
             },
         },
         "docs": "quickstart() / MCP resource docs://sparsegf2/quickstart",

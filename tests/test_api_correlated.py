@@ -172,6 +172,32 @@ def test_summary_shows_many_couplings_within_the_size_limit():
     )
 
 
+def test_summary_keeps_the_smallest_and_largest_coupling_whatever_the_order():
+    # more couplings than the summary shows, given unsorted: evenly spaced positions would
+    # have dropped the largest J; the summary shows them in increasing order of J, both ends in
+    couplings = [2.5, -1.0, 0.5, 3.0, 0.0, 1.5, 2.0, -0.5, 1.0, 0.25, 0.75, 1.25, 1.75, -2.0]
+    spec = dict(SMALL_JSON, probes=[
+        {"kind": "code_dimension"}, _json_probe(couplings=couplings, samples=8)
+    ])  # fmt: skip
+    out = api.run_ensemble(spec, 3, seed=2)
+    entry = out["probes"]["correlated_erasure"]
+    shown = entry["couplings"]
+    assert len(shown) == 12 < len(couplings)
+    assert shown == sorted(shown) and shown[0] == -2.0 and shown[-1] == 3.0
+    assert any(
+        "increasing order of J" in note and "smallest and the largest" in note
+        for note in out["notes"]
+    )
+    # the rows are those couplings' (the saved result has them in the given order)
+    result = api._build_spec(spec).run(3, seed=2)
+    _, sizes, values = result.correlated()
+    rows = [couplings.index(j) for j in shown]
+    cols = [sizes.tolist().index(m) for m in entry["sizes"]]
+    has_code = result.values["code_dimension"][:, -1] > 0
+    expected = values[has_code, -1].mean(axis=0)[np.ix_(rows, cols)]
+    np.testing.assert_allclose(np.array(entry["mean"], dtype=float), expected, rtol=1e-5, atol=1e-9)
+
+
 def test_summary_shows_everything_when_it_fits():
     spec = dict(SMALL_JSON, probes=[{"kind": "code_dimension"}, _json_probe()])
     out = api.run_ensemble(spec, 3, seed=2)

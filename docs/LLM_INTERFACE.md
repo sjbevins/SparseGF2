@@ -631,8 +631,9 @@ worked examples are in
 * Summary entry: `what`, `at_layer`, `count`, `count_with_code` (when a `code_dimension`
   or `erasure_first_failure` probe covers the layers; without one the mean is over every
   trajectory, k = 0 counting as 0, with a note), `couplings` and `sizes` (at most 12
-  couplings and 17 sizes, evenly spaced with the ends kept, fewer with a note when the
-  summary must shrink), `mean` and `stderr` (`mean[i][j]` is `couplings[i]` at
+  couplings and 17 sizes, evenly spaced with the ends kept, the couplings in increasing
+  order of J with the smallest and the largest included when some are left out, fewer with a
+  note when the summary must shrink), `mean` and `stderr` (`mean[i][j]` is `couplings[i]` at
   `sizes[j]`), `sampler` (one line) and `vs_depth` (`layers`, `count_with_code`, `sizes`,
   and `mean[i][d][j]` at `couplings[i]`, `layers[d]`, `sizes[j]`). `estimate_ensemble`
   adds `working_megabytes` (the regions the running threads hold at once) and a note.
@@ -679,7 +680,8 @@ seeded `[seed, i]`) for at most 12 couplings and returns `graph` (with its `geom
   calls with 12 couplings 0.001 apart);
 * `mixing`, one note per kind with what to change: R-hat above its limit (the chains
   differ more than one stationary distribution allows: not in equilibrium, in different
-  regions, or too short for their autocorrelation), an effective sample size below 400,
+  regions, or too short for their autocorrelation), an effective sample size below 100 per
+  chain (400 for the default four chains),
   exchange acceptance below 5%, a mean more than 5 standard errors from its exact value, a
   failed Proposition-2 step. On correct swap chains the R-hat note fired in about 2% of
   calls at 200 samples (a ring of 32 nodes, a 14-node Watts-Strogatz graph) and in none at
