@@ -2611,7 +2611,7 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
     long_extras = [
         key
         for key, value in extra.items()
-        if key not in ("files", "path")
+        if key not in ("files", "path", "storage")  # storage is bounded by construction
         and len(json.dumps(_jsonable(value, exact=True))) > MAX_OUTPUT_CHARS // 4
     ]
     if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
@@ -3209,19 +3209,24 @@ def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
     )
 
 
-def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
+def _load_directory(
+    out: Path, files_read: list[Path] | None = None
+) -> tuple[mipt.EnsembleResult | None, dict | None]:
     """Read an output directory, retrying while a running job merges chunks meanwhile.
 
     A merge deletes the chunks it absorbed (``FileNotFoundError`` for a reader
     that listed them) and, on Windows, a file being replaced cannot be opened
     for a moment (``PermissionError``). A file that still cannot be read after
     the retries (another program holds it, or this process may not read it) is
-    an input error that names it.
+    an input error that names it. ``files_read``, if given, is filled with the
+    files that were listed.
     """
 
     def read() -> tuple[mipt.EnsembleResult | None, dict | None]:
         meta = _read_meta(out)
         parts = _result_parts(out)
+        if files_read is not None:
+            files_read[:] = parts
         return (_load_parts_once(parts) if parts else None), meta
 
     try:
@@ -3717,19 +3722,27 @@ def load_results(path: str) -> dict[str, Any]:
     directory. The summary has the same form as :func:`run_ensemble`'s, plus
     the stored ``spec`` when ``spec.json`` exists: exactly as stored (its
     floats are not rounded for display), so passing it back to
-    :func:`start_ensemble_job` resumes or extends the run.
+    :func:`start_ensemble_job` resumes or extends the run. ``storage`` gives
+    the disk use of the saved ``.npz`` files: ``total_megabytes``, each file
+    (``files``) and each array (``arrays``, compressed sizes; with several
+    chunk files, summed by name).
     """
     if not isinstance(path, (str, os.PathLike)):
         raise ValueError("path must be a string")
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise ValueError(f"no such file or directory: {str(p)!r}")
+    parts: list[Path] = [p]
     try:
         if p.is_dir():
-            result, meta = _load_directory(p)
+            result, meta = _load_directory(p, parts)
             if result is None:
                 raise ValueError(f"no saved results in {str(p)!r} (expected result.npz or chunks/)")
             _merge_if_pending(p, result, meta)
+            # a merge replaced the chunks by result.npz
+            parts = [q for q in parts if q.exists()]
+            if (p / _RESULT_FILE).exists() and (p / _RESULT_FILE) not in parts:
+                parts.insert(0, p / _RESULT_FILE)
         else:
             result, meta = _retrying(functools.partial(_load_result_file, p)), None
     except OSError as exc:  # still in use after the retries, or not ours to read
@@ -3738,7 +3751,55 @@ def load_results(path: str) -> dict[str, Any]:
     if meta is not None:
         extra["spec"] = meta.get("spec")
         extra["trajectories_requested"] = meta.get("trajectories")
+    # a file replaced meanwhile: the data was read, only the sizes are missing
+    with contextlib.suppress(OSError, zipfile.BadZipFile):
+        extra["storage"] = _storage_summary(parts, p if p.is_dir() else p.parent)
     return _bounded_summary(result, extra)
+
+
+MAX_STORAGE_FILES = 8
+MAX_STORAGE_ARRAYS = 20
+
+
+def _storage_summary(parts: list[Path], root: Path) -> dict[str, Any]:
+    """The disk use of the ``.npz`` files ``parts``: each file and each array, in megabytes.
+
+    A file's size is its size on disk; an array's is the compressed size of its member of
+    the zip file. With several files (chunks of a run in progress) the arrays are summed by
+    name over the files and only the first :data:`MAX_STORAGE_FILES` files are listed; the
+    arrays are at most :data:`MAX_STORAGE_ARRAYS`, the smaller ones summed as one entry.
+    """
+    files: list[dict[str, Any]] = []
+    sums: dict[str, int] = {}
+    total = 0
+    for path in parts:
+        size = path.stat().st_size
+        total += size
+        files.append({"path": path.relative_to(root).as_posix(), "megabytes": _num(size / 1e6)})
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                name = info.filename.removesuffix(".npy")
+                sums[name] = sums.get(name, 0) + info.compress_size
+    rows = list(sums.items())
+    if len(rows) > MAX_STORAGE_ARRAYS:
+        keep = {name for name, _ in sorted(rows, key=lambda r: -r[1])[: MAX_STORAGE_ARRAYS - 1]}
+        rest = sum(size for name, size in rows if name not in keep)
+        rows = [r for r in rows if r[0] in keep] + [("(other arrays)", rest)]
+    single = len(parts) == 1
+    arrays = [
+        {**({"file": files[0]["path"]} if single else {}), "name": name, "megabytes": _num(b / 1e6)}
+        for name, b in rows
+    ]
+    out: dict[str, Any] = {
+        "total_megabytes": _num(total / 1e6),
+        "files": files[:MAX_STORAGE_FILES],
+        "arrays": arrays,
+    }
+    if len(files) > MAX_STORAGE_FILES:
+        out["files_not_shown"] = len(files) - MAX_STORAGE_FILES
+    if not single:
+        out["arrays_summed_over_files"] = len(files)
+    return out
 
 
 # ---------------------------------------------------------------------------

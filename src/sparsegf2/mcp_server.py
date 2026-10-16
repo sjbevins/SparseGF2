@@ -182,8 +182,9 @@ Example: {}"""
 _LOAD_RESULTS = """\
 Summarize a saved ensemble: an output directory (including partial chunks of a running or
 cancelled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
-spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run. A
-"merge pending" left by a finished job is completed here.
+spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run, and
+storage, the disk use in megabytes of each file and each array (compressed). A "merge
+pending" left by a finished job is completed here.
 
 Example: {"path": "runs/n128_p012"}"""
 
