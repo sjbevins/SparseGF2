@@ -91,6 +91,7 @@ SELECTED = (1, 2, 4, 8, 12, 16)  # sizes m = n * s / 32
 LARGE_N = 128  # the second fit uses n >= LARGE_N only
 PROFILE_CAP = 192  # Li-Fisher's mean interval information is computed for lengths up to this
 GH = {"p_c": 0.1593, "nu": 1.28, "A": 7.3}  # Gullans and Huse, Fig. 2 (near-critical fit)
+GH_MIN_P = 0.1  # the near-critical form is read from here to p_c; it gives 0.69 at p = 0
 LITERATURE: dict[str, Any] = {
     "li_fisher_gamma1": 0.38,  # PRB 103, 104306 (2021): |A|* (mean I = 1 bit), p = 0.04-0.12
     "li_vijay_fisher_beta": 1 / 3,  # PRX Quantum 4, 010331 (2023): DPRE roughness exponent
@@ -491,7 +492,14 @@ def fmt(value, se=None, digits=3) -> str:
 
 
 def gh_rate(p: float) -> float | None:
-    return GH["A"] * (GH["p_c"] - p) ** GH["nu"] if p < GH["p_c"] else None
+    """The Gullans-Huse near-critical guide to the code rate, or None outside its range."""
+    return GH["A"] * (GH["p_c"] - p) ** GH["nu"] if GH_MIN_P <= p < GH["p_c"] else None
+
+
+def prob_text(x: float) -> str:
+    """One format for every probability of the table: four significant digits, kept
+    (0.01000, 0.5360, 0.9999), and scientific where it is small (6.690e-05)."""
+    return f"{x:#.4g}"
 
 
 def fit_text(f: dict | None) -> str:
@@ -538,14 +546,21 @@ def verdicts(r: dict) -> list[str]:
     if 0.12 in rate:
         pred = gh_rate(0.12)
         assert pred is not None
+        outside = [p for p in sorted(rate) if gh_rate(p) is None and p < GH["p_c"]]
         ratio = rate[0.12]["mean"] / pred
         lines.append(
             f"* **Code rate:** ⟨k⟩/n = {fmt(rate[0.12]['mean'], rate[0.12]['se'], 4)} at p = 0.12, "
             f"n = {big}, against {pred:.3f} from Gullans-Huse's near-critical form "
             f"7.3 (p_c - p)^1.28, a ratio of {ratio:.2f}. The form is a guide to their Fig. 2 (A ≈ 7.3 "
             "is a caption value; ν = 1.28(2) alone moves it by ±6.5% at p = 0.12), so this agrees "
-            "at the level the form can be read. At p = 0.04 and 0.08 the form is outside its range "
-            "(it gives 0.69 at p = 0), so those are not compared."
+            "at the level the form can be read."
+            + (
+                f" At p = {' and '.join(f'{p:g}' for p in outside)} the form is outside its range "
+                f"(it gives {GH['A'] * GH['p_c'] ** GH['nu']:.2f} at p = 0), so those are not "
+                "compared (the guide column of section 1 shows '-')."
+                if outside
+                else ""
+            )
         )
     for f in [f for f in r["fits"] if f["family"] == "ring"]:
         parts = []
@@ -605,19 +620,28 @@ def verdicts(r: dict) -> list[str]:
             "the bounds leave d between d low (the exact counts' cutoff plus one) and d high (the "
             "smallest of the orderings' first failures, a weak bound that grows like n here)."
         )
+    li = LITERATURE["li_fisher_gamma1"]
     for f in [f for f in r["fits"] if f["family"] == "ring" and f["p"] == 0.12]:
-        last = (f["lf_star"] or {}).get("local", [])
-        if last:
+        fit = f.get("lf_star_large") or f["lf_star"]
+        last = (fit or {}).get("local", [])
+        if fit and last:
             tail = last[-1]
             xi = (GH["p_c"] - 0.12) ** -GH["nu"]
+            scope = f"n >= {LARGE_N}" if f.get("lf_star_large") else "every n"
+            z = (fit["gamma"] - li) / fit["se"]
+            z_fit = (tail["slope"] - fit["gamma"]) / tail["se"]
+            z_li = (tail["slope"] - li) / tail["se"]
+            undecided = abs(z_fit) <= 2 and abs(z_li) <= 2
             lines.append(
-                "* **p = 0.12 is a crossover:** closer to p_c (correlation length "
-                f"(p_c - p)^-ν ≈ {xi:.0f} sites) the effective exponents are larger, between "
-                "Gullans-Huse's deep-mixed-phase range and their near-critical ⟨l⟩ ∝ L. The last "
-                f"local slope of |A|* (n = {tail['n'][0]} to {tail['n'][1]}) is "
-                f"{tail['slope']:.2f} ± {tail['se']:.2f}, so Li-Fisher's single 0.38 for "
-                "p = 0.04-0.12 is reached at p = 0.12 only at the largest sizes here (their depths "
-                "6L-8L also differ from 4n)."
+                f"* **p = 0.12, an open question:** the {scope} exponent of |A|* is "
+                f"{fit_text(fit)}, {abs(z):.1f} σ {'above' if z > 0 else 'below'} Li-Fisher's "
+                f"{li:g} (their single value for p = 0.04-0.12). Two possible causes are not "
+                "tested here: a near-critical crossover (correlation length "
+                f"(p_c - p)^-ν ≈ {xi:.0f} sites) and the shallower depth (4n here, against their "
+                f"6L-8L). The last local slope of |A|* (n = {tail['n'][0]} to {tail['n'][1]}) is "
+                f"{tail['slope']:.2f} ± {tail['se']:.2f}, {abs(z_fit):.1f} σ from "
+                f"{fit['gamma']:.2f} and {abs(z_li):.1f} σ from {li:g}"
+                + (", so it is consistent with either value." if undecided else ".")
             )
     gaps = []
     for f in [f for f in r["fits"] if f["family"] == "ring"]:
@@ -643,14 +667,49 @@ def verdicts(r: dict) -> list[str]:
             for a in range(len(labels) - 1):
                 steps += 1
                 rises += means[a + 1] >= means[a] - 2 * math.hypot(ses[a], ses[a + 1])
-    if steps:
-        lines.append(
-            "* **New: clustered erasures hurt the brickwork codes.** The mean P_{C,J}(m) does not "
-            f"decrease from J = 0 to 0.5, 1, 2 and inf in {rises} of {steps} steps (selected "
-            "sizes, every ring (n, p); 'not decrease' within 2 standard errors), and ε_δ(J) falls "
-            "with J (section 5). The permutation-invariant control (all-to-all circuits, "
-            "`tests/test_brickwork_correlated.py`) shows no J dependence, as it must."
+    cells, falls = [], []  # (n, p, m, J = 0 mean, J = 2 mean, increase, its standard error)
+    for c in full:
+        if c["q_plus"] == 0:
+            continue
+        zero, two = c["curves"]["J = 0"], c["curves"]["J = 2"]
+        for i, m in enumerate(c["sizes"]):
+            if None in (zero["mean"][i], two["mean"][i], zero["se"][i], two["se"][i]):
+                continue
+            cell = (
+                c["n"], c["p"], m, zero["mean"][i], two["mean"][i],
+                two["mean"][i] - zero["mean"][i], math.hypot(zero["se"][i], two["se"][i]),
+            )  # fmt: skip
+            cells.append(cell)
+            if 2 * m == c["n"] and cell[5] < 0:
+                falls.append(cell)
+    if steps and cells:
+        up = [x for x in cells if x[5] > 2 * x[6]]
+        top = max(cells, key=lambda x: x[5])
+        text = (
+            "* **New: clustered erasures hurt the brickwork codes.** From J = 0 to J = 2 the mean "
+            f"P_{{C,J}}(m) rises by more than 2 standard errors in {len(up)} of {len(cells)} "
+            f"(n, p, m) cells of the selected sizes (k > 0), by as much as {top[5]:.3f} "
+            f"(n = {top[0]}, p = {top[1]:g}, m = {top[2]}: {top[3]:.3f} -> {top[4]:.3f}); along "
+            f"J = 0, 0.5, 1, 2, inf no step falls by more than 2 standard errors in {rises} of "
+            f"{steps} steps."
         )
+        if falls:
+            near = " near p_c" if all(x[1] >= GH_MIN_P for x in falls) else ""
+            text += (
+                f" At m = n/2{near} the mean instead falls slightly with J from 0 to 2: "
+                + "; ".join(
+                    f"n = {n}, p = {p:g}, m = {m}: {a:.4f} -> {b:.4f} ({d / s:+.1f} standard errors)"
+                    for n, p, m, a, b, d, s in falls
+                )
+                + ". "
+            )
+        else:
+            text += " "
+        text += (
+            "ε_δ(J) falls with J (section 5). The permutation-invariant control (all-to-all "
+            "circuits, `tests/test_brickwork_correlated.py`) shows no J dependence, as it must."
+        )
+        lines.append(text)
     j_rows = []
     for c in full:
         if c["p"] not in MIXED or c["q_plus"] == 0 or c["n"] != big_full:
@@ -747,7 +806,8 @@ def verdicts(r: dict) -> list[str]:
         "* **Could not be compared:** the amplitudes of the lengths (figures only in the papers), "
         "p_c itself (no I3 crossing is run here), and any random-region (J = 0) or "
         "correlated-erasure statistic of monitored brickwork codes (none found in the literature "
-        "memo). The random-code formula of Gullans et al. is checked in "
+        "survey of `docs/observables/correlated-erasure.md`, section 11). The random-code "
+        "formula of Gullans et al. is checked in "
         "`tests/test_brickwork_correlated.py` instead, with its own definition of failure, "
         "1 - E[2^-I(A:R)]."
     )
@@ -803,7 +863,9 @@ def render_markdown(r: dict) -> str:
         "Li-Fisher, the length where the mean I(interval : R) over all trajectories reaches 1 bit "
         "(bootstrap error). d low / high: uniform distance bounds (exact counts up to the cutoff, "
         "then the smallest first failure); 'd exact': the fraction where they meet; "
-        "'d < d_cont': the fraction of those whose smallest uncorrectable set is not an interval.",
+        "'d < d_cont': the fraction of those whose smallest uncorrectable set is not an interval. "
+        "GH: Gullans-Huse's near-critical guide to ⟨k⟩/n, shown only inside the range where it is "
+        f"read (p from {GH_MIN_P:g} to p_c = {GH['p_c']:g}), '-' elsewhere.",
         "",
         "| n | p | q+ | ⟨k⟩/n | GH 7.3(p_c-p)^1.28 | d_cont | ⟨l⟩ | \\|A\\|* | d low | d high "
         "| d exact | d < d_cont |",
@@ -875,8 +937,9 @@ def render_markdown(r: dict) -> str:
     ]
     for row in r["interval_probability"]:
         out.append(
-            f"| {row['n']} | {row['m']} | {row['J = 0.5']:.2e} | {row['J = 1']:.2e} | "
-            f"{row['J = 2']:.3f} | {row['J = 4']:.3f} | {row['J = 8']:.4f} | {row['J_x']:.2f} |"
+            f"| {row['n']} | {row['m']} | {prob_text(row['J = 0.5'])} | {prob_text(row['J = 1'])} | "
+            f"{prob_text(row['J = 2'])} | {prob_text(row['J = 4'])} | {prob_text(row['J = 8'])} | "
+            f"{row['J_x']:.2f} |"
         )
     out += [
         "",
@@ -955,6 +1018,13 @@ def render_markdown(r: dict) -> str:
                 f"{mc['min_exchange_acceptance']:.2f} | {mc['j0_boundary_max_z']:.1f} | "
                 f"{len(mc['warnings'])} |"
             )
+        out += [
+            "",
+            "Only J = 0 is compared with an exact value, and with a standard error of independent "
+            "draws although the records come from a chain; the J = 2 numbers of the graph rows "
+            "above and of the summary rest on the absence of warnings, which is no proof of "
+            "equilibrium.",
+        ]
         warned = [w for mc in r["mixing"] for w in mc["warnings"]]
         if warned:
             out += ["", f"Warnings ({len(warned)}; the first five):", ""]
@@ -1019,10 +1089,13 @@ def run_case(family: str, n: int, p: float, beta, cfg: dict, rng, correlated=Tru
 
 
 def write(results: dict, out: Path) -> None:
+    # newline="\n": the same bytes on every platform (the repository keeps LF)
     (out / "correlated_erasure_baseline.json").write_text(
-        json.dumps(results, indent=1), encoding="utf-8"
+        json.dumps(results, indent=1), encoding="utf-8", newline="\n"
     )
-    (out / "correlated_erasure_baseline.md").write_text(render_markdown(results), encoding="utf-8")
+    (out / "correlated_erasure_baseline.md").write_text(
+        render_markdown(results), encoding="utf-8", newline="\n"
+    )
 
 
 def main() -> None:
