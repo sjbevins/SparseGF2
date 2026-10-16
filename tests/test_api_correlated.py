@@ -15,7 +15,7 @@ import math
 import numpy as np
 import pytest
 
-from sparsegf2 import api, mipt
+from sparsegf2 import api, erasures, mipt
 
 SMALL_JSON = {
     "num_system": 12,
@@ -162,6 +162,24 @@ def test_resume_with_other_couplings_is_refused(tmp_path):
     np.testing.assert_array_equal(
         saved.values["correlated_erasure"], direct.values["correlated_erasure"]
     )
+
+
+def test_resume_after_a_change_of_the_default_burn_in_is_refused(tmp_path, monkeypatch):
+    """Review M1: the saved run pins the burn-in it ran with, so the same spec text, which
+    would now resolve "burn_in": null to another default, builds another protocol."""
+    out = tmp_path / "job"
+    spec = dict(SMALL_JSON, probes=[{"kind": "code_dimension"}, _json_probe(burn_in=None)])
+    status = api.start_ensemble_job(spec, 3, output_dir=str(out), seed=5)
+    assert api.job_status(status["job_id"], wait_seconds=60)["status"] == "completed"
+    assert mipt.EnsembleResult.load(out / "result.npz").spec.probes[1].burn_in == 200
+    monkeypatch.setattr(erasures, "MIN_BURN_IN", 400)
+    with pytest.raises(ValueError, match="builds another protocol.*probes"):
+        api.start_ensemble_job(spec, 5, output_dir=str(out))
+    # with the burn-in it ran with written out, the run continues
+    pinned = dict(spec, probes=[{"kind": "code_dimension"}, _json_probe(burn_in=200)])
+    more = api.start_ensemble_job(pinned, 5, output_dir=str(out))
+    assert more["resumed_from"] == 3
+    assert api.job_status(more["job_id"], wait_seconds=60)["status"] == "completed"
 
 
 @pytest.mark.parametrize(

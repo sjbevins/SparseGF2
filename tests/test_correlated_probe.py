@@ -39,9 +39,9 @@ import pytest
 import _gf2_oracle as gf2
 import _protocol_oracle as oracle
 import _reference_rng as ref
+from _erasure_oracle import _reference_chain, _reference_exact
 from sparsegf2 import erasures, graphs, mipt
 from sparsegf2._kernel import rng as krng
-from test_erasures import _reference_chain, _reference_exact
 
 JIT_FREE = bool(numba.config.DISABLE_JIT)
 
@@ -157,13 +157,18 @@ def _check_fractions(monkeypatch, spec, result, name="correlated_erasure") -> di
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", ["ring", "ws_chain", "cycle_geometry", "path_geometry"])
+@pytest.mark.parametrize(
+    "case", ["ring", "ws_chain", "single_reference", "cycle_geometry", "path_geometry"]
+)
 def test_values_are_the_failing_fractions_of_the_graph_side_regions(case, monkeypatch):
     if case == "ring":
         spec = _ring_spec()
         method = "exact"
     elif case == "ws_chain":
         spec = _ws_spec()
+        method = "chain"
+    elif case == "single_reference":  # one reference qubit with a random partner: k in {0, 1}
+        spec = _ws_spec(reference="single", measurement_rate=0.04, checkpoints=[10, 20, 40])
         method = "chain"
     else:
         geometry = case.split("_")[0]
@@ -211,9 +216,9 @@ def _oracle_values(spec, probe, seed, trajectory, layer, generators) -> np.ndarr
     out = np.zeros((len(given), len(probe.sizes)))
     for i, m in enumerate(probe.sizes):
         state = ref.stream_state(oracle.probe_key(seed), ref.mix(index, m, 0))
-        if probe.geometry == "cycle" and probe.method != "chain":
+        if probe.geometry in ("cycle", "path") and probe.method != "chain":
             regions, _, _ = _reference_exact(
-                "cycle", n, m, requested, probe.samples, list(range(n)), state
+                probe.geometry, n, m, requested, probe.samples, list(range(n)), state
             )
         else:  # the automatic ladder of sample_regions: 0 and rungs no further apart than
             # 1 / sqrt(Var_0 b)
@@ -229,7 +234,7 @@ def _oracle_values(spec, probe, seed, trajectory, layer, generators) -> np.ndarr
     return out
 
 
-@pytest.mark.parametrize("geometry", ["interaction", "cycle"])
+@pytest.mark.parametrize("geometry", ["interaction", "cycle", "path"])
 def test_protocol_oracle_rebuilds_the_values_in_plain_python(geometry):
     n = 8
     probe = mipt.correlated_erasure(
@@ -502,6 +507,121 @@ def test_default_sizes_and_burn_in_resolve_for_each_system_size():
     # explicit values stay explicit at another n
     kept = _ring_spec(explicit, num_system=64, edges=graphs.cycle(64)).probes[1]
     assert kept.sizes == tuple(range(1, 12)) and kept.burn_in == 200
+
+
+def test_values_set_by_replace_win_over_the_defaults(ws_run):
+    """A probe whose sizes or burn-in were filled in by a spec keeps a value set later with
+    dataclasses.replace (it is explicit), and a field left at its default still follows
+    another n."""
+    probe = mipt.correlated_erasure(COUPLINGS, samples=_size(40, 12), thin=2, name="ce")
+    spec = _ws_spec(probe, checkpoints=[40])
+    resolved = spec.probes[1]
+    assert resolved.sizes == tuple(range(1, N)) and resolved.burn_in == 200
+    full = spec.run(_size(3, 1), seed=40)
+    narrow = dataclasses.replace(resolved, sizes=(9, 3))
+    for t in range(full.num_trajectories):
+        part = full.replay(t, probes=[narrow], checkpoints=[40])
+        assert part.correlated("ce")[1].tolist() == [9, 3]
+        np.testing.assert_array_equal(
+            part.correlated("ce")[2][0, 0], full.correlated("ce")[2][t, 0][:, [8, 2]]
+        )
+    # a probe no spec has seen yet, and the burn-in
+    unseen = dataclasses.replace(mipt.correlated_erasure([0.0]), sizes=(2, 3))
+    assert _ws_spec(unseen).probes[1].sizes == (2, 3)
+    longer = _ws_spec(dataclasses.replace(resolved, burn_in=31)).probes[1]
+    assert longer.burn_in == 31 and dict(longer.n_defaults) == {"sizes": tuple(range(1, N))}
+    # the sizes left at their default follow another n; the explicit burn-in stays
+    other = _ws_spec(longer, n=10).probes[1]
+    assert other.sizes == tuple(range(1, 10)) and other.burn_in == 31
+
+
+def _save_with_old_rules(tmp_path, *, burn_in=None):
+    """A run with the default burn-in and the automatic ladder, saved."""
+    probe = mipt.correlated_erasure(
+        [0.0, 1.5], sizes=[3, 8], samples=_size(30, 8), name="ce", burn_in=burn_in
+    )
+    spec = _ws_spec(probe, checkpoints=[40])
+    result = spec.run(_size(3, 2), seed=9)
+    result.save(tmp_path / "run.npz")
+    return probe, spec, result
+
+
+def test_a_saved_run_pins_its_burn_in_and_ladders(tmp_path, monkeypatch):
+    """Review M1: changing the default burn-in or the ladder rule after a save changes
+    nothing a loaded run does: it keeps its burn-in and ladders, replays exactly (also a
+    narrower probe), and a resume or merge under the new rules is another protocol."""
+    probe, spec, result = _save_with_old_rules(tmp_path)
+    assert spec.probes[1].burn_in == 200 and spec.correlated_sampler("ce")["method"] == "chain"
+    monkeypatch.setattr(erasures, "MIN_BURN_IN", 400)  # a new default burn-in ...
+    moments = erasures._uniform_moments  # ... and a ladder twice as dense
+    monkeypatch.setattr(
+        erasures, "_uniform_moments", lambda *a: (moments(*a)[0], 4 * moments(*a)[1])
+    )
+    fresh = _ws_spec(probe, checkpoints=[40])
+    assert fresh.probes[1].burn_in == 400
+    assert not mipt._same_plan(fresh._plans["ce"], spec._plans["ce"])  # the rules did change
+    loaded = mipt.EnsembleResult.load(tmp_path / "run.npz")
+    pinned = loaded.spec.probes[1]
+    assert pinned.burn_in == 200 and pinned.n_defaults == () and pinned == spec.probes[1]
+    assert mipt._same_plan(loaded.spec._plans["ce"], spec._plans["ce"])
+    assert mipt._protocol_difference(loaded.spec, spec) is None
+    narrow = dataclasses.replace(pinned, sizes=(8,))
+    for t in range(result.num_trajectories):
+        again = loaded.replay(t)
+        np.testing.assert_array_equal(again.values["ce"][0], result.values["ce"][t])
+        part = loaded.replay(t, probes=[narrow], checkpoints=[40])
+        np.testing.assert_array_equal(
+            part.correlated("ce")[2][0, 0], result.correlated("ce")[2][t, 0][:, [1]]
+        )
+    assert mipt._protocol_difference(loaded.spec, fresh) == "probes"  # its burn-in is 400
+    same_burn_in = _ws_spec(dataclasses.replace(probe, burn_in=200), checkpoints=[40])
+    assert same_burn_in.probes[1] == pinned
+    assert "ladders" in mipt._protocol_difference(loaded.spec, same_burn_in)
+    with pytest.raises(ValueError, match="ladders .* differs"):
+        mipt.EnsembleResult.concatenate([loaded, same_burn_in.run(1, seed=9, first_trajectory=5)])
+
+
+def test_files_without_a_stored_plan_pin_their_burn_in(tmp_path, monkeypatch):
+    """A record as the probe's first version wrote it (n_defaults, no plan) loads with the
+    burn-in it stored, not the current default; a stored plan that does not fit is refused."""
+    _, _, result = _save_with_old_rules(tmp_path)
+    path = tmp_path / "run.npz"
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files}
+    meta = json.loads(str(arrays["__meta__"]))
+    record = meta["probes"][1]
+    plan = record.pop("plan")
+    record["n_defaults"] = ["burn_in"]
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(path, **arrays)
+    monkeypatch.setattr(erasures, "MIN_BURN_IN", 400)
+    loaded = mipt.EnsembleResult.load(path)
+    assert loaded.spec.probes[1].burn_in == 200
+    np.testing.assert_array_equal(loaded.replay(1).values["ce"][0], result.values["ce"][1])
+    record["plan"] = dict(plan, graph_class=[0, 0])  # one graph, two classes listed
+    arrays["__meta__"] = np.array(json.dumps(meta))
+    np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="stored plan of probe 'ce' does not fit"):
+        mipt.EnsembleResult.load(path)
+
+
+def test_working_memory_of_all_running_threads_is_bounded(monkeypatch, ws_run):
+    spec, _ = ws_run
+    per_thread = spec.correlated_bytes_per_thread()
+    assert per_thread == 8 * len(COUPLINGS) * spec.probes[1].samples * (max(SIZES) + 1)
+    assert (
+        _ring_spec(
+            probe=mipt.code_dimension(), probes=[mipt.code_dimension()]
+        ).correlated_bytes_per_thread()
+        == 0
+    )
+    running = min(3, numba.config.NUMBA_NUM_THREADS)
+    monkeypatch.setattr(mipt, "MAX_WORKING_BYTES", running * per_thread - 1)
+    with pytest.raises(ValueError, match=f"in each of {running} running threads"):
+        spec.run(running, seed=1, num_threads=running)
+    if running > 1:  # fewer threads, or fewer trajectories than threads, fit
+        assert spec.run(running, seed=1, num_threads=running - 1).num_trajectories == running
+        assert spec.run(running - 1, seed=1, num_threads=running).num_trajectories == running - 1
 
 
 def test_save_and_load_round_trip(tmp_path, ws_run):
