@@ -91,7 +91,7 @@ SELECTED = (1, 2, 4, 8, 12, 16)  # sizes m = n * s / 32
 LARGE_N = 128  # the second fit uses n >= LARGE_N only
 PROFILE_CAP = 192  # Li-Fisher's mean interval information is computed for lengths up to this
 GH = {"p_c": 0.1593, "nu": 1.28, "A": 7.3}  # Gullans and Huse, Fig. 2 (near-critical fit)
-GH_MIN_P = 0.1  # the near-critical form is read from here to p_c; it gives 0.69 at p = 0
+GH_MIN_P = 0.1  # the near-critical form is read from here to p_c; it gives 0.70 at p = 0
 LITERATURE: dict[str, Any] = {
     "li_fisher_gamma1": 0.38,  # PRB 103, 104306 (2021): |A|* (mean I = 1 bit), p = 0.04-0.12
     "li_vijay_fisher_beta": 1 / 3,  # PRX Quantum 4, 010331 (2023): DPRE roughness exponent
@@ -695,8 +695,14 @@ def verdicts(r: dict) -> list[str]:
         )
         if falls:
             near = " near p_c" if all(x[1] >= GH_MIN_P for x in falls) else ""
+            noise = all(-x[5] <= 2 * x[6] for x in falls)
+            how = (
+                "does not rise from J = 0 to 2 (it falls, within 2 standard errors)"
+                if noise
+                else "falls with J from 0 to 2"
+            )
             text += (
-                f" At m = n/2{near} the mean instead falls slightly with J from 0 to 2: "
+                f" At m = n/2{near} the mean {how}: "
                 + "; ".join(
                     f"n = {n}, p = {p:g}, m = {m}: {a:.4f} -> {b:.4f} ({d / s:+.1f} standard errors)"
                     for n, p, m, a, b, d, s in falls
