@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "run_circuit",
     "run_ensemble",
     "estimate_ensemble",
+    "benchmark_ensemble",
     "start_ensemble_job",
     "job_status",
     "cancel_job",
@@ -162,6 +163,22 @@ def test_estimate_tool():
     assert with_threads == api.estimate_ensemble(SPEC, 10, threads=[1, 4])
     text = error_text(call("estimate_ensemble", {"spec": SPEC, "trajectories": 10, "threads": [0]}))
     assert "threads" in text
+
+
+def test_benchmark_tool(tmp_path):
+    tools = session(lambda c: c.list_tools()).tools
+    (tool,) = [t for t in tools if t.name == "benchmark_ensemble"]
+    assert tool.annotations.read_only_hint  # it writes nothing
+    args = {"spec": SPEC, "trajectories": 20, "threads": [1, 64], "seconds": 1}
+    out = ok(call("benchmark_ensemble", args))
+    assert out["trajectories"] == 20
+    assert [row["threads"] for row in out["projected"]] == [1, 64]
+    assert out["storage"]["disk_megabytes"] > 0
+    # a call takes up to about twice `seconds`: more than half the synchronous limit is refused
+    text = error_text(call("benchmark_ensemble", {**args, "seconds": 31}))
+    assert "seconds" in text and "at most 30" in text
+    assert "seconds" in error_text(call("benchmark_ensemble", {**args, "seconds": 0}))
+    assert "threads" in error_text(call("benchmark_ensemble", {**args, "threads": [0]}))
 
 
 def test_job_tools_lifecycle(tmp_path):

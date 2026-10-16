@@ -14,7 +14,7 @@ import json
 import shlex
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -31,8 +31,9 @@ examples:
   M 0 1' | sparsegf2 run - --shots 1000 --seed 1
   sparsegf2 inspect circuit.stim
   sparsegf2 ensemble spec.json --trajectories 1000 --seed 7 --output-dir runs/p010
+  sparsegf2 benchmark spec.json --trajectories 100000 --threads 1 32
   sparsegf2 results runs/p010
-  sparsegf2 mcp                      # MCP server over stdio (for Claude and other agents)
+  sparsegf2 mcp                   # MCP server over stdio (for Claude and other agents)
 
 Every command accepts --json: one JSON object on stdout, logs on stderr.
 Exit codes: 0 ok, 2 invalid input (also: inspect of an invalid circuit),
@@ -70,6 +71,17 @@ SPEC.json holds MonitoredCircuit parameters, e.g.
 or {"spec": {...}, "trajectories": N, "seed": S} (flags override the file).
 With --chunk-size the run is saved chunk by chunk to --output-dir and can be
 resumed by running the same command again.
+"""
+
+_BENCHMARK_HELP = """\
+examples:
+  sparsegf2 benchmark spec.json --trajectories 100000 --threads 1 32
+  sparsegf2 benchmark spec.json --trajectories 5000 --seconds 10 --json
+
+Times the first trajectories of the run on one thread and on as many as this machine
+has, then projects the seconds of the whole run to each count in --threads (counts
+beyond the machine's threads are projected with the simulator's thread model), and
+measures the size of result.npz. Writes nothing. SPEC.json is read as by ensemble.
 """
 
 _RESULTS_HELP = """\
@@ -179,6 +191,35 @@ def _build_parser() -> _Parser:
         "--chunk-size", type=int, default=None, help="run in resumable chunks (needs --output-dir)"
     )
     p.add_argument("--threads", type=int, default=None, help="limit the number of CPU threads")
+
+    p = add(
+        "benchmark",
+        "Measure the speed and storage of an ensemble on this machine; writes nothing.",
+        _BENCHMARK_HELP,
+    )
+    p.add_argument("spec", metavar="SPEC.json", help="spec file, or - for stdin")
+    p.add_argument(
+        "--trajectories",
+        type=int,
+        default=None,
+        help="trajectories of the planned run (default for a graph collection: all its circuits)",
+    )
+    p.add_argument(
+        "--threads",
+        type=int,
+        nargs="+",
+        default=None,
+        help="thread counts to report (default: 1 and every thread Numba can use)",
+    )
+    p.add_argument(
+        "--seconds",
+        type=float,
+        default=30.0,
+        help="time target per measurement; the call takes up to about twice this (default 30)",
+    )
+    p.add_argument(
+        "--seed", type=int, default=None, help="random seed (default: from file, else 0)"
+    )
 
     p = add(
         "results", "Summarize a saved ensemble (result.npz or an output directory).", _RESULTS_HELP
@@ -314,9 +355,8 @@ def _cmd_run(args: argparse.Namespace) -> _Outcome:
     return result, EXIT_OK
 
 
-def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
-    from sparsegf2 import api
-
+def _read_spec_file(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    """``(spec, trajectories, seed)`` from SPEC.json, the flags overriding the file."""
     data = _read_json(_read_text(args.spec), "SPEC.json")
     if isinstance(data, dict) and "spec" in data:
         # graph_file is the record of a graph file that a run writes beside its spec
@@ -331,6 +371,59 @@ def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
         spec, trajectories, seed = data, None, None
     trajectories = args.trajectories if args.trajectories is not None else trajectories
     seed = args.seed if args.seed is not None else seed
+    return spec, trajectories, seed
+
+
+def _cmd_benchmark(args: argparse.Namespace) -> _Outcome:
+    from sparsegf2 import api
+
+    spec, trajectories, seed = _read_spec_file(args)
+    _log("benchmarking (this takes about twice --seconds, plus the first compile)")
+    result = api.benchmark_ensemble(
+        spec,
+        trajectories,
+        threads=args.threads,
+        seconds=args.seconds,
+        seed=0 if seed is None else seed,
+    )
+    return result, EXIT_OK
+
+
+def _human_benchmark(result: dict[str, Any]) -> list[str]:
+    """A short table of a :func:`sparsegf2.api.benchmark_ensemble` result."""
+    storage = result["storage"]
+    lines = [
+        f"{result['trajectories']} trajectories, seed {result['seed']}; this process has "
+        f"{result['threads_available']} threads ({result['cpus']} cpus); warm-up "
+        f"{result['warmup_seconds']} s",
+        "",
+        "measured     threads  trajectories  seconds  trajectories/s",
+    ]
+    lines += [
+        f"             {m['threads']:>7}  {m['trajectories']:>12}  {m['seconds']:>7}  "
+        f"{m['trajectories_per_second']:>14}"
+        for m in result["measured"]
+    ]
+    lines += ["", "projected    threads  seconds (whole run)  basis"]
+    lines += [
+        f"             {row['threads']:>7}  {row['seconds']:>19}  {row['basis']}"
+        for row in result["projected"]
+    ]
+    lines += [
+        "",
+        f"estimate_ensemble said {result['estimated_seconds']} s; measured / estimated per "
+        f"trajectory = {result['estimate_ratio']}",
+        f"storage: disk {storage['disk_megabytes']} MB (result.npz), memory "
+        f"{storage['memory_megabytes']} MB",
+    ]
+    lines += [f"note: {note}" for note in result.get("notes", [])]
+    return lines
+
+
+def _cmd_ensemble(args: argparse.Namespace) -> _Outcome:
+    from sparsegf2 import api
+
+    spec, trajectories, seed = _read_spec_file(args)
     # Without a count the API decides: a graph collection (graph.realizations, or a graph
     # file holding several graphs) runs all of its circuits, a resumed job runs to its
     # stored target, and a single graph is refused with a message.
@@ -419,8 +512,12 @@ _COMMANDS = {
     "inspect": _cmd_inspect,
     "run": _cmd_run,
     "ensemble": _cmd_ensemble,
+    "benchmark": _cmd_benchmark,
     "results": _cmd_results,
 }
+
+# Commands whose result is shown as a table rather than as the generic listing.
+_TABLES: dict[str, Callable[[dict[str, Any]], list[str]]] = {"benchmark": _human_benchmark}
 
 
 def _error(kind: str, message: str, as_json: bool) -> None:
@@ -461,7 +558,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # report, never dump a traceback on stdout
         _error(type(exc).__name__, f"internal error: {exc}", as_json)
         return EXIT_INTERNAL
-    _emit(result, as_json)
+    if as_json or args.command not in _TABLES:
+        _emit(result, as_json)
+    else:
+        print("\n".join(_TABLES[args.command](result)))
     if not as_json:
         _log(f"done in {time.perf_counter() - start:.2f} s")
     return code

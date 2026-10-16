@@ -129,6 +129,21 @@ it). Otherwise the arguments of run_ensemble.
 Example: {"spec": {"num_system": 256, "graph": {"family": "cycle"}, "layers": 2048,
  "measurement_rate": 0.1, "reference": "single"}, "trajectories": 10000, "threads": [1, 32]}"""
 
+_BENCHMARK = """\
+Measure what a run costs on this machine, before running it. After a warm-up (one trajectory,
+which compiles the kernels) it times the first trajectories of the run on one thread and on as
+many as this process has, doubling the count until a run takes seconds / 4. It returns
+measured timings; projected, the seconds of the whole run for each count in threads (counts
+beyond the machine's threads are projected with the simulator's thread model and say so);
+estimate_ratio, measured over estimated time per trajectory; and storage: disk_megabytes of
+result.npz (compressed, measured on a sample) and memory_megabytes. It writes nothing and takes
+up to about 2 x seconds plus the warm-up (seconds at most 30 here). Same spec and
+trajectories as run_ensemble; threads defaults to [1, all].
+
+Example: {"spec": {"num_system": 64, "graph": {"family": "cycle"}, "layers": 512,
+ "measurement_rate": 0.1, "reference": "single", "probes": [{"kind": "code_dimension"}]},
+ "trajectories": 100000, "threads": [1, 32], "seconds": 10}"""
+
 _START_JOB = """\
 Start a long ensemble as a background job; returns immediately with a job_id. The run is
 split into chunks (chunk_size trajectories, default about 10 s each), each saved under
@@ -331,6 +346,26 @@ def build_server() -> Any:
         threads: list[Int] | None = None,
     ) -> Result:
         return call(api.estimate_ensemble, spec, trajectories, threads)
+
+    # A call takes up to about twice `seconds` (plus the warm-up): keep it within the limit
+    # for synchronous calls.
+    max_benchmark_seconds = api.SYNC_ENSEMBLE_MAX_SECONDS / 2
+
+    @server.tool(description=_BENCHMARK, annotations=read_only)
+    def benchmark_ensemble(
+        spec: dict[str, Any],
+        trajectories: Int | None = None,
+        threads: list[Int] | None = None,
+        seconds: StrictFloat = 30.0,
+        seed: Int = 0,
+    ) -> Result:
+        if seconds > max_benchmark_seconds:
+            raise ToolError(
+                f"seconds must be at most {max_benchmark_seconds:g} here (a call takes up to "
+                f"twice that, and calls above {api.SYNC_ENSEMBLE_MAX_SECONDS:g} s time out); "
+                "use sparsegf2 benchmark in a shell for longer measurements"
+            )
+        return call(api.benchmark_ensemble, spec, trajectories, threads, seconds, seed)
 
     @server.tool(description=_START_JOB, annotations=computes)
     def start_ensemble_job(

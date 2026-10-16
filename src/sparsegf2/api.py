@@ -25,7 +25,11 @@ Functions
     (:class:`sparsegf2.mipt.MonitoredCircuit`) and summarize the probes and
     the purification statistics.
 :func:`estimate_ensemble`
-    A rough runtime estimate for :func:`run_ensemble`.
+    A rough runtime estimate for :func:`run_ensemble`, with the layout of the
+    saved result.
+:func:`benchmark_ensemble`
+    Measured speed and storage of a run on this machine, projected to other
+    thread counts; writes nothing.
 :func:`start_ensemble_job`, :func:`job_status`, :func:`cancel_job`, :func:`list_jobs`
     The same ensembles as resumable background jobs, saved chunk by chunk.
 :func:`load_results`
@@ -76,8 +80,10 @@ from sparsegf2.sampling import sample
 from sparsegf2.simulator import Simulator
 
 __all__ = [
+    "MAX_BENCHMARK_SECONDS",
     "MAX_OUTPUT_CHARS",
     "SYNC_ENSEMBLE_MAX_SECONDS",
+    "benchmark_ensemble",
     "cancel_job",
     "capabilities",
     "estimate_ensemble",
@@ -2158,6 +2164,175 @@ def estimate_ensemble(
     return out
 
 
+MAX_BENCHMARK_SECONDS = 600.0
+"""Largest ``seconds`` that :func:`benchmark_ensemble` accepts."""
+
+
+def _projected_rate(r1: float, rp: float | None, p: int, busy: int) -> float:
+    """Trajectories per second with ``busy`` busy threads, from measured rates.
+
+    ``r1`` is the measured rate on one thread; ``rp`` the measured rate on ``p``
+    threads (``None`` when only one thread was measured). The simulator's thread
+    model (:func:`_parallel_threads`) gives the shape, and a constant calibrates
+    it so that it reproduces the measured ``p``-thread rate; one busy thread is
+    the measured one-thread rate itself.
+    """
+    f = _parallel_threads
+    if busy == 1:
+        return r1  # measured
+    scale = 1.0 if rp is None or p == 1 else rp / (r1 * f(p) / f(1))
+    return r1 * f(busy) / f(1) * scale
+
+
+def _measure(
+    mc: mipt.MonitoredCircuit, threads: int, first: int, limit: int, seconds: float, seed: int
+) -> tuple[mipt.EnsembleResult, float]:
+    """Run the run's first ``k`` trajectories on ``threads`` threads, doubling ``k`` from
+    ``first`` until a run takes ``seconds / 4`` or ``k`` reaches ``limit``; the last run and its
+    wall-clock seconds."""
+    k = first
+    while True:
+        start = time.perf_counter()
+        with _COMPUTE_LOCK:
+            result = mc.run(k, seed=seed, num_threads=threads)
+        elapsed = time.perf_counter() - start
+        if elapsed >= seconds / 4 or k >= limit:
+            return result, elapsed
+        k = min(limit, 2 * k)
+
+
+def _file_bytes(result: mipt.EnsembleResult, directory: Path) -> int:
+    """The size of ``result`` saved as ``directory/result.npz``, the file a run keeps."""
+    path = directory / _RESULT_FILE
+    result.save(path)
+    return path.stat().st_size
+
+
+def benchmark_ensemble(
+    spec: dict[str, Any],
+    trajectories: int | None = None,
+    threads: list[int] | None = None,
+    seconds: float = 30.0,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Measure the speed and storage of a run on this machine; write nothing.
+
+    After a warm-up (one trajectory, which compiles the kernels), the first
+    trajectories of the run (seed ``seed``) are timed on one thread and on
+    ``P = min(max(threads), available, trajectories)`` threads, where
+    ``available`` is the most threads Numba can use here. Each measurement doubles
+    its trajectory count until a run takes ``seconds / 4``, so the call takes up to
+    about ``2 * seconds`` plus the warm-up. ``threads`` defaults to
+    ``[1, available]``.
+
+    ``measured`` lists the timings. ``projected`` gives, for each count in
+    ``threads``, the seconds the whole run would take (the trajectories only, not
+    building the spec and its graphs), calibrated to the measured rates; a count
+    beyond the ``P`` measured is projected with the simulator's thread model
+    (``basis``: ``"projected"``), and a count beyond the threads of this process
+    gets a note. ``estimate_ratio`` is the measured seconds per trajectory at
+    ``P`` threads over :func:`estimate_ensemble`'s, to scale cheap estimates.
+    ``storage`` gives the megabytes of ``result.npz`` (compressed, measured on
+    the sample and scaled to all trajectories) and of the result in memory. The
+    sample is saved in a temporary folder that is removed.
+    """
+    import tempfile
+
+    import numba
+
+    mc = _build_spec(spec)
+    trajectories = _trajectory_count(mc, trajectories)
+    seconds = _require_number(seconds, "seconds", 0.0, MAX_BENCHMARK_SECONDS)
+    if seconds <= 0:
+        raise ValueError(f"seconds must be positive (at most {MAX_BENCHMARK_SECONDS:g}), got 0")
+    seed = _require_int(seed, "seed", minimum=0, maximum=None)
+    max_threads = int(numba.config.NUMBA_NUM_THREADS)
+    counts = sorted({1, max_threads}) if threads is None else _require_thread_counts(threads)
+    p = min(max(counts), max_threads, trajectories)
+    notes: list[str] = []
+    if any(job.status == "running" for job in _JOBS.values()):
+        notes.append("a background job was running: the timings are lower than an idle machine's")
+
+    start = time.perf_counter()
+    with _COMPUTE_LOCK:
+        first = mc.run(1, seed=seed, num_threads=1)
+        if p > 1:  # the first parallel region starts the thread pool
+            mc.run(p, seed=seed, num_threads=p)
+    warmup = time.perf_counter() - start
+
+    one, one_seconds = _measure(mc, 1, 1, trajectories, seconds, seed)
+    measured = [(1, one.num_trajectories, one_seconds)]
+    sample, sample_seconds = one, one_seconds
+    if p > 1:
+        sample, sample_seconds = _measure(mc, p, p, trajectories, seconds, seed)
+        measured.append((p, sample.num_trajectories, sample_seconds))
+    r1 = one.num_trajectories / one_seconds
+    rp = None if p == 1 else sample.num_trajectories / sample_seconds
+
+    projected = []
+    for t in counts:
+        busy = min(t, trajectories)
+        rate = _projected_rate(r1, rp, p, busy)
+        projected.append(
+            {
+                "threads": t,
+                "seconds": _num(trajectories / rate),
+                "basis": "measured" if busy in (1, p) else "projected",
+            }
+        )
+    if max(counts) > max_threads:
+        notes.append(
+            f"counts above {max_threads} are projected beyond the {max_threads} threads this "
+            "process has, with the simulator's thread model"
+        )
+    notes.append("seconds are for the trajectories; building the spec and its graphs is extra")
+
+    rate_p = r1 if rp is None else rp
+    modelled = _trajectory_us(mc) * 1e-6 / _parallel_threads(p)  # seconds per trajectory
+    with tempfile.TemporaryDirectory(prefix="sparsegf2-benchmark-") as folder:
+        one_bytes = _file_bytes(first, Path(folder))
+        big_bytes = _file_bytes(sample, Path(folder))
+    k = sample.num_trajectories
+    if k > 1 and big_bytes > one_bytes:
+        # the file has a part that does not grow with the trajectories (the graphs, the
+        # gate set): the growth per trajectory is what two sample sizes show
+        disk = one_bytes + (big_bytes - one_bytes) / (k - 1) * (trajectories - 1)
+    else:
+        disk = max(one_bytes, big_bytes) * trajectories / k
+        if k == 1 and trajectories > 1:
+            notes.append(
+                "disk_megabytes is an upper bound: one trajectory took longer than seconds / 4, "
+                "so its fixed part (graphs, spec) was scaled with the rest"
+            )
+    return {
+        "trajectories": trajectories,
+        "seed": seed,
+        "threads_available": max_threads,
+        "cpus": len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else os.cpu_count(),
+        "estimated_seconds": _num(_estimate_seconds(spec, mc, trajectories)),
+        "warmup_seconds": _num(warmup),
+        "measured": [
+            {
+                "threads": t,
+                "trajectories": count,
+                "seconds": _num(elapsed),
+                "trajectories_per_second": _num(count / elapsed),
+            }
+            for t, count, elapsed in measured
+        ],
+        "projected": projected,
+        "estimate_ratio": _num(1.0 / rate_p / modelled),
+        "storage": {
+            "sample_trajectories": k,
+            "disk_megabytes": _num(disk / 1e6),
+            "memory_megabytes": _num(_result_bytes(mc, trajectories) / 1e6),
+        },
+        "notes": notes,
+    }
+
+
 _SCAN_KINDS = ("contiguous_distance", "erasure_first_failure")  # stop at the first failure
 
 
@@ -4195,6 +4370,7 @@ def _capability_sections() -> dict[str, Any]:
             "run_circuit",
             "run_ensemble",
             "estimate_ensemble",
+            "benchmark_ensemble",
             "start_ensemble_job",
             "job_status",
             "cancel_job",
