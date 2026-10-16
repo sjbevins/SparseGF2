@@ -664,7 +664,9 @@ seeded `[seed, i]`) for at most 12 couplings and returns `graph` (with its `geom
   `ess_boundary`, `slowest`, `r_hat`, `r_hat_limit`, `r_hat_at`, `min_boundary_seen`,
   `exact` and `deviation_se`. `stderr = sqrt(variance / ess_boundary)`, the effective
   sample size of the boundary itself; `tau_int` (largest) and `ess` (smallest) are over the
-  boundary and the membership of 8 spread nodes, `slowest` says which. `r_hat` is the
+  boundary and the membership of 8 spread nodes, `slowest` says which. `ess` and
+  `ess_boundary` are capped at `chains x samples` (the estimated `tau_int` of a short
+  series can fall below 1 from noise; `tau_int` is left as estimated). `r_hat` is the
   R-hat of the series (the boundary or a node, `r_hat_at`) furthest above its own
   `r_hat_limit`: the 99% point of the F distribution of the split R-hat for stationary
   draws of that series' autocorrelation, shared over the `2 x 9 x couplings` series
