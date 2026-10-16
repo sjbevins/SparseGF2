@@ -453,3 +453,203 @@ def test_core_works_without_mcp_installed():
     )  # fmt: skip
     assert proc.returncode == 2, proc.stderr
     assert "pip install 'sparsegf2[mcp]'" in json.loads(proc.stdout)["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# regions and curves: the erasure tools
+# ---------------------------------------------------------------------------
+
+
+def regions_argv(**flags: list[str] | None) -> list[str]:
+    """``sparsegf2 regions`` on a 32-node ring, with the given options replaced (None drops one)."""
+    options: dict[str, list[str] | None] = {
+        "family": ["cycle"], "n": ["32"], "size": ["8"], "couplings": ["0", "1", "2"],
+        "samples": ["100"], "seed": ["3"],
+    }  # fmt: skip
+    options.update(flags)
+    argv = ["regions"]
+    for name, values in options.items():
+        if values is not None:
+            argv += ["--" + name.replace("_", "-"), *values]
+    return argv
+
+
+def _timeless(data: dict) -> dict:
+    return {k: v for k, v in data.items() if k not in ("elapsed_seconds", "estimated_seconds")}
+
+
+def test_regions_matches_the_api(capsys):
+    code, data = run_json(capsys, *regions_argv())
+    assert code == 0
+    expected = api.sample_erasure_regions(
+        {"family": "cycle"}, 8, [0, 1, 2], 100, num_nodes=32, seed=3
+    )
+    assert _timeless(data) == _timeless(json.loads(json.dumps(expected)))
+    assert data["method"] == "exact" and data["seed"] == 3
+
+
+def test_regions_family_parameters_and_options(capsys):
+    argv = regions_argv(
+        family=["watts_strogatz"], n=["24"], k=["4"], beta=["0.2"], graph_seed=["5"], size=["6"],
+        couplings=["-1", "0", "1.5"], samples=["40"], chains=["2"], burn_in=["30"], thin=["2"],
+        seed=["9"], method=["chain"], max_step=["0.5"], no_tempering=[],
+    )  # fmt: skip
+    code, data = run_json(capsys, *argv)
+    assert code == 0, data
+    graph = {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 5}
+    expected = api.sample_erasure_regions(
+        graph, 6, [-1, 0, 1.5], 40, num_nodes=24, seed=9, chains=2, burn_in=30, thin=2,
+        tempering=False, method="chain", max_step=0.5,
+    )  # fmt: skip
+    assert _timeless(data) == _timeless(json.loads(json.dumps(expected)))
+    assert data["tempering"] is False and data["burn_in"] == 30 and data["thin"] == 2
+    # another family parameter, as JSON
+    argv = regions_argv(
+        family=["erdos_renyi"], n=["16"], graph_param=["p=0.3"], graph_seed=["1"], size=["4"],
+        couplings=["0", "1"], samples=["30"],
+    )  # fmt: skip
+    code, data = run_json(capsys, *argv)
+    assert code == 0, data
+    assert data["graph"]["family"] == "erdos_renyi"
+
+
+def test_regions_reads_a_graph_file(capsys, tmp_path):
+    n = 12
+    graphs.save(tmp_path / "g.npz", [graphs.watts_strogatz(n, 4, 0.3, seed=2)], n)
+    argv = regions_argv(
+        family=None, n=None, graph=[str(tmp_path / "g.npz")], size=["4"], couplings=["0", "1"],
+        samples=["30"], seed=["1"],
+    )  # fmt: skip
+    code, data = run_json(capsys, *argv)
+    assert code == 0, data
+    assert data["graph"]["num_nodes"] == n and data["graph"]["family"] == "file"
+
+
+def test_regions_table(capsys):
+    code, out, err = run_cli(capsys, *regions_argv())
+    assert code == 0 and "done in" in err
+    assert "mean b" in out and "R-hat" in out and "Proposition 2" in out
+    assert "ring closed form" in out and "example regions at J = 2" in out
+    rows = [line for line in out.splitlines() if line.lstrip().startswith(("0 ", "1 ", "2 "))]
+    assert len(rows) >= 3  # one line per coupling
+    argv = regions_argv(
+        family=["watts_strogatz"], n=["64"], k=["4"], beta=["0.1"], graph_seed=["1"],
+        size=["16"], couplings=["0", "2"], samples=["40"], burn_in=["5"], seed=["1"],
+    )  # fmt: skip
+    code, out, _ = run_cli(capsys, *argv)
+    assert code == 0 and "swap chain, burn-in 5 sweeps" in out and "mixing:" in out
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        ({"size": ["40"]}, "size must be between 1 and 31"),
+        ({"couplings": ["0", "0"]}, "distinct"),
+        ({"samples": ["2"]}, "samples must be at least 8"),
+        ({"graph_param": ["oops"]}, "KEY=VALUE"),
+        ({"graph": ["x.npz"]}, "carries its own graph"),
+        ({"method": ["magic"]}, "method must be"),
+        ({"ladder": ["dense"]}, "--ladder takes"),
+        ({"max_seconds": ["0"]}, "max_seconds=0"),
+    ],
+)
+def test_regions_errors_exit_2(capsys, flags, message):
+    code, data = run_json(capsys, *regions_argv(**flags))
+    assert code == 2, data
+    assert data["error"]["type"] == "ValidationError" and message in data["error"]["message"]
+
+
+def test_regions_needs_a_graph_and_the_required_options(capsys):
+    code, data = run_json(capsys, *regions_argv(family=None, n=None))
+    assert code == 2 and "give the graph" in data["error"]["message"]
+    code, data = run_json(capsys, *regions_argv(size=None))
+    assert code == 2 and data["error"]["type"] == "UsageError"
+    assert "--size" in data["error"]["message"]
+    code, data = run_json(capsys, *regions_argv(n=None))
+    assert code == 2 and "give num_nodes" in data["error"]["message"]
+
+
+def test_regions_refuses_what_would_take_minutes(capsys):
+    argv = regions_argv(
+        family=["watts_strogatz"], n=["2000"], k=["4"], beta=["0.1"], graph_seed=["1"],
+        size=["500"], samples=["2000"], chains=["8"],
+    )  # fmt: skip
+    code, data = run_json(capsys, *argv)
+    assert code == 2 and "estimated at about" in data["error"]["message"]
+    assert "--max-seconds" in data["error"]["message"]
+
+
+@pytest.fixture(scope="module")
+def erasure_run(tmp_path_factory) -> Path:
+    spec = {
+        "num_system": 12, "graph": {"family": "cycle"}, "layers": 16, "measurement_rate": 0.1,
+        "schedule": "matching", "reference": "purification", "checkpoints": [8, 16],
+        "probes": [
+            {"kind": "code_dimension"},
+            {"kind": "erasure_first_failure", "samples": 100},
+            {"kind": "uncorrectable_region_counts", "max_size": 2},
+            {"kind": "correlated_erasure", "couplings": [0, 1.5], "samples": 60},
+        ],
+    }  # fmt: skip
+    out = tmp_path_factory.mktemp("cli_curves") / "run"
+    api.run_ensemble(spec, 30, seed=4, output_dir=str(out))
+    return out
+
+
+def test_curves_matches_the_api(capsys, erasure_run):
+    code, data = run_json(
+        capsys, "curves", str(erasure_run), "--eps", "0.05", "0.1", "0.3", "--delta", "0.05",
+        "--layer", "8",
+    )  # fmt: skip
+    assert code == 0, data
+    expected = api.erasure_curves(str(erasure_run), [0.05, 0.1, 0.3], 0.05, 8)
+    assert data == json.loads(json.dumps(expected))
+    assert data["layer"] == 8 and data["uniform"]["erasure_first_failure"]["layer"] == 8
+    code, data = run_json(capsys, "curves", str(erasure_run / "result.npz"))
+    assert code == 0 and len(data["e"]) >= 4
+
+
+def test_curves_table(capsys, erasure_run):
+    code, out, err = run_cli(capsys, "curves", str(erasure_run), "--eps", "0.05", "0.1", "0.3")
+    assert code == 0 and "done in" in err
+    assert "independent erasure" in out and "correlated erasure" in out
+    assert "Phi J=0" in out and "Phi J=1.5" in out and "e_delta" in out and "stderr" in out
+    assert "hold a code" in out
+
+
+def test_curves_errors_exit_2(capsys, erasure_run, tmp_path):
+    code, data = run_json(capsys, "curves", str(tmp_path / "nowhere"))
+    assert code == 2 and "no such file or directory" in data["error"]["message"]
+    code, data = run_json(capsys, "curves", str(erasure_run), "--layer", "7")
+    assert code == 2 and "layer 7 was not evaluated" in data["error"]["message"]
+    code, data = run_json(capsys, "curves", str(erasure_run), "--delta", "3")
+    assert code == 2 and "delta must be in [0, 1]" in data["error"]["message"]
+    code, data = run_json(capsys, "curves", str(erasure_run), "--eps", "2")
+    assert code == 2 and "e must be numbers in [0, 1]" in data["error"]["message"]
+    plain = {**SPEC, "probes": [{"kind": "code_dimension"}]}
+    api.run_ensemble(plain, 3, seed=1, output_dir=str(tmp_path / "plain"))
+    code, data = run_json(capsys, "curves", str(tmp_path / "plain"))
+    assert code == 2
+    assert "no erasure_first_failure or correlated_erasure probe" in data["error"]["message"]
+    code, data = run_json(capsys, "curves")
+    assert code == 2 and data["error"]["type"] == "UsageError"
+
+
+def test_erasure_commands_help_starts_with_examples(capsys):
+    for argv in (["regions", "--help"], ["curves", "--help"]):
+        code, out, _ = run_cli(capsys, *argv)
+        assert code == 0
+        assert out.split("\n\n", 1)[1].startswith("examples:"), argv
+
+
+def test_internal_errors_of_the_erasure_commands_exit_1(capsys, monkeypatch, erasure_run):
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(api, "erasure_curves", boom)
+    code, data = run_json(capsys, "curves", str(erasure_run))
+    assert code == 1
+    assert data["error"] == {"type": "RuntimeError", "message": "internal error: kaboom"}
+    monkeypatch.setattr(api, "sample_erasure_regions", boom)
+    code, data = run_json(capsys, *regions_argv())
+    assert code == 1 and data["error"]["message"] == "internal error: kaboom"
