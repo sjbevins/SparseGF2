@@ -24,6 +24,21 @@ then a basis of ``N(S)``, the latter marked), both have that form.
   once, ``P_J(m) = sum_b U_m(b) exp(-J b) / sum_b N_m(b) exp(-J b)``.
 * :func:`window_first_failure`: for every start along an order of the qubits,
   the length of the shortest failing contiguous window from there.
+* :func:`boundary_columns`: how many boundary columns the count arrays of
+  :func:`boundary_failure_counts` need (size them with it, from one place).
+
+**Arguments are checked.** Under the JIT an array that is too small is not an
+IndexError but a write past its end, so every kernel here validates what it
+is given before it writes anything, and raises ``ValueError`` (in compiled code
+too) when: the tableau has fewer than ``2 n_sys`` column rows or ``ws``
+words, or ``ref_rows`` fewer than ``ws`` words; an output or ``scratch`` is
+smaller than documented; the graph is not a CSR of ``n_sys`` nodes without
+self-loops; a region or order lists a qubit outside the system or twice; or
+the ``k`` passed to :func:`region_failures` is not the number of logical qubits
+of the tableau (``I(system : R) != 2k``). In the engine's layout
+``k = popcount(ref_rows) - num_ref`` (as
+:func:`.entropy.contiguous_distance_rows` computes it); for a
+:class:`sparsegf2.codes.StabilizerCode` it is ``num_logical``.
 
 Nothing here draws random numbers.
 """
@@ -38,12 +53,29 @@ from sparsegf2._kernel.entropy import basis_add, basis_clear, code_columns, lost
 
 
 @njit(cache=True)
+def _check_tableau(tab, ws, ref_rows, n_sys):
+    """Refuse a tableau that cannot hold ``n_sys`` system qubits of ``ws`` words."""
+    if n_sys < 0 or ws < 1 or tab.shape[0] < 2 * n_sys or tab.shape[1] < ws:
+        raise ValueError("the tableau needs at least 2 n_sys column rows of ws >= 1 words")
+    if ref_rows.shape[0] < ws:
+        raise ValueError("ref_rows needs at least ws words")
+
+
+@njit(cache=True)
+def _logical_bits(tab, ws, ref_rows, n_sys):
+    """``I(system : R) = 2 S(R) = 2k`` (the system and ``R`` together are pure); 0 for no system."""
+    everything = np.arange(n_sys)
+    scratch = np.zeros((2 * n_sys, ws), dtype=np.uint64)
+    return lost_information_rows(tab, ws, everything, ref_rows, scratch)
+
+
+@njit(cache=True)
 def region_failures(tab, ws, ref_rows, n_sys, k, regions, scratch, out):
     """``out[r] = 1[I(A_r : R) > 0]`` for each row ``A_r`` of ``regions``.
 
     ``regions`` is int64[R, m]: each row lists ``m`` distinct system qubits of
     ``0..n_sys-1`` (any order); ``k = S(R)`` is the number of logical qubits.
-    ``out`` is uint8[R]. ``scratch`` is uint64 of shape at least
+    ``out`` is uint8[R] (at least). ``scratch`` is uint64 of shape at least
     ``(max(2 min(m, n_sys - m), 1), ws)``. ``I(A:R)`` is
     :func:`.entropy.lost_information_rows`: the rank of the columns of ``A``
     over all rows minus their rank over the rows outside ``ref_rows``, two
@@ -57,16 +89,45 @@ def region_failures(tab, ws, ref_rows, n_sys, k, regions, scratch, out):
     ``I(Ā:R) < 2k``. That bounds the eliminations by ``2 min(m, n_sys - m)``
     columns, about four times less work on average over ``m``. ``m = 0``
     gives 0, ``m = n_sys`` gives ``1[k > 0]``, and ``k = 0`` gives 0 without
-    any elimination.
+    any further elimination.
+
+    Checked first (``ValueError``, see the module docstring): the tableau
+    sizes, ``scratch`` and ``out``, every region's qubits (in range, distinct),
+    and ``k`` itself, by one elimination of all ``2 n_sys`` system columns
+    (``I(system : R)`` must be ``2k``) when there is at least one region.
     """
     count = regions.shape[0]
     m = regions.shape[1]
+    _check_tableau(tab, ws, ref_rows, n_sys)
+    if m > n_sys:
+        raise ValueError("region_failures: a region of m > n_sys distinct system qubits")
+    if scratch.shape[0] < max(2 * min(m, n_sys - m), 1) or scratch.shape[1] < ws:
+        raise ValueError(
+            "region_failures: scratch needs max(2 min(m, n_sys - m), 1) rows of ws words"
+        )
+    if out.shape[0] < count:
+        raise ValueError("region_failures: out needs one entry per region")
+    member = np.zeros(n_sys, dtype=np.uint8)
+    for r in range(count):
+        for j in range(m):
+            q = regions[r, j]
+            if q < 0 or q >= n_sys:
+                raise ValueError("region_failures: a region lists a qubit outside 0..n_sys-1")
+            if member[q]:
+                raise ValueError("region_failures: a region lists a qubit twice")
+            member[q] = 1
+        for j in range(m):
+            member[regions[r, j]] = 0
+    if count > 0 and _logical_bits(tab, ws, ref_rows, n_sys) != 2 * k:
+        raise ValueError(
+            "region_failures: k is not the number of logical qubits of this tableau "
+            "(I(system : R) != 2k)"
+        )
     if k == 0:
         for r in range(count):
             out[r] = 0
         return
     flip = 2 * m > n_sys
-    member = np.zeros(n_sys, dtype=np.uint8)
     other = np.empty(n_sys - m, dtype=np.int64)
     for r in range(count):
         if not flip:
@@ -84,6 +145,48 @@ def region_failures(tab, ws, ref_rows, n_sys, k, regions, scratch, out):
                 t += 1
         lost = lost_information_rows(tab, ws, other, ref_rows, scratch)
         out[r] = 1 if lost < 2 * k else 0
+
+
+@njit(cache=True)
+def _check_csr(indptr, indices, n_sys):
+    """Refuse anything but the CSR form of a graph on ``n_sys`` nodes without self-loops."""
+    if indptr.shape[0] != n_sys + 1 or indptr[0] != 0 or indptr[n_sys] != indices.shape[0]:
+        raise ValueError("the graph must be in CSR form on n_sys nodes (indptr of n_sys + 1)")
+    for v in range(n_sys):  # first, so that every index read below lies in indices
+        if indptr[v + 1] < indptr[v]:
+            raise ValueError("the graph's indptr must be nondecreasing")
+    for v in range(n_sys):
+        for j in range(indptr[v], indptr[v + 1]):
+            w = indices[j]
+            if w < 0 or w >= n_sys or w == v:
+                raise ValueError("the graph's neighbours must be other nodes in 0..n_sys-1")
+
+
+@njit(cache=True)
+def boundary_columns(indptr, max_size):
+    """The number of boundary columns ``B + 1`` that counts up to size ``max_size`` need.
+
+    ``indptr`` is the CSR row pointer of the graph (:func:`.erasure_chain.csr`;
+    every edge appears in the rows of both its ends). A region ``A`` with
+    ``|A| <= w`` has ``b(A) <= sum of the degrees in A <= the sum of the w
+    largest degrees``, and ``b(A) <= |E|``, so::
+
+        B = min(|E|, sum of the max_size largest degrees)
+
+    bounds every boundary :func:`boundary_failure_counts` can meet, which
+    refuses arrays with fewer columns. Size the count arrays with this, as
+    :meth:`sparsegf2.codes.StabilizerCode.boundary_failure_counts` and
+    :func:`sparsegf2.codes.boundary_columns` do. Callable from compiled code.
+    """
+    n = indptr.shape[0] - 1
+    degrees = np.empty(n, dtype=np.int64)
+    for v in range(n):
+        degrees[v] = indptr[v + 1] - indptr[v]
+    degrees.sort()
+    top = 0
+    for j in range(min(max_size, n)):
+        top += degrees[n - 1 - j]
+    return min(indptr[n] // 2, top) + 1
 
 
 @njit(cache=True)
@@ -124,9 +227,12 @@ def boundary_failure_counts(
     The regions are the ``m``-subsets ``A`` of the system qubits
     ``0..n_sys-1``; the graph (CSR, :func:`.erasure_chain.csr`) is on the same
     ``n_sys`` nodes, and ``b(A)`` is the number of its edges with exactly one
-    end in ``A``. Outputs, int64 of shape ``(max_size, B + 1)`` with ``B`` at
-    least the largest boundary of any region of size ``<= max_size`` (the sum
-    of the ``max_size`` largest degrees, or the number of edges, bounds it)::
+    end in ``A``. Outputs, int64 arrays of one shape, at least
+    ``(max_size, boundary_columns(indptr, max_size))`` (:func:`boundary_columns`:
+    ``B = min(|E|, sum of the max_size largest degrees)`` bounds every
+    boundary, so no count can fall outside; smaller arrays are refused with
+    ``ValueError``, as are a malformed graph and a tableau too small for
+    ``n_sys`` qubits); entries beyond are zeroed::
 
         out_total[m - 1, b]  = N_m(b) = #{A : |A| = m, b(A) = b}
         out_failed[m - 1, b] = U_m(b) = #{A : |A| = m, b(A) = b, I(A:R) > 0}
@@ -151,12 +257,23 @@ def boundary_failure_counts(
     rank computations are skipped (its boundary never is). With no logical
     qubits (``r == s``) nothing fails and no rank is computed.
     """
+    _check_tableau(tab, ws, ref_rows, n_sys)
+    _check_csr(indptr, indices, n_sys)
+    if max_size < 0:
+        raise ValueError("boundary_failure_counts: max_size must be non-negative")
+    if out_failed.shape[0] != out_total.shape[0] or out_failed.shape[1] != out_total.shape[1]:
+        raise ValueError("boundary_failure_counts: out_failed and out_total need the same shape")
+    if out_total.shape[0] < max_size or out_total.shape[1] < boundary_columns(indptr, max_size):
+        raise ValueError(
+            "boundary_failure_counts: the count arrays need max_size rows and "
+            "boundary_columns(indptr, max_size) columns"
+        )
     for i in range(out_total.shape[0]):
         for b in range(out_total.shape[1]):
             out_total[i, b] = 0
             out_failed[i, b] = 0
     w = max_size
-    if w <= 0 or n_sys == 0:
+    if w == 0 or n_sys == 0:
         return
     system = np.arange(n_sys)
     cols, s, r = code_columns(tab, ws, system, ref_rows)
@@ -241,8 +358,19 @@ def window_first_failure(tab, ws, ref_rows, order, periodic, out):
     basis is built for the window and kept up from then on, and the scan stops
     at the first ``L`` with ``rank_N > rank_S``. Cost ``O(n)`` incremental steps
     per start. With no logical qubits nothing fails and no rank is computed.
+    ``order`` must be a permutation of ``0..n-1`` and ``out`` hold ``n``
+    entries; otherwise, or for a tableau too small, ``ValueError``.
     """
     n = order.shape[0]
+    _check_tableau(tab, ws, ref_rows, n)
+    if out.shape[0] < n:
+        raise ValueError("window_first_failure: out needs one entry per start")
+    seen = np.zeros(n, dtype=np.uint8)
+    for j in range(n):
+        q = order[j]
+        if q < 0 or q >= n or seen[q]:
+            raise ValueError("window_first_failure: order must be a permutation of 0..n-1")
+        seen[q] = 1
     cols, s, r = code_columns(tab, ws, order, ref_rows)
     if r == s:
         for start in range(n):

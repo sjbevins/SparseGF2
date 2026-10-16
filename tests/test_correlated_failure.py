@@ -49,6 +49,8 @@ import pytest
 import _gf2_oracle as oracle
 import sparsegf2 as sg
 from sparsegf2 import analysis, erasures, graphs, mipt
+from sparsegf2 import codes as codes_module
+from sparsegf2._kernel import erasure_chain
 from sparsegf2._kernel import erasure_failure as kernel
 from sparsegf2.codes import BoundaryCounts, CorrelatedFailure, StabilizerCode
 
@@ -310,12 +312,24 @@ def test_exact_correlated_failure_broadcasts_and_pads():
 # ---------------------------------------------------------------------------------------
 
 
+ESS_FLOOR = 0.05
+"""The smallest effective share of the records the chain tests accept where 0.01 < p < 0.99."""
+
+
 def _within_errors(code, edges, result, exact, **sampler):
-    """|estimate - exact| <= 4 se + 2 / ESS for every coupling and size, se from the
-    effective sample size of the failure indicators of the very regions the estimate used
-    (reproduced with seed [seed, m]). The 2 / ESS allows for the discreteness of rare
-    failures (a single failing record when ESS p is 0.01, say). Returns the largest |z|
-    where the normal approximation holds (ESS p (1 - p) >= 10)."""
+    """|estimate - exact| <= 4 se + 2 / ESS for every coupling and size, se =
+    sqrt(p (1 - p) / ESS) with p the exact value.
+
+    The ESS is ``result.failure_ess``: S for exact samples, and for the chain the
+    effective sample size of the failure indicators themselves (Sokal's window), checked
+    here to equal a recomputation from the very regions the estimate used (reproduced
+    with seed [seed, m], which also checks the seed contract). An ESS estimated from the
+    data under test could, for a chain that mixes slowly, widen its own tolerance, so it
+    must be at least ESS_FLOOR of the records wherever 0.01 < p < 0.99 (a stuck chain is
+    caught either way: its indicator series is constant, its ESS is S, and its estimate
+    0 or 1). The 2 / ESS allows for the discreteness of rare failures (a single failing
+    record when ESS p is 0.01, say). Returns the largest |z| where the normal
+    approximation holds (ESS p (1 - p) >= 10)."""
     worst = 0.0
     n = code.num_qubits
     for j, m in enumerate(result.sizes.tolist()):
@@ -336,10 +350,13 @@ def _within_errors(code, edges, result, exact, **sampler):
             fails = code.region_failures(drawn.regions[i])
             assert fails.sum() == result.failures[i, j]  # the seed contract
             p = exact[i, m - 1]
+            ess = result.failure_ess[i, j]
             if drawn.method == "exact":
-                ess = float(result.samples)
+                assert ess == result.samples
             else:
-                ess = erasures.chain_diagnostics(fails.astype(float))["ess"]
+                assert ess == erasures.chain_diagnostics(fails.astype(float))["ess"]
+            if 0.01 < p < 0.99:
+                assert ess >= ESS_FLOOR * result.samples, (result.couplings[i], m, ess)
             se = math.sqrt(p * (1 - p) / ess)
             gap = abs(result.failure[i, j] - p)
             assert gap <= 4 * se + 2 / ess, (result.couplings[i], m, result.failure[i, j], p, se)
@@ -395,14 +412,60 @@ def test_correlated_failure_reports_its_sampler():
         edges, 10, 5, [0.0, 4.0], 60, burn_in=10, seed=[1, 5], ladder="given"
     )
     assert coarse.exchange_acceptance[0, 0] == drawn.exchange_acceptance[0]
+    assert coarse.min_exchange_acceptance[0] == drawn.exchange_acceptance[0]
     assert coarse.rungs.tolist() == [2]
+    assert coarse.size_warnings == tuple((5, w) for w in drawn.warnings)
     assert coarse.warnings == tuple(f"size 5: {w}" for w in drawn.warnings)
     assert any("replica exchange between J = 0 and J = 4" in w for w in coarse.warnings)
-    # exact samples on a cycle: no exchanges, no acceptance
+    # one coupling: no requested pairs, but the link from the inserted rung 0 is reported
+    single = code.correlated_failure(edges, [3.0], [4, 6], 50, burn_in=20, seed=4)
+    assert single.exchange_pairs.shape == (0, 2) and single.exchange_acceptance.shape == (0, 2)
+    for j, m in enumerate([4, 6]):
+        drawn = erasures.sample_regions(edges, 10, m, [3.0], 50, burn_in=20, seed=[4, m])
+        assert drawn.ladder[0] == 0.0 and drawn.ladder.size >= 2
+        assert single.min_exchange_acceptance[j] == drawn.exchange_acceptance.min()
+    assert single.tempering is True
+    # exact samples on a cycle: no exchanges, no acceptance, independent records
     ring = code.correlated_failure(graphs.cycle(10), [0.0, 5.0], [4], 30, seed=2)
     assert (ring.method, ring.geometry) == ("exact", "cycle")
     assert np.all(np.isnan(ring.acceptance)) and np.all(np.isnan(ring.exchange_acceptance))
-    assert ring.warnings == ()
+    assert np.all(np.isnan(ring.min_exchange_acceptance))
+    assert ring.warnings == () and ring.size_warnings == ()
+    assert ring.tempering is False  # the flag says what ran, not what was passed
+    np.testing.assert_array_equal(ring.failure_ess, np.full((2, 1), 30.0))
+
+
+def test_repeated_warnings_are_merged_across_sizes():
+    """A coarse ladder warns at every size: one line per kind of warning, sizes listed."""
+    code = CODES["scrambled_k3"]()
+    edges = graphs.watts_strogatz(10, 4, 0.3, seed=2)
+    sizes = [3, 4, 5, 7]
+    r = code.correlated_failure(edges, [0.0, 4.0], sizes, 60, burn_in=10, seed=1, ladder="given")
+    exchange = [(m, w) for m, w in r.size_warnings if w.startswith("replica exchange")]
+    assert [m for m, _ in exchange] == sizes  # every size warns
+    differ = len({w for _, w in exchange}) > 1
+    note = " (figures as at size 3; they differ at the other sizes)" if differ else ""
+    merged = [w for w in r.warnings if "replica exchange between J = 0 and J = 4" in w]
+    assert merged == [f"sizes 3-5, 7 (4 sizes): {exchange[0][1]}{note}"]
+    assert len(r.warnings) < len(r.size_warnings)
+    # the couplings are not figures: warnings about other couplings stay apart
+    assert _merge_lines(
+        [
+            (1, "at J = 1 the records are strongly correlated: 5 of 60."),
+            (2, "at J = 2 the records are strongly correlated: 7 of 60."),
+            (3, "at J = 1 the records are strongly correlated: 9 of 60."),
+            (4, "at J = -0.5 the records are strongly correlated: 9 of 60."),
+        ]
+    ) == (
+        "sizes 1, 3 (2 sizes): at J = 1 the records are strongly correlated: 5 of 60. "
+        "(figures as at size 1; they differ at the other sizes)",
+        "size 2: at J = 2 the records are strongly correlated: 7 of 60.",
+        "size 4: at J = -0.5 the records are strongly correlated: 9 of 60.",
+    )
+
+
+def _merge_lines(notes):
+    return codes_module._merge_warnings(notes)
 
 
 def test_correlated_failure_is_reproducible_and_reports_a_fresh_seed():
@@ -427,6 +490,7 @@ def test_a_code_without_logical_qubits_never_fails():
     edges = graphs.watts_strogatz(8, 4, 0.3, seed=1)
     r = code.correlated_failure(edges, [0.0, 2.0], [0, 1, 4, 8], 30, burn_in=10, seed=1)
     assert r.num_logical == 0 and not r.failures.any() and not r.failure.any()
+    assert np.all(r.failure_ess == 30)  # a constant series: every record counts
     assert np.all(np.isfinite(r.mean_boundary))
     assert r.mean_boundary[:, [0, 3]].tolist() == [[0.0, 0.0], [0.0, 0.0]]  # m = 0 and m = n
 
@@ -501,6 +565,46 @@ def test_windows_on_a_code_wider_than_one_word():
         assert code.lost_information(window[:-1]) == 0
 
 
+@pytest.mark.parametrize("code_name", list(CODES))
+def test_the_limits_equal_the_counts_and_the_exact_samplers_under_any_labeling(code_name, rng):
+    """J -> +inf on a ring and on an open path laid along a random order of the qubits.
+
+    The ring's smallest boundary (b = 2) belongs to its n intervals, so the limit
+    U_m(2) / N_m(2) must be interval_failure_by_size(order); the path's (b = 1) to its
+    two end windows only, so U_m(1) / N_m(1) must be end_window_failure_by_size(order).
+    Both exactly, and BoundaryCounts.exact at J = 1e4 reaches them. The exact samplers
+    (method="auto" finds the relabeled cycle and path) agree at J = 40 within errors.
+    """
+    code = CODES[code_name]()
+    n = code.num_qubits
+    order = rng.permutation(n)
+    ring = graphs.from_edges([(order[i], order[(i + 1) % n]) for i in range(n)], n)
+    path = graphs.from_edges([(order[i], order[i + 1]) for i in range(n - 1)], n)
+    on_ring = code.boundary_failure_counts(ring, n - 1)
+    on_path = code.boundary_failure_counts(path, n - 1)
+    intervals = code.interval_failure_by_size(order)
+    ends = code.end_window_failure_by_size(order)
+    assert on_ring.total[:, 2].tolist() == [n] * (n - 1)  # the n intervals
+    assert not on_ring.total[:, :2].any()
+    assert on_path.total[:, 1].tolist() == [2] * (n - 1)  # the prefix and the suffix
+    assert not on_path.total[:, 0].any()
+    np.testing.assert_array_equal(on_ring.failed[:, 2] / on_ring.total[:, 2], intervals[1:n])
+    np.testing.assert_array_equal(on_path.failed[:, 1] / on_path.total[:, 1], ends[1:n])
+    np.testing.assert_array_equal(on_ring.exact(1e4)[0], intervals[1:n])
+    np.testing.assert_array_equal(on_path.exact(1e4)[0], ends[1:n])
+    samples = _size(2000, 300)
+    for edges, counts, limit, geometry in (
+        (ring, on_ring, intervals, "cycle"),
+        (path, on_path, ends, "path"),
+    ):
+        result = code.correlated_failure(edges, [40.0], None, samples, seed=7)
+        assert (result.method, result.geometry) == ("exact", geometry)
+        p = limit[1:n]
+        bias = np.abs(counts.exact(40.0)[0] - p)  # below C(n, m) e^-40: nothing to see
+        se = np.sqrt(p * (1 - p) / samples)
+        np.testing.assert_array_less(np.abs(result.failure[0] - p), 4 * se + 2 / samples + bias)
+
+
 # ---------------------------------------------------------------------------------------
 # 5. The brickwork ring baseline
 # ---------------------------------------------------------------------------------------
@@ -528,10 +632,18 @@ BRICKWORK = [(12, 0.05), (12, 0.2), (16, 0.05), (16, 0.2)]
 
 
 def _brickwork(n: int, p: float) -> list[StabilizerCode]:
-    """Two codes per (n, p); JIT-free, n = 12 stands in for 16 (other seeds), since the
-    plain-Python enumeration of 2^16 subsets per code takes too long."""
+    """The first two codes with k > 0 among 8 trajectories, per (n, p).
+
+    With k = 0 every identity below is trivially 0 = 0 (k = 0 is tested on other codes),
+    so the codes are chosen by that property rather than by trajectory index, and the
+    test does not depend on which trajectories of the circuit stream purify. JIT-free,
+    n = 12 stands in for 16 (other seeds): the plain-Python enumeration of 2^16 subsets
+    per code takes too long."""
     size = 12 if JIT_FREE else n
-    return _brickwork_codes(size, p, 2, seed=int(100 * p) + n)
+    drawn = _brickwork_codes(size, p, 8, seed=int(100 * p) + n)
+    codes = [code for code in drawn if code.num_logical > 0]
+    assert len(codes) >= 2, f"fewer than 2 of 8 brickwork codes (n = {size}, p = {p}) have k > 0"
+    return codes[:2]
 
 
 @pytest.mark.parametrize(("n", "p"), BRICKWORK)
@@ -613,12 +725,14 @@ def _assert_brickwork_estimate(code, ring, result, target, bias, method, ladder)
         for i in range(2):
             fails = code.region_failures(drawn.regions[i])
             assert fails.sum() == result.failures[i, j]
-            ess = (
-                float(result.samples)
-                if method == "exact"
-                else erasures.chain_diagnostics(fails.astype(float))["ess"]
-            )
+            ess = result.failure_ess[i, j]
+            if method == "exact":
+                assert ess == result.samples
+            else:
+                assert ess == erasures.chain_diagnostics(fails.astype(float))["ess"]
             p = target[i, m - 1]
+            if 0.01 < p < 0.99:
+                assert ess >= ESS_FLOOR * result.samples, (method, i, m, ess)
             allowance = bias[m] if i == 1 else 0.0
             se = math.sqrt(p * (1 - p) / ess)
             gap = abs(result.failure[i, j] - p)
@@ -626,29 +740,29 @@ def _assert_brickwork_estimate(code, ring, result, target, bias, method, ladder)
 
 
 def test_the_brickwork_codes_are_not_trivial():
-    """The baseline sees k = 0, codes of distance 2 or more, and curves that move between
-    0 and 1 over several sizes, with the interval limit apart from the uniform curve."""
-    seen = set()
+    """The baseline's codes include one of distance 2 or more, and curves that move
+    between 0 and 1 over several sizes, with the interval limit apart from the uniform
+    curve. Each property is checked on its own, and a failure says which is missing."""
+    found = dict.fromkeys(
+        ["distance >= 2", "partial over several sizes", "intervals differ from uniform"], False
+    )
     for size, p in BRICKWORK:
         for code in _brickwork(size, p):
             n = code.num_qubits
-            if code.num_logical == 0:
-                seen.add("k = 0")
-                continue
             if code.uncorrectable_counts(1)[0] == 0:
-                seen.add("distance >= 2")
+                found["distance >= 2"] = True
             intervals = code.interval_failure_by_size()
             uniform = analysis.exact_failure_by_size(code.uncorrectable_counts(n), n)
             if np.count_nonzero((intervals > 0) & (intervals < 1)) >= 3:
-                seen.add("partial over several sizes")
+                found["partial over several sizes"] = True
             if np.max(np.abs(intervals[1:] - uniform)) > 0.1:
-                seen.add("intervals differ from uniform")
-    assert seen == {
-        "k = 0",
-        "distance >= 2",
-        "partial over several sizes",
-        "intervals differ from uniform",
-    }
+                found["intervals differ from uniform"] = True
+    missing = [label for label, ok in found.items() if not ok]
+    assert not missing, (
+        f"the brickwork codes of test_brickwork_ring_codes no longer show {missing}: not a bug "
+        "in the code under test (the codes come from the random circuit stream), but the "
+        "baseline would check less; choose other seeds in _brickwork"
+    )
 
 
 # ---------------------------------------------------------------------------------------
@@ -794,6 +908,61 @@ def test_tolerance_from_a_non_monotone_curve_is_the_last_crossing():
         np.stack([curve, np.linspace(0, 1, 5)]), n, delta, return_monotone=True
     )[1]
     assert flags.tolist() == [False, True]
+
+
+def test_interpolated_plateaus_are_exact_and_count_as_monotone():
+    n = 12
+    for value in (0.1, 0.3, 0.7, 0.9, 1 / 3):
+        curve, filled = analysis.correlated_failure_curve([[value, value]], [3, 9], n)
+        assert filled[4:9].all() and np.all(curve[0, 3:10] == value)  # exactly the plateau
+        _, monotone = analysis.tolerance_from_curve(curve[0], n, 0.05, return_monotone=True)
+        assert monotone is True
+    # a step down within MONOTONE_SLACK (rounding) still counts, a real one does not
+    step = np.array([0.0, 0.2, 0.5 + 1e-15, 0.5, 0.8, 0.9, 1.0])
+    assert analysis.tolerance_from_curve(step, 6, 0.1, return_monotone=True)[1] is True
+    step[2] = 0.5 + 1e-9
+    assert analysis.tolerance_from_curve(step, 6, 0.1, return_monotone=True)[1] is False
+    assert analysis.MONOTONE_SLACK == 1e-12
+
+
+def test_p_of_n_comes_from_the_exact_counts_when_they_cover_it():
+    """Without holds_code, P(n) is the exact last entry when exact covers m = n."""
+    pure = CODES["pure_k0"]()  # k = 0: P(n) = 0
+    counts = pure.boundary_failure_counts(graphs.cycle(8), 8)
+    curve, _ = analysis.correlated_failure_curve(np.zeros((1, 0)), [], 8, exact=counts.exact(0.0))
+    assert not curve.any()
+    forced, _ = analysis.correlated_failure_curve(
+        np.zeros((1, 0)), [], 8, exact=counts.exact(0.0), holds_code=1
+    )
+    assert forced[0, 8] == 1.0  # holds_code wins
+    blocks = CODES["blocks_k3"]()  # k = 3: P(n) = 1
+    exact = blocks.boundary_failure_counts(graphs.cycle(10), 10).exact([0.0, 2.0])
+    full, _ = analysis.correlated_failure_curve(np.zeros((2, 0)), [], 10, exact=exact)
+    assert full[:, 10].tolist() == [1.0, 1.0]
+    shorter, _ = analysis.correlated_failure_curve(np.zeros((1, 0)), [], 8, exact=[[0.1, 0.2]])
+    assert shorter[0, 8] == 1.0  # exact up to m = 2 only: the default P(n) = 1
+
+
+def test_phi_and_the_tolerance_do_not_depend_on_the_chunk_size(monkeypatch):
+    n = 30
+    rng = np.random.default_rng(3)
+    curves = np.sort(rng.random((5, n + 1)), axis=1)
+    curves[:, 0] = 0.0
+    e = np.linspace(0, 1, 37)
+    full = analysis.failure_probability_from_curve(curves, n, e)
+    tolerance = analysis.tolerance_from_curve(curves, n, 0.2)
+    monkeypatch.setattr(analysis, "_CHUNK", 3 * (n + 1))  # three rows or values of e at a time
+    np.testing.assert_allclose(
+        analysis.failure_probability_from_curve(curves, n, e), full, rtol=1e-14, atol=1e-15
+    )
+    np.testing.assert_allclose(analysis.tolerance_from_curve(curves, n, 0.2), tolerance, atol=1e-12)
+    monkeypatch.undo()
+    # a large n works in bounded memory: a step at m = 4000 of n = 20000 has Phi(e) = 1/2
+    # where Pr[Bin(n, e) >= 4000] = 1/2, near e = 0.2 (the median of Bin(n, e) is n e
+    # within 1)
+    big = 20_000
+    step = (np.arange(big + 1) >= 4000).astype(np.float64)
+    assert analysis.tolerance_from_curve(step, big, 0.5) == pytest.approx(0.2, abs=1e-4)
 
 
 def test_mean_over_codes_drops_codes_without_logical_qubits():
@@ -962,11 +1131,186 @@ def test_kernels_leave_zero_counts_for_nothing_to_count():
     out = np.full(2, 9, dtype=np.uint8)
     scratch = np.zeros((1, code._ws), dtype=np.uint64)
     nothing = np.zeros((2, 0), dtype=np.int64)
+    kernel.region_failures(code._tab, code._ws, code._marked, 0, 0, nothing, scratch, out)
+    assert out.tolist() == [0, 0]  # no system at all: k = 0 is the only consistent value
+    with pytest.raises(ValueError, match="k is not the number of logical qubits"):
+        kernel.region_failures(code._tab, code._ws, code._marked, 0, 1, nothing, scratch, out)
     kernel.region_failures(code._tab, code._ws, code._marked, 10, 3, nothing, scratch, out)
     assert out.tolist() == [0, 0]
     everything = np.tile(np.arange(10), (2, 1))  # the complement is empty: l = 2k > 0
     kernel.region_failures(code._tab, code._ws, code._marked, 10, 3, everything, scratch, out)
     assert out.tolist() == [1, 1]
+
+
+@pytest.mark.parametrize(
+    ("graph", "n"),
+    [
+        ("cycle", 10),
+        ("path", 9),
+        ("watts_strogatz", 12),
+        ("erdos_renyi", 11),
+        ("star", 8),
+        ("empty", 6),
+    ],
+)
+def test_boundary_columns_bounds_every_boundary(graph, n):
+    if graph == "star":
+        edges = graphs.from_edges([(0, v) for v in range(1, n)], n)
+    elif graph == "empty":
+        edges = np.zeros((0, 2), dtype=np.int64)
+    else:
+        edges = _graph(graph, n)
+    indptr, _ = erasure_chain.csr(n, np.ascontiguousarray(edges, dtype=np.int64))
+    degrees = np.sort(np.bincount(edges.ravel(), minlength=n))[::-1]
+    largest = 0  # the largest boundary of any region of size <= w, by enumeration
+    for w in range(0, n + 1):
+        if w > 0:
+            largest = max(largest, len(erasures.boundary_counts(edges, n, w)) - 1)
+        columns = kernel.boundary_columns(indptr, w)
+        assert columns == min(len(edges), int(degrees[:w].sum())) + 1
+        assert columns >= largest + 1
+        assert codes_module.boundary_columns(edges, n, w) == columns
+    assert kernel.boundary_columns(indptr, n + 5) == kernel.boundary_columns(indptr, n)
+    # tight on the ring: three isolated erased nodes cut 6 edges
+    ring_ptr, _ = erasure_chain.csr(10, graphs.cycle(10))
+    assert kernel.boundary_columns(ring_ptr, 3) == 7
+    with pytest.raises(ValueError, match="num_qubits must be at least 1"):
+        codes_module.boundary_columns(edges, 0, 2)
+    with pytest.raises(ValueError, match="max_size must be at least 0"):
+        codes_module.boundary_columns(edges, n, -1)
+
+
+def _region_case(**change):
+    code = CODES["blocks_k3"]()  # n = 10, k = 3
+    args = {
+        "tab": code._tab,
+        "ws": code._ws,
+        "ref_rows": code._marked,
+        "n_sys": 10,
+        "k": 3,
+        "regions": np.array([[0, 1, 2, 3]], dtype=np.int64),
+        "scratch": np.zeros((8, code._ws), dtype=np.uint64),
+        "out": np.zeros(1, dtype=np.uint8),
+    }
+    args.update(change)
+    return tuple(args.values())
+
+
+REGION_REFUSALS = [
+    ({"n_sys": 11}, "the tableau needs at least 2 n_sys column rows"),
+    ({"ws": 0}, "the tableau needs"),
+    ({"ws": 2}, "the tableau needs"),
+    ({"ref_rows": np.zeros(0, dtype=np.uint64)}, "ref_rows needs at least ws words"),
+    (
+        {"regions": np.zeros((1, 11), dtype=np.int64), "scratch": np.zeros((22, 1), np.uint64)},
+        "m > n_sys",
+    ),
+    ({"scratch": np.zeros((7, 1), dtype=np.uint64)}, "scratch needs"),
+    ({"scratch": np.zeros((8, 0), dtype=np.uint64)}, "scratch needs"),
+    ({"regions": np.array([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=np.int64)}, "out needs"),
+    ({"regions": np.array([[0, 1, 2, 10]], dtype=np.int64)}, "outside 0..n_sys-1"),
+    ({"regions": np.array([[0, 1, -1, 3]], dtype=np.int64)}, "outside 0..n_sys-1"),
+    ({"regions": np.array([[0, 1, 3, 3]], dtype=np.int64)}, "a qubit twice"),
+    ({"k": 2}, "k is not the number of logical qubits"),
+    ({"k": 0}, "k is not the number of logical qubits"),
+]
+
+
+@pytest.mark.parametrize(("change", "message"), REGION_REFUSALS)
+def test_region_failures_kernel_refuses_what_would_corrupt_memory(change, message):
+    """Compiled code has no bounds checks: the kernel checks its arguments itself."""
+    out = np.zeros(1, dtype=np.uint8)
+    kernel.region_failures(*_region_case(out=out))  # the unchanged arguments are fine
+    assert out[0] == 1  # {0, 1, 2, 3} breaks the [[4, 2, 2]] block
+    with pytest.raises(ValueError, match=message):
+        kernel.region_failures(*_region_case(**change))
+
+
+def _counts_case(**change):
+    code = CODES["blocks_k3"]()
+    indptr, indices = erasure_chain.csr(10, graphs.cycle(10))
+    columns = kernel.boundary_columns(indptr, 3)
+    args = {
+        "tab": code._tab,
+        "ws": code._ws,
+        "ref_rows": code._marked,
+        "indptr": indptr,
+        "indices": indices,
+        "n_sys": 10,
+        "max_size": 3,
+        "out_failed": np.zeros((3, columns), dtype=np.int64),
+        "out_total": np.zeros((3, columns), dtype=np.int64),
+    }
+    args.update(change)
+    return tuple(args.values())
+
+
+def _csr_with(position, value, array="indptr"):
+    indptr, indices = erasure_chain.csr(10, graphs.cycle(10))
+    changed = (indptr if array == "indptr" else indices).copy()
+    changed[position] = value
+    return {array: changed}
+
+
+def _decreasing_rows():
+    """An indptr that decreases at row 1, on a graph without edges (nothing is read)."""
+    indptr = np.zeros(11, dtype=np.int64)
+    indptr[1] = 1
+    return {"indptr": indptr, "indices": np.zeros(0, dtype=np.int64)}
+
+
+COUNTS_REFUSALS = [
+    (
+        {
+            "n_sys": 11,
+            "indptr": erasure_chain.csr(11, graphs.cycle(11))[0],
+            "indices": erasure_chain.csr(11, graphs.cycle(11))[1],
+        },
+        "the tableau needs",
+    ),
+    ({"indptr": np.zeros(10, dtype=np.int64)}, "CSR form"),
+    (_csr_with(0, 1), "CSR form"),
+    ({"indices": np.zeros(19, dtype=np.int64)}, "CSR form"),
+    (_decreasing_rows(), "nondecreasing"),
+    (_csr_with(0, 10, "indices"), "other nodes in 0..n_sys-1"),
+    (_csr_with(0, -1, "indices"), "other nodes in 0..n_sys-1"),
+    (_csr_with(0, 0, "indices"), "other nodes in 0..n_sys-1"),  # a self-loop at node 0
+    ({"max_size": -1}, "max_size must be non-negative"),
+    ({"out_failed": np.zeros((3, 6), dtype=np.int64)}, "the same shape"),
+    (
+        {"out_failed": np.zeros((2, 7), dtype=np.int64), "out_total": np.zeros((2, 7), np.int64)},
+        "max_size rows",
+    ),
+    (
+        {"out_failed": np.zeros((3, 6), dtype=np.int64), "out_total": np.zeros((3, 6), np.int64)},
+        "boundary_columns",
+    ),
+]
+
+
+@pytest.mark.parametrize(("change", "message"), COUNTS_REFUSALS)
+def test_boundary_failure_counts_kernel_refuses_what_would_corrupt_memory(change, message):
+    args = _counts_case()
+    kernel.boundary_failure_counts(*args)  # the unchanged arguments are fine
+    assert args[-1].sum() == 10 + 45 + 120
+    with pytest.raises(ValueError, match=message):
+        kernel.boundary_failure_counts(*_counts_case(**change))
+
+
+@pytest.mark.parametrize(
+    ("order", "out", "message"),
+    [
+        (np.arange(11), np.zeros(11, dtype=np.int64), "the tableau needs"),
+        (np.arange(10), np.zeros(9, dtype=np.int64), "out needs one entry per start"),
+        (np.zeros(10, dtype=np.int64), np.zeros(10, dtype=np.int64), "a permutation"),
+        (np.arange(1, 11), np.zeros(10, dtype=np.int64), "a permutation"),
+        (np.arange(-1, 9), np.zeros(10, dtype=np.int64), "a permutation"),
+    ],
+)
+def test_window_kernel_refuses_what_would_corrupt_memory(order, out, message):
+    code = CODES["blocks_k3"]()
+    with pytest.raises(ValueError, match=message):
+        kernel.window_first_failure(code._tab, code._ws, code._marked, order, True, out)
 
 
 def test_a_code_without_stabilizers_fails_on_every_nonempty_region():

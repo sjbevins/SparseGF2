@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import operator
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 
@@ -46,7 +47,7 @@ from sparsegf2._kernel import erasure_failure as _fail
 from sparsegf2._kernel.rng import seed_state
 from sparsegf2.pauli import PauliString
 
-__all__ = ["BoundaryCounts", "CorrelatedFailure", "StabilizerCode"]
+__all__ = ["BoundaryCounts", "CorrelatedFailure", "StabilizerCode", "boundary_columns"]
 
 
 def _read_only(obj) -> None:
@@ -70,35 +71,56 @@ class CorrelatedFailure:
       of ``P_J(m) = sum over |A| = m of Q_J(A | m) 1[I(A:R) > 0]``. 0 for a
       code without logical qubits.
     * ``failures``: int64[c, s], how many of the ``S`` recorded regions failed.
+    * ``failure_ess``: float64[c, s], the effective number of independent
+      records behind each entry: ``S`` for exact samples (independent), and
+      for the chain ``S / tau_int`` of the series of failure indicators
+      (:func:`sparsegf2.erasures.chain_diagnostics`). A standard error is
+      ``sqrt(p (1 - p) / failure_ess)``; it is an estimate from the run
+      itself (it can be too small when the chain has not mixed: compare seeds),
+      and when no record or every record failed it gives 0, so read such an
+      entry as "below about 3 / failure_ess" (or above 1 minus that).
     * ``couplings``: float64[c]; ``sizes``: int64[s]; ``samples``: ``S``.
     * ``mean_boundary``: float64[c, s], the mean boundary ``b`` of the recorded
-      regions (it must not increase with ``J``: Proposition 2).
+      regions, an estimate of ``<b>_J`` (Proposition 2: the exact ``<b>_J``
+      does not increase with ``J``; compare along increasing couplings, within
+      errors).
     * ``acceptance``: float64[c, s], the fraction of swap proposals accepted
       (NaN for exact samples).
     * ``exchange_pairs``: float64[c-1, 2], the requested couplings in
-      increasing order, as neighbouring pairs; ``exchange_acceptance``:
-      float64[c-1, s], for each pair the smallest replica-exchange acceptance
-      among the rungs of the ladder between them (they are neighbours in the
-      ladder only with ``ladder="given"``; NaN without exchanges, as for exact
-      samples). ``rungs``: int64[s], how many couplings the ladder of each size
-      ran (the cost is proportional to it).
+      increasing order, as neighbouring pairs (shape ``(0, 2)`` for one
+      coupling); ``exchange_acceptance``: float64[c-1, s], for each pair the
+      smallest replica-exchange acceptance among the rungs of the ladder
+      between them (they are neighbours in the ladder only with
+      ``ladder="given"``; NaN without exchanges, as for exact samples).
+    * ``min_exchange_acceptance``: float64[s], the smallest exchange acceptance
+      over every neighbouring pair of the whole ladder of each size, including
+      the links to inserted rungs such as ``J = 0`` (the one number to check;
+      NaN without exchanges). ``rungs``: int64[s], how many couplings the
+      ladder of each size ran (the cost is proportional to it).
     * ``method`` (``"chain"`` or ``"exact"``) and ``geometry`` (``"cycle"``,
       ``"path"`` or ``"other"``), as :class:`sparsegf2.erasures.RegionSample`.
-    * ``warnings``: the sampler's warnings, each prefixed with its size
-      (``"size 7: ..."``); empty when none.
+    * ``size_warnings``: every warning of the sampler, as ``(m, sentence)``
+      pairs in the order of ``sizes``; ``warnings``: the same merged for
+      reading, one line per kind of warning with the sizes it occurred at
+      (``"sizes 3-9, 12: replica exchange between J = 0 and J = 4 was accepted
+      in 2.1% ..."``, with the figures of the first of those sizes and a note
+      when they differ at the others; sentences that differ only in their
+      figures are one kind, sentences about other couplings are not). Both
+      empty when nothing was flagged.
     * ``seed``: the seed used; the regions of size ``m`` are those of
       ``erasures.sample_regions(..., seed=[seed, m])`` (for a list seed, its
       entries followed by ``m``). ``burn_in``: the sweeps before the first
       record (the default :func:`sparsegf2.erasures.default_burn_in` of n
-      resolved, or as passed; the exact samplers ignore it); ``thin``,
-      ``tempering``: as passed. ``num_qubits``, ``num_logical``: the code's n
-      and k.
+      resolved, or as passed; the exact samplers ignore it); ``thin``: as
+      passed; ``tempering``: whether replica exchange ran at any size (False
+      for exact samples and for a one-rung ladder, whatever was passed).
+      ``num_qubits``, ``num_logical``: the code's n and k.
 
-    Records of one chain are correlated, so ``failures`` is not binomial; for
-    errors use the spread over codes (independent chains), or reproduce one
-    size's regions with ``erasures.sample_regions`` and
-    :meth:`StabilizerCode.region_failures` and pass the failure indicators to
-    :func:`sparsegf2.erasures.chain_diagnostics`.
+    Records of one chain are correlated, so ``failures`` is not binomial:
+    use ``failure_ess`` for errors, and for an ensemble the spread over codes
+    (independent chains). To look closer at one size, reproduce its regions
+    with ``erasures.sample_regions(..., seed=[seed, m])`` and
+    :meth:`StabilizerCode.region_failures`.
     """
 
     couplings: np.ndarray
@@ -106,14 +128,17 @@ class CorrelatedFailure:
     samples: int
     failure: np.ndarray
     failures: np.ndarray
+    failure_ess: np.ndarray
     mean_boundary: np.ndarray
     acceptance: np.ndarray
     exchange_pairs: np.ndarray
     exchange_acceptance: np.ndarray
+    min_exchange_acceptance: np.ndarray
     rungs: np.ndarray
     method: str
     geometry: str
     warnings: tuple[str, ...]
+    size_warnings: tuple[tuple[int, str], ...]
     seed: int | tuple[int, ...]
     burn_in: int
     thin: int
@@ -145,7 +170,9 @@ class BoundaryCounts:
     (:meth:`StabilizerCode.uncorrectable_counts`). ``max_size``,
     ``num_qubits`` (n) and ``num_logical`` (k) describe the run.
 
-    :meth:`exact` turns the counts into ``P_J(m)`` for any couplings.
+    :meth:`exact` turns the counts into ``P_J(m)`` for any couplings. Arrays
+    for counts of one's own (for example per trajectory, sharing one graph)
+    need :func:`boundary_columns` columns before trimming.
     """
 
     failed: np.ndarray
@@ -163,9 +190,65 @@ class BoundaryCounts:
         Exactly (in floating point, stable for any finite ``J``), for each
         coupling in ``couplings`` (a number or a list) and ``m = 1..w``:
         :func:`sparsegf2.analysis.exact_correlated_failure`. ``J = 0`` is the
-        uniform ``P_C(m)``.
+        uniform ``P_C(m)``. For a full curve with
+        :func:`sparsegf2.analysis.correlated_failure_curve`, pass
+        ``holds_code=num_logical`` (or ``max_size = n``, whose last entry is
+        ``P(n) = 1[k > 0]``).
         """
         return analysis.exact_correlated_failure(self.failed, self.total, couplings)
+
+
+def boundary_columns(edges, num_qubits: int, max_size: int) -> int:
+    """How many boundary columns ``B + 1`` the counts of regions of size ``<= max_size`` need.
+
+    For the graph ``edges`` on ``num_qubits`` nodes (``(E, 2)`` as in
+    :mod:`sparsegf2.graphs`), every region ``A`` with ``|A| <= w = max_size``
+    has ``b(A) <= min(|E|, sum of the w largest degrees) = B``, so count
+    arrays of shape ``(w, B + 1)`` hold every boundary. The compiled kernel
+    refuses smaller arrays; this is the one place the bound is computed
+    (:func:`sparsegf2._kernel.erasure_failure.boundary_columns`, callable from
+    compiled code with the CSR row pointer). :class:`BoundaryCounts` trims its
+    columns afterwards to the largest boundary that occurs.
+    """
+    n = erasures._integer(num_qubits, "num_qubits", 1)
+    e = np.ascontiguousarray(graphs.from_edges(edges, n), dtype=np.int64)
+    w = erasures._integer(max_size, "max_size", 0)
+    indptr, _ = _chain.csr(n, e)
+    return int(_fail.boundary_columns(indptr, w))
+
+
+_FIGURES = re.compile(r"(?<!J = )(?<![\w.\-])-?\d+(?:\.\d+)?")
+"""Numbers in a warning other than the couplings (``J = ...``): percentages, counts."""
+
+
+def _size_ranges(sizes: list[int]) -> str:
+    """``[3, 4, 5, 7]`` as ``"3-5, 7"``."""
+    parts, start = [], 0
+    for i in range(1, len(sizes) + 1):
+        if i == len(sizes) or sizes[i] != sizes[i - 1] + 1:
+            a, b = sizes[start], sizes[i - 1]
+            parts.append(str(a) if a == b else f"{a}-{b}")
+            start = i
+    return ", ".join(parts)
+
+
+def _merge_warnings(notes: list[tuple[int, str]]) -> tuple[str, ...]:
+    """One line per kind of warning (the sentence with its figures masked), with its sizes."""
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for m, sentence in notes:
+        groups.setdefault(_FIGURES.sub("#", sentence), []).append((m, sentence))
+    lines = []
+    for items in groups.values():
+        sizes = sorted({m for m, _ in items})
+        first_m, text = items[0]
+        if len(sizes) == 1:
+            label = f"size {sizes[0]}"
+        else:
+            label = f"sizes {_size_ranges(sizes)} ({len(sizes)} sizes)"
+        if len({sentence for _, sentence in items}) > 1:
+            text += f" (figures as at size {first_m}; they differ at the other sizes)"
+        lines.append(f"{label}: {text}")
+    return tuple(lines)
 
 
 def _bounded(value, name: str, low: int, high: int) -> int:
@@ -461,7 +544,8 @@ class StabilizerCode:
         of the graph ``edges`` (on this code's ``n`` qubits, ``(E, 2)`` as in
         :mod:`sparsegf2.graphs`) with exactly one end in ``A``: ``J > 0`` favours
         compact regions, ``J = 0`` is uniform, ``J < 0`` favours spread-out
-        ones. The failure probability is::
+        ones. With ``l(A) = I(A:R)`` the bits of logical information erasing
+        ``A`` destroys (:meth:`lost_information`), the failure probability is::
 
             P_J(m) = sum over |A| = m of Q_J(A | m) F(A),     F(A) = 1[l(A) > 0]
 
@@ -490,13 +574,16 @@ class StabilizerCode:
         ``len(sizes)`` times that of one
         :func:`~sparsegf2.erasures.sample_regions` call plus ``c S len(sizes)``
         failure evaluations of two eliminations of ``2 min(m, n - m)`` columns
-        of ``n / 32`` words each.
+        of ``n / 32`` words each. ``failure_ess`` gives each entry's effective
+        number of independent records, for error bars.
 
         **Seeds.** One ``seed`` drives every size: the regions of size ``m``
         are drawn with the sequence seed ``[seed, m]`` (a list seed's entries
         followed by ``m``), so they are exactly
         ``erasures.sample_regions(edges, n, m, couplings, samples, ...,
-        seed=[seed, m])``, and different sizes use independent streams.
+        seed=[seed, m])``, and the sizes ``m >= 1`` of one seed use different,
+        independent streams. (numpy's ``SeedSequence`` pads with zeros, so
+        ``[seed, 0]`` is the stream of ``seed`` itself; size 0 draws nothing.)
         ``seed=None`` draws a fresh seed, reported as ``seed``.
 
         A code without logical qubits gives 0 everywhere (its regions are
@@ -514,13 +601,16 @@ class StabilizerCode:
         c, s = len(given), len(m_list)
         requested = np.sort(given)
         failures = np.zeros((c, s), dtype=np.int64)
+        ess = np.full((c, s), float(samples))
         mean_boundary = np.empty((c, s))
         acceptance = np.empty((c, s))
         exchange = np.full((c - 1, s), np.nan)
+        weakest = np.full(s, np.nan)
         rungs = np.zeros(s, dtype=np.int64)
-        notes: list[str] = []
+        notes: list[tuple[int, str]] = []
         method_used = geometry = ""
         used_burn_in = 0
+        exchanged = False
         for j, m in enumerate(m_list.tolist()):
             drawn = erasures.sample_regions(
                 e,
@@ -540,36 +630,48 @@ class StabilizerCode:
                 flat = np.array(drawn.regions.reshape(c * samples, m))
                 failed = np.zeros(c * samples, dtype=np.uint8)
                 self._fill_failures(flat, failed)
-                failures[:, j] = failed.reshape(c, samples).sum(axis=1)
+                indicators = failed.reshape(c, samples)
+                failures[:, j] = indicators.sum(axis=1)
+                if drawn.method == "chain" and samples >= 2:
+                    for i in range(c):
+                        series = indicators[i].astype(np.float64)
+                        ess[i, j] = erasures.chain_diagnostics(series)["ess"]
             mean_boundary[:, j] = drawn.boundaries.mean(axis=1)
             acceptance[:, j] = drawn.acceptance
+            pairs = drawn.exchange_acceptance
             place = np.searchsorted(drawn.ladder, requested)
             for i in range(c - 1):
-                between = drawn.exchange_acceptance[place[i] : place[i + 1]]
+                between = pairs[place[i] : place[i + 1]]
                 finite = between[np.isfinite(between)]
                 exchange[i, j] = finite.min() if finite.size else np.nan
+            if np.isfinite(pairs).any():
+                weakest[j] = pairs[np.isfinite(pairs)].min()
             rungs[j] = drawn.ladder.size
-            notes.extend(f"size {m}: {note}" for note in drawn.warnings)
+            notes.extend((m, note) for note in drawn.warnings)
             method_used, geometry = drawn.method, drawn.geometry
             used_burn_in = drawn.burn_in  # the same for every size (it depends on n only)
+            exchanged = exchanged or drawn.tempering
         return CorrelatedFailure(
             couplings=given.copy(),
             sizes=m_list,
             samples=samples,
             failure=failures / samples,
             failures=failures,
+            failure_ess=ess,
             mean_boundary=mean_boundary,
             acceptance=acceptance,
             exchange_pairs=np.stack([requested[:-1], requested[1:]], axis=1),
             exchange_acceptance=exchange,
+            min_exchange_acceptance=weakest,
             rungs=rungs,
             method=method_used,
             geometry=geometry,
-            warnings=tuple(notes),
+            warnings=_merge_warnings(notes),
+            size_warnings=tuple(notes),
             seed=used,
             burn_in=used_burn_in,
             thin=thin,
-            tempering=bool(tempering),
+            tempering=bool(exchanged),
             num_qubits=n,
             num_logical=self.num_logical,
         )
@@ -608,10 +710,9 @@ class StabilizerCode:
         w = _bounded(max_size, "max_size", 1, n)
         _check_region_budget(n, w, budget)
         indptr, indices = _chain.csr(n, e)
-        degrees = np.sort(np.diff(indptr))[::-1]
-        bound = int(min(len(e), degrees[:w].sum()))  # b(A) <= both, for every |A| <= w
-        failed = np.zeros((w, bound + 1), dtype=np.int64)
-        total = np.zeros((w, bound + 1), dtype=np.int64)
+        columns = int(_fail.boundary_columns(indptr, w))  # holds every b(A), |A| <= w
+        failed = np.zeros((w, columns), dtype=np.int64)
+        total = np.zeros((w, columns), dtype=np.int64)
         _fail.boundary_failure_counts(
             self._tab, self._ws, self._marked, indptr, indices, n, w, failed, total
         )
@@ -647,7 +748,7 @@ class StabilizerCode:
         return out
 
     def interval_failure_by_size(self, order=None, *, periodic: bool = True) -> np.ndarray:
-        """The fraction of contiguous windows of each length ``m = 0..n`` whose erasure fails.
+        """The failing fraction of the windows of each length: the ring's J -> inf limit with periodic=True only.
 
         Entry ``m`` (float64, length ``n + 1``) is ``#{failing windows of
         length m} / #{windows of length m}`` along ``order`` (default
@@ -669,8 +770,8 @@ class StabilizerCode:
         ``(1[L_first <= m] + 1[L_last <= m]) / 2`` with ``L_first`` and
         ``L_last`` the first-failure lengths of the prefix and of the suffix
         (:meth:`end_window_failure_by_size`). With ``periodic=False`` this
-        method gives the uniform law on all intervals of the open order, a
-        different quantity.
+        method gives the uniform law on all intervals of the open order, which
+        is NOT the open path's ``J -> +inf`` limit (that is the two end windows).
         """
         n = self._n
         first = self.window_first_failure(order, periodic=periodic)
