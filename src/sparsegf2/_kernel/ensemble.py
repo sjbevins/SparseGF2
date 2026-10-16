@@ -74,6 +74,17 @@ So the samples at one evaluation depend only on (seed, trajectory, probe name,
 layer, samples) and the state, never on other probes, on the checkpoints or
 on earlier evaluations: replaying a trajectory with other probes or
 checkpoints reproduces them, and fewer samples are a prefix of more.
+
+The ``correlated_erasure`` probe (:func:`correlated_erasure_rows`) adds one
+stream per size: at the evaluation whose stream index is
+``index = mix(first + t, phash[j], L)``, size ``m`` draws from
+``stream_state(key_probe, mix(index, m, 0))``, and from nothing else: the
+draws of ``erasures.sample_regions`` (the exact ring or path sampler, or the
+swap chain with its ladder, every chain started afresh) from that state. A
+size's regions therefore depend only on (seed, trajectory, probe name, layer,
+size, the probe's couplings and settings, the erasure graph), not on the other
+sizes; with ``k = 0`` nothing is drawn. These streams are new under contract 2
+(no existing stream changes).
 """
 
 from __future__ import annotations
@@ -93,6 +104,14 @@ from sparsegf2._kernel.entropy import (
     region_entropy,
     uncorrectable_counts_rows,
 )
+from sparsegf2._kernel.erasure_chain import (
+    csr,
+    geometry_order,
+    path_exact_sample,
+    ring_exact_sample,
+    sample_chain,
+)
+from sparsegf2._kernel.erasure_failure import region_failures
 from sparsegf2._kernel.rng import mix, next_below, next_bit, next_double, stream_state
 from sparsegf2._kernel.tableau import (
     apply_1q,
@@ -120,6 +139,25 @@ PROBE_ERASURE_LOST_PROFILE = 7
 PROBE_FIRST_FAILURE = 8
 PROBE_UNCORRECTABLE_COUNTS = 9
 PROBE_CODE_SNAPSHOT = 10
+PROBE_CORRELATED_ERASURE = 11
+
+# Columns of ce_param (one row per probe; see correlated_erasure_rows): offsets into the
+# flat ce_int and ce_float tables, and the chain's settings.
+CE_SIZES = 0  # ce_int: the sizes m, as given
+CE_NUM_SIZES = 1
+CE_COUPLINGS = 2  # ce_float: the couplings, sorted ascending
+CE_NUM_COUPLINGS = 3
+CE_ORDER = 4  # ce_int: the given index of each sorted coupling (the output column block)
+CE_CLASSES = 5  # ce_int: the class of each erasure graph (one per spec graph, or one)
+CE_LADDER_IDS = 6  # ce_int: ladder index per (class, size), class-major; -1: exact samples
+CE_LADDER_PTR = 7  # ce_int: ladder k's rungs and records are entries ptr[k]..ptr[k+1]
+CE_RUNGS = 8  # ce_float: the rungs of every ladder, back to back (each sorted)
+CE_RECORDS = 9  # ce_int: per rung its row among the sorted couplings, or -1
+CE_BURN_IN = 10
+CE_THIN = 11
+CE_TEMPERING = 12
+CE_GEOMETRY = 13  # 0: the trajectory's interaction graph; 1: cycle, 2: path over the labels
+CE_COLUMNS = 14
 
 
 @njit(cache=True, inline="always")
@@ -330,6 +368,79 @@ def eval_probe(
 
 
 @njit(cache=True)
+def correlated_erasure_rows(
+    j, row, tab, ws, n_sys, ref_rows, s_ref, samples, ce_param, ce_int, ce_float, graph,
+    indptr, indices, gorder, gkind, key_probe, index, prng, scratch,
+):  # fmt: skip
+    """Evaluate the correlated_erasure probe ``j`` on the current state into ``row``.
+
+    ``row[c * s + i]`` (``s`` sizes, coupling-major in the given order) becomes the
+    fraction of the ``samples`` regions of size ``m = sizes[i]`` drawn from
+    ``Q_J(A | m) ∝ exp(-J b(A))`` at ``J = couplings[c]`` on the erasure graph (CSR
+    ``indptr``, ``indices``; ``gorder`` and ``gkind`` from
+    :func:`~sparsegf2._kernel.erasure_chain.geometry_order`; ``graph`` its index among
+    the spec's graphs, 0 for a fixed geometry) whose erasure loses logical information
+    (:func:`~sparsegf2._kernel.erasure_failure.region_failures`, with ``k = s_ref``).
+    With ``s_ref == 0`` the row is 0 and nothing is drawn.
+
+    Draws, for each size in the order given: ``prng`` is set to stream
+    ``mix(index, m, 0)`` of ``key_probe`` (``index`` is the evaluation's stream index
+    ``mix(t, name hash, layer)``), then exactly the draws of
+    ``erasures.sample_regions`` from that state: the exact sampler of the cycle
+    (``gkind == 1``) or path (``gkind == 2``) with the couplings sorted ascending when the
+    graph's class has no ladder (ladder index -1), else
+    :func:`~sparsegf2._kernel.erasure_chain.sample_chain` on the class's ladder for that
+    size, recording only the requested couplings. Nothing is kept between sizes or
+    evaluations. Memory: one size's regions at a time, ``c x samples x m`` int64.
+    """
+    s = ce_param[j, CE_NUM_SIZES]
+    c = ce_param[j, CE_NUM_COUPLINGS]
+    for k in range(c * s):
+        row[k] = 0.0
+    if s_ref == 0:
+        return
+    sizes_at = ce_param[j, CE_SIZES]
+    order_at = ce_param[j, CE_ORDER]
+    lo = ce_param[j, CE_COUPLINGS]
+    couplings = ce_float[lo : lo + c]
+    cls = ce_int[ce_param[j, CE_CLASSES] + graph]
+    burn_in = ce_param[j, CE_BURN_IN]
+    thin = ce_param[j, CE_THIN]
+    tempering = ce_param[j, CE_TEMPERING] != 0
+    failed = np.zeros(c * samples, dtype=np.uint8)
+    for i in range(s):
+        m = ce_int[sizes_at + i]
+        stream_state(key_probe, mix(index, m, 0), prng)
+        regions = np.empty((c, samples, m), dtype=np.int64)
+        bounds = np.empty((c, samples), dtype=np.int64)
+        ladder = ce_int[ce_param[j, CE_LADDER_IDS] + cls * s + i]
+        if ladder < 0:
+            if gkind == 1:
+                ring_exact_sample(n_sys, m, couplings, samples, prng, gorder, regions, bounds)
+            else:
+                path_exact_sample(n_sys, m, couplings, samples, prng, gorder, regions, bounds)
+        else:
+            ptr = ce_param[j, CE_LADDER_PTR] + ladder
+            start = ce_int[ptr]
+            stop = ce_int[ptr + 1]
+            rungs = ce_float[ce_param[j, CE_RUNGS] + start : ce_param[j, CE_RUNGS] + stop]
+            record = ce_int[ce_param[j, CE_RECORDS] + start : ce_param[j, CE_RECORDS] + stop]
+            moves = np.empty((stop - start, 4), dtype=np.int64)
+            sample_chain(
+                indptr, indices, n_sys, m, rungs, record, samples, burn_in, thin, tempering,
+                prng, regions, bounds, moves,
+            )  # fmt: skip
+        region_failures(
+            tab, ws, ref_rows, n_sys, s_ref, regions.reshape(c * samples, m), scratch, failed
+        )
+        for q in range(c):
+            count = 0
+            for r in range(q * samples, (q + 1) * samples):
+                count += np.int64(failed[r])  # never uint8 arithmetic (it would wrap at 256)
+            row[ce_int[order_at + q] * s + i] = count / samples
+
+
+@njit(cache=True)
 def _setup(
     tab, n_sys, ref_mode, partner, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2, ws
 ):
@@ -348,13 +459,21 @@ def run_ensemble(
     color_ptr, color_ptr_ptr, color_idx, schedule_kind, gates_per_layer, pool, p, layers,
     scramble_gates, scramble_matchings, scramble_layers, orient, gck, detect, stop_purified,
     pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
-    order, periodic, key_struct, key_probe, phash, first, out, snap, snap_rows, out_tau,
+    order, periodic, key_struct, key_probe, phash, ce_param, ce_int, ce_float, geo_indptr,
+    geo_indices, geo_order, geo_kind, ce_need_graph, first, out, snap, snap_rows, out_tau,
     out_final, out_meas, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
 ):  # fmt: skip
     """Simulate ``out.shape[0]`` trajectories; see the module docstring.
 
     ``phash[j]`` (uint64) is the hash of probe ``j``'s name, which keys its
     sampling streams.
+
+    The correlated_erasure probes read their tables from ``ce_param``, ``ce_int``
+    and ``ce_float`` (the ``CE_*`` columns; built by ``mipt._correlated_tables``)
+    and their fixed erasure graphs from ``geo_*`` (row 0 the cycle, row 1 the path
+    over the labels: CSR, order, kind). With ``ce_need_graph`` each trajectory puts
+    its own interaction graph in CSR form once, with its order and kind
+    (:func:`~sparsegf2._kernel.erasure_chain.geometry_order`), for the probes on it.
 
     ``snap`` (trajectories, evaluations, n_sys, 2 wsys) and ``snap_rows``
     receive the code snapshots of the (at most one) snapshot probe; rows of
@@ -395,6 +514,14 @@ def run_ensemble(
         refs = np.arange(n_sys, n).astype(np.int64)
         work = np.zeros(n_sys + 1, dtype=np.int64)
         next_eval = np.zeros(num_probes, dtype=np.int64)  # next evaluation index per probe
+        # the interaction graph as the correlated_erasure probes on it need it (once)
+        g_indptr = geo_indptr[0]
+        g_indices = geo_indices[0]
+        g_order = geo_order[0]
+        g_kind = 0
+        if ce_need_graph:
+            g_indptr, g_indices = csr(n_sys, g_edges)
+            g_order, g_kind = geometry_order(g_indptr, g_indices, n_sys)
 
         partner = fixed_partner
         if ref_mode == REF_SINGLE and fixed_partner < 0:
@@ -457,6 +584,28 @@ def run_ensemble(
                     c = next_eval[j]
                     if c < pck_ptr[j + 1] - pck_ptr[j] and pck[pck_ptr[j] + c] == layer:
                         base = poff[j] + c * plen[j]
+                        if pkind[j] == PROBE_CORRELATED_ERASURE:
+                            # one stream per size, derived from this evaluation's index
+                            geometry = ce_param[j, CE_GEOMETRY]
+                            if geometry == 0:
+                                correlated_erasure_rows(
+                                    j, out[t, base : base + plen[j]], tab, ws, n_sys,
+                                    ref_rows, s_ref, sample_param[j], ce_param, ce_int,
+                                    ce_float, g, g_indptr, g_indices, g_order, g_kind,
+                                    key_probe, mix(first + t, phash[j], layer), prng,
+                                    erase_scratch,
+                                )  # fmt: skip
+                            else:
+                                correlated_erasure_rows(
+                                    j, out[t, base : base + plen[j]], tab, ws, n_sys,
+                                    ref_rows, s_ref, sample_param[j], ce_param, ce_int,
+                                    ce_float, 0, geo_indptr[geometry - 1],
+                                    geo_indices[geometry - 1], geo_order[geometry - 1],
+                                    geo_kind[geometry - 1], key_probe,
+                                    mix(first + t, phash[j], layer), prng, erase_scratch,
+                                )  # fmt: skip
+                            next_eval[j] = c + 1
+                            continue
                         if sample_param[j] > 0:  # every sampled kind has samples >= 1
                             stream_state(key_probe, mix(first + t, phash[j], layer), prng)
                         eval_probe(

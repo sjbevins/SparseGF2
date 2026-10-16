@@ -377,3 +377,46 @@ def test_pinned_values_for_the_current_contract():
         "RANDOMNESS_CONTRACT changed: add an entry to EXPECTED (never edit an old one)"
     )
     assert _current_values() == EXPECTED[mipt.RANDOMNESS_CONTRACT]
+
+
+# The correlated_erasure probe's streams (one per size of each evaluation, added under
+# contract 2 without changing any stream above): its values on S1's protocol, with the
+# exact ring sampler, the swap chain with its automatic ladder (forced on the ring) and the
+# exact path sampler over the labels. They change only if those draws, the ladder or the
+# stream derivation mix(mix(t, name hash, layer), m, 0) change.
+CORRELATED_RUN = "2af432e3d3af4383ff5d64c66c620ae3b2a8056d5f572a2a747d1331ed359090"
+
+
+def test_pinned_values_of_the_correlated_erasure_probe():
+    s1 = _specs()["S1"]
+    spec = mipt.MonitoredCircuit(
+        num_system=s1.num_system,
+        edges=s1.edges,
+        layers=s1.layers,
+        measurement_rate=s1.measurement_rate,
+        schedule=s1.schedule,
+        reference=s1.reference,
+        scramble_gates=s1.scramble_gates,
+        checkpoints=[2, 4],
+        probes=[
+            mipt.code_dimension(),
+            mipt.correlated_erasure(
+                [1.0, -0.5, 0.0], [2, 3, 6], 6, "ring_exact", burn_in=4, thin=2
+            ),
+            mipt.correlated_erasure(
+                [2.5, 0.0], [5, 2], 5, "ring_chain", burn_in=3, method="chain", geometry="cycle"
+            ),
+            mipt.correlated_erasure([2.0, 0.5], [3], 4, "path_exact", geometry="path"),
+        ],
+    )
+    res = spec.run(6, seed=11)
+    assert {spec.correlated_sampler(name)["method"] for name in ("ring_exact", "path_exact")} == {
+        "exact"
+    }
+    assert spec.correlated_sampler("ring_chain")["rungs"][1] > 2  # the automatic ladder
+    h = hashlib.sha256()
+    for name in sorted(res.values):
+        h.update(name.encode("utf-8"))
+        h.update(np.ascontiguousarray(res.values[name]).astype("<f8").tobytes())
+    assert 0 < res.values["ring_chain"].mean() < 1
+    assert h.hexdigest() == CORRELATED_RUN

@@ -75,8 +75,11 @@ Erasure: with a reference, the code the circuit has generated at a checkpoint
 is probed by ``erasure_first_failure`` (first-failure sizes over random
 orderings, from which :mod:`sparsegf2.analysis` estimates P_C(m), the
 failure probability Phi_C(e) under independent erasure, and e_delta),
-``uncorrectable_region_counts`` (exhaustive small erasures: exact P_C(m)) and
-``code_snapshot`` (the code itself, for :class:`sparsegf2.codes.StabilizerCode`).
+``uncorrectable_region_counts`` (exhaustive small erasures: exact P_C(m)),
+``correlated_erasure`` (P_{C,G,J}(m): erasures of m qubits that cluster on a
+graph, drawn with probability proportional to exp(-J b_G(A)), per coupling J)
+and ``code_snapshot`` (the code itself, for
+:class:`sparsegf2.codes.StabilizerCode`).
 
 Randomness: trajectory ``t`` of ``run(..., seed=s)`` is a deterministic function
 of ``(spec, s, t)``, independent of the thread count and of the other
@@ -86,15 +89,17 @@ qubit per layer whatever the rate, so runs at different ``measurement_rate``
 with the same seed share their random numbers (the measured set at a lower rate
 is a subset of that at a higher rate). The sampled probes draw their orderings
 from a stream of their own at each evaluation, keyed by the trajectory, the
-probe's name and the layer, so other probes and other checkpoints never change
-them (:data:`RANDOMNESS_CONTRACT`).
+probe's name and the layer (``correlated_erasure``: and the size), so other
+probes and other checkpoints never change them (:data:`RANDOMNESS_CONTRACT`).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import operator
+import re
 import time
 import warnings
 from collections.abc import Mapping, Sequence
@@ -104,7 +109,10 @@ from typing import Any
 
 import numpy as np
 
+from sparsegf2 import erasures
+from sparsegf2 import graphs as _graphs
 from sparsegf2._kernel import ensemble as _ens
+from sparsegf2._kernel import erasure_chain as _chain
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
 from sparsegf2._parallel import threads
 from sparsegf2._version import __version__
@@ -116,12 +124,14 @@ from sparsegf2.graphs import edge_coloring, from_edges
 
 __all__ = [
     "EnsembleResult",
+    "GEOMETRIES",
     "RANDOMNESS_CONTRACT",
     "MonitoredCircuit",
     "Probe",
     "code_dimension",
     "code_snapshot",
     "contiguous_distance",
+    "correlated_erasure",
     "entropy",
     "entropy_profile",
     "erasure_first_failure",
@@ -159,7 +169,11 @@ _CX_INDEX = _CX_CLIFFORD.index()
 #:   (trajectory ``t`` uses stream ``t`` of words 0 and 1 of the run's
 #:   ``SeedSequence``, which fixes ``run``, ``replay`` and ``circuit``), the
 #:   ensemble probe streams (one per sampled-probe evaluation: stream
-#:   ``mix(t, name hash, layer)`` of words 2 and 3), the shot streams of
+#:   ``mix(t, name hash, layer)`` of words 2 and 3; :func:`correlated_erasure`
+#:   uses one per size ``m`` of each evaluation, stream
+#:   ``mix(mix(t, name hash, layer), m, 0)``, and draws in it exactly what
+#:   ``erasures.sample_regions`` draws: added under contract 2, it changes no
+#:   other stream), the shot streams of
 #:   ``sparsegf2.sample`` (shot ``s`` uses stream ``s`` of ``stream_key(seed)``)
 #:   and the sampled observables ``random_erasure_statistics`` and
 #:   ``erasure_profile`` (stream 0 of ``stream_key(seed)``);
@@ -190,10 +204,15 @@ class Probe:
 
     Each probe records a fixed number of values per evaluation (one for a
     scalar probe; one per region size, permutation sample or erased-region
-    size for a vector probe). It is evaluated at the spec's ``checkpoints``,
-    or at its own ``checkpoints`` (same forms: ``"final"``, ``"every_layer"``,
-    a stride or a list of layers), so expensive probes can run at a few
-    depths while cheap ones run at every layer.
+    size for a vector probe; one per coupling and size for
+    :func:`correlated_erasure`). It is evaluated at the spec's
+    ``checkpoints``, or at its own ``checkpoints`` (same forms: ``"final"``,
+    ``"every_layer"``, a stride or a list of layers), so expensive probes can
+    run at a few depths while cheap ones run at every layer.
+
+    The fields after ``cutoff`` belong to :func:`correlated_erasure` (the
+    law of its regions and how they are drawn; see there) and keep their
+    defaults on every other probe.
     """
 
     kind: str
@@ -211,6 +230,24 @@ class Probe:
     cutoff: tuple[str, int | tuple[tuple[int, int], ...]] | None = field(
         default=None, compare=False
     )
+    # correlated_erasure: the couplings J (as given), the erasure sizes m (as given; ()
+    # until the spec fills in every size), the chain's burn-in (None until the spec fills
+    # in the size-aware default), thinning, replica exchange, sampler, ladder, its largest
+    # gap and the erasure graph.
+    couplings: tuple[float, ...] = ()
+    sizes: tuple[int, ...] = ()
+    burn_in: int | None = None
+    thin: int = 1
+    tempering: bool = True
+    method: str = "auto"
+    ladder: str | tuple[float, ...] = "auto"
+    max_step: float | None = None
+    geometry: str = "interaction"
+    # correlated_erasure: the fields ("sizes", "burn_in") that the spec fills in from its
+    # num_system because they were left at their defaults. Like ``cutoff``, it stays on the
+    # resolved probe so that a spec of another size fills them in again, and it is not
+    # compared: every size written out is the same probe as the default.
+    n_defaults: tuple[str, ...] = field(default=(), compare=False)
 
     @property
     def is_vector(self) -> bool:
@@ -499,6 +536,255 @@ def _counts_size(p: Probe, n: int) -> Probe:
     return p
 
 
+GEOMETRIES = ("interaction", "cycle", "path")
+"""The erasure graphs of :func:`correlated_erasure` (``geometry=``)."""
+
+_SIZE_RANGE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*(?::\s*(\d+)\s*)?$")
+
+
+def correlated_erasure(
+    couplings: float | Sequence[float],
+    sizes: Sequence[int] | str | None = None,
+    samples: int = 100,
+    name: str | None = None,
+    *,
+    burn_in: int | None = None,
+    thin: int = 1,
+    tempering: bool = True,
+    method: str = "auto",
+    ladder: str | Sequence[float] = "auto",
+    max_step: float | None = None,
+    geometry: str = "interaction",
+    checkpoints=None,
+) -> Probe:
+    """Vector: P_{C,G,J}(m), the failure probability under geometry-correlated erasures, per coupling J and size m.
+
+    An erasure of ``m`` system qubits strikes a region ``A`` with probability
+    ``Q_J(A | m) = exp(-J b_G(A)) / Z_m(J)``, where ``b_G(A)`` is the number of
+    edges of the erasure graph ``G`` with exactly one end in ``A`` (``J > 0``
+    favours compact regions, ``J = 0`` is the uniform law, ``J < 0`` favours
+    spread-out ones), and it fails when it loses logical information,
+    ``F_C(A) = 1[I(A:R) > 0]``. The probe estimates
+    ``P_{C,G,J}(m) = sum over |A| = m of Q_J(A | m) F_C(A)`` for the code ``C``
+    the circuit holds at each evaluation::
+
+        value[t, e, c, i] = (1/S) sum_{s=1..S} F_C(A_s)
+
+    the fraction of the ``S = samples`` regions ``A_s`` of size
+    ``m = sizes[i]`` drawn at ``J = couplings[c]`` whose erasure fails, for
+    trajectory ``t`` at evaluation ``e``. At ``J = 0`` it estimates the uniform
+    ``P_C(m)`` of :func:`erasure_first_failure` and
+    :func:`uncorrectable_region_counts`. Needs a reference; a code with
+    ``k = 0`` (a purified reference) never fails, so it records 0 (and draws
+    nothing), also after a ``stop_when_purified`` stop.
+
+    **Layout.** ``EnsembleResult.values[name]`` is float64 ``(trajectories,
+    evaluations, len(couplings) * len(sizes))``, coupling-major: entry
+    ``c * len(sizes) + i`` is coupling ``c``, size ``i``, both in the order
+    given. :meth:`EnsembleResult.correlated` returns ``(couplings, sizes,
+    values)`` with ``values`` reshaped to ``(trajectories, evaluations,
+    len(couplings), len(sizes))``.
+
+    **Arguments.** ``couplings``: one finite number or a list of distinct ones,
+    any order (``J -> +inf`` is a limit, not a coupling: its exact answers are
+    ``StabilizerCode.interval_failure_by_size`` on the ring,
+    ``end_window_failure_by_size`` on the open path and
+    ``erasures.minimum_boundary_regions`` on small graphs). ``sizes``: distinct
+    sizes in ``[1, n-1]`` in any order, as a list or a range string
+    ``"a:b[:step]"`` (Python slice semantics, ``"1:33"`` is 1..32), or None
+    (default) for every ``m = 1..n-1``, filled in for the spec's ``n``.
+    ``geometry`` is the erasure graph ``G``: ``"interaction"`` (default; the
+    trajectory's own interaction graph, the study's ``G``), ``"cycle"`` or
+    ``"path"`` over the qubit labels ``0..n-1`` (the physical ring or chain a
+    Watts-Strogatz circuit is built on).
+
+    **Sampler.** Exactly :func:`sparsegf2.erasures.sample_regions` with these
+    ``method``, ``burn_in``, ``thin``, ``tempering``, ``ladder`` and
+    ``max_step``: with ``method="auto"`` (default), independent exact samples
+    when ``G`` is one cycle or one path through all ``n`` qubits (in any
+    labeling: the ring and the open chain, the brickwork geometries; no
+    burn-in or thinning), otherwise a Metropolis swap chain per rung of a
+    replica-exchange ladder of couplings (``ladder="auto"``: the couplings, 0,
+    and rungs at most ``max_step`` apart, by default ``1 / sqrt(Var_0 b)``;
+    only the requested couplings are recorded) that starts from uniform
+    regions, runs ``burn_in`` sweeps (default None: ``max(200, 8 n)``, the
+    graph side's size-aware default) and records ``samples`` states ``thin``
+    sweeps apart. ``"chain"`` forces the chain, ``"exact"`` refuses other
+    graphs. The chain does not depend on the code, so its mixing for the
+    spec's graph, sizes and couplings is checked on the graph side
+    (``erasures.sample_regions``, the ``sample_erasure_regions`` tool: same
+    kernel, same ladder, its diagnostics and warnings) before a large run.
+    Errors across trajectories are honest whatever the chain's correlation:
+    each trajectory's chains are independent.
+
+    **Randomness.** Each size of each evaluation draws from its own stream,
+    ``stream_state(key_probe, mix(mix(t, h, L), m, 0))`` for trajectory ``t``,
+    probe-name hash ``h``, layer ``L`` and size ``m`` (:data:`RANDOMNESS_CONTRACT`),
+    starts afresh (uniform start states, a full burn-in: nothing is carried
+    between sizes, layers or evaluations), and makes exactly the draws of
+    ``sample_regions`` from that state (the chain's, or the exact sampler's
+    with the couplings in increasing order). So a size's values do not depend
+    on the other sizes requested, and a replay reproduces them.
+
+    **Cost.** Per evaluation with ``k > 0`` and per size, the chain makes
+    ``rungs x (burn_in + (samples - 1) thin) x n`` swap proposals (each
+    ``O(degree)``: about 20 ns at mean degree 4 and 30 ns at 8 on one thread
+    of an AMD Ryzen 9 9950X3D), and ``len(couplings) x samples`` regions are
+    evaluated, two eliminations of ``2 min(m, n - m)`` columns each (14 us at
+    ``n = 256``, ``m = 32``; 170 to 290 us at ``m = 128``); ``estimate_ensemble``
+    prices both. The default burn-in, ``8 n`` sweeps, dominates at large
+    ``n``: at ``n = 256`` with about 10 rungs that is 5 million proposals,
+    0.1 s, per size and evaluation. To keep it down: a narrow
+    ``sizes`` window (:func:`sparsegf2.analysis.binomial_window` says which
+    sizes matter for an erasure rate), checkpoints of its own (``"final"``),
+    fewer couplings, or the exact samplers (``geometry="cycle"`` or a ring
+    circuit). Working memory per thread: ``8 c S (m + 1)`` bytes for the
+    largest size.
+    """
+    return Probe(
+        "correlated_erasure",
+        name or "correlated_erasure",
+        (),
+        0,
+        _integer_at_least(samples, "samples", 1),
+        _schedule(checkpoints),
+        couplings=_coupling_tuple(couplings),
+        sizes=() if sizes is None else _size_tuple(sizes),
+        burn_in=None if burn_in is None else _integer_at_least(burn_in, "burn_in", 0),
+        thin=_integer_at_least(thin, "thin", 1),
+        tempering=_flag(tempering, "tempering"),
+        method=_choice(method, "method", erasures.METHODS),
+        ladder=_ladder_arg(ladder),
+        max_step=None if max_step is None else erasures._max_step(max_step),
+        geometry=_choice(geometry, "geometry", GEOMETRIES),
+        n_defaults=tuple(
+            f for f, value in (("sizes", sizes), ("burn_in", burn_in)) if value is None
+        ),
+    )
+
+
+def _integer_at_least(value, what: str, minimum: int) -> int:
+    v = _integer(value, what)
+    if v < minimum:
+        raise ValueError(f"{what} must be at least {minimum}, got {v}")
+    return v
+
+
+def _choice(value, what: str, choices: Sequence[str]) -> str:
+    if not isinstance(value, str) or value not in choices:
+        listed = ", ".join(repr(c) for c in choices)
+        raise ValueError(f"{what} must be one of {listed}, got {value!r}")
+    return value
+
+
+def _real(value, what: str) -> float:
+    """One real number (int or float, numpy scalars too; never a bool or a string)."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.number)):
+        raise ValueError(f"{what} must be numbers, got {value!r}")
+    return float(value)
+
+
+def _coupling_tuple(couplings) -> tuple[float, ...]:
+    """The couplings as given: finite, distinct, at least one."""
+    if isinstance(couplings, (str, bytes)):
+        raise ValueError(f"couplings must be numbers (one, or a list), got {couplings!r}")
+    if isinstance(couplings, (int, float, np.number)) and not isinstance(couplings, np.ndarray):
+        values = [couplings]
+    else:
+        try:
+            values = list(couplings)
+        except TypeError:
+            raise ValueError(
+                f"couplings must be numbers (one, or a list), got {couplings!r}"
+            ) from None
+    js = tuple(_real(v, "couplings") for v in values)
+    if not js:
+        raise ValueError("couplings: give at least one coupling J")
+    for position, j in enumerate(js):
+        if not math.isfinite(j):
+            raise ValueError(
+                f"couplings must be finite, got {j} at position {position} (J -> +inf is a "
+                "limit, not a coupling: its exact answers are StabilizerCode."
+                "interval_failure_by_size on the ring, end_window_failure_by_size on the open "
+                "path and erasures.minimum_boundary_regions on small graphs)"
+            )
+    if len(set(js)) != len(js):
+        twice = next(j for j in js if js.count(j) > 1)
+        raise ValueError(f"couplings must be distinct: {twice:g} appears {js.count(twice)} times")
+    return js
+
+
+def _size_tuple(sizes) -> tuple[int, ...]:
+    """Sizes as given (a list, or a range string ``"a:b[:step]"``): distinct integers, at least one."""
+    if isinstance(sizes, str):
+        match = _SIZE_RANGE.match(sizes)
+        if not match:
+            raise ValueError(
+                f"sizes: expected a list of sizes or a range like '1:33' (sizes 1..32), got "
+                f"{sizes!r}"
+            )
+        start, stop, step = int(match.group(1)), int(match.group(2)), int(match.group(3) or 1)
+        if step < 1:
+            raise ValueError("sizes: a range step must be positive")
+        values: list[int] = list(range(start, stop, step))
+    else:
+        if isinstance(sizes, (int, float, np.number, bytes)):
+            raise ValueError(
+                f"sizes: expected a list of sizes or a range like '1:33', got {sizes!r}"
+            )
+        try:
+            raw = list(sizes)
+        except TypeError:
+            raise ValueError(
+                f"sizes: expected a list of sizes or a range like '1:33', got {sizes!r}"
+            ) from None
+        values = []
+        for s in raw:
+            try:
+                values.append(_integer(s, "sizes"))
+            except TypeError:
+                raise ValueError(f"sizes must be integers, got {s!r}") from None
+    if not values:
+        raise ValueError("sizes: give at least one size (or None for every size 1..n-1)")
+    if len(set(values)) != len(values):
+        twice = next(s for s in values if values.count(s) > 1)
+        raise ValueError(f"sizes must be distinct: {twice} appears {values.count(twice)} times")
+    return tuple(values)
+
+
+def _ladder_arg(ladder) -> str | tuple[float, ...]:
+    """``"auto"``, ``"given"`` or the extra couplings of a ladder (a tuple), checked."""
+    extra = erasures._ladder_extra(ladder)
+    return ladder if extra is None else tuple(float(j) for j in extra)
+
+
+def _correlated_resolved(p: Probe, n: int) -> Probe:
+    """A correlated_erasure probe for ``n`` system qubits: its defaults filled in and checked.
+
+    The errors say what to change but not which probe; the caller names it.
+    """
+    sizes = tuple(range(1, n)) if "sizes" in p.n_defaults else tuple(int(m) for m in p.sizes)
+    if not sizes:
+        raise ValueError("sizes: give at least one size (or None for every size 1..n-1)")
+    bad = [m for m in sizes if not 1 <= m <= n - 1]
+    if bad:
+        raise ValueError(
+            f"sizes must lie in [1, {n - 1}] (P(0) = 0 and P(n) = 1[k > 0] are known), got {bad[0]}"
+        )
+    burn_in = erasures.default_burn_in(n) if "burn_in" in p.n_defaults else p.burn_in
+    if p.geometry == "cycle" and n < 3:
+        raise ValueError(f"geometry 'cycle' needs at least 3 system qubits (n = {n}): use 'path'")
+    needed = 8 * len(p.couplings) * p.samples * (max(sizes) + 1)
+    if needed > erasures.MAX_RESULT_BYTES:
+        raise ValueError(
+            f"one size holds {len(p.couplings)} coupling(s) x {p.samples:,} samples x (size "
+            f"{max(sizes)} + 1) int64 values = {needed:,} bytes per thread, above "
+            f"{erasures.MAX_RESULT_BYTES:,}: record fewer samples (thin more instead), smaller "
+            "sizes or fewer couplings"
+        )
+    return replace(p, sizes=sizes, burn_in=burn_in)
+
+
 def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
     """The code itself: its stabilizer generators, saved for analysis after the run.
 
@@ -518,7 +804,9 @@ class _Kind:
 
     code: int  # kernel probe code (``_kernel.ensemble.PROBE_*``)
     reference: bool  # needs a reference qubit system
-    length: str  # values per evaluation: "one", "profile" (n + 1), "samples", "size"
+    # values per evaluation: "one", "profile" (n + 1), "samples", "size", "correlated"
+    # (couplings x sizes)
+    length: str
     after_purification: str  # value once the reference is pure: "nan", "zero", "n", "n+1"
     sampled: bool = False  # draws random orderings: Probe.samples must be at least 1
 
@@ -536,11 +824,15 @@ _KINDS = {
     "erasure_first_failure": _Kind(_ens.PROBE_FIRST_FAILURE, True, "samples", "n+1", True),
     "uncorrectable_counts": _Kind(_ens.PROBE_UNCORRECTABLE_COUNTS, True, "size", "zero"),
     "code_snapshot": _Kind(_ens.PROBE_CODE_SNAPSHOT, False, "one", "n"),
+    "correlated_erasure": _Kind(_ens.PROBE_CORRELATED_ERASURE, True, "correlated", "zero", True),
 }
 
 
 def _probe_length(p: Probe, n: int) -> int:
     rule = _KINDS[p.kind].length
+    if rule == "correlated":  # coupling-major: len(couplings) x len(sizes)
+        sizes = n - 1 if "sizes" in p.n_defaults else len(p.sizes)
+        return len(p.couplings) * sizes
     return {"one": 1, "profile": n + 1, "samples": p.samples, "size": p.size}[rule]
 
 
@@ -548,6 +840,29 @@ def _probe_fill(p: Probe, n: int) -> float:
     """The probe's exact value once the reference is pure (k = 0), or NaN if not determined."""
     rule = _KINDS[p.kind].after_purification
     return {"nan": np.nan, "zero": 0.0, "n": float(n), "n+1": float(n + 1)}[rule]
+
+
+@dataclass(frozen=True, eq=False)
+class _CorrelatedPlan:
+    """How a correlated_erasure probe draws its regions in one spec (built in Python, once).
+
+    ``requested`` are the couplings sorted ascending, ``order[q]`` the given index of the
+    ``q``-th of them; ``sizes`` as given. ``graph_class[g]`` is the class of erasure graph
+    ``g`` (the spec's graphs, or the one cycle or path); ``classes[c]`` is ``("exact",
+    kind)`` (kind 1 cycle, 2 path) or ``("chain", |E|, D)``. ``ladder_id[c, i]`` indexes
+    ``ladders`` (sorted rungs) for chain class ``c`` and size ``sizes[i]``, -1 for exact
+    samples; ``max_steps`` holds each ladder's automatic gap (None if not automatic).
+    """
+
+    requested: np.ndarray
+    order: np.ndarray
+    sizes: np.ndarray
+    graph_class: np.ndarray
+    classes: tuple[tuple, ...]
+    ladder_id: np.ndarray
+    ladders: tuple[np.ndarray, ...]
+    max_steps: tuple[float | None, ...]
+    burn_in: int
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +961,9 @@ class MonitoredCircuit:
     )
     _probe_layers: tuple = field(init=False, repr=False, compare=False, default=())
     _compiled: dict = field(init=False, default_factory=dict, repr=False, compare=False)
+    # correlated_erasure probes: name -> _CorrelatedPlan (their ladders, built and checked
+    # in __post_init__)
+    _plans: dict = field(init=False, default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         n = _integer(self.num_system, "num_system")
@@ -752,6 +1070,12 @@ class MonitoredCircuit:
         )
         if self.stop_when_purified and self.reference == "none":
             raise ValueError("stop_when_purified needs a reference")
+        for p in self.probes:
+            if p.kind == "correlated_erasure":
+                try:
+                    self._plans[p.name] = self._plan_correlated(p)
+                except ValueError as exc:
+                    raise ValueError(f"probe {p.name!r}: {exc}") from None
 
     def _resolve_probe(self, p: Probe) -> Probe:
         """Validate a probe and fill in default regions and the exhaustive size for this n."""
@@ -794,7 +1118,129 @@ class MonitoredCircuit:
                 p = _counts_size(p, n)
             except ValueError as exc:
                 raise ValueError(f"probe {p.name!r}: {exc}") from None
+        if p.kind == "correlated_erasure":  # default sizes and burn-in for this n
+            try:
+                p = _correlated_resolved(p, n)
+            except ValueError as exc:
+                raise ValueError(f"probe {p.name!r}: {exc}") from None
         return p
+
+    def _plan_correlated(self, p: Probe) -> _CorrelatedPlan:
+        """How the resolved correlated_erasure probe ``p`` draws its regions in this spec.
+
+        The erasure graphs are the spec's graphs (``geometry="interaction"``) or the cycle
+        or path over the labels. Each gets a class: exact (one cycle or one path through
+        all n nodes, in any labeling, unless ``method="chain"``), or a chain class of the
+        graphs with the same ``|E|`` and ``D = sum_v d_v (d_v - 1)``, the only things the
+        automatic ladder depends on. Per chain class and size the ladder is
+        :func:`sparsegf2.erasures._chain_ladder`, the rule of ``sample_regions``, so the
+        rungs are the graph-side tool's exactly. Raises ``ValueError`` (without the probe's
+        name; the caller adds it) for ``method="exact"`` on another graph, extra rungs
+        without tempering, and a ladder of too many rungs.
+        """
+        n = self.num_system
+        given = np.array(p.couplings, dtype=np.float64)
+        order = np.argsort(given, kind="stable").astype(np.int64)
+        requested = np.ascontiguousarray(given[order])
+        if p.geometry == "interaction":
+            targets: tuple[np.ndarray, ...] = self.graphs
+        else:
+            maker = _graphs.cycle if p.geometry == "cycle" else _graphs.path
+            targets = (from_edges(maker(n), n),)
+        keys: dict[tuple[Any, ...], int] = {}
+        graph_class = np.empty(len(targets), dtype=np.int64)
+        for g, edges in enumerate(targets):
+            kind = 0
+            if p.method != "chain":
+                indptr, indices = _chain.csr(n, np.ascontiguousarray(edges, dtype=np.int64))
+                kind = int(_chain.geometry_order(indptr, indices, n)[1])
+            if kind == 0 and p.method == "exact":
+                which = f"graph {g}" if len(targets) > 1 else "the erasure graph"
+                raise ValueError(
+                    "method='exact' needs an erasure graph that is one cycle or one path "
+                    f"through all {n} qubits (in any labeling); {which} is neither: use "
+                    "method='chain' (or 'auto'), or geometry='cycle' or 'path'"
+                )
+            key: tuple[Any, ...] = (
+                ("exact", kind) if kind else ("chain", len(edges), erasures._shared_pairs(edges, n))
+            )
+            graph_class[g] = keys.setdefault(key, len(keys))
+        sizes = np.array(p.sizes, dtype=np.int64)
+        extra = None if isinstance(p.ladder, str) else np.array(p.ladder, dtype=np.float64)
+        chains = [entry for entry in keys if entry[0] == "chain"]
+        if chains and extra is not None and not p.tempering:
+            raise ValueError(
+                "extra couplings (ladder) only help with tempering=True (without exchanges the "
+                "chains never meet): drop ladder or set tempering=True"
+            )
+        ladders: dict[tuple[float, ...], int] = {}
+        steps: list[float | None] = []
+        ladder_id = np.full((len(keys), len(sizes)), -1, dtype=np.int64)
+        for entry, cls in keys.items():
+            if entry[0] != "chain":
+                continue
+            num_edges, shared = int(entry[1]), int(entry[2])
+            for i, m in enumerate(sizes.tolist()):
+
+                def variance(m: int = m, e: int = num_edges, d: int = shared) -> float:
+                    return erasures._uniform_moments(n, m, e, d)[1]
+
+                rungs, step, _ = erasures._chain_ladder(
+                    requested, p.ladder, extra, p.tempering, p.max_step, variance
+                )
+                rung_key = tuple(rungs.tolist())
+                if rung_key not in ladders:
+                    ladders[rung_key] = len(ladders)
+                    steps.append(step)
+                ladder_id[cls, i] = ladders[rung_key]
+        return _CorrelatedPlan(
+            requested=requested,
+            order=order,
+            sizes=sizes,
+            graph_class=graph_class,
+            classes=tuple(keys),
+            ladder_id=ladder_id,
+            ladders=tuple(np.array(r, dtype=np.float64) for r in ladders),
+            max_steps=tuple(steps),
+            burn_in=int(p.burn_in or 0),
+        )
+
+    def correlated_sampler(self, name: str) -> dict[str, Any]:
+        """How the correlated_erasure probe ``name`` draws its regions in this spec.
+
+        A dict: ``method`` (``"exact"``, ``"chain"``, or ``"mixed"`` when a graph
+        collection has both kinds), ``geometries`` (``"cycle"``/``"path"`` for the exact
+        erasure graphs), ``graphs`` (how many erasure graphs, and how many are sampled
+        exactly: ``exact_graphs``), and for the chain ``rungs`` (the fewest and most rungs
+        of any ladder, over the sizes and graphs), ``max_step`` (the largest automatic gap
+        used, or None), ``burn_in``, ``thin`` and ``tempering``. The chain's mixing depends
+        on the graph, the size and these settings only: check it on the graph side
+        (``erasures.sample_regions``) with the same ones.
+        """
+        p = next((q for q in self.probes if q.name == name), None)
+        if p is None or p.kind != "correlated_erasure":
+            raise KeyError(f"no correlated_erasure probe named {name!r}")
+        plan = self._plans[name]
+        exact = np.array([key[0] == "exact" for key in plan.classes])[plan.graph_class]
+        out: dict[str, Any] = {
+            "method": "exact" if exact.all() else "chain" if not exact.any() else "mixed",
+            "graphs": int(exact.size),
+            "exact_graphs": int(exact.sum()),
+        }
+        if exact.any():
+            kinds = {key[1] for key in plan.classes if key[0] == "exact"}
+            out["geometries"] = sorted({1: "cycle", 2: "path"}[k] for k in kinds)
+        if not exact.all():
+            counts = [len(r) for r in plan.ladders]
+            finite = [s for s in plan.max_steps if s is not None]
+            out.update(
+                rungs=[min(counts), max(counts)],
+                max_step=max(finite) if finite else None,
+                burn_in=plan.burn_in,
+                thin=p.thin,
+                tempering=p.tempering and max(counts) > 1,
+            )
+        return out
 
     def _resolve_checkpoints(self, spec) -> tuple[str | int | np.ndarray, np.ndarray]:
         """The checkpoint spec in normal form, and the (read-only) layers it selects.
@@ -977,6 +1423,7 @@ class MonitoredCircuit:
                 size=np.array([p.size for p in self.probes], dtype=np.int64),
                 samples=np.array([p.samples for p in self.probes], dtype=np.int64),
                 phash=np.array([_name_hash(p.name) for p in self.probes], dtype=np.uint64),
+                **_correlated_tables(self),
                 snapshot=snapshot[0] if snapshot else -1,
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
@@ -1050,8 +1497,10 @@ class MonitoredCircuit:
                     a["detect"], bool(self.stop_when_purified), a["pkind"], a["plen"], a["poff"],
                     a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"], a["idx"],
                     a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
-                    key_probe, a["phash"], first_trajectory, out, snap, snap_rows, tau, final,
-                    meas,
+                    key_probe, a["phash"], a["ce_param"], a["ce_int"], a["ce_float"],
+                    a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
+                    bool(a["ce_need_graph"]), first_trajectory, out, snap, snap_rows, tau,
+                    final, meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
@@ -1171,6 +1620,83 @@ class MonitoredCircuit:
                 c.append("M", mq[lo:hi].tolist())
             c.append("TICK")
         return c
+
+
+def _correlated_tables(spec: MonitoredCircuit) -> dict[str, Any]:
+    """The kernel's tables of the correlated_erasure probes (``_kernel.ensemble``, CE_*).
+
+    ``ce_param[j]`` holds probe ``j``'s offsets into the flat ``ce_int`` (sizes, the given
+    index of each sorted coupling, the class of each erasure graph, the ladder index of
+    each class and size, the ladders' pointers and record masks) and ``ce_float`` (the
+    sorted couplings, the rungs), and its burn-in, thinning, tempering and geometry
+    (0 interaction, 1 cycle, 2 path); rows of other probes are zero. ``geo_*`` hold the
+    CSR form, the order along it and the kind (1 cycle, 2 path) of the cycle (row 0) and
+    the path (row 1) over the labels, for the geometries in use (zeros otherwise);
+    ``ce_need_graph`` says whether some probe samples on the trajectories' own graphs.
+    """
+    n = spec.num_system
+    ints: list[int] = []
+    floats: list[float] = []
+    param = np.zeros((len(spec.probes), _ens.CE_COLUMNS), dtype=np.int64)
+    geo_indptr = np.zeros((2, n + 1), dtype=np.int64)
+    geo_indices = np.zeros((2, 2 * n), dtype=np.int64)
+    geo_order = np.zeros((2, n), dtype=np.int64)
+    geo_kind = np.zeros(2, dtype=np.int64)
+    need_graph = False
+
+    def put(values, into: list) -> int:
+        at = len(into)
+        into.extend(values)
+        return at
+
+    for j, p in enumerate(spec.probes):
+        if p.kind != "correlated_erasure":
+            continue
+        plan: _CorrelatedPlan = spec._plans[p.name]
+        geometry = GEOMETRIES.index(p.geometry)
+        need_graph = need_graph or geometry == 0
+        if geometry:
+            maker = _graphs.cycle if geometry == 1 else _graphs.path
+            edges = np.ascontiguousarray(from_edges(maker(n), n), dtype=np.int64)
+            indptr, indices = _chain.csr(n, edges)
+            walk, kind = _chain.geometry_order(indptr, indices, n)
+            geo_indptr[geometry - 1] = indptr
+            geo_indices[geometry - 1, : indices.size] = indices
+            geo_order[geometry - 1] = walk
+            geo_kind[geometry - 1] = kind
+        pointers, records, rungs = [0], [], []
+        for ladder in plan.ladders:
+            positions = np.searchsorted(ladder, plan.requested)
+            record = np.full(ladder.size, -1, dtype=np.int64)
+            record[positions] = np.arange(plan.requested.size)
+            records.extend(record.tolist())
+            rungs.extend(ladder.tolist())
+            pointers.append(len(rungs))
+        row = param[j]
+        row[_ens.CE_SIZES] = put(plan.sizes.tolist(), ints)
+        row[_ens.CE_NUM_SIZES] = plan.sizes.size
+        row[_ens.CE_COUPLINGS] = put(plan.requested.tolist(), floats)
+        row[_ens.CE_NUM_COUPLINGS] = plan.requested.size
+        row[_ens.CE_ORDER] = put(plan.order.tolist(), ints)
+        row[_ens.CE_CLASSES] = put(plan.graph_class.tolist(), ints)
+        row[_ens.CE_LADDER_IDS] = put(plan.ladder_id.ravel().tolist(), ints)
+        row[_ens.CE_LADDER_PTR] = put(pointers, ints)
+        row[_ens.CE_RUNGS] = put(rungs, floats)
+        row[_ens.CE_RECORDS] = put(records, ints)
+        row[_ens.CE_BURN_IN] = plan.burn_in
+        row[_ens.CE_THIN] = p.thin
+        row[_ens.CE_TEMPERING] = int(p.tempering)
+        row[_ens.CE_GEOMETRY] = geometry
+    return {
+        "ce_param": param,
+        "ce_int": np.array(ints, dtype=np.int64),
+        "ce_float": np.array(floats, dtype=np.float64),
+        "geo_indptr": geo_indptr,
+        "geo_indices": geo_indices,
+        "geo_order": geo_order,
+        "geo_kind": geo_kind,
+        "ce_need_graph": need_graph,
+    }
 
 
 def _graph_list(edges) -> tuple[list[np.ndarray], bool]:
@@ -1343,6 +1869,45 @@ def _cutoff_from_record(record: dict | None) -> tuple | None:
     return form, _cutoff_value(value, form)
 
 
+_CORRELATED_FIELDS = (
+    "couplings",
+    "sizes",
+    "burn_in",
+    "thin",
+    "tempering",
+    "method",
+    "ladder",
+    "max_step",
+    "geometry",
+    "n_defaults",
+)
+
+
+def _correlated_record(p: Probe) -> dict:
+    """A correlated_erasure probe's law and sampler as saved (resolved for the spec's n)."""
+    out = {}
+    for name in _CORRELATED_FIELDS:
+        value = getattr(p, name)
+        out[name] = list(value) if isinstance(value, tuple) else value
+    return out
+
+
+def _correlated_from_record(record: dict) -> dict:
+    """The keyword arguments of :class:`Probe` saved by :func:`_correlated_record` (none for
+    other probes and old files)."""
+    if record.get("kind") != "correlated_erasure":
+        return {}
+    out = {name: record[name] for name in _CORRELATED_FIELDS if name in record}
+    for name in ("couplings", "sizes", "n_defaults"):
+        if name in out:
+            out[name] = tuple(out[name])
+    if isinstance(out.get("ladder"), list):
+        out["ladder"] = tuple(float(j) for j in out["ladder"])
+    out["couplings"] = tuple(float(j) for j in out.get("couplings", ()))
+    out["sizes"] = tuple(int(m) for m in out.get("sizes", ()))
+    return out
+
+
 def _json_default(obj):
     """``json.dumps`` fallback: numpy scalars and arrays become plain Python values."""
     if isinstance(obj, np.generic):
@@ -1367,7 +1932,9 @@ class EnsembleResult:
         reference (k = 0: code dimension and lost information 0, first-failure
         size n + 1, no uncorrectable regions) or NaN where that is not
         determined (entanglement probes); ``contiguous_distance`` is NaN
-        wherever k = 0.
+        wherever k = 0. A :func:`correlated_erasure` probe stores
+        ``len(couplings) * len(sizes)`` values per evaluation, coupling-major;
+        :meth:`correlated` returns them as ``(..., couplings, sizes)``.
     snapshots
         For a :func:`code_snapshot` probe: ``(generators, counts)``, where
         ``generators[t, c, i]`` is generator ``i`` of the code at evaluation
@@ -1444,6 +2011,36 @@ class EnsembleResult:
     def layers(self, name: str) -> np.ndarray:
         """The layers at which probe ``name`` was evaluated (the columns of ``values[name]``)."""
         return self.spec.probe_layers(name)
+
+    def correlated(self, name: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """A :func:`correlated_erasure` probe's values with their axes: ``(couplings, sizes, values)``.
+
+        ``couplings`` is float64 ``[c]`` and ``sizes`` int64 ``[s]``, both in the order
+        given; ``values`` is float64 ``(trajectories, evaluations, c, s)``, a view of
+        ``self.values[name]`` (stored flat and coupling-major): ``values[t, e, i, j]`` is
+        the estimate of ``P_{C,G,J}(m)`` at ``J = couplings[i]``, ``m = sizes[j]``, for
+        row ``t`` at evaluation ``e`` (the layers are ``layers(name)``). ``name`` may be
+        left out when the spec has one such probe.
+        """
+        found = [p for p in self.spec.probes if p.kind == "correlated_erasure"]
+        if name is None:
+            if len(found) != 1:
+                names = [p.name for p in found]
+                raise KeyError(
+                    f"give the name of a correlated_erasure probe (the spec has {names})"
+                )
+            probe = found[0]
+        else:
+            matches = [p for p in found if p.name == name]
+            if not matches:
+                raise KeyError(
+                    f"no correlated_erasure probe named {name!r}; they are {[p.name for p in found]}"
+                )
+            probe = matches[0]
+        couplings = np.array(probe.couplings, dtype=np.float64)
+        sizes = np.array(probe.sizes, dtype=np.int64)
+        flat = np.asarray(self.values[probe.name])
+        return couplings, sizes, flat.reshape(*flat.shape[:2], couplings.size, sizes.size)
 
     def code(self, trajectory: int, evaluation: int, name: str | None = None):
         """The saved code of row ``trajectory`` at evaluation ``evaluation`` of a snapshot probe.
@@ -1615,6 +2212,7 @@ class EnsembleResult:
                     else p.checkpoints,
                     # the budget or mapping that chose ``size``, kept for another n
                     **({"cutoff": _cutoff_record(p.cutoff)} if p.cutoff is not None else {}),
+                    **(_correlated_record(p) if p.kind == "correlated_erasure" else {}),
                 }
                 for p in spec.probes
             ],
@@ -1662,6 +2260,7 @@ class EnsembleResult:
                     p["samples"],
                     _schedule(p.get("checkpoints")),
                     _cutoff_from_record(p.get("cutoff")),
+                    **_correlated_from_record(p),
                 )
                 for p in meta["probes"]
             ]

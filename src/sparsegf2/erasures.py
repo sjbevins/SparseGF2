@@ -73,7 +73,7 @@ import math
 import operator
 import secrets
 import statistics
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from fractions import Fraction
 from typing import Any
@@ -416,11 +416,19 @@ def uniform_boundary_moments(edges, num_nodes: int, size: int) -> tuple[float, f
     """
     n, e = _graph(edges, num_nodes)
     m = _size(size, n)
-    if n < 2 or len(e) == 0:
-        return 0.0, 0.0
+    return _uniform_moments(n, m, len(e), _shared_pairs(e, n))
+
+
+def _shared_pairs(e: np.ndarray, n: int) -> int:
+    """``D = sum_v d_v (d_v - 1)``, the ordered pairs of distinct edges sharing a node."""
     degree = np.bincount(e.ravel(), minlength=n).astype(object)
-    edges_ = len(e)
-    shared = int(np.sum(degree * (degree - 1)))
+    return int(np.sum(degree * (degree - 1)))
+
+
+def _uniform_moments(n: int, m: int, edges_: int, shared: int) -> tuple[float, float]:
+    """:func:`uniform_boundary_moments` from ``n``, ``m``, ``|E|`` and ``D`` (all a graph enters by)."""
+    if n < 2 or edges_ == 0:
+        return 0.0, 0.0
     disjoint = edges_ * (edges_ - 1) - shared
     k = n - m
     mean = Fraction(edges_ * 2 * m * k, n * (n - 1))
@@ -484,6 +492,37 @@ def coupling_ladder(couplings, max_step: float) -> np.ndarray:
         pieces.append(a + (b - a) * np.arange(1, k + 1) / (k + 1))
         pieces.append(np.array([b]))
     return np.concatenate(pieces)
+
+
+def _chain_ladder(
+    requested: np.ndarray,
+    ladder: Any,
+    extra: np.ndarray | None,
+    tempering: bool,
+    max_step: float | None,
+    variance: Callable[[], float],
+) -> tuple[np.ndarray, float | None, bool]:
+    """The rungs a swap chain runs for the sorted ``requested`` couplings: ``(rungs, max_step, automatic)``.
+
+    The rule of :func:`sample_regions` (``ladder``: ``"auto"``, ``"given"`` or a list,
+    already checked into ``extra`` by :func:`_ladder_extra`): without ``tempering`` or with
+    ``"given"``, the requested couplings; with a list, the requested couplings plus those;
+    with ``"auto"``, :func:`coupling_ladder` with ``max_step`` or else
+    ``1 / sqrt(Var_0(b))``, where ``variance()`` gives ``Var_0(b)`` (it is called only
+    then). The reported ``max_step`` is None when the ladder was not automatic or nothing
+    could be inserted (``Var_0(b) = 0``). The in-run probe ``mipt.correlated_erasure``
+    builds its ladders with this function, so they are the graph-side tool's exactly.
+    """
+    if not tempering or (isinstance(ladder, str) and ladder == "given"):
+        return requested, None, False
+    if extra is not None:
+        return np.unique(np.concatenate([requested, extra])), None, False
+    step = max_step
+    if step is None:
+        var0 = variance()
+        step = 1.0 / math.sqrt(var0) if var0 > 0 else math.inf
+    used = step if math.isfinite(step) else None  # None: nothing to insert
+    return coupling_ladder(requested, step), used, True
 
 
 def default_burn_in(num_nodes: int) -> int:
@@ -849,17 +888,17 @@ def sample_regions(
     requested = np.ascontiguousarray(given[order])
     used_step: float | None = None
     automatic = False
-    if exact or not tempering or (isinstance(ladder, str) and ladder == "given"):
+    if exact:
         rungs = requested
-    elif extra is not None:
-        rungs = np.unique(np.concatenate([requested, extra]))
     else:
-        automatic = True
-        if step is None:
-            var0 = uniform_boundary_moments(e, n, m)[1]
-            step = 1.0 / math.sqrt(var0) if var0 > 0 else math.inf
-        used_step = step if math.isfinite(step) else None  # None: nothing to insert
-        rungs = coupling_ladder(requested, step)
+        rungs, used_step, automatic = _chain_ladder(
+            requested,
+            ladder,
+            extra,
+            bool(tempering),
+            step,
+            lambda: uniform_boundary_moments(e, n, m)[1],
+        )
     positions = np.searchsorted(rungs, requested)
     assert np.array_equal(rungs[positions], requested)
     regions = np.empty((c, samples, m), dtype=np.int64)
