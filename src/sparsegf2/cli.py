@@ -120,7 +120,11 @@ its erasure_first_failure probes (independent erasure, exact up to the counts' w
 uncorrectable_region_counts was evaluated at the same layer) and correlated_erasure probes
 (one row per coupling): the fraction of trajectories holding a code, the failure probability
 Phi(e) at each --eps (default: eight values from 1/n to 1/2) and the tolerance
-e_delta = sup{e : Phi(e) <= delta}. --layer picks the evaluation (default: each probe's last).
+e_delta = sup{e : Phi(e) <= delta}. Erasure is independent per qubit only for the
+erasure_first_failure rows and for J = 0; for J != 0 the Bin(n, e) erased qubits form one
+region drawn with probability proportional to exp(-J b(A)). A correlated row whose sizes were
+not all sampled is interpolated, and says when e_delta itself rests on that
+(e_delta_complete). --layer picks the evaluation (default: each probe's last).
 """
 
 _CAPABILITIES_HELP = """\
@@ -848,6 +852,18 @@ def _human_curves(result: dict[str, Any]) -> list[str]:
                 f"          {_g(j):>6}   {span:<26}{_g(d['per_code_mean'][i]):>10} +- "
                 f"{_g(d['per_code_stderr'][i]):<10}{_g(d['per_code_median'][i]):>7}  "
                 f"{_g(d['monotone_fraction'][i], 3):>8}"
+            )
+        if entry["e_delta_complete"] is False:
+            worst = max(
+                x for row in d["interpolated_mass_at_e_delta"] for x in row if x is not None
+            )
+            lines.append(
+                "  e_delta rests on interpolated sizes: they carry up to "
+                f"{_g(worst)} of the binomial mass at e_delta"
+            )
+        if not all(d["of_mean_phi_monotone"]):
+            lines.append(
+                "  the mean curve steps down in m for some J: e_delta is its last crossing"
             )
     if result.get("truncated"):
         lines.append("")

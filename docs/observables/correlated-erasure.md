@@ -1965,7 +1965,9 @@ each `e`; default eight values log-spaced from $1/n$ to $1/2$), and `e_delta`:
   `of_mean_phi_range`, its value when the mean curve moves by plus and minus its
   standard error at every size (the tolerance of the higher curve, then of the
   lower: a rough one-standard-error band, since the errors at different sizes
-  are positively correlated);
+  are positively correlated), and `of_mean_phi_monotone`, false where the mean
+  curve steps down in $m$ (then $\Phi$ may cross $\delta$ more than once and
+  `of_mean_phi` is the last crossing, §6.6);
 * `per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own
   tolerance. They differ from `of_mean_phi` ($\Phi$ is linear in $P$, the
   tolerance is not) and describe the spread across codes; they are biased
@@ -1975,9 +1977,17 @@ each `e`; default eight values log-spaced from $1/n$ to $1/2$), and `e_delta`:
 
 A correlated entry also lists `sampled_sizes`, `interpolated_sizes` and
 `interpolated_mass` (the binomial probability the interpolated sizes carry at
-each $e$; `complete` when it stays below 0.1%), `binomial_window` (the sizes
-carrying all but $10^{-6}$ of the probability at the given $e$: the ones worth
-sampling), and `sampler`. The per-code curves are
+each requested $e$; `complete` when it stays below 0.1%), `binomial_window` (the
+sizes carrying all but $10^{-6}$ of the probability at the given $e$: the ones
+worth sampling), and `sampler`. The tolerance searches every $e$, not only the
+ones requested, so `e_delta.interpolated_mass_at_e_delta` gives, per coupling,
+the binomial mass of the interpolated sizes at `of_mean_phi` and at the two ends
+of `of_mean_phi_range`, and `e_delta_complete` is false, with a note, when any
+of them exceeds 0.1%: the headline tolerance then leans on the interpolation
+even where `complete` is true (a window chosen for small requested $e$ and a
+$\delta$ large enough to put $e_\delta$ where the unsampled sizes matter; the
+note names the sizes $e_\delta$ needs). The `uniform` rows have neither field:
+their curve is sampled or exact at every size. The per-code curves are
 `analysis.correlated_failure_curve` of the stored fractions (P(0) = 0,
 P(n) = 1[k > 0], linear interpolation between sampled sizes; without a
 `code_dimension` or `erasure_first_failure` probe on the layer every trajectory
@@ -2077,8 +2087,9 @@ by the threads; `estimate_ensemble` does it for a spec.
   the sizes outside it change $\Phi$ by at most `tol` (§6.6). Sample a stride
   inside the window (a range string such as `"8:57:4"`) and let
   `correlated_failure_curve` interpolate between, then read
-  `interpolated_mass` in `erasure_curves`: where it is not small, $\Phi$ leans
-  on the interpolation, which can miss a non-monotone step for $J \ne 0$
+  `interpolated_mass` and `e_delta_complete` in `erasure_curves`: where the
+  mass is not small (at the rates asked for, or at $e_\delta$ itself), the result
+  leans on the interpolation, which can miss a non-monotone step for $J \ne 0$
   (§9(d)). Small sizes are where sampling fails: a failure probability of
   order $10^{-3}$ needs thousands of samples, and the exact counts of §6 on the
   saved codes (`code_snapshot`, then `boundary_failure_counts`) do better.

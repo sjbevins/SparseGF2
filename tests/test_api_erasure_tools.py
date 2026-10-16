@@ -713,6 +713,69 @@ def test_curves_report_what_was_interpolated(tmp_path):
     assert any("interpolat" in note for note in out["notes"])
 
 
+def _narrow_window_run(tmp_path, sizes):
+    spec = dict(CURVE_SPEC, layers=48, checkpoints="final", probes=[
+        {"kind": "code_dimension"},
+        {"kind": "correlated_erasure", "couplings": [0, 2], "sizes": sizes, "samples": 100},
+    ])  # fmt: skip
+    out = tmp_path / "narrow"
+    api.run_ensemble(spec, 40, seed=5, output_dir=str(out))
+    return out
+
+
+def test_the_tolerance_reports_the_mass_it_leans_on_interpolation_for(tmp_path):
+    # sizes 1..3 sampled, 4..15 interpolated: at the small e asked for they carry almost
+    # nothing (complete), but e_delta for delta = 0.1 sits where they carry about 3%
+    out = api.erasure_curves(str(_narrow_window_run(tmp_path, "1:4")), e=[0.01, 0.02], delta=0.1)
+    entry = out["correlated"]["correlated_erasure"]
+    assert entry["complete"] is True and max(entry["interpolated_mass"]) < 1e-3
+    assert entry["e_delta_complete"] is False
+    tolerance = entry["e_delta"]
+    mass = tolerance["interpolated_mass_at_e_delta"]  # per coupling: at of_mean_phi, then the range
+    assert len(mass) == 2 and all(len(row) == 3 for row in mass)
+    for i, row in enumerate(mass):
+        at = [tolerance["of_mean_phi"][i], *tolerance["of_mean_phi_range"][i]]
+        expected = [
+            sum(math.comb(N, m) * x**m * (1 - x) ** (N - m) for m in range(4, N)) for x in at
+        ]
+        np.testing.assert_allclose(row, expected, rtol=1e-4)
+    assert max(max(row) for row in mass) > api.INTERPOLATION_MASS_WARNING
+    note = next(x for x in out["notes"] if "e_delta_complete is false" in x)
+    assert "interpolated_mass_at_e_delta" in note and "at the e asked for only" in note
+    assert tolerance["of_mean_phi_monotone"] == [True, True]  # the flag of the curve behind it
+
+
+def test_the_tolerance_of_a_fully_sampled_run_is_complete(tmp_path):
+    out = api.erasure_curves(str(_narrow_window_run(tmp_path, None)), e=[0.01, 0.02], delta=0.1)
+    entry = out["correlated"]["correlated_erasure"]
+    assert entry["num_interpolated"] == 0 and entry["complete"] is True
+    assert entry["e_delta_complete"] is True
+    assert entry["e_delta"]["interpolated_mass_at_e_delta"] == [[0.0] * 3] * 2
+    assert not any("e_delta_complete" in x for x in out["notes"])
+
+
+def test_the_uniform_channel_has_no_interpolation_flags_but_a_monotone_flag(run_dir, result):
+    out = api.erasure_curves(str(run_dir), e=[0.05, 0.1], delta=0.05)
+    uniform = out["uniform"]["erasure_first_failure"]
+    assert "e_delta_complete" not in uniform and "interpolated_mass" not in uniform
+    first = result.values["erasure_first_failure"][:, 1]
+    counts = result.values["uncorrectable_region_counts[2]"][:, 1]
+    code = first.min(axis=1) <= N
+    curve = analysis.hybrid_failure_by_size(first[code], N, exact_counts=counts[code])
+    _, monotone = analysis.tolerance_from_curve(curve.mean(axis=0), N, 0.05, return_monotone=True)
+    assert uniform["e_delta"]["of_mean_phi_monotone"] is bool(monotone)
+
+
+def test_the_monotone_flag_of_the_mean_curve_is_false_for_a_curve_that_steps_down():
+    down = np.array([0.0, 0.5, 0.2, 0.6, 1.0])
+    up = np.array([0.0, 0.1, 0.2, 0.6, 1.0])
+    for curve, flag in ((down, False), (up, True)):
+        chunk = np.tile(curve, (3, 1, 1))  # three codes, one coupling
+        stats = api._curve_statistics(iter([chunk]), 4, [0.1], 0.05, 3, 3)
+        assert stats["tol_of_mean_monotone"].tolist() == [flag]
+        assert api._tolerance_entry(stats, 0)["of_mean_phi_monotone"] is np.bool_(flag)
+
+
 def test_curves_of_a_swap_chain_point_to_the_mixing_check(tmp_path):
     spec = dict(CURVE_SPEC, graph={"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 2},
                 schedule="random_edges", probes=[

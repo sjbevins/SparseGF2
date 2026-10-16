@@ -703,10 +703,17 @@ tolerance of the ensemble-mean Phi and the headline, with `of_mean_phi_range` (i
 when the mean curve moves by plus and minus its standard error at every size), and
 `per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own tolerance (they
 describe the spread across codes and are biased upward for noisy curves);
-`monotone_fraction` for the correlated rows. A correlated entry adds `couplings` (at most
-12 shown), `sampled_sizes`, `interpolated_sizes`, `interpolated_mass` (the binomial
-probability the interpolated sizes carry at each e), `complete` (that mass below 0.1%),
-`binomial_window` and `sampler`. Without a code probe on the layer every trajectory counts
+`of_mean_phi_monotone` (false where the mean curve steps down in m: `of_mean_phi` is then
+the last crossing of delta); `monotone_fraction` for the correlated rows. A correlated entry
+adds `couplings` (at most 12 shown), `sampled_sizes`, `interpolated_sizes`,
+`interpolated_mass` (the binomial probability the interpolated sizes carry at each e),
+`complete` (that mass below 0.1% at the e asked for), `e_delta_complete` (false, with a
+note, when the interpolated sizes carry more than 0.1% at `e_delta` itself, which the
+tolerance searches over every e: `e_delta.interpolated_mass_at_e_delta`, per coupling, the
+mass at `of_mean_phi` and at both ends of `of_mean_phi_range`; the `uniform` rows have none
+of these fields), `binomial_window` and `sampler`. Phi erases each qubit independently only
+for the `uniform` rows and for J = 0; a row with J != 0 erases Bin(n, e) qubits as one
+region drawn from Q_J. Without a code probe on the layer every trajectory counts
 and one that stored only zeros loses nothing (P(n) = 0). The standard errors treat
 trajectories as independent; a note warns when they ran on a few graphs (circuits on one
 graph are correlated). The work is bounded: the curves are at most 10^8 values (codes x

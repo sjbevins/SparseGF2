@@ -397,10 +397,14 @@ mathematics, the samplers with proofs, costs and worked examples.
   from a saved run, per `erasure_first_failure` probe (`uniform`) and per coupling of a
   `correlated_erasure` probe (`correlated`): `q_plus`, `phi` (mean, stderr and the number of
   `codes` at each e), `e_delta` (`of_mean_phi`, the tolerance of the ensemble-mean Phi and the
-  headline, with `of_mean_phi_range` for a one-standard-error shift of the curve; the
-  `per_code_*` summarize each code's own tolerance and are biased upward), and for the
-  correlated channel the `interpolated_sizes` with the binomial mass they carry
-  (`interpolated_mass`, `complete`) and the `binomial_window` worth sampling. The work is
+  headline, with `of_mean_phi_range` for a one-standard-error shift of the curve and
+  `of_mean_phi_monotone`, false where the mean curve steps down in m; the `per_code_*`
+  summarize each code's own tolerance and are biased upward), and for the correlated channel
+  the `interpolated_sizes` with the binomial mass they carry at the requested e
+  (`interpolated_mass`, `complete`), the mass they carry at `e_delta` itself
+  (`e_delta.interpolated_mass_at_e_delta`, with `e_delta_complete` false when it exceeds
+  0.1%: the tolerance then leans on interpolation even if `complete` is true; the uniform
+  channel has neither field) and the `binomial_window` worth sampling. The work is
   bounded (curves of at most 10^8 values, tolerances of at most 10^10 multiply-adds): beyond
   that evenly spaced codes are used and a note says so; `elapsed_seconds` reports the time.
 * **Exact routes** (saved codes, `code_snapshot`): `code.boundary_failure_counts(edges, w)`

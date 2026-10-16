@@ -624,6 +624,23 @@ def test_curves_table(capsys, erasure_run):
     assert "hold a code" in out
 
 
+def test_curves_table_says_when_the_tolerance_rests_on_interpolated_sizes(capsys, tmp_path):
+    spec = {
+        "num_system": 16, "graph": {"family": "cycle"}, "layers": 48, "measurement_rate": 0.1,
+        "schedule": "matching", "reference": "purification", "checkpoints": "final",
+        "probes": [
+            {"kind": "code_dimension"},
+            {"kind": "correlated_erasure", "couplings": [0, 2], "sizes": "1:4", "samples": 100},
+        ],
+    }  # fmt: skip
+    api.run_ensemble(spec, 40, seed=5, output_dir=str(tmp_path / "narrow"))
+    args = ("curves", str(tmp_path / "narrow"), "--eps", "0.01", "0.02", "--delta", "0.1")
+    code, out, _ = run_cli(capsys, *args)
+    assert code == 0 and "e_delta rests on interpolated sizes" in out
+    code, data = run_json(capsys, *args)
+    assert data["correlated"]["correlated_erasure"]["e_delta_complete"] is False
+
+
 def test_curves_errors_exit_2(capsys, erasure_run, tmp_path):
     code, data = run_json(capsys, "curves", str(tmp_path / "nowhere"))
     assert code == 2 and "no such file or directory" in data["error"]["message"]

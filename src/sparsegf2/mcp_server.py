@@ -218,15 +218,18 @@ result.npz). For its erasure_first_failure probe (independent erasure; exact for
 uncorrectable_region_counts probe was evaluated at the same layer) and its correlated_erasure
 probes (one curve per coupling J), at `layer` (default: each probe's last evaluation), over the
 trajectories that hold a code (k > 0): q_plus and count_with_code; phi, Phi(e) = sum_m C(n,m)
-e^m (1-e)^(n-m) P(m), the probability that erasing each qubit with probability e loses logical
-information, mean and stderr at each e (default eight values from 1/n to 1/2); e_delta, the
-tolerance sup{e : Phi(e) <= delta}: of_mean_phi is the headline, the tolerance of the
-ensemble-mean Phi, with of_mean_phi_range for a one-standard-error shift of the curve;
-per_code_* describe the spread across codes (biased upward). For correlated curves,
-interpolated_sizes are the sizes the probe did not sample, interpolated_mass the binomial
-probability they carry at each e, complete whether that is under 0.1%. Needs an
-erasure_first_failure or correlated_erasure probe. Work is bounded (a long run uses evenly
-spaced codes, with a note); at most 12 couplings are shown (truncated). Writes nothing.
+e^m (1-e)^(n-m) P(m), mean and stderr at each e (default eight values from 1/n to 1/2): the
+uniform rows and J = 0 erase each qubit independently with probability e; a row with J != 0
+erases Bin(n, e) qubits as one region drawn from Q_J. e_delta, the tolerance sup{e : Phi(e) <=
+delta}: of_mean_phi is the headline, the tolerance of the ensemble-mean Phi, with
+of_mean_phi_range for a one-standard-error shift and of_mean_phi_monotone (false: the mean
+curve steps down in m, so e_delta is its last crossing); per_code_* describe the spread across
+codes (biased upward). For correlated curves, interpolated_sizes are the sizes the probe did not
+sample, interpolated_mass the binomial probability they carry at each e, complete whether that
+is under 0.1% at those e; e_delta_complete is false when they carry more at e_delta itself
+(interpolated_mass_at_e_delta). Needs an erasure_first_failure or correlated_erasure probe. Work
+is bounded (a long run uses evenly spaced codes, with a note); at most 12 couplings are shown
+(truncated). Writes nothing.
 
 Example: {"path": "runs/erasure", "e": [0.02, 0.05, 0.1], "delta": 0.01, "layer": 128}"""
 

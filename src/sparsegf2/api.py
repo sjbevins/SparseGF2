@@ -5657,8 +5657,10 @@ def _curve_statistics(
     evenly (``tol_mean``, ``tol_median``, ``tol_stderr``), the tolerance of the mean curve
     (``tol_of_mean``: the ensemble's, what ``analysis.erasure_tolerance`` gives) and of the
     mean curve moved by plus and minus its standard error at every size
-    (``tol_range``: the tolerance of the higher curve, then of the lower one), and the
-    fraction of the ``tolerance_codes`` codes whose curve is nondecreasing in m (``monotone``).
+    (``tol_range``: the tolerance of the higher curve, then of the lower one), whether the
+    mean curve is nondecreasing in m (``tol_of_mean_monotone``: where it is not, the
+    tolerance is the last crossing of delta, not the only one), and the fraction of the
+    ``tolerance_codes`` codes whose curve is nondecreasing in m (``monotone``).
     """
     keep = tolerance_codes
     # running mean and sum of squared deviations (Chan et al.) of Phi and of the curve itself
@@ -5703,6 +5705,9 @@ def _curve_statistics(
         ],
         axis=-1,
     )
+    of_mean, of_mean_monotone = analysis.tolerance_from_curve(
+        curve_mean, n, delta, return_monotone=True
+    )
     return {
         "phi_mean": mean,
         "phi_stderr": stderr,
@@ -5710,7 +5715,8 @@ def _curve_statistics(
         "tol_mean": each.mean(axis=0),
         "tol_median": np.median(each, axis=0),
         "tol_stderr": tol_err,
-        "tol_of_mean": np.atleast_1d(analysis.tolerance_from_curve(curve_mean, n, delta)),
+        "tol_of_mean": np.atleast_1d(of_mean),
+        "tol_of_mean_monotone": np.atleast_1d(of_mean_monotone),
         "tol_range": tol_range,
         "monotone": np.concatenate(flags, axis=0).mean(axis=0),
         "tol_codes": each.shape[0],
@@ -5722,6 +5728,7 @@ def _tolerance_entry(stats: dict[str, Any], pick: int | slice) -> dict[str, Any]
     return {
         "of_mean_phi": stats["tol_of_mean"][pick],
         "of_mean_phi_range": stats["tol_range"][pick],
+        "of_mean_phi_monotone": stats["tol_of_mean_monotone"][pick],
         "per_code_mean": stats["tol_mean"][pick],
         "per_code_median": stats["tol_median"][pick],
         "per_code_stderr": stats["tol_stderr"][pick],
@@ -5877,6 +5884,7 @@ def _correlated_curves(
         "interpolated_sizes": _compress_ints(interpolated.tolist()) if interpolated.size else None,
         "interpolated_mass": mass,
         "complete": bool(mass.max(initial=0.0) <= INTERPOLATION_MASS_WARNING),
+        "e_delta_complete": None,
         "binomial_window": list(analysis.binomial_window(n, es, 1e-6)),
         "sampler": _sampler_text(sampler),
         "what": (
@@ -5916,9 +5924,15 @@ def _correlated_curves(
         "stderr": stats["phi_stderr"],
         "codes": stats["phi_codes"],
     }
+    # the tolerance searches every e, not only the e asked for: the binomial mass of the
+    # interpolated sizes at e_delta itself (of_mean_phi, then the ends of its range)
+    tolerances = np.column_stack([stats["tol_of_mean"], stats["tol_range"]])  # (couplings, 3)
+    at_tolerance = np.stack([_binomial_mass(n, row.tolist(), interpolated) for row in tolerances])
     entry["e_delta"] = _tolerance_entry(stats, slice(None)) | {
-        "monotone_fraction": stats["monotone"]
+        "monotone_fraction": stats["monotone"],
+        "interpolated_mass_at_e_delta": at_tolerance,
     }
+    entry["e_delta_complete"] = bool(np.all(at_tolerance <= INTERPOLATION_MASS_WARNING))
     note = _subset_note(probe.name, stats, k)
     if note:
         notes.append(note)
@@ -5933,6 +5947,18 @@ def _correlated_curves(
                 else f" (above {100 * INTERPOLATION_MASS_WARNING:g}% somewhere: Phi there "
                 "leans on the interpolation; sample more sizes)"
             )
+        )
+    if not entry["e_delta_complete"]:
+        low, high = analysis.binomial_window(
+            n, np.unique(tolerances[np.isfinite(tolerances)]), 1e-6
+        )
+        notes.append(
+            f"{probe.name}: e_delta_complete is false: the interpolated sizes carry up to "
+            f"{100 * float(np.nanmax(at_tolerance)):.2g}% of the binomial probability at "
+            "e_delta itself (interpolated_mass_at_e_delta: at of_mean_phi, then at both ends "
+            "of of_mean_phi_range), so the tolerance leans on the interpolation even where "
+            f"complete is {str(entry['complete']).lower()} (that is at the e asked for only); "
+            f"sample the sizes {low} to {high} that e_delta needs"
         )
     if sampler["method"] != "exact":
         notes.append(
@@ -5958,22 +5984,33 @@ def erasure_curves(
     probe's last evaluation), over the trajectories that hold a code (k > 0): ``q_plus``
     (the fraction of trajectories that do) and ``count_with_code``; ``phi``, ``Phi(e)`` with
     its standard error at each ``e`` (default eight values log-spaced from 1/n to 1/2); and
-    ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}``:
+    ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}``. ``Phi(e)`` erases each qubit
+    independently with probability ``e`` only for the ``uniform`` rows and for ``J = 0``; for a
+    correlated row with ``J != 0`` it erases ``M ~ Bin(n, e)`` qubits as one region drawn from
+    ``Q_J``.
 
     * ``of_mean_phi`` is the headline: the tolerance of the ensemble-mean ``Phi`` (what
       ``analysis.erasure_tolerance`` returns for the whole ensemble), with
       ``of_mean_phi_range`` its value when the mean curve moves by plus and minus its standard
       error at every size (the tolerance of the higher curve, then of the lower: a rough
-      one-standard-error band, since errors at different sizes are positively correlated);
+      one-standard-error band, since errors at different sizes are positively correlated), and
+      ``of_mean_phi_monotone``, false where the mean curve steps down in m (``Phi`` may then
+      cross ``delta`` more than once, and ``of_mean_phi`` is the last crossing);
     * ``per_code_mean``, ``per_code_median`` and ``per_code_stderr`` summarize the tolerance
       of each code's own curve: they describe the spread across codes and are biased upward
       for noisy curves, because the tolerance is not linear in ``Phi``.
 
     For a correlated channel, ``interpolated_sizes`` are the sizes the probe did not sample,
     whose curve is interpolated, ``interpolated_mass`` the binomial probability they carry at
-    each ``e``, ``complete`` whether that stays below 0.1% and ``binomial_window`` the sizes
-    (from, to) that carry all but a millionth of the probability at the ``e`` given (the
-    sizes worth sampling). A curve that is exact for small sizes at every coupling needs the
+    each ``e`` given, ``complete`` whether that stays below 0.1% at those ``e`` and
+    ``binomial_window`` the sizes (from, to) that carry all but a millionth of the probability
+    at the ``e`` given (the sizes worth sampling). The tolerance searches every ``e``, not
+    only those given: ``e_delta.interpolated_mass_at_e_delta`` is, per coupling, the mass at
+    ``of_mean_phi`` and at the two ends of ``of_mean_phi_range`` (in that order), and
+    ``e_delta_complete`` is false, with a note, when any of them exceeds 0.1%: the tolerance
+    then leans on the interpolation even where ``complete`` is true. (The ``uniform`` rows
+    have none of these fields: their curve is sampled or exact at every size.) A curve that
+    is exact for small sizes at every coupling needs the
     saved codes (``StabilizerCode.boundary_failure_counts``). The standard errors treat
     trajectories as independent; circuits on one graph are not (a note says so for a graph
     collection).
