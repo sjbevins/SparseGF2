@@ -385,6 +385,10 @@ def test_correlated_failure_reports_its_sampler():
     assert np.all(r.rungs >= 3) and r.acceptance.shape == (3, 2)
     assert (r.num_qubits, r.num_logical) == (10, code.num_logical)
     assert (r.burn_in, r.thin, r.tempering) == (20, 1, True)
+    # burn_in=None is the sampler's size-aware default, recorded as used
+    wide = _random_code(70, 2, 150, 4, seed=7)
+    default = wide.correlated_failure(graphs.cycle(70), [0.0, 2.0], [3], 5, seed=1)
+    assert default.burn_in == erasures.default_burn_in(70) == 560
     # ladder="given": the pairs are the ladder's own, and a coarse one warns per size
     coarse = code.correlated_failure(edges, [0.0, 4.0], [5], 60, burn_in=10, seed=1, ladder="given")
     drawn = erasures.sample_regions(

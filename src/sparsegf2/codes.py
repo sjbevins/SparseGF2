@@ -88,8 +88,11 @@ class CorrelatedFailure:
       (``"size 7: ..."``); empty when none.
     * ``seed``: the seed used; the regions of size ``m`` are those of
       ``erasures.sample_regions(..., seed=[seed, m])`` (for a list seed, its
-      entries followed by ``m``). ``burn_in``, ``thin``, ``tempering``: as
-      passed. ``num_qubits``, ``num_logical``: the code's n and k.
+      entries followed by ``m``). ``burn_in``: the sweeps before the first
+      record (the default :func:`sparsegf2.erasures.default_burn_in` of n
+      resolved, or as passed; the exact samplers ignore it); ``thin``,
+      ``tempering``: as passed. ``num_qubits``, ``num_logical``: the code's n
+      and k.
 
     Records of one chain are correlated, so ``failures`` is not binomial; for
     errors use the spread over codes (independent chains), or reproduce one
@@ -443,7 +446,7 @@ class StabilizerCode:
         sizes=None,
         samples: int = 100,
         *,
-        burn_in: int = 200,
+        burn_in: int | None = None,
         thin: int = 1,
         tempering: bool = True,
         seed=None,
@@ -466,12 +469,13 @@ class StabilizerCode:
         order; default every ``m = 1..n-1``, since ``P(0) = 0`` and
         ``P(n) = 1[k > 0]`` are known), :func:`sparsegf2.erasures.sample_regions`
         draws ``samples`` regions at every coupling in ``couplings`` (finite,
-        distinct, any order) with ``burn_in``, ``thin``, ``tempering``,
-        ``method``, ``ladder`` and ``max_step`` passed on (exact independent
-        samples when the graph is one cycle or one path, in any labeling;
-        otherwise a swap chain per coupling with replica exchange along an
-        automatic ladder of couplings: see that function for the algorithm,
-        its diagnostics and warnings). Each region's failure is computed
+        distinct, any order) with ``burn_in`` (default ``None``: that
+        function's size-aware default), ``thin``, ``tempering``, ``method``,
+        ``ladder`` and ``max_step`` passed on (exact independent samples when
+        the graph is one cycle or one path, in any labeling; otherwise a swap
+        chain per coupling with replica exchange along an automatic ladder of
+        couplings: see that function for the algorithm, its diagnostics and
+        warnings). Each region's failure is computed
         exactly (:meth:`region_failures`), and the estimate is the failing
         fraction::
 
@@ -516,6 +520,7 @@ class StabilizerCode:
         rungs = np.zeros(s, dtype=np.int64)
         notes: list[str] = []
         method_used = geometry = ""
+        used_burn_in = 0
         for j, m in enumerate(m_list.tolist()):
             drawn = erasures.sample_regions(
                 e,
@@ -546,6 +551,7 @@ class StabilizerCode:
             rungs[j] = drawn.ladder.size
             notes.extend(f"size {m}: {note}" for note in drawn.warnings)
             method_used, geometry = drawn.method, drawn.geometry
+            used_burn_in = drawn.burn_in  # the same for every size (it depends on n only)
         return CorrelatedFailure(
             couplings=given.copy(),
             sizes=m_list,
@@ -561,7 +567,7 @@ class StabilizerCode:
             geometry=geometry,
             warnings=tuple(notes),
             seed=used,
-            burn_in=burn_in,
+            burn_in=used_burn_in,
             thin=thin,
             tempering=bool(tempering),
             num_qubits=n,
