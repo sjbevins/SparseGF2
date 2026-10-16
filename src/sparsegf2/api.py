@@ -1978,12 +1978,15 @@ def _parallel_threads(threads: int) -> float:
     return threads / (1.0 + 0.04 * (threads - 1))
 
 
-def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) -> float:
+def _estimate_seconds(
+    spec: dict, mc: mipt.MonitoredCircuit, trajectories: int, threads: int | None = None
+) -> float:
+    """The estimated seconds of a run on ``threads`` threads (default: Numba's current count)."""
     import numba
 
     # Trajectories are the unit of parallelism: fewer trajectories than threads
     # leave threads idle.
-    parallel = min(numba.get_num_threads(), trajectories)
+    parallel = min(numba.get_num_threads() if threads is None else threads, trajectories)
     kernel = trajectories * _trajectory_us(mc) * 1e-6 / _parallel_threads(parallel)
     return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
 
@@ -2032,7 +2035,83 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     return trajectories
 
 
-def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> dict[str, Any]:
+def _require_thread_counts(threads: Any) -> list[int]:
+    """``threads`` as a non-empty list of positive integers, or an error that names it."""
+    if not isinstance(threads, (list, tuple)) or not threads:
+        raise ValueError(
+            f"threads must be a non-empty list of positive integers such as [1, 32], got {threads!r}"
+        )
+    return [_require_int(t, "threads", minimum=1) for t in threads]
+
+
+def _array_row(name: str, shape: Sequence[int], dtype: Any) -> dict[str, Any]:
+    """One array of the saved file: its shape, dtype and uncompressed megabytes."""
+    size = int(np.prod(shape, dtype=object)) * np.dtype(dtype).itemsize
+    return {"name": name, "shape": [int(s) for s in shape], "dtype": str(np.dtype(dtype)),
+            "megabytes": _num(size / 1e6)}  # fmt: skip
+
+
+def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, Any]:
+    """The arrays and files that ``run_ensemble(..., output_dir=...)`` saves for ``mc``.
+
+    Mirrors :meth:`sparsegf2.mipt.EnsembleResult.save`; sizes are uncompressed.
+    """
+    n = mc.num_system
+    wsys = (n + 63) // 64
+    edges = sum(len(g) for g in mc.graphs)
+    gate_set, order = np.asarray(mc.gate_set), np.asarray(mc.system_order)  # resolved by the spec
+    rows = [
+        _array_row("edges", (edges, 2), np.concatenate(mc.graphs).dtype),
+        _array_row("graph_ptr", (len(mc.graphs) + 1,), np.int64),
+        _array_row("gate_set", gate_set.shape, gate_set.dtype),
+        _array_row("system_order", order.shape, order.dtype),
+        _array_row("trajectories", (trajectories,), np.int64),
+        _array_row("checkpoint_layers", (len(mc.checkpoint_layers),), np.int64),
+        _array_row("final_layer", (trajectories,), np.int64),
+        _array_row("num_measurements", (trajectories,), np.int64),
+    ]
+    if mc.edge_weights is not None:
+        rows.append(_array_row("edge_weights", (edges,), np.float64))
+    snapshots = False
+    for p in mc.probes:
+        evaluations = len(mc.probe_layers(p.name))
+        shape = [trajectories, evaluations]
+        if p.is_vector:
+            shape.append(mipt._probe_length(p, n))
+        rows.append(_array_row(f"value::{p.name}", shape, np.float64))
+        if p.kind == "code_snapshot":
+            snapshots = True
+            rows.append(
+                _array_row(
+                    f"snapshot::{p.name}", (trajectories, evaluations, n, 2 * wsys), np.uint64
+                )
+            )
+            rows.append(
+                _array_row(f"snapshot_counts::{p.name}", (trajectories, evaluations), np.int64)
+            )
+    if mc.reference != "none":
+        rows.append(_array_row("purification_layer", (trajectories,), np.int64))
+    note = (
+        "Sizes are uncompressed. The file is saved with np.savez_compressed, so the disk use "
+        "is lower (benchmark_ensemble measures it), and a small __meta__ record holds the "
+        "spec; spec.json and provenance.json are small text files."
+    )
+    if snapshots:
+        note += (
+            " A snapshot:: array is stored at its full shape, an upper bound: each code "
+            "fills only its first generator rows (snapshot_counts:: says how many), the rest "
+            "is zero."
+        )
+    return {
+        "arrays": rows,
+        "files": [_RESULT_FILE, _SPEC_FILE, _PROVENANCE_FILE],
+        "note": note,
+    }
+
+
+def estimate_ensemble(
+    spec: dict[str, Any], trajectories: int | None = None, threads: list[int] | None = None
+) -> dict[str, Any]:
     """A rough (deliberately pessimistic) runtime estimate for :func:`run_ensemble`.
 
     Returns ``estimated_seconds`` (building the spec, generating and
@@ -2043,9 +2122,16 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
     result needs. Trajectories that stop early (``stop_when_purified``) make
     real runs faster. ``notes`` (when present) says where the estimate can be
     too low.
+
+    ``threads`` (a list of positive integers) adds ``by_threads``, the
+    estimate for each count in the order given (threads beyond the number of
+    trajectories stay idle). ``layout`` lists the arrays and files that
+    ``run_ensemble(..., output_dir=...)`` saves, with their shapes, dtypes and
+    uncompressed megabytes (disk use is lower; see :func:`benchmark_ensemble`).
     """
     import numba
 
+    counts = None if threads is None else _require_thread_counts(threads)
     mc = _build_spec(spec)
     trajectories = _trajectory_count(mc, trajectories)
     seconds = _estimate_seconds(spec, mc, trajectories)
@@ -2057,6 +2143,15 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
     }
+    if counts is not None:
+        out["by_threads"] = [
+            {
+                "threads": t,
+                "estimated_seconds": _num(_estimate_seconds(spec, mc, trajectories, threads=t)),
+            }
+            for t in counts
+        ]
+    out["layout"] = _result_layout(mc, trajectories)
     notes = _estimate_notes(mc)
     if notes:
         out["notes"] = notes

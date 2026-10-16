@@ -154,6 +154,14 @@ def test_run_ensemble_builds_the_spec_once(monkeypatch):
 def test_estimate_tool():
     est = ok(call("estimate_ensemble", {"spec": SPEC, "trajectories": 10}))
     assert est["fits_sync_limit"]
+    assert "by_threads" not in est and est["layout"]["files"][0] == "result.npz"
+    with_threads = ok(
+        call("estimate_ensemble", {"spec": SPEC, "trajectories": 10, "threads": [1, 4]})
+    )
+    assert [row["threads"] for row in with_threads["by_threads"]] == [1, 4]
+    assert with_threads == api.estimate_ensemble(SPEC, 10, threads=[1, 4])
+    text = error_text(call("estimate_ensemble", {"spec": SPEC, "trajectories": 10, "threads": [0]}))
+    assert "threads" in text
 
 
 def test_job_tools_lifecycle(tmp_path):

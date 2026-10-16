@@ -121,10 +121,13 @@ Example: {"spec": {"num_system": 32, "graph": {"family": "watts_strogatz", "k": 
 _ESTIMATE = """\
 Rough, deliberately pessimistic runtime estimate (seconds) for run_ensemble with this spec
 and trajectory count, whether it fits the synchronous limit, and the result's memory
-(result_megabytes). Same arguments as run_ensemble.
+(result_megabytes). threads (a list such as [1, 32]) adds by_threads, the estimate for each
+count. layout lists the arrays and files that run_ensemble(output_dir=...) saves, with
+shapes, dtypes and uncompressed megabytes (disk use is lower; benchmark_ensemble measures
+it). Otherwise the arguments of run_ensemble.
 
 Example: {"spec": {"num_system": 256, "graph": {"family": "cycle"}, "layers": 2048,
- "measurement_rate": 0.1, "reference": "single"}, "trajectories": 10000}"""
+ "measurement_rate": 0.1, "reference": "single"}, "trajectories": 10000, "threads": [1, 32]}"""
 
 _START_JOB = """\
 Start a long ensemble as a background job; returns immediately with a job_id. The run is
@@ -322,8 +325,12 @@ def build_server() -> Any:
         )
 
     @server.tool(description=_ESTIMATE, annotations=read_only)
-    def estimate_ensemble(spec: dict[str, Any], trajectories: Int | None = None) -> Result:
-        return call(api.estimate_ensemble, spec, trajectories)
+    def estimate_ensemble(
+        spec: dict[str, Any],
+        trajectories: Int | None = None,
+        threads: list[Int] | None = None,
+    ) -> Result:
+        return call(api.estimate_ensemble, spec, trajectories, threads)
 
     @server.tool(description=_START_JOB, annotations=computes)
     def start_ensemble_job(
