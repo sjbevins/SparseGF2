@@ -94,11 +94,13 @@ def test_the_erasure_tools_are_read_only_and_say_what_they_return():
     assert (
         "max_seconds" not in regions.input_schema["properties"]
     )  # a call must fit a client's wait
-    for word in ("mean boundary", "exact_source", "mixing", "nonincreasing_in_J", "[seed, i]"):
+    for word in ("mean_boundary", "exact_source", "mixing", "nonincreasing_in_J", "[seed, i]",
+                 "r_hat_limit", "z_critical", "ess_boundary"):  # fmt: skip
         assert word in regions.description, word
     curves = tools["erasure_curves"]
     assert curves.input_schema["required"] == ["path"]
-    for word in ("Phi(e)", "e_delta", "of_mean_phi", "interpolated_mass", "truncated"):
+    for word in ("Phi(e)", "e_delta", "of_mean_phi", "of_mean_phi_range", "interpolated_mass",
+                 "truncated", "headline"):  # fmt: skip
         assert word in curves.description, word
     # the run_ensemble description keeps its room
     assert len(tools["run_ensemble"].description) < 2000
@@ -269,7 +271,7 @@ def test_erasure_curves_tool_matches_the_api(curves_run):
     args = {"path": str(curves_run), "e": [0.05, 0.2], "delta": 0.05, "layer": 8}
     out = ok(call("erasure_curves", args))
     expected = api.erasure_curves(str(curves_run), [0.05, 0.2], 0.05, 8)
-    assert out == json.loads(json.dumps(expected))
+    assert _without_timing(out) == _without_timing(json.loads(json.dumps(expected)))
     assert out["uniform"]["erasure_first_failure"]["layer"] == 8
     default = ok(call("erasure_curves", {"path": str(curves_run)}))
     assert default["layer"] is None and default["uniform"]["erasure_first_failure"]["layer"] == 16

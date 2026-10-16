@@ -196,16 +196,18 @@ Sample geometry-correlated erasure regions on a graph (no circuit) and check how
 A region A of `size` nodes is drawn with probability proportional to exp(-J b(A)), b(A) the
 graph edges leaving A (J > 0 favours compact regions, J = 0 is uniform): the sampler of the
 correlated_erasure probe, to try before a long run. graph: {"family": "watts_strogatz", "k": 4,
-"beta": 0.1, "seed": 1} with num_nodes, {"family": "cycle"|"path"}, {"family": "file", "path":
-...} or {"edges": [[0, 1], ...], "num_nodes": n}. `chains` independent runs (chain i seeded
-[seed, i]): exact samples on a cycle or path, else a swap chain with replica exchange. Returns,
-per coupling: the mean boundary with stderr, variance, acceptance, exchange_acceptance, tau_int,
-ess, r_hat (the slowest of the boundary and the membership of a few nodes), min_boundary_seen
-and the exact mean/variance (ring or path closed form, enumeration, or the uniform law at J = 0:
-exact_source); nonincreasing_in_J (Proposition 2); mixing notes (R-hat above 1.01, ESS below
-400, exchange acceptance below 5%, mean far from exact) saying what to change; the sampler's
-warnings; three example regions. No note is no proof: repeat with another seed and a longer
-burn_in. Refused if estimated above 60 s (shrink samples, chains, burn_in). Writes nothing.
+"beta": 0.1, "seed": 1} with num_nodes (beside it or inside), {"family": "cycle"|"path"},
+{"family": "file", "path": ...} or {"edges": [[0, 1], ...], "num_nodes": n}. `chains` runs
+(chain i seeded [seed, i]): exact independent samples on a cycle or path (tau_int 1, no R-hat),
+else a swap chain with replica exchange. Per coupling: mean_boundary, stderr = sqrt(variance /
+ess_boundary); acceptance, exchange_acceptance; tau_int, ess (the slowest of the boundary and a
+few nodes' membership); r_hat and its r_hat_limit (what stationary draws of that
+autocorrelation allow, shared over the series tested); min_boundary_seen; exact mean/variance
+(ring or path closed form, enumeration, or the uniform law at J = 0: exact_source) and
+deviation_se. nonincreasing_in_J: no step to the next coupling rises beyond z_critical (1%,
+Bonferroni; a test of the estimates, not of Proposition 2); proposition2 gives the worst and
+failed steps. mixing: one note per problem with what to change. No note is no proof: repeat
+with another seed and a longer burn_in. At most 12 couplings; refused if estimated above 60 s.
 
 Example: {"graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
  "num_nodes": 64, "size": 16, "couplings": [0, 0.5, 1, 2], "samples": 200, "seed": 7}"""
@@ -218,11 +220,13 @@ probes (one curve per coupling J), at `layer` (default: each probe's last evalua
 trajectories that hold a code (k > 0): q_plus and count_with_code; phi, Phi(e) = sum_m C(n,m)
 e^m (1-e)^(n-m) P(m), the probability that erasing each qubit with probability e loses logical
 information, mean and stderr at each e (default eight values from 1/n to 1/2); e_delta, the
-tolerance sup{e : Phi(e) <= delta}, of each code's own curve (per_code_mean, _median, _stderr)
-and of the mean curve (of_mean_phi). For correlated curves, interpolated_sizes are the sizes the
-probe did not sample, interpolated_mass the binomial probability they carry at each e, complete
-whether that is under 0.1%. The run needs an erasure_first_failure or correlated_erasure probe.
-At most 12 couplings are shown (truncated). Reads only; writes nothing.
+tolerance sup{e : Phi(e) <= delta}: of_mean_phi is the headline, the tolerance of the
+ensemble-mean Phi, with of_mean_phi_range for a one-standard-error shift of the curve;
+per_code_* describe the spread across codes (biased upward). For correlated curves,
+interpolated_sizes are the sizes the probe did not sample, interpolated_mass the binomial
+probability they carry at each e, complete whether that is under 0.1%. Needs an
+erasure_first_failure or correlated_erasure probe. Work is bounded (a long run uses evenly
+spaced codes, with a note); at most 12 couplings are shown (truncated). Writes nothing.
 
 Example: {"path": "runs/erasure", "e": [0.02, 0.05, 0.1], "delta": 0.01, "layer": 128}"""
 
