@@ -38,10 +38,14 @@ What is here:
 * :func:`boundary`; :func:`boundary_counts` (exact ``N_m(b)`` by enumeration),
   :func:`boundary_moments` (``log Z``, ``<b>``, ``Var b`` from ``N_m``),
   :func:`minimum_boundary_regions` (the ``J -> +inf`` support);
+* :func:`uniform_boundary_moments` (the exact mean and variance of ``b`` at
+  ``J = 0``, in closed form);
 * :func:`sample_regions` (:class:`RegionSample`): regions drawn from ``Q_J``,
   exactly and independently when the graph is one cycle or one path through
   all nodes (in any labeling), otherwise by a Metropolis swap chain per
-  coupling with replica exchange between couplings;
+  coupling with replica exchange along an automatic ladder of couplings
+  (:func:`coupling_ladder`), with plain warnings when the run looks poorly
+  mixed;
 * :func:`chain_diagnostics` (integrated autocorrelation time, effective sample
   size, R-hat) and :func:`region_diagnostics` (the same for the membership of
   a few nodes: on a ring the boundary looks mixed long before the regions have
@@ -64,12 +68,14 @@ What is here:
 
 from __future__ import annotations
 
+import itertools
 import math
 import operator
 import secrets
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -79,7 +85,13 @@ from sparsegf2._kernel import erasure_chain as _chain
 from sparsegf2._kernel.rng import seed_state
 
 __all__ = [
+    "ACCEPTANCE_WARNING",
+    "CORRELATION_WARNING",
     "ENUMERATION_BUDGET",
+    "EXCHANGE_WARNING",
+    "LADDERS",
+    "MAX_LADDER_INSERTED",
+    "MAX_RESULT_BYTES",
     "METHODS",
     "REGION_PROBES",
     "RegionSample",
@@ -88,6 +100,7 @@ __all__ = [
     "boundary_counts",
     "boundary_moments",
     "chain_diagnostics",
+    "coupling_ladder",
     "minimum_boundary_regions",
     "path_boundary_distribution",
     "path_partition_function",
@@ -99,6 +112,7 @@ __all__ = [
     "sample_path_regions",
     "sample_regions",
     "sample_ring_regions",
+    "uniform_boundary_moments",
 ]
 
 ENUMERATION_BUDGET = 2_000_000
@@ -106,6 +120,21 @@ ENUMERATION_BUDGET = 2_000_000
 
 SOKAL_WINDOW = 5.0
 """The constant ``c`` of Sokal's automatic window in :func:`chain_diagnostics`."""
+
+MAX_LADDER_INSERTED = 256
+"""At most this many couplings :func:`coupling_ladder` inserts (a larger ``max_step`` lowers it)."""
+
+MAX_RESULT_BYTES = 2**31
+"""Default ``max_bytes`` of :func:`sample_regions` and the exact samplers (2 GiB of int64)."""
+
+EXCHANGE_WARNING = 0.1
+"""Replica-exchange acceptance below this between two rungs gets a warning."""
+
+ACCEPTANCE_WARNING = 0.01
+"""Swap acceptance below this at a coupling no exchange reaches gets a warning."""
+
+CORRELATION_WARNING = 0.1
+"""An integrated autocorrelation time above this fraction of the records gets a warning."""
 
 
 # ---------------------------------------------------------------------------------------
@@ -237,10 +266,14 @@ def _check_budget(n: int, m: int, budget: Any) -> None:
     limit = ENUMERATION_BUDGET if budget is None else _integer(budget, "budget", 1)
     total = math.comb(n, m)
     if total > limit:
+        if total < 10**30:
+            size, advice = f"{total:,}", f"pass budget={total} (the time grows in proportion)"
+        else:  # str() of a huge int is refused by Python (and no budget could cover it)
+            size, advice = f"about 10^{math.log10(total):.0f}", "no budget can cover that"
         raise ValueError(
-            f"listing every region of size {m} on {n} nodes means C({n}, {m}) = {total:,} "
-            f"subsets, above the budget of {limit:,}; pass budget={total} (the time grows "
-            "in proportion to the number of subsets) or sample regions with sample_regions"
+            f"listing every region of size {m} on {n} nodes means C({n}, {m}) = {size} "
+            f"subsets, above the budget of {limit:,}; {advice}; or sample regions with "
+            "sample_regions"
         )
 
 
@@ -341,6 +374,97 @@ def boundary_moments(counts, couplings) -> dict[str, np.ndarray]:
     }
 
 
+def uniform_boundary_moments(edges, num_nodes: int, size: int) -> tuple[float, float]:
+    """Exact mean and variance of ``b(A)`` for a uniformly random region of size ``m``: ``(E_0[b], Var_0(b))``.
+
+    The law at ``J = 0``, in closed form (no enumeration, any ``n``). Write
+    ``b = sum over e in E of X_e`` with ``X_e = 1[e is cut]`` (exactly one end in
+    ``A``), ``d_v`` the degree of ``v`` and ``D = sum_v d_v (d_v - 1)``, the number
+    of ordered pairs of distinct edges that share a node (in a simple graph two
+    distinct edges share at most one). Then::
+
+        E_0[b]   = |E| P_2,                       P_2 = 2 m (n-m) / (n (n-1))
+        E_0[b^2] = E_0[b] + D P_3 + (|E| (|E|-1) - D) P_4
+        P_3 = [m (n-m)(n-m-1) + (n-m) m (m-1)] / [n (n-1)(n-2)]
+        P_4 = 4 m (m-1)(n-m)(n-m-1) / [n (n-1)(n-2)(n-3)]
+        Var_0(b) = E_0[b^2] - E_0[b]^2
+
+    ``P_2`` is the chance that an edge is cut (one end in, one out: ``2 m (n-m)``
+    ordered choices of the pair's places among ``n (n-1)``). ``E_0[b^2]`` sums
+    ``E[X_e X_f]`` over ordered pairs ``(e, f)``: ``e = f`` gives ``E_0[b]``; two
+    edges ``{u, v}``, ``{v, w}`` sharing ``v`` are both cut exactly when ``v`` is
+    in and ``u, w`` out, or ``v`` out and ``u, w`` in (``P_3``); two disjoint
+    edges are both cut when each has one end in, 4 assignments of 2 in and 2
+    out among their 4 nodes (``P_4``). A term with no such pairs is 0 (``n < 3``
+    or ``n < 4``), so small ``n`` and ``m = 0`` or ``n`` need no special case.
+    Computed in exact rational arithmetic and returned as floats; ``Var_0(b) =
+    0`` exactly when every region of size ``m`` has the same boundary (then ``J``
+    changes nothing). :func:`sample_regions` spaces its automatic ladder by
+    ``1 / sqrt(Var_0(b))``.
+    """
+    n, e = _graph(edges, num_nodes)
+    m = _size(size, n)
+    if n < 2 or len(e) == 0:
+        return 0.0, 0.0
+    degree = np.bincount(e.ravel(), minlength=n).astype(object)
+    edges_ = len(e)
+    shared = int(np.sum(degree * (degree - 1)))
+    disjoint = edges_ * (edges_ - 1) - shared
+    k = n - m
+    mean = Fraction(edges_ * 2 * m * k, n * (n - 1))
+    second = mean
+    if shared:
+        second += Fraction(shared * (m * k * (k - 1) + k * m * (m - 1)), n * (n - 1) * (n - 2))
+    if disjoint:
+        second += Fraction(
+            disjoint * 4 * m * (m - 1) * k * (k - 1), n * (n - 1) * (n - 2) * (n - 3)
+        )
+    return float(mean), float(second - mean * mean)
+
+
+def _max_step(value: Any) -> float:
+    try:
+        step = float(value)
+    except (TypeError, ValueError):
+        step = math.nan
+    if not step > 0:  # NaN, zero and negatives
+        raise ValueError(f"max_step must be a positive number (or math.inf), got {value!r}")
+    return step
+
+
+def coupling_ladder(couplings, max_step: float) -> np.ndarray:
+    """The replica-exchange ladder for ``couplings``: float64, sorted, no gap above ``max_step``.
+
+    The sorted union of the couplings and 0 (the uniform law, which a swap
+    chain samples at once), with couplings inserted evenly in every gap
+    wider than ``max_step``: a gap ``(a, b)`` gets ``ceil((b - a) / max_step) - 1``
+    of them, at ``a + (b - a) j / (k + 1)``, ``j = 1..k``. ``max_step =
+    math.inf`` inserts none. Neighbouring rungs exchange their states with
+    probability about ``exp(-ΔJ Δb)``, and ``Δb`` is of the order of
+    ``ΔJ Var(b)``, so ``ΔJ <= 1 / sqrt(Var b)`` keeps exchanges frequent;
+    :func:`sample_regions` uses ``max_step = 1 / sqrt(Var_0(b))``
+    (:func:`uniform_boundary_moments`). At most :data:`MAX_LADDER_INSERTED`
+    couplings are inserted; more are refused with what to change.
+    """
+    points = np.unique(np.append(_couplings(couplings, distinct=False), 0.0))
+    step = _max_step(max_step)
+    pieces = [points[:1]]
+    inserted = 0
+    for a, b in itertools.pairwise(points.tolist()):
+        k = max(math.ceil((b - a) / step) - 1, 0) if math.isfinite(step) else 0
+        inserted += k
+        if inserted > MAX_LADDER_INSERTED:
+            raise ValueError(
+                f"the exchange ladder would insert more than {MAX_LADDER_INSERTED} couplings "
+                f"({k} between J = {a:g} and J = {b:g} alone, at max_step = {step:g}), and at "
+                f"most {MAX_LADDER_INSERTED} can be inserted: pass a larger max_step, couplings "
+                "closer together, or ladder='given' (and check exchange_acceptance)"
+            )
+        pieces.append(a + (b - a) * np.arange(1, k + 1) / (k + 1))
+        pieces.append(np.array([b]))
+    return np.concatenate(pieces)
+
+
 # ---------------------------------------------------------------------------------------
 # The swap chain with replica exchange
 # ---------------------------------------------------------------------------------------
@@ -350,29 +474,39 @@ def boundary_moments(counts, couplings) -> dict[str, np.ndarray]:
 class RegionSample:
     """Regions drawn from ``Q_J`` by :func:`sample_regions`, with how they were drawn.
 
-    With ``c`` couplings, ``S`` recorded states per coupling and region size
-    ``m`` (every array is read-only, and every per-coupling axis follows the
-    order of ``couplings`` as given):
+    With ``c`` requested couplings, ``L`` rungs in the ladder the chain ran,
+    ``S`` recorded states per coupling and region size ``m`` (every array is
+    read-only; every per-coupling axis follows the order of ``couplings`` as
+    given, every per-rung axis the sorted ``ladder``):
 
     * ``couplings``: float64[c], the couplings ``J`` as given.
     * ``size``: ``m``; ``num_nodes``: ``n``.
     * ``regions``: int64[c, S, m]; ``regions[i, s]`` is the ``s``-th recorded
-      region at ``couplings[i]``, nodes sorted ascending.
+      region at ``couplings[i]``, nodes sorted ascending. Only the requested
+      couplings are recorded; auxiliary rungs never are.
     * ``boundaries``: int64[c, S], ``b`` of each recorded region.
     * ``method``: ``"chain"`` (the swap chain: records of one coupling are
       correlated) or ``"exact"`` (independent exact samples: a cycle or a path).
     * ``geometry``: ``"cycle"`` or ``"path"`` when the graph is one cycle or one
       path through all nodes (in any labeling), else ``"other"``.
+    * ``ladder``: float64[L], sorted, the couplings the chain ran (the requested
+      ones, plus 0 and inserted rungs with ``ladder="auto"``; the sorted
+      requested couplings for exact samples). ``max_step``: the largest gap the
+      automatic ladder allowed (None when the ladder was not automatic).
     * ``acceptance``: float64[c], the fraction of swap proposals accepted at
-      each coupling (NaN for exact samples, and when ``m = 0`` or ``m = n``:
-      nothing to propose).
-    * ``exchange_acceptance``: float64[c-1]; entry ``i`` is the fraction of
-      accepted replica exchanges between the ``i``-th and ``(i+1)``-th
-      smallest couplings (``np.sort(couplings)``), NaN without exchanges.
+      each requested coupling (NaN for exact samples, and when ``m = 0`` or
+      ``m = n``: nothing to propose).
+    * ``exchange_pairs``: float64[L-1, 2], the neighbouring rungs
+      ``(ladder[i], ladder[i+1])``; ``exchange_acceptance``: float64[L-1], the
+      fraction of accepted replica exchanges between them (NaN without
+      exchanges). Below about 0.1 the pair barely exchanges: add rungs between.
+    * ``warnings``: tuple of plain sentences, each naming a problem and what to
+      change (empty when nothing looks wrong; always empty for exact samples).
+      See :func:`sample_regions`.
     * ``seed``: the seed used (a fresh one when ``seed=None`` was passed).
     * ``burn_in``, ``thin``: as passed (the exact samplers ignore them);
-      ``tempering``: whether exchanges ran (False with one coupling and for
-      exact samples).
+      ``tempering``: whether exchanges ran (False with one rung and for exact
+      samples).
     """
 
     couplings: np.ndarray
@@ -382,8 +516,12 @@ class RegionSample:
     boundaries: np.ndarray
     method: str
     geometry: str
+    ladder: np.ndarray
+    max_step: float | None
     acceptance: np.ndarray
+    exchange_pairs: np.ndarray
     exchange_acceptance: np.ndarray
+    warnings: tuple[str, ...]
     seed: int | tuple[int, ...]
     burn_in: int
     thin: int
@@ -399,7 +537,90 @@ class RegionSample:
 METHODS = ("auto", "chain", "exact")
 """The ``method`` values of :func:`sample_regions`."""
 
+LADDERS = ("auto", "given")
+"""The named ``ladder`` values of :func:`sample_regions` (or a list of extra couplings)."""
+
 _GEOMETRIES = {0: "other", 1: "cycle", 2: "path"}
+
+
+def _check_bytes(rows: int, samples: int, m: int, limit: int) -> None:
+    """Refuse a result of ``rows x samples`` regions of size ``m`` (and boundaries) above ``limit`` bytes."""
+    needed = 8 * rows * samples * (m + 1)
+    if needed > limit:
+        raise ValueError(
+            f"the result would hold {rows} coupling(s) x {samples:,} samples x (size {m} + 1) "
+            f"int64 values = {needed:,} bytes, above max_bytes = {limit:,}: record fewer "
+            "samples (thin more instead), a smaller size or fewer couplings, or raise max_bytes"
+        )
+
+
+def _ladder_extra(ladder: Any) -> np.ndarray | None:
+    """``None`` for ``"auto"`` and ``"given"``, else the extra couplings (checked)."""
+    if isinstance(ladder, str):
+        if ladder not in LADDERS:
+            raise ValueError(
+                f"ladder must be 'auto', 'given' or a list of extra couplings, got {ladder!r}"
+            )
+        return None
+    try:
+        return _couplings(ladder, distinct=False)
+    except ValueError as exc:
+        if "finite" in str(exc):
+            raise
+        raise ValueError(
+            f"ladder must be 'auto', 'given' or a list of extra couplings, got {ladder!r}"
+        ) from None
+
+
+def _chain_warnings(
+    rungs: np.ndarray,
+    positions: np.ndarray,
+    local: np.ndarray,
+    exchange: np.ndarray,
+    regions: np.ndarray,
+    bounds: np.ndarray,
+    n: int,
+    m: int,
+) -> tuple[str, ...]:
+    """Plain warnings about a chain run (rows of ``regions``: the requested couplings, sorted)."""
+    notes = []
+    for i, rate in enumerate(exchange.tolist()):
+        if math.isfinite(rate) and rate < EXCHANGE_WARNING:
+            notes.append(
+                f"replica exchange between J = {rungs[i]:g} and J = {rungs[i + 1]:g} was accepted "
+                f"in {100 * rate:.1f}% of attempts (below {100 * EXCHANGE_WARNING:.0f}%): add "
+                "couplings between them (ladder='auto', or a smaller max_step)."
+            )
+    samples = bounds.shape[1]
+    for k, i in enumerate(positions.tolist()):
+        coupling = rungs[i]
+        rate = local[i]
+        near = [exchange[j] for j in (i - 1, i) if 0 <= j < len(exchange)]
+        reached = any(math.isfinite(x) and x >= EXCHANGE_WARNING for x in near)
+        if math.isfinite(rate) and rate < ACCEPTANCE_WARNING and not reached:
+            notes.append(
+                f"at J = {coupling:g} swaps were accepted only {100 * rate:.2f}% of the time and "
+                "no replica exchange reaches it: its records may hardly move; use "
+                "tempering=True with ladder='auto', and compare several seeds "
+                "(region_diagnostics)."
+            )
+        if samples >= 10 and 0 < m < n:
+            on_b = chain_diagnostics(bounds[k])["tau_int"]
+            where = region_diagnostics(regions[k], n)
+            worst = max(on_b, where["tau_int_max"])
+            if worst > CORRELATION_WARNING * samples:
+                which = (
+                    "the boundary"
+                    if on_b >= where["tau_int_max"]
+                    else f"the membership of node {where['slowest']}"
+                )
+                notes.append(
+                    f"at J = {coupling:g} the records are strongly correlated: the integrated "
+                    f"autocorrelation time of {which} is {worst:.0f} of {samples} records "
+                    f"(about {samples / worst:.0f} effective samples); record more (samples, "
+                    "thin) or burn in longer, and compare several seeds."
+                )
+    return tuple(notes)
 
 
 def sample_regions(
@@ -414,6 +635,9 @@ def sample_regions(
     tempering: bool = True,
     seed: int | Sequence[int] | None = None,
     method: str = "auto",
+    ladder: str | Sequence[float] = "auto",
+    max_step: float | None = None,
+    max_bytes: int = MAX_RESULT_BYTES,
 ) -> RegionSample:
     """Draw regions of size ``m`` from ``Q_J(A) ∝ exp(-J b(A))`` at each coupling.
 
@@ -424,53 +648,96 @@ def sample_regions(
       brickwork geometries), else ``"chain"``.
     * ``"exact"``: independent exact samples (:func:`sample_ring_regions` and
       :func:`sample_path_regions`, laid along the cycle or path the edges
-      form); refused for any other graph. ``burn_in``, ``thin`` and
-      ``tempering`` do not apply.
+      form); refused for any other graph. ``burn_in``, ``thin``,
+      ``tempering``, ``ladder`` and ``max_step`` do not apply.
     * ``"chain"``: the swap chain below, on any graph.
 
-    **The chain.** One Metropolis swap chain (Kawasaki dynamics) per coupling.
-    A proposal picks ``u`` uniformly in ``A`` and ``v`` uniformly outside it and
-    moves to ``A' = A \\ {u} ∪ {v}``; the proposal probability
-    ``1 / (m (n - m))`` is symmetric, and the move is accepted with probability
-    ``min(1, exp(-J Δb))``, ``Δb = b(A') - b(A)``, so ``Q_J`` is stationary
-    (detailed balance). Swaps connect all ``m``-subsets whatever the graph, so
-    the chain is irreducible. ``Δb`` costs ``O(deg u + deg v)``::
+    **The chain.** One Metropolis swap chain (Kawasaki dynamics) per rung of a
+    ladder of couplings. A proposal picks ``u`` uniformly in ``A`` and ``v``
+    uniformly outside it and moves to ``A' = A \\ {u} ∪ {v}``; the proposal
+    probability ``1 / (m (n - m))`` is symmetric, and the move is accepted with
+    probability ``min(1, exp(-J Δb))``, ``Δb = b(A') - b(A)``, so ``Q_J`` is
+    stationary (detailed balance). Swaps connect all ``m``-subsets whatever the
+    graph, so the chain is irreducible. ``Δb`` costs ``O(deg u + deg v)``::
 
         Δb = (deg_A(u) - deg_Ā(u)) + (deg_Ā(v) - deg_A(v)) + 2 * 1[u ~ v]
 
     (degrees into ``A`` and its complement ``Ā``, before the move; the edge
     ``{u, v}`` is a boundary edge before and after). A sweep is ``n`` proposals.
 
-    **Replica exchange** (``tempering``, two or more couplings): after every
-    sweep, the chains at neighbouring couplings ``J_i < J_{i+1}`` (sorted)
-    exchange their states with probability ``min(1, exp((J_i - J_{i+1})
-    (b_i - b_{i+1})))`` (Swendsen and Wang 1986; Geyer 1991; Hukushima and
-    Nemoto 1996). The product of the laws is invariant, so each chain still
-    samples exactly its own ``Q_J``, but states cross barriers at low ``J`` and
-    climb the ladder: at large ``J`` a lone chain can stay for very long in one
-    of several separated minima (on the open path, at one end), which R-hat
-    over seeds reveals.
+    **Replica exchange** (``tempering``): after every sweep, the chains at
+    neighbouring rungs ``J_i < J_{i+1}`` exchange their states with probability
+    ``min(1, exp((J_i - J_{i+1}) (b_i - b_{i+1})))`` (Swendsen and Wang 1986;
+    Geyer 1991; Hukushima and Nemoto 1996). The product of the laws is
+    invariant, so each chain still samples exactly its own ``Q_J``, while states
+    made at low ``J`` (where the chain mixes in a few sweeps) climb the ladder.
+    Why it is needed: at fixed size the swap dynamics coarsen slowly at strong
+    coupling (conserved-order-parameter, Kawasaki-type dynamics), so a lone
+    chain at large ``J`` stays for a long time near where it started. On a
+    Watts-Strogatz graph (``n = 256``, ``k = 4``, ``beta = 0.1``, ``m = 64``) a
+    lone chain at ``J = 2`` still drifts after 200,000 sweeps, and the four
+    rungs ``0, 0.5, 1, 2`` with 200 sweeps of burn-in hardly ever exchange and
+    overestimate ``<b>`` at ``J = 2`` by 15-30%; 41 rungs ``0, 0.05, ..., 2``
+    exchange about 70% of the time and give the right value.
+
+    **The ladder** (``ladder``, with ``tempering``):
+
+    * ``"auto"`` (default): the requested couplings, 0, and rungs inserted so
+      that no gap exceeds ``max_step`` (:func:`coupling_ladder`). Exchange
+      acceptance is about ``exp(-ΔJ Δb)`` with ``Δb`` of the order of
+      ``ΔJ Var(b)``, so the gaps must satisfy ``ΔJ <~ 1 / sqrt(Var b)``; the
+      default ``max_step`` is ``1 / sqrt(Var_0(b))``, from the exact uniform
+      variance (:func:`uniform_boundary_moments`; about 0.12 for the example
+      above). ``max_step`` (a positive float, or ``math.inf``) overrides it.
+    * ``"given"``: exactly the requested couplings.
+    * a list of couplings: the requested ones plus these.
+
+    Only the requested couplings are recorded and returned; auxiliary rungs run
+    and exchange but are never stored, so memory does not grow with the ladder.
+    The cost grows in proportion to the number of rungs (``len(ladder)``).
+    Without ``tempering`` the chains never meet, so the ladder is the requested
+    couplings (and a list of extra couplings is refused).
 
     **Recording.** Each chain starts from a uniformly random region (exact at
     ``J = 0``), runs ``burn_in`` sweeps, then records its state ``samples``
-    times, ``thin`` sweeps apart. Records of one chain are correlated: use
-    :func:`chain_diagnostics` on ``boundaries`` and :func:`region_diagnostics`
-    on ``regions`` for errors and mixing. The boundary alone can mislead: at
-    large ``J`` on a ring every state is an interval (``b = 2``) long before the
-    interval has moved round the ring (about ``m (n - m) n / (4 pi^2)`` sweeps),
-    which is why ``"auto"`` samples cycles and paths exactly.
+    times, ``thin`` sweeps apart. ``burn_in = 200`` is a default for small to
+    moderate ``n`` (tens to a hundred or two) and must be checked: the
+    diagnostics below, and a second run with a longer burn-in that agrees.
+    Records of one chain are correlated: use :func:`chain_diagnostics` on
+    ``boundaries`` and :func:`region_diagnostics` on ``regions`` for errors and
+    mixing, and compare several seeds (R-hat). The boundary alone can mislead:
+    at large ``J`` on a ring every state is an interval (``b = 2``) long before
+    the interval has moved round the ring (about ``m (n - m) n / (4 pi^2)``
+    sweeps), which is why ``"auto"`` samples cycles and paths exactly. The
+    chain does not depend on any code or circuit, only on the graph, ``m``,
+    the couplings and these settings: diagnostics from ``sample_regions`` carry
+    over to a run that uses the same ones (such as an in-run probe).
+
+    **Warnings** (``RegionSample.warnings``, plain sentences that say what to
+    change): an exchange acceptance below :data:`EXCHANGE_WARNING` (0.1)
+    between two rungs; a swap acceptance below :data:`ACCEPTANCE_WARNING` (0.01)
+    at a requested coupling that no frequent exchange reaches; an integrated
+    autocorrelation time of the boundary or of a followed node's membership
+    (:func:`region_diagnostics`) above :data:`CORRELATION_WARNING` (a tenth) of
+    the records (checked from 10 records on). No warning is no proof of
+    mixing; several seeds are the check.
+
+    **Limits.** A result of more than ``max_bytes`` (default
+    :data:`MAX_RESULT_BYTES`, 2 GiB: ``8 c S (m + 1)`` bytes) is refused before
+    anything runs.
 
     **Randomness.** The only source is the xoshiro256** state
     ``seed_state(seed)`` (:mod:`sparsegf2._kernel.rng`), drawn in the orders
     documented in :mod:`sparsegf2._kernel.erasure_chain`: ``sample_chain``
-    (start states, then per sweep each chain's ``n`` proposals in increasing
-    coupling order, then the exchanges), or ``ring_exact_sample`` /
+    (start states of every rung, then per sweep each rung's ``n`` proposals in
+    increasing coupling order, then the exchanges), or ``ring_exact_sample`` /
     ``path_exact_sample`` (coupling by coupling in increasing order, sample by
     sample). The same arguments and seed give the same result on every
     platform. ``seed=None`` draws a fresh seed, reported as ``seed``.
 
-    Returns a :class:`RegionSample`. Arrays are in the order of ``couplings``
-    as given; ``exchange_acceptance`` follows the sorted couplings.
+    Returns a :class:`RegionSample`. Per-coupling arrays are in the order of
+    ``couplings`` as given; ``exchange_pairs`` and ``exchange_acceptance``
+    follow the sorted ``ladder``.
     """
     n, e = _graph(edges, num_nodes)
     m = _size(size, n)
@@ -482,6 +749,16 @@ def sample_regions(
         raise ValueError(f"tempering must be True or False, got {tempering!r}")
     if not isinstance(method, str) or method not in METHODS:
         raise ValueError(f"method must be 'auto', 'chain' or 'exact', got {method!r}")
+    extra = _ladder_extra(ladder)
+    step = None if max_step is None else _max_step(max_step)
+    limit = _integer(max_bytes, "max_bytes", 1)
+    c = len(given)
+    _check_bytes(c, samples, m, limit)
+    if extra is not None and not tempering:
+        raise ValueError(
+            "extra couplings only help with tempering=True (without exchanges the chains "
+            "never meet): drop ladder or set tempering=True"
+        )
     used = _seed(seed)
 
     indptr, indices = _csr(n, e)
@@ -493,24 +770,40 @@ def sample_regions(
         )
     exact = method == "exact" or (method == "auto" and kind != 0)
 
-    c = len(given)
     order = np.argsort(given, kind="stable")
-    ladder = np.ascontiguousarray(given[order])
+    requested = np.ascontiguousarray(given[order])
+    used_step: float | None = None
+    if exact or not tempering or (isinstance(ladder, str) and ladder == "given"):
+        rungs = requested
+    elif extra is not None:
+        rungs = np.unique(np.concatenate([requested, extra]))
+    else:
+        if step is None:
+            var0 = uniform_boundary_moments(e, n, m)[1]
+            step = 1.0 / math.sqrt(var0) if var0 > 0 else math.inf
+        used_step = step
+        rungs = coupling_ladder(requested, step)
+    positions = np.searchsorted(rungs, requested)
+    assert np.array_equal(rungs[positions], requested)
     regions = np.empty((c, samples, m), dtype=np.int64)
     bounds = np.empty((c, samples), dtype=np.int64)
     if exact:
         sampler = _chain.ring_exact_sample if kind == 1 else _chain.path_exact_sample
-        sampler(n, m, ladder, samples, seed_state(used), path_order, regions, bounds)
-        local = np.full(c, np.nan)
-        exchange = np.full(max(c - 1, 0), np.nan)
+        sampler(n, m, requested, samples, seed_state(used), path_order, regions, bounds)
+        local = np.full(len(rungs), np.nan)
+        exchange = np.full(len(rungs) - 1, np.nan)
+        notes: tuple[str, ...] = ()
     else:
-        moves = np.zeros((c, 4), dtype=np.int64)
+        record = np.full(len(rungs), -1, dtype=np.int64)
+        record[positions] = np.arange(c)
+        moves = np.zeros((len(rungs), 4), dtype=np.int64)
         _chain.sample_chain(
             indptr,
             indices,
             n,
             m,
-            ladder,
+            np.ascontiguousarray(rungs),
+            record,
             samples,
             burn_in,
             thin,
@@ -522,12 +815,13 @@ def sample_regions(
         )
         local = np.where(moves[:, 0] > 0, moves[:, 1] / np.maximum(moves[:, 0], 1), np.nan)
         exchange = np.where(moves[:-1, 2] > 0, moves[:-1, 3] / np.maximum(moves[:-1, 2], 1), np.nan)
+        notes = _chain_warnings(rungs, positions, local, exchange, regions, bounds, n, m)
     out_regions = np.empty_like(regions)
     out_bounds = np.empty_like(bounds)
     acceptance = np.empty(c, dtype=np.float64)
     out_regions[order] = regions
     out_bounds[order] = bounds
-    acceptance[order] = local
+    acceptance[order] = local[positions]
     return RegionSample(
         couplings=given.copy(),
         size=m,
@@ -536,12 +830,16 @@ def sample_regions(
         boundaries=out_bounds,
         method="exact" if exact else "chain",
         geometry=_GEOMETRIES[int(kind)],
+        ladder=np.array(rungs, dtype=np.float64),
+        max_step=used_step,
         acceptance=acceptance,
+        exchange_pairs=np.stack([rungs[:-1], rungs[1:]], axis=1).astype(np.float64),
         exchange_acceptance=exchange.astype(np.float64),
+        warnings=notes,
         seed=used,
         burn_in=burn_in,
         thin=thin,
-        tempering=bool(tempering) and c >= 2 and not exact,
+        tempering=bool(tempering) and len(rungs) >= 2 and not exact,
     )
 
 
@@ -616,11 +914,17 @@ def chain_diagnostics(series) -> dict[str, Any]:
       ``tau`` (``N >= 50 tau`` is the usual rule), and meant for positively
       correlated draws (Metropolis chains). It is floored at
       ``1 / max(1, log10(total))`` (an effective size at most
-      ``total log10(total)``, as Stan caps it), and is 1 for a series with no
-      variation.
+      ``total log10(total)``, as Stan caps it). A chain with no variation
+      (``ptp == 0``, decided exactly) contributes no autocorrelation; when no
+      chain varies ``tau`` is 1.
     * ``window``: ``W``; ``ess``: the effective sample size ``total / tau``;
       ``std_error``: the standard error of ``mean``, ``sqrt(variance tau /
       total)``; ``chains`` and ``draws``.
+    * ``constant``: True when every draw is equal (then ``mean`` is that value,
+      ``variance`` and ``std_error`` are 0, ``tau_int`` is 1 and ``ess`` is
+      ``total``). These are not evidence of mixing: a chain stuck at one value
+      looks the same. Only a comparison of independent chains (R-hat over
+      seeds) can tell.
     * ``rhat`` (2-D only): the rank-normalized split R-hat of Vehtari, Gelman,
       Simpson, Carpenter and Bürkner (2021, Bayesian Analysis 16(2), 667), the
       larger of the bulk and the folded (tail) version. Each chain is split
@@ -662,7 +966,12 @@ def chain_diagnostics(series) -> dict[str, Any]:
         raise ValueError("series must be finite numbers (no NaN or inf)")
     num_chains, draws = chains.shape
     total = num_chains * draws
-    acov = _autocovariance(chains - chains.mean(axis=1, keepdims=True)).mean(axis=0)
+    # "No variation" is decided exactly (a constant 0.1 has a mean an ulp off, and its
+    # centred values are 1e-17, not 0); constant chains are centred to exact zeros.
+    flat = np.ptp(chains, axis=1) == 0
+    constant = bool(np.all(flat)) and bool(np.ptp(chains[:, 0]) == 0)
+    centred = np.where(flat[:, None], 0.0, chains - chains.mean(axis=1, keepdims=True))
+    acov = _autocovariance(centred).mean(axis=0)
     if acov[0] > 0:
         taus = 2.0 * np.cumsum(acov / acov[0]) - 1.0
         ok = np.arange(draws) >= SOKAL_WINDOW * taus
@@ -671,10 +980,10 @@ def chain_diagnostics(series) -> dict[str, Any]:
     else:
         window, tau = 0, 1.0
     tau = max(tau, 1.0 / max(1.0, math.log10(total)))
-    variance = float(np.var(chains))
+    variance = 0.0 if constant else float(np.var(chains))
     ess = total / tau
     out: dict[str, Any] = {
-        "mean": float(np.mean(chains)),
+        "mean": float(chains[0, 0]) if constant else float(np.mean(chains)),
         "variance": variance,
         "tau_int": tau,
         "window": window,
@@ -682,6 +991,7 @@ def chain_diagnostics(series) -> dict[str, Any]:
         "std_error": math.sqrt(variance / ess),
         "chains": num_chains,
         "draws": draws,
+        "constant": constant,
     }
     if x.ndim == 2:
         out["rhat"] = _split_rhat(chains)
@@ -867,7 +1177,10 @@ def ring_partition_function(n: int, m: int, coupling: float) -> float:
     return top + math.log(float(np.sum(np.exp(logw - top))))
 
 
-def _exact_samples(kind: int, n: int, m: int, coupling: float, samples: int, seed) -> np.ndarray:
+def _exact_samples(
+    kind: int, n: int, m: int, coupling: float, samples: int, seed, max_bytes: Any
+) -> np.ndarray:
+    _check_bytes(1, samples, m, _integer(max_bytes, "max_bytes", 1))
     regions = np.empty((1, samples, m), dtype=np.int64)
     bounds = np.empty((1, samples), dtype=np.int64)
     sampler = _chain.ring_exact_sample if kind == 1 else _chain.path_exact_sample
@@ -876,7 +1189,9 @@ def _exact_samples(kind: int, n: int, m: int, coupling: float, samples: int, see
     return regions[0]
 
 
-def sample_ring_regions(n: int, m: int, coupling: float, samples: int, *, seed) -> np.ndarray:
+def sample_ring_regions(
+    n: int, m: int, coupling: float, samples: int, *, seed, max_bytes: int = MAX_RESULT_BYTES
+) -> np.ndarray:
     """Exact independent samples of ``Q_J`` on the ring ``C_n``: int64 ``[samples, m]``, rows sorted.
 
     Each sample: draw the number of runs ``r`` from ``P(r) = N(n, m, r)
@@ -893,13 +1208,14 @@ def sample_ring_regions(n: int, m: int, coupling: float, samples: int, *, seed) 
     and no correlation between samples. The ring is ``graphs.cycle(n)`` (node
     ``i`` next to ``i +- 1 mod n``); :func:`sample_regions` uses the same
     sampler on any graph that is a cycle, whatever its labels. ``seed`` as in
-    :func:`sample_regions` (``None``: a fresh, unreported seed); the draw order
-    is in :func:`sparsegf2._kernel.erasure_chain.ring_exact_sample`.
+    :func:`sample_regions` (``None``: a fresh, unreported seed), and so is
+    ``max_bytes``; the draw order is in
+    :func:`sparsegf2._kernel.erasure_chain.ring_exact_sample`.
     """
     n, m = _ring_args(n, m)
     value = _coupling(coupling)
     samples = _integer(samples, "samples", 1)
-    return _exact_samples(1, n, m, value, samples, seed)
+    return _exact_samples(1, n, m, value, samples, seed, max_bytes)
 
 
 # ---------------------------------------------------------------------------------------
@@ -1004,7 +1320,9 @@ def path_partition_function(n: int, m: int, coupling: float) -> float:
     return top + math.log(float(np.sum(np.exp(logw - top))))
 
 
-def sample_path_regions(n: int, m: int, coupling: float, samples: int, *, seed) -> np.ndarray:
+def sample_path_regions(
+    n: int, m: int, coupling: float, samples: int, *, seed, max_bytes: int = MAX_RESULT_BYTES
+) -> np.ndarray:
     """Exact independent samples of ``Q_J`` on the path ``P_n``: int64 ``[samples, m]``, rows sorted.
 
     Each sample: draw ``(r, e)`` (runs, ends touched) with probability
@@ -1018,10 +1336,11 @@ def sample_path_regions(n: int, m: int, coupling: float, samples: int, *, seed) 
     has probability ``exp(-J b) / Z = Q_J(A)``. The path is
     ``graphs.path(n)``; :func:`sample_regions` uses the same sampler on any
     graph that is a path, whatever its labels. ``seed`` as in
-    :func:`sample_regions` (``None``: a fresh, unreported seed); the draw order
-    is in :func:`sparsegf2._kernel.erasure_chain.path_exact_sample`.
+    :func:`sample_regions` (``None``: a fresh, unreported seed), and so is
+    ``max_bytes``; the draw order is in
+    :func:`sparsegf2._kernel.erasure_chain.path_exact_sample`.
     """
     n, m = _path_args(n, m)
     value = _coupling(coupling)
     samples = _integer(samples, "samples", 1)
-    return _exact_samples(2, n, m, value, samples, seed)
+    return _exact_samples(2, n, m, value, samples, seed, max_bytes)

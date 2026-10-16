@@ -38,9 +38,15 @@ region A, Q_J(A) = exp(-J b(A)) / Z_m(J) on the regions of size m):
     ...); the exact samplers follow Q_J on every region of small rings and paths, relabeled
     too, and the law of r or (r, e) on larger ones; they equal a plain-Python transcription
     of their documented draw order; ``method="auto"`` picks them exactly on cycles and paths.
-11. Positional diagnostics (ruling R10): on C_64 at J = 6 a short swap chain has a
+11. Positional diagnostics (ruling R10): on C_64 at J = 8 a lone swap chain has a
     boundary that looks mixed while its interval has not moved; ``region_diagnostics``
     (membership indicators of spread-out nodes) flags it, and passes the exact sampler.
+12. The automatic replica-exchange ladder (review item I1): the exact uniform moments of b
+    against enumeration; the ladder's spacing and contents; only requested couplings are
+    recorded, without changing the stream; the reviewer's case scaled down (a coarse
+    ladder's seeds disagree and scatter, the automatic one agrees with a long run);
+    warnings when expected and not otherwise; the order of exchange acceptances (M4); the
+    uniform start (M5); refusals of oversized work (M2, M3).
 """
 
 from __future__ import annotations
@@ -350,7 +356,12 @@ def test_chain_records_regions_of_size_m_with_their_boundaries(tempering):
                 assert res.boundaries[i, s] == _brute_boundary(edges, res.regions[i, s])
         assert np.all((res.acceptance > 0) & (res.acceptance <= 1))
         assert res.acceptance[0] == 1.0  # J = 0 accepts every swap
-        assert res.exchange_acceptance.shape == (2,)
+        rungs = len(res.ladder)
+        assert rungs >= 3 and set(couplings) <= set(res.ladder.tolist())
+        assert res.exchange_acceptance.shape == (rungs - 1,)
+        assert res.exchange_pairs.tolist() == [
+            [a, b] for a, b in itertools.pairwise(res.ladder.tolist())
+        ]
         assert np.all(np.isnan(res.exchange_acceptance)) != tempering
         assert res.size == m and res.num_nodes == n and res.tempering == tempering
         assert res.couplings.tolist() == couplings
@@ -370,15 +381,18 @@ def test_degenerate_sizes_record_the_single_region_and_draw_nothing(method):
             np.zeros((0, 2), dtype=np.int64), 1, m, 0.5, 2, seed=0, method=method
         )
         assert res.regions.shape == (1, 2, m) and np.all(res.boundaries == 0)
-        assert res.exchange_acceptance.shape == (0,)
+        assert res.exchange_acceptance.shape == (len(res.ladder) - 1,)
+        assert res.warnings == ()
     indptr, indices = kernel.csr(4, graphs.cycle(4))
     state = seed_state(9)
     before = state.copy()
     regions = np.full((2, 2, 4), -1, dtype=np.int64)
     bnd = np.full((2, 2), -1, dtype=np.int64)
-    moves = np.full((2, 4), -1, dtype=np.int64)
+    moves = np.full((3, 4), -1, dtype=np.int64)
+    record = np.array([0, -1, 1])  # the middle rung is auxiliary
+    couplings = np.array([0.0, 0.5, 1.0])
     kernel.sample_chain(
-        indptr, indices, 4, 4, np.array([0.0, 1.0]), 2, 5, 1, True, state, regions, bnd, moves
+        indptr, indices, 4, 4, couplings, record, 2, 5, 1, True, state, regions, bnd, moves
     )
     assert np.array_equal(state, before)  # no draws
     assert np.all(regions == np.arange(4)) and np.all(bnd == 0) and np.all(moves == 0)
@@ -537,9 +551,11 @@ def _ring_moments(n, m, coupling):
 def test_samples_on_the_ring_match_the_closed_form_moments(method):
     n, m = 64, 16
     couplings = [0.0, 0.5, 1.0, 2.0]
-    draws = _size(20_000, 500)
+    # JIT-free: 1,200 records (at 500 the variance estimate of a short chain is skewed:
+    # 1 seed in 40 lands beyond 4 standard errors; at 1,200 the worst of 40 is 2.9).
+    draws = _size(20_000, 1_200)
     res = erasures.sample_regions(
-        graphs.cycle(n), n, m, couplings, draws, burn_in=_size(500, 100), seed=21, method=method
+        graphs.cycle(n), n, m, couplings, draws, burn_in=_size(500, 150), seed=21, method=method
     )
     assert res.method == method and res.geometry == "cycle"
     for i, coupling in enumerate(couplings):
@@ -719,9 +735,20 @@ def test_r_hat_of_agreeing_and_disagreeing_chains():
 def test_chain_diagnostics_of_constant_series():
     flat = erasures.chain_diagnostics(np.full(50, 3.0))
     assert flat["mean"] == 3.0 and flat["variance"] == 0.0 and flat["std_error"] == 0.0
-    assert flat["tau_int"] == 1.0 and flat["ess"] == 50.0
+    assert flat["tau_int"] == 1.0 and flat["ess"] == 50.0 and flat["constant"] is True
+    # A value without an exact binary form: the mean is off by an ulp, and the centred
+    # series is not exactly zero; still "no variation" (it gave tau = N, ess = 1).
+    for value in (0.1, 1 / 3):
+        tenth = erasures.chain_diagnostics(np.full(1000, value))
+        assert tenth["tau_int"] == 1.0 and tenth["ess"] == 1000.0 and tenth["constant"] is True
+        assert tenth["mean"] == value and tenth["variance"] == 0.0
+        assert erasures.chain_diagnostics(np.full((3, 1000), value))["ess"] == 3000.0
+    rows = erasures.chain_diagnostics(np.repeat([[0.1], [0.3]], 500, axis=1))
+    assert rows["constant"] is False and rows["tau_int"] == 1.0 and rows["rhat"] == math.inf
+    moving = erasures.chain_diagnostics(np.arange(20.0) % 3)
+    assert moving["constant"] is False
     same = erasures.chain_diagnostics(np.full((3, 20), 2.0))
-    assert math.isnan(same["rhat"])
+    assert math.isnan(same["rhat"]) and same["constant"] is True
     apart = erasures.chain_diagnostics(np.repeat([[1.0], [2.0]], 20, axis=1))
     assert apart["rhat"] == math.inf
     # Constant chains whose normal scores do not sum exactly: still inf, not ~1e15.
@@ -738,8 +765,11 @@ def test_chain_diagnostics_of_constant_series():
 # ---------------------------------------------------------------------------------------
 
 
-def _reference_chain(edges, n, m, couplings, samples, burn_in, thin, tempering, state):
-    """The chain transcribed from the draw order in ``sample_chain``'s docstring."""
+def _reference_chain(edges, n, m, couplings, record, samples, burn_in, thin, tempering, state):
+    """The chain transcribed from the draw order in ``sample_chain``'s docstring.
+
+    Rung ``i`` is recorded on row ``record[i]`` of the outputs, or not at all for -1.
+    """
     gen = ref.Xoshiro([int(w) for w in state])
     c = len(couplings)
     chains = []
@@ -751,8 +781,9 @@ def _reference_chain(edges, n, m, couplings, samples, burn_in, thin, tempering, 
         chains.append([order[:m], order[m:], _brute_boundary(edges, order[:m])])
     slot = list(range(c))
     moves = np.zeros((c, 4), dtype=np.int64)
-    regions = np.zeros((c, samples, m), dtype=np.int64)
-    bounds = np.zeros((c, samples), dtype=np.int64)
+    rows = sum(1 for k in record if k >= 0)
+    regions = np.zeros((rows, samples, m), dtype=np.int64)
+    bounds = np.zeros((rows, samples), dtype=np.int64)
     done = 0
     for r in range(samples):
         while done < burn_in + r * thin:
@@ -781,27 +812,30 @@ def _reference_chain(edges, n, m, couplings, samples, burn_in, thin, tempering, 
                         moves[i, 3] += 1
             done += 1
         for i in range(c):
-            regions[i, r] = sorted(chains[slot[i]][0])
-            bounds[i, r] = chains[slot[i]][2]
+            if record[i] >= 0:
+                regions[record[i], r] = sorted(chains[slot[i]][0])
+                bounds[record[i], r] = chains[slot[i]][2]
     return regions, bounds, moves, gen.s
 
 
+@pytest.mark.parametrize("record", [[0, 1, 2, 3], [-1, 0, -1, 1]], ids=["every rung", "two rungs"])
 @pytest.mark.parametrize("tempering", [True, False])
-def test_kernel_follows_the_documented_draw_order(tempering):
+def test_kernel_follows_the_documented_draw_order(tempering, record):
     n, m = 11, 4
     edges = graphs.watts_strogatz(n, 4, 0.3, seed=5)
     couplings = np.array([-0.5, 0.0, 0.6, 1.4])
     samples, burn_in, thin = 5, 3, 2
     state = seed_state(77)
     expected = _reference_chain(
-        edges, n, m, couplings.tolist(), samples, burn_in, thin, tempering, state
+        edges, n, m, couplings.tolist(), record, samples, burn_in, thin, tempering, state
     )
     indptr, indices = kernel.csr(n, edges)
-    regions = np.empty((4, samples, m), dtype=np.int64)
-    bounds = np.empty((4, samples), dtype=np.int64)
+    rows = sum(1 for k in record if k >= 0)
+    regions = np.empty((rows, samples, m), dtype=np.int64)
+    bounds = np.empty((rows, samples), dtype=np.int64)
     moves = np.empty((4, 4), dtype=np.int64)
     kernel.sample_chain(
-        indptr, indices, n, m, couplings, samples, burn_in, thin, tempering,
+        indptr, indices, n, m, couplings, np.array(record), samples, burn_in, thin, tempering,
         state, regions, bounds, moves,
     )  # fmt: skip
     assert np.array_equal(regions, expected[0])
@@ -809,6 +843,30 @@ def test_kernel_follows_the_documented_draw_order(tempering):
     assert np.array_equal(moves, expected[2])
     assert [int(w) for w in state] == expected[3]  # the state advanced by exactly these draws
     assert moves[:, 1].min() > 0 and (moves[:3, 3].sum() > 0) == tempering
+
+
+def test_recording_fewer_rungs_changes_nothing_else():
+    """Auxiliary rungs run but are not recorded: the recorded rows, the move counts and
+    the generator's final state equal those of a run that records every rung."""
+    n, m = 14, 5
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=8)
+    indptr, indices = kernel.csr(n, edges)
+    couplings = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+    outputs = []
+    for record in ([0, 1, 2, 3, 4], [-1, 0, -1, -1, 1]):
+        rows = sum(1 for k in record if k >= 0)
+        state = seed_state(4)
+        regions = np.empty((rows, 6, m), dtype=np.int64)
+        bounds = np.empty((rows, 6), dtype=np.int64)
+        moves = np.empty((5, 4), dtype=np.int64)
+        kernel.sample_chain(
+            indptr, indices, n, m, couplings, np.array(record), 6, 4, 2, True,
+            state, regions, bounds, moves,
+        )  # fmt: skip
+        outputs.append((regions, bounds, moves, state))
+    full, part = outputs
+    assert np.array_equal(part[0], full[0][[1, 4]]) and np.array_equal(part[1], full[1][[1, 4]])
+    assert np.array_equal(part[2], full[2]) and np.array_equal(part[3], full[3])
 
 
 def test_same_seed_same_regions_other_seed_other_regions():
@@ -828,21 +886,29 @@ def test_same_seed_same_regions_other_seed_other_regions():
 
 
 # The chain's own stream contract: these bytes change only if the draw order documented in
-# sparsegf2._kernel.erasure_chain.sample_chain (or the generator) changes.
+# sparsegf2._kernel.erasure_chain.sample_chain (or the generator) changes. The first is the
+# requested couplings alone (ladder="given": unchanged since the chain was introduced), the
+# second the automatic ladder, which also pins how that ladder is built.
 PINNED_DIGEST = "c6067e313dd0b4a51b7f8e65b7adfafb3871890ea944a4e3ff639c0ff46696fe"
+PINNED_AUTO_DIGEST = "2de0b0e3cdff08045f1ca34fedb754eb2bd88d127a02b8f2f8afbc9ec0871192"
 
 
-def test_pinned_digest_of_a_small_run():
+@pytest.mark.parametrize(
+    ("ladder", "digest"), [("given", PINNED_DIGEST), ("auto", PINNED_AUTO_DIGEST)]
+)
+def test_pinned_digest_of_a_small_run(ladder, digest):
     res = erasures.sample_regions(
         graphs.watts_strogatz(12, 4, 0.25, seed=7), 12, 4, [1.5, -0.5, 0.0, 0.75], 8,
-        burn_in=3, thin=2, seed=2026,
+        burn_in=3, thin=2, seed=2026, ladder=ladder,
     )  # fmt: skip
     h = hashlib.sha256()
     for array in (res.regions, res.boundaries):
         h.update(array.astype("<i8").tobytes())
     for array in (res.acceptance, res.exchange_acceptance):
         h.update(array.astype("<f8").tobytes())
-    assert h.hexdigest() == PINNED_DIGEST
+    if ladder == "auto":
+        h.update(res.ladder.astype("<f8").tobytes())
+    assert h.hexdigest() == digest
 
 
 def test_results_are_read_only():
@@ -879,6 +945,11 @@ def test_results_are_read_only():
         ({"edges": [(1, 1)]}, "self-loops"),
         ({"tempering": "yes"}, "tempering must be True or False"),
         ({"seed": -3}, "seed"),
+        ({"ladder": "fine"}, "ladder must be 'auto', 'given' or a list of extra couplings"),
+        ({"ladder": [math.inf]}, "finite"),
+        ({"max_step": 0.0}, "max_step must be a positive number"),
+        ({"max_step": "big"}, "max_step must be a positive number"),
+        ({"max_bytes": 0}, "max_bytes must be at least 1"),
     ],
 )
 def test_sample_regions_validation(kwargs, message):
@@ -1262,7 +1333,9 @@ def test_positional_diagnostics_flag_a_slow_ring_chain_that_the_boundary_misses(
     ring = graphs.cycle(n)
     draws = _size(400, 150)
     runs = [
-        erasures.sample_regions(ring, n, m, [coupling], draws, burn_in=500, seed=s, method="chain")
+        erasures.sample_regions(
+            ring, n, m, [coupling], draws, burn_in=500, seed=s, method="chain", tempering=False
+        )
         for s in range(4)
     ]
     bounds = np.stack([r.boundaries[0] for r in runs])
@@ -1315,3 +1388,202 @@ def test_region_diagnostics_validation():
         erasures.path_run_count(1, 1, 1, 2)
     with pytest.raises(ValueError, match="ends must be 0, 1 or 2"):
         erasures.path_run_count(5, 2, 1, 3)
+
+
+# ---------------------------------------------------------------------------------------
+# 12. The automatic exchange ladder, warnings, limits
+# ---------------------------------------------------------------------------------------
+
+UNIFORM = [
+    ("erdos_renyi_9", graphs.erdos_renyi(9, 0.4, seed=1), 9),
+    ("erdos_renyi_10", graphs.erdos_renyi(10, 0.6, seed=4), 10),
+    ("cycle_7", graphs.cycle(7), 7),
+    ("path_6", graphs.path(6), 6),
+    ("complete_5", graphs.complete(5), 5),
+    ("star_8", graphs.from_edges([(0, v) for v in range(1, 8)], 8), 8),
+    ("watts_strogatz_10", graphs.watts_strogatz(10, 4, 0.3, seed=2), 10),
+    ("triangle", graphs.cycle(3), 3),
+    ("one_edge", graphs.path(2), 2),
+    ("path_and_node", *_union((graphs.path(3), 3), (_EMPTY, 1))),
+    ("no_edges_4", _EMPTY, 4),
+]
+
+
+@pytest.mark.parametrize(("name", "edges", "n"), UNIFORM, ids=[u[0] for u in UNIFORM])
+def test_uniform_boundary_moments_match_enumeration(name, edges, n):
+    for m in range(n + 1):
+        counts = erasures.boundary_counts(edges, n, m)
+        b = np.arange(len(counts))
+        mean = float(np.sum(b * counts)) / counts.sum()
+        var = float(np.sum((b - mean) ** 2 * counts)) / counts.sum()
+        got = erasures.uniform_boundary_moments(edges, n, m)
+        assert isinstance(got[0], float) and isinstance(got[1], float)
+        assert got == pytest.approx((mean, var), rel=1e-12, abs=1e-12), m
+
+
+def test_uniform_boundary_moments_edge_cases_and_scale():
+    assert erasures.uniform_boundary_moments(_EMPTY, 1, 0) == (0.0, 0.0)
+    assert erasures.uniform_boundary_moments(_EMPTY, 1, 1) == (0.0, 0.0)
+    assert erasures.uniform_boundary_moments(graphs.complete(6), 6, 3) == (9.0, 0.0)  # all cut 9
+    n, m = 4096, 1024
+    edges = graphs.watts_strogatz(n, 4, 0.1, seed=1)
+    mean, var = erasures.uniform_boundary_moments(edges, n, m)
+    assert mean == pytest.approx(len(edges) * 2 * m * (n - m) / (n * (n - 1)))
+    assert 0 < var < mean
+
+
+def test_coupling_ladder_spacing_and_contents():
+    ladder = erasures.coupling_ladder([2.0, 0.5, -1.0], 0.4)
+    assert np.all(np.diff(ladder) > 0) and np.diff(ladder).max() <= 0.4 * (1 + 1e-12)
+    assert {-1.0, 0.0, 0.5, 2.0} <= set(ladder.tolist()) and len(ladder) == 10
+    assert ladder[ladder > 0.5] == pytest.approx([0.875, 1.25, 1.625, 2.0])  # evenly split
+    assert erasures.coupling_ladder([1.0], math.inf).tolist() == [0.0, 1.0]
+    assert erasures.coupling_ladder([0.0], 0.1).tolist() == [0.0]
+    with pytest.raises(ValueError, match="at most 256"):
+        erasures.coupling_ladder([0.0, 100.0], 0.01)
+    with pytest.raises(ValueError, match="max_step must be"):
+        erasures.coupling_ladder([1.0], 0.0)
+
+
+def test_sample_regions_runs_a_ladder_and_records_only_the_requested_couplings():
+    n, m = 24, 6
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=3)
+    _, var0 = erasures.uniform_boundary_moments(edges, n, m)
+    requested = [1.5, 0.0, -0.5]
+    res = erasures.sample_regions(edges, n, m, requested, 20, seed=1)
+    assert res.max_step == pytest.approx(1 / math.sqrt(var0))
+    assert np.array_equal(res.ladder, erasures.coupling_ladder(requested, res.max_step))
+    assert len(res.ladder) > 3 and res.regions.shape == (3, 20, m)
+    assert res.couplings.tolist() == requested and res.acceptance.shape == (3,)
+    assert res.exchange_pairs.shape == (len(res.ladder) - 1, 2)
+    finer = erasures.sample_regions(edges, n, m, requested, 5, seed=1, max_step=0.1)
+    assert np.diff(finer.ladder).max() <= 0.1 * (1 + 1e-12) and finer.max_step == 0.1
+    given = erasures.sample_regions(edges, n, m, requested, 5, seed=1, ladder="given")
+    assert given.ladder.tolist() == sorted(requested) and given.max_step is None
+    extra = erasures.sample_regions(edges, n, m, requested, 5, seed=1, ladder=[0.75, 3.0])
+    assert extra.ladder.tolist() == sorted([*requested, 0.75, 3.0])
+    assert extra.regions.shape == (3, 5, m)
+    alone = erasures.sample_regions(edges, n, m, requested, 5, seed=1, tempering=False)
+    assert alone.ladder.tolist() == sorted(requested) and not alone.tempering
+    with pytest.raises(ValueError, match="extra couplings only help with tempering=True"):
+        erasures.sample_regions(edges, n, m, requested, 5, seed=1, ladder=[0.75], tempering=False)
+    exact = erasures.sample_regions(graphs.cycle(n), n, m, requested, 5, seed=1)
+    assert exact.method == "exact" and exact.ladder.tolist() == sorted(requested)
+    assert exact.max_step is None and exact.warnings == ()
+
+
+def test_the_automatic_ladder_fixes_what_a_coarse_ladder_gets_wrong():
+    """The reviewer's case, scaled down: Watts–Strogatz (beta = 0.1), m = n/4, couplings
+    0, 0.5, 1, 2 and the default 200 sweeps of burn-in. The coarse ladder almost never
+    exchanges between 1 and 2, so each J = 2 chain stays where its burn-in left it: seeds
+    disagree (R-hat well above 1) and their means scatter. The automatic ladder (spacing
+    1/sqrt(Var_0 b)) exchanges freely, and its seeds agree with a long run."""
+    n, m = 96, 24
+    edges = graphs.watts_strogatz(n, 4, 0.1, seed=1)
+    requested = [0.0, 0.5, 1.0, 2.0]
+    seeds, draws, burn = range(_size(6, 1)), _size(1_000, 60), _size(200, 20)
+
+    def run(seed, **kw):
+        return erasures.sample_regions(edges, n, m, requested, draws, burn_in=burn, seed=seed, **kw)
+
+    coarse = [run(s, ladder="given") for s in seeds]
+    auto = [run(s) for s in seeds]
+    assert min(r.exchange_acceptance.min() for r in coarse) < 0.05
+    assert min(r.exchange_acceptance.min() for r in auto) > 0.2
+    assert any("replica exchange between J = 1 and J = 2" in w for w in coarse[0].warnings)
+    assert not any("replica exchange" in w for r in auto for w in r.warnings)
+    if JIT_FREE:
+        return  # the rest needs long runs; the exchange statistics above are the cheap part
+    top = requested.index(2.0)
+    rhat_coarse = erasures.chain_diagnostics(np.stack([r.boundaries[top] for r in coarse]))
+    rhat_auto = erasures.chain_diagnostics(np.stack([r.boundaries[top] for r in auto]))
+    assert rhat_coarse["rhat"] > 1.2 and rhat_auto["rhat"] < 1.1
+    reference = np.mean(
+        [
+            erasures.sample_regions(edges, n, m, requested, 10_000, burn_in=2_000, seed=100 + s)
+            .boundaries[top]
+            .mean()
+            for s in range(2)
+        ]
+    )
+    auto_mean = np.mean([r.boundaries[top].mean() for r in auto])
+    assert abs(auto_mean - reference) < 0.3
+    assert max(abs(r.boundaries[top].mean() - reference) for r in coarse) > 0.8
+
+
+def test_warnings_appear_when_expected_and_not_otherwise():
+    """Each warning on a run that clearly deserves it (fixed seeds, the same run compiled
+    and JIT-free), and none on a well-mixed run or on exact samples. The warnings are
+    heuristics: their absence is no proof of mixing (several seeds are)."""
+    n, m = 32, 8
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=1)
+    calm = erasures.sample_regions(edges, n, m, [0.0, 0.5], 100, seed=3)
+    assert calm.warnings == ()
+    assert erasures.sample_regions(graphs.cycle(n), n, m, [0.0, 6.0], 50, seed=1).warnings == ()
+    coarse = erasures.sample_regions(edges, n, m, [0.0, 4.0], 100, seed=3, ladder="given")
+    assert any("replica exchange between J = 0 and J = 4" in w for w in coarse.warnings)
+    assert all(isinstance(w, str) and w.endswith(".") for w in coarse.warnings)
+
+    # A lone chain at strong coupling: almost no swap is accepted, and nothing reaches it.
+    ws64 = graphs.watts_strogatz(64, 4, 0.1, seed=1)
+    lone = erasures.sample_regions(
+        ws64, 64, 16, [2.5], 100, burn_in=100, seed=0, method="chain", tempering=False
+    )
+    assert lone.acceptance[0] < 0.01
+    assert any("swaps were accepted only" in w for w in lone.warnings), lone.warnings
+    helped = erasures.sample_regions(ws64, 64, 16, [2.5], 100, burn_in=100, seed=0)
+    assert not any("swaps were accepted only" in w for w in helped.warnings)  # exchanges reach it
+
+    # A lone chain whose records are strongly correlated.
+    ws96 = graphs.watts_strogatz(96, 4, 0.1, seed=1)
+    slow = erasures.sample_regions(
+        ws96, 96, 24, [2.0], 100, burn_in=100, seed=0, method="chain", tempering=False
+    )
+    assert any("records are strongly correlated" in w for w in slow.warnings), slow.warnings
+    assert erasures.chain_diagnostics(slow.boundaries[0])["tau_int"] > 10 or (
+        erasures.region_diagnostics(slow.regions[0], 96)["tau_int_max"] > 10
+    )
+
+
+def test_exchange_acceptance_follows_the_sorted_ladder():
+    res = erasures.sample_regions(
+        graphs.watts_strogatz(16, 4, 0.2, seed=2), 16, 4, [3.0, 0.0, 0.2], _size(300, 100),
+        seed=5, ladder="given",
+    )  # fmt: skip
+    assert res.exchange_pairs.tolist() == [[0.0, 0.2], [0.2, 3.0]]
+    assert res.exchange_acceptance[0] > res.exchange_acceptance[1]  # (0, 0.2) are close
+
+
+def test_the_start_state_is_uniform():
+    """With no burn-in the one record is the start state, a uniformly random region."""
+    n, m = 8, 3
+    ring = graphs.cycle(n)
+    seeds = _size(4_000, 800)
+    regions = np.array(
+        [
+            erasures.sample_regions(ring, n, m, [0.0], 1, burn_in=0, seed=s, method="chain")
+            .regions[0, 0]
+            .tolist()
+            for s in range(seeds)
+        ]
+    )
+    subsets, _, p = _exact_law(ring, n, m, 0.0)
+    ids = _state_ids(regions, subsets, n)
+    assert _chi2_sf(*_chi_square(np.bincount(ids, minlength=len(p)), p, seeds, seeds)) > 1e-4
+
+
+def test_size_limits_refuse_with_what_to_change():
+    with pytest.raises(ValueError, match=r"C\(20000, 10000\) = about 10\^6\d{3} subsets"):
+        erasures.boundary_counts(graphs.cycle(20_000), 20_000, 10_000)
+    with pytest.raises(ValueError, match=r"samples.*size.*bytes"):
+        erasures.sample_regions(graphs.cycle(10), 10, 5, [0.0, 1.0], 10**10, seed=1)
+    with pytest.raises(ValueError, match="max_bytes"):
+        erasures.sample_regions(graphs.cycle(10), 10, 5, [0.0], 100, seed=1, max_bytes=1000)
+    at_limit = erasures.sample_regions(
+        graphs.cycle(10), 10, 5, [0.0], 100, seed=1, max_bytes=8 * 100 * (5 + 1)
+    )
+    assert at_limit.regions.shape == (1, 100, 5)
+    with pytest.raises(ValueError, match="bytes"):
+        erasures.sample_ring_regions(10, 5, 0.0, 10**10, seed=1)
+    with pytest.raises(ValueError, match="bytes"):
+        erasures.sample_path_regions(10, 5, 0.0, 10**10, seed=1)

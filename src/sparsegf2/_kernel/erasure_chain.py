@@ -41,10 +41,13 @@ from sparsegf2._kernel.rng import next_below, next_double
 def csr(n, edges):
     """The graph in compressed sparse rows: ``(indptr int64[n+1], indices int64[2E])``.
 
-    ``edges`` is an ``(E, 2)`` int64 array of distinct pairs without self-loops
-    (:func:`sparsegf2.graphs.from_edges` gives one). The neighbours of ``v``
-    are ``indices[indptr[v]:indptr[v+1]]``, sorted ascending; every edge
-    appears in the rows of both its ends. The compiled twin of
+    ``edges`` is an ``(E, 2)`` int64 array of distinct pairs without self-loops.
+    Distinct matters: a repeated edge would appear twice in both rows, and
+    every boundary, ``Δb`` (its ``u ~ v`` flag) and count here would treat it as
+    two edges. So build it only from :func:`sparsegf2.graphs.from_edges` output,
+    which removes repeats (as :mod:`sparsegf2.erasures` does). The neighbours
+    of ``v`` are ``indices[indptr[v]:indptr[v+1]]``, sorted ascending; every
+    edge appears in the rows of both its ends. The compiled twin of
     ``graphs._csr``, which does not sort the rows.
     """
     num_edges = edges.shape[0]
@@ -133,6 +136,7 @@ def sample_chain(
     n,
     m,
     couplings,
+    record,
     samples,
     burn_in,
     thin,
@@ -145,15 +149,20 @@ def sample_chain(
     """Sample regions of size ``m`` from ``Q_J`` at each coupling: one Metropolis swap chain each.
 
     Arguments: the graph in CSR form (:func:`csr`) on ``n`` nodes; ``couplings``
-    float64[c], finite and strictly increasing; ``samples >= 1``,
+    float64[c], the ladder of rungs, finite and strictly increasing;
+    ``record`` int64[c], the output row of each rung, or -1 for an auxiliary
+    rung that runs (and exchanges) but is never recorded; ``samples >= 1``,
     ``burn_in >= 0``, ``thin >= 1``; ``tempering`` (bool); ``prng`` a uint64[4]
     xoshiro256** state, the only source of randomness, advanced in place.
-    Outputs, filled in full: ``out_regions`` int64[c, samples, m] (row
-    ``[i, s]``: the ``s``-th recorded region of the chain at ``couplings[i]``,
-    its nodes sorted ascending), ``out_boundary`` int64[c, samples] (their
-    ``b``), ``out_moves`` int64[c, 4] (row ``i``: swap proposals and accepted
-    swaps at ``couplings[i]``, then exchange attempts and accepted exchanges of
-    the pair ``(i, i+1)``; zero for ``i = c-1`` and without tempering).
+    Outputs, filled in full: ``out_regions`` int64[k, samples, m], ``k`` the
+    number of recorded rungs (row ``[record[i], s]``: the ``s``-th recorded
+    region of the chain at ``couplings[i]``, its nodes sorted ascending),
+    ``out_boundary`` int64[k, samples] (their ``b``), ``out_moves`` int64[c, 4]
+    (row ``i``: swap proposals and accepted swaps at ``couplings[i]``, then
+    exchange attempts and accepted exchanges of the pair ``(i, i+1)``; zero for
+    ``i = c-1`` and without tempering). Recording only some rungs changes
+    nothing else: the draws, the moves and every recorded row are those of a
+    run that records every rung.
 
     **The chain.** A state is a region of size ``m``, kept as a list of its
     nodes ("erased") and a list of the others ("unerased"), plus a 0/1 mask and
@@ -176,18 +185,18 @@ def sample_chain(
     swaps which state buffer each coupling points to; nothing is copied.
 
     **Recording.** Each chain starts from a uniformly random ``m``-subset (an
-    exact sample of ``Q_0``). After ``burn_in`` sweeps the state of every chain
-    is recorded, then again after every further ``thin`` sweeps, ``samples``
-    records in all (``burn_in + (samples - 1) * thin`` sweeps).
+    exact sample of ``Q_0``). After ``burn_in`` sweeps the state of every
+    recorded rung is recorded, then again after every further ``thin`` sweeps,
+    ``samples`` records in all (``burn_in + (samples - 1) * thin`` sweeps).
 
     **Draw order (the contract).** All draws come from ``prng``
     (:func:`~sparsegf2._kernel.rng.next_below`, :func:`~.rng.next_double`):
 
-    1. Start states, chain by chain in coupling order: ``m`` draws
-       ``next_below(n - t)``, ``t = 0..m-1``, a partial Fisher-Yates shuffle of
-       ``0..n-1`` (swap entries ``t`` and ``t + draw``). The first ``m``
-       entries, in shuffled order, are the erased list and the remaining ``n - m``
-       the unerased list.
+    1. Start states, chain by chain in coupling order (every rung, recorded or
+       not): ``m`` draws ``next_below(n - t)``, ``t = 0..m-1``, a partial
+       Fisher-Yates shuffle of ``0..n-1`` (swap entries ``t`` and
+       ``t + draw``). The first ``m`` entries, in shuffled order, are the erased
+       list and the remaining ``n - m`` the unerased list.
     2. Sweeps, one after another. In a sweep, chain by chain in coupling order,
        ``n`` proposals, each ``a = next_below(m)``, then ``p = next_below(n - m)``,
        then, only when ``J Δb > 0`` (the acceptance probability
@@ -206,11 +215,7 @@ def sample_chain(
         for k in range(4):
             out_moves[i, k] = 0
     if m == 0 or m == n:
-        for i in range(c):
-            for s in range(samples):
-                out_boundary[i, s] = 0
-                for k in range(m):
-                    out_regions[i, s, k] = k
+        _single_region(m, out_regions, out_boundary)
         return
     unerased = n - m
     member = np.zeros((c, n), dtype=np.uint8)
@@ -284,13 +289,16 @@ def sample_chain(
                         out_moves[i, 3] += 1
             done += 1
         for i in range(c):
+            row = record[i]
+            if row < 0:
+                continue  # an auxiliary rung of the ladder
             s = slot[i]
             k = 0
             for v in range(n):
                 if member[s, v]:
-                    out_regions[i, r, k] = v
+                    out_regions[row, r, k] = v
                     k += 1
-            out_boundary[i, r] = bnd[s]
+            out_boundary[row, r] = bnd[s]
 
 
 @njit(cache=True)
