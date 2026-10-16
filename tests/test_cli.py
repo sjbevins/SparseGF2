@@ -525,10 +525,17 @@ def test_regions_reads_a_graph_file(capsys, tmp_path):
     assert data["graph"]["num_nodes"] == n and data["graph"]["family"] == "file"
 
 
+def test_the_regions_time_limit_is_the_api_limit(capsys):
+    assert cli.REGIONS_MAX_SECONDS == api.SYNC_ENSEMBLE_MAX_SECONDS
+    code, out, _ = run_cli(capsys, "regions", "--help")
+    assert f"({api.SYNC_ENSEMBLE_MAX_SECONDS:g})" in out
+
+
 def test_regions_table(capsys):
     code, out, err = run_cli(capsys, *regions_argv())
     assert code == 0 and "done in" in err
-    assert "mean b" in out and "R-hat" in out and "Proposition 2" in out
+    assert "mean b" in out and "R-hat" in out and "Proposition 2" in out and "limit" in out
+    assert "against z = " in out and "the step nearest a rise" in out
     assert "ring closed form" in out and "example regions at J = 2" in out
     rows = [line for line in out.splitlines() if line.lstrip().startswith(("0 ", "1 ", "2 "))]
     assert len(rows) >= 3  # one line per coupling
@@ -603,7 +610,7 @@ def test_curves_matches_the_api(capsys, erasure_run):
     )  # fmt: skip
     assert code == 0, data
     expected = api.erasure_curves(str(erasure_run), [0.05, 0.1, 0.3], 0.05, 8)
-    assert data == json.loads(json.dumps(expected))
+    assert _timeless(data) == _timeless(json.loads(json.dumps(expected)))
     assert data["layer"] == 8 and data["uniform"]["erasure_first_failure"]["layer"] == 8
     code, data = run_json(capsys, "curves", str(erasure_run / "result.npz"))
     assert code == 0 and len(data["e"]) >= 4

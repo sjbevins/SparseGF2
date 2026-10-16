@@ -18,6 +18,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+REGIONS_MAX_SECONDS = 60.0  # api.SYNC_ENSEMBLE_MAX_SECONDS (api is imported lazily; a test checks)
 EXIT_OK = 0
 EXIT_INTERNAL = 1
 EXIT_USAGE = 2
@@ -318,8 +319,8 @@ def _build_parser() -> _Parser:
     p.add_argument(
         "--max-seconds",
         type=float,
-        default=60.0,
-        help="refuse a call estimated above this many seconds (60)",
+        default=REGIONS_MAX_SECONDS,
+        help=f"refuse a call estimated above this many seconds ({REGIONS_MAX_SECONDS:g})",
     )
 
     p = add(
@@ -735,19 +736,32 @@ def _human_regions(result: dict[str, Any]) -> list[str]:
         )
     lines.append(f"exact values: {result['exact_source']}")
     head = ["J", "mean b", "stderr", "exact", "variance", "accept", "exch", "tau", "ESS", "R-hat",
-            "min b", "slowest"]  # fmt: skip
+            "limit", "min b", "slowest"]  # fmt: skip
     body = []
     for r in result["couplings"]:
         exact = None if r["exact"] is None else r["exact"]["mean_boundary"]
         body.append([_g(r["coupling"]), _g(r["mean_boundary"]), _g(r["stderr"]), _g(exact),
                      _g(r["variance"]), _g(r["acceptance"]), _g(r["exchange_acceptance"]),
-                     _g(r["tau_int"]), _g(r["ess"], 3), _g(r["r_hat"], 4),
-                     _g(r["min_boundary_seen"]), r["slowest"]])  # fmt: skip
+                     _g(r["tau_int"]), _g(r["ess"], 3), _g(r["r_hat"], 4), _g(r["r_hat_limit"], 4),
+                     _g(r["min_boundary_seen"]), r["slowest"] or "-"])  # fmt: skip
     widths = [max(len(head[i]), *(len(row[i]) for row in body)) for i in range(len(head))]
     lines += ["", _row(head, widths), *(_row(row, widths) for row in body), ""]
-    check = result["nonincreasing_in_J"]
-    shown = "not checked (one coupling)" if check is None else "yes" if check else "NO"
-    lines.append(f"mean boundary nonincreasing in J (Proposition 2, within 3 errors): {shown}")
+    check, detail = result["nonincreasing_in_J"], result["proposition2"]
+    if detail is None:
+        lines.append("mean boundary nonincreasing in J (Proposition 2): not checked (one coupling)")
+    else:
+        worst = detail["worst"]
+        lines.append(
+            f"mean boundary nonincreasing in J (Proposition 2, each step to the next coupling "
+            f"against z = {_g(detail['z_critical'], 3)}): {'yes' if check else 'NO'}; the step "
+            f"nearest a rise, J = {_g(worst['J'][0])} to {_g(worst['J'][1])}, changes the mean "
+            f"by {_g(worst['increase'])} (z = {_g(worst['z'], 3)})"
+        )
+        lines += [
+            f"  failed step J = {_g(s['J'][0])} to {_g(s['J'][1])}: {_g(s['increase'])} "
+            f"(z = {_g(s['z'], 3)})"
+            for s in detail["failed"]
+        ]
     if result["mixing"]:
         lines += ["mixing:", *(f"  - {note}" for note in result["mixing"])]
     else:
@@ -797,9 +811,11 @@ def _human_curves(result: dict[str, Any]) -> list[str]:
             continue
         table([("Phi", entry["phi"]["mean"]), ("stderr", entry["phi"]["stderr"])])
         d = entry["e_delta"]
+        low, high = d["of_mean_phi_range"]
         lines.append(
-            f"  e_delta: of the mean Phi {_g(d['of_mean_phi'])}; per code mean {_g(d['per_code_mean'])}"
-            f" +- {_g(d['per_code_stderr'])}, median {_g(d['per_code_median'])}"
+            f"  e_delta: of the mean Phi {_g(d['of_mean_phi'])} (range {_g(low)} to {_g(high)}); "
+            f"per code mean {_g(d['per_code_mean'])} +- {_g(d['per_code_stderr'])}, median "
+            f"{_g(d['per_code_median'])}"
         )
         if entry["exact_counts"]:
             lines.append(
@@ -823,12 +839,14 @@ def _human_curves(result: dict[str, Any]) -> list[str]:
         table([(f"Phi J={_g(j)}", row) for j, row in zip(js, entry["phi"]["mean"], strict=True)])
         d = entry["e_delta"]
         lines.append(
-            "  e_delta      J   of mean Phi   per code mean  +- stderr   median   monotone"
+            "  e_delta      J   of mean Phi (range)       per code mean +- stderr   median  monotone"
         )
         for i, j in enumerate(js):
+            low, high = d["of_mean_phi_range"][i]
+            span = f"{_g(d['of_mean_phi'][i])} ({_g(low, 3)} to {_g(high, 3)})"
             lines.append(
-                f"          {_g(j):>6}   {_g(d['of_mean_phi'][i]):>11}   {_g(d['per_code_mean'][i]):>13}"
-                f"  {_g(d['per_code_stderr'][i]):>8}   {_g(d['per_code_median'][i]):>6}   "
+                f"          {_g(j):>6}   {span:<26}{_g(d['per_code_mean'][i]):>10} +- "
+                f"{_g(d['per_code_stderr'][i]):<10}{_g(d['per_code_median'][i]):>7}  "
                 f"{_g(d['monotone_fraction'][i], 3):>8}"
             )
     if result.get("truncated"):
