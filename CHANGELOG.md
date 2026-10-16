@@ -34,6 +34,13 @@
     mixing diagnostics against exact values, to check settings before a long run) and
     `erasure_curves` (`sparsegf2 curves`: Phi(e) and e_delta of a saved run, independent
     and per coupling).
+  * Review round: couplings satisfy |J| <= 10^6 (`erasures.MAX_ABS_COUPLING`; the exact
+    J -> inf routes have no bound), an effective sample size that feeds an error bar is
+    capped at the number of records, `erasure_curves` reports the interpolated mass at
+    `e_delta` itself (`e_delta.interpolated_mass_at_e_delta`, `e_delta_complete`) and
+    whether the mean curve behind the headline tolerance is monotone
+    (`of_mean_phi_monotone`), the ESS note scales with the chains, and a graph file that
+    is not a zip archive gets a plain message.
   * Documents: `docs/observables/correlated-erasure.md` (the study transcribed with its
     two corrections, the exact limits and the samplers with proofs, estimators,
     diagnostics, costs and worked examples checked by brute force), AGENTS.md,
@@ -326,7 +333,8 @@
   kernel compiled from other sources is recompiled rather than loaded, even one
   saved after an update by a process that had imported the old sources.
   Importing the package also deletes such stale cache files. The first import
-  after an update, including this one, recompiles the kernels once (10 to 30 s).
+  after an update, including this one, recompiles the kernels once (about 30 s on the
+  development machine, longer on slower ones).
   A process that was already running keeps the code it loaded, so restart it
   (for example the MCP server) to use the new code. If a Numba version lacks the
   private locator list this relies on, or `NUMBA_CACHE_LOCATOR_CLASSES` is set,

@@ -56,8 +56,11 @@ undirected. Region `A ⊆ V`, size `m = |A|`. Edge boundary `∂A = {{u,v} ∈ E
   product of the targets is invariant, so each chain's marginal is exactly `Q_{J_i}`; the `J = 0` chain mixes
   instantly, and exchanges carry its configurations up the ladder. Optional (`tempering`), on by default when there are
   two or more couplings.
-- **Starting state:** a uniformly random `m`-subset (an exact sample at `J = 0`, so at `J = 0` there is no burn-in bias
-  at all), then `burn_in` sweeps before the first recorded state, and `thin` sweeps between recorded states.
+- **Starting state:** a uniformly random `m`-subset (an exact sample at `J = 0`, so a lone chain at `J = 0`, without
+  tempering, has no burn-in bias at all; with replica exchange the `J = 0` rung also receives states from the cold
+  rungs, so its records are exact only once the joint chain has equilibrated, as §5.1 of
+  `docs/observables/correlated-erasure.md` says), then `burn_in` sweeps before the first recorded state, and `thin`
+  sweeps between recorded states.
 - **Estimators and errors:** per trajectory and per `(J, m)`, `P̂ = (1/S) Σ_s F_C(A_s)` over `S` recorded states of one
   chain (consistent; biased only by incomplete equilibration). Across trajectories the chains are independent, so the
   ensemble mean's standard error from the across-trajectory spread is valid whatever the correlation inside a chain.

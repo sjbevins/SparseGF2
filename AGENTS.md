@@ -20,8 +20,9 @@ python -c "import sparsegf2; print(sparsegf2.__version__)"
 ```
 
 This installs two commands: `sparsegf2` (CLI) and `sparsegf2-mcp` (MCP server). The first
-simulation after installing or updating compiles the Numba kernels. That takes 10 to 30 s
-once; later runs load the compiled kernels from cache.
+simulation after installing or updating compiles the Numba kernels. That takes about 30 s
+once on the development machine (the ensemble kernel's cold compile was measured at 29 s
+there), longer on a slower one; later runs load the compiled kernels from cache.
 
 ## Which entry point to use
 
@@ -257,7 +258,8 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   left by a process that has ended on this machine is taken over.
 * Compiled kernels are cached on disk and recompiled automatically whenever any kernel
   source (or the Numba or Python version) changes, so the first import and run after an
-  update is slower (10 to 30 s). Kernels that a process started before the update saves
+  update is slower (about 30 s on the development machine, longer on slower ones). Kernels
+  that a process started before the update saves
   afterwards are ignored and recompiled. That process itself, such as a running MCP
   server, keeps the code it loaded: restart it to use the new code. If cached kernels
   ever look stale, delete the `sparsegf2-kernels.*.sha256` marker next to the cache

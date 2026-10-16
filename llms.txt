@@ -19,6 +19,12 @@ qubit erased independently with probability e after the circuit): probes
 `uncorrectable_region_counts` (exact counts for small erasures), `code_snapshot` to save
 the code; `sparsegf2.analysis.erasure_failure_probability` gives
 Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) and `erasure_tolerance` gives e_delta.
+Correlated erasures (the erased region clusters on the interaction graph: a region A of m
+qubits is drawn with probability proportional to exp(-J b(A)), b(A) the graph edges leaving
+it; J = 0 is the uniform case above): the probe `correlated_erasure`, the read-only tools
+`sample_erasure_regions` (check a region sampler on a graph, no circuit) and `erasure_curves`
+(Phi_J(e) and e_delta per coupling from a saved run), exact J -> inf routes on saved codes;
+couplings satisfy |J| <= 10^6.
 
 ## Docs
 
@@ -28,6 +34,7 @@ Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) and `erasure_tolerance` gives e_del
 - [AGENTS.md](AGENTS.md): install, which entry point to use, five-minute tour, conventions, pitfalls
 - [docs/LLM_INTERFACE.md](docs/LLM_INTERFACE.md): full CLI and MCP reference with examples and client registration
 - [README.md](README.md): install, the Python library tour (including the erasure workflow), performance
+- [docs/observables/correlated-erasure.md](docs/observables/correlated-erasure.md): geometry-correlated erasures end to end: the definitions, exact limits (J -> inf), the samplers with proofs, the estimators, the probe and the two tools, cost, worked examples, pitfalls
 - [docs/LITERATURE.md](docs/LITERATURE.md): the observables the monitored-circuit literature uses and how they are computed
 - [docs/DESIGN.md](docs/DESIGN.md): architecture, data layout and benchmarks
 
@@ -35,8 +42,9 @@ Phi(e) = sum_m C(n,m) e^m (1-e)^(n-m) P_C(m) and `erasure_tolerance` gives e_del
 
 - [src/sparsegf2/api.py](src/sparsegf2/api.py): JSON service layer (capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results, sample_erasure_regions, erasure_curves)
 - [src/sparsegf2/mipt.py](src/sparsegf2/mipt.py): MonitoredCircuit protocol (graph collections, circuits_per_graph), probes with their own checkpoints, EnsembleResult (values, layers, graph_index, snapshots, code)
-- [src/sparsegf2/codes.py](src/sparsegf2/codes.py): StabilizerCode, a code from generators, Pauli strings or a saved snapshot: lost information l(A) = I(A:R), first-failure sizes, exhaustive uncorrectable counts
-- [src/sparsegf2/analysis.py](src/sparsegf2/analysis.py): failure_by_size, exact_failure_by_size, erasure_failure_probability (hybrid exact/sampled), erasure_tolerance, Kaplan-Meier survival, mean_and_error
+- [src/sparsegf2/erasures.py](src/sparsegf2/erasures.py): geometry-correlated erasure regions on a graph (the graph side, no codes): boundaries, exact densities of states, exact ring and path samplers, the swap chain with replica exchange, mixing diagnostics
+- [src/sparsegf2/codes.py](src/sparsegf2/codes.py): StabilizerCode, a code from generators, Pauli strings or a saved snapshot: lost information l(A) = I(A:R), first-failure sizes, exhaustive uncorrectable counts, correlated erasures (correlated_failure by sampling, boundary_failure_counts and exact P_J(m), the J -> inf interval limits)
+- [src/sparsegf2/analysis.py](src/sparsegf2/analysis.py): failure_by_size, exact_failure_by_size, erasure_failure_probability (hybrid exact/sampled), erasure_tolerance, correlated curves (correlated_failure_curve, failure_probability_from_curve, tolerance_from_curve, binomial_window), Kaplan-Meier survival, mean_and_error
 - [src/sparsegf2/observables.py](src/sparsegf2/observables.py): entropies, code dimension, erasure statistics, contiguous distance on a Simulator state
 - [src/sparsegf2/simulator.py](src/sparsegf2/simulator.py): Simulator (stim.TableauSimulator-style API)
 - [src/sparsegf2/circuit.py](src/sparsegf2/circuit.py): Circuit (Stim syntax, CLIFFORD_1Q/2Q extensions)

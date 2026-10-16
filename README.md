@@ -421,6 +421,14 @@ workflow versus depth: code rate, the fraction of circuits that keep a code,
 Φ(e) at several erasure rates, e_δ conditioned on k > 0, and a saved code
 analysed again with ten times more orderings.
 
+Erasures that cluster on the interaction graph (a region of m qubits drawn with
+probability ∝ exp(−J b(A)), b(A) the graph edges leaving it; J = 0 is the
+uniform case above) are measured by the probe `correlated_erasure`, checked on a
+graph alone by `sample_erasure_regions` and turned into Φ_J(e) and e_δ(J) by
+`erasure_curves`; the exact J → ∞ limits are on saved codes. The definitions,
+samplers, costs and worked examples are in
+[`docs/observables/correlated-erasure.md`](docs/observables/correlated-erasure.md).
+
 ## What it shows: three standard experiments
 
 All three figures come from [`benchmarks/physics_data.py`](benchmarks/physics_data.py)
@@ -660,6 +668,7 @@ the benchmarks that settled them.
 | [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) | how the simulator works inside, with diagrams |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | design decisions and the benchmarks behind them, roadmap |
 | [`docs/LITERATURE.md`](docs/LITERATURE.md) | the literature review behind the feature set (protocols, observables, codes, erasure, graphs) |
+| [`docs/observables/correlated-erasure.md`](docs/observables/correlated-erasure.md) | geometry-correlated erasures: definitions, exact limits, samplers, the probe and tools, cost, examples |
 | [`docs/AUDIT.md`](docs/AUDIT.md) | the audit of the deprecated v2 package that shaped this design |
 | [`AGENTS.md`](AGENTS.md), [`docs/LLM_INTERFACE.md`](docs/LLM_INTERFACE.md) | running SparseGF2 from AI agents (MCP, CLI, JSON API) |
 | [`examples/`](examples/) | complete study scripts: purification times on a graph collection, transition scans, and [`code_and_erasure.py`](examples/code_and_erasure.py), the erasure workflow |
