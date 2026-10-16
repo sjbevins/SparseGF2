@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+* **Measured cost of a run, before running it:** new `benchmark_ensemble` (API, MCP tool,
+  `sparsegf2 benchmark`) times the run's first trajectories on one thread and on all of
+  them, projects the seconds of the whole run to any thread counts (marked `projected`
+  beyond what was measured), and measures the size of `result.npz`. It writes nothing.
+  `estimate_ensemble` takes `threads` (adds `by_threads`) and always returns `layout`,
+  the arrays and files `output_dir` will hold, and `load_results` returns `storage`, the
+  compressed size of each saved file and array.
 * **Every MCP failure carries a message:** the server turns every exception into a tool
   error the model can read. A `ValueError` (invalid input) keeps the API's message;
   anything else, a `TypeError` included, is a bug and reads `TypeName: message (internal

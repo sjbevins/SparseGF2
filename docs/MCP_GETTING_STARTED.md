@@ -44,7 +44,8 @@ error messages are identical everywhere.
 | `inspect_circuit` | Parses a Stim-format circuit without running it: counts, instruction histogram, or every bad line with its line number. | `circuit` |
 | `run_circuit` | Runs a Stim-format circuit from \|0...0>. | `circuit`, `shots`, `seed`, `observables`, `observe_ticks`, `tick_stride`, `phases`, `output_dir` |
 | `run_ensemble` | Runs many trajectories of a random monitored circuit (a `MonitoredCircuit` spec) and returns probe means and standard errors per checkpoint, purification statistics and throughput. Refuses runs estimated above `max_seconds`. | `spec`, `trajectories` (optional for a graph collection), `seed`, `output_dir`, `max_seconds` (default 60) |
-| `estimate_ensemble` | A deliberately pessimistic runtime estimate, the trajectory count and the result's memory, before anything runs. | `spec`, `trajectories` |
+| `estimate_ensemble` | A deliberately pessimistic runtime estimate, the trajectory count and the result's memory, before anything runs; with `threads` the estimate at each thread count, and always the layout of the saved result. | `spec`, `trajectories`, `threads` |
+| `benchmark_ensemble` | Measures the speed of the run's first trajectories on this machine (one thread and all of them), projects the seconds of the whole run to each count in `threads`, and measures the size of `result.npz`. Writes nothing; takes up to twice `seconds` (at most 30 here). | `spec`, `trajectories`, `threads`, `seconds`, `seed` |
 | `start_ensemble_job` | Starts a long ensemble as a background job, saved chunk by chunk; resumes or extends a run in the same directory. Returns at once with a `job_id`. | `spec`, `output_dir` (required), `trajectories`, `seed`, `chunk_size` |
 | `job_status` | Progress of a job: status, trajectories done, throughput, ETA, error. | `job_id`, `wait_seconds` (0 to 60: block until done or timeout) |
 | `cancel_job` | Stops a job after its current chunk; saved chunks are kept. | `job_id` |
@@ -270,7 +271,7 @@ asyncio.run(main())
 $ python check_mcp.py
 server command: /home/you/SparseGF2/.venv/bin/sparsegf2-mcp
 server: sparsegf2 3.0.0.dev9
-tools: capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results
+tools: capabilities, inspect_circuit, run_circuit, run_ensemble, estimate_ensemble, benchmark_ensemble, start_ensemble_job, job_status, cancel_job, list_jobs, load_results
 probes: code_dimension, code_snapshot, contiguous_distance, entropy, entropy_profile, erasure_first_failure, erasure_lost_profile, half_cut_entropy, lost_information, mutual_information, tripartite_information, uncorrectable_region_counts
 run_ensemble (text the agent reads, first 600 chars):
 {"num_trajectories":50,"num_system":16,"num_qubits":17,"layers":32,"measurement_rate":0.2,"seed":1,"elapsed_seconds":0.44495,"trajectories_per_second":112.372,"checkpoints":{"layers":[0,4,8,12,16,20,24,28,32],"num_total":9,"subsampled":false},"probes":{"code_dimension":{"mean":[1.0,0.54,0.32,0.22,0.16,0.12,0.04,0.04,0.04],"stderr":[0.0,0.0711996,0.0666395,0.059178,0.0523723,0.0464231,0.0279942,0.0279942,0.0279942]}},"purification":{"trajectories":50,"purified":48,"censored":2,"censored_fraction":0.04,"horizon_layer":32,"tau_mean_purified":8.83333,"tau_median_purified":8.0,"tau_min":4,"tau_max"

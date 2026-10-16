@@ -109,7 +109,8 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `inspect_circuit(circuit)` | `sparsegf2 inspect FILE\|-` | parse and validate a circuit without running it |
 | `run_circuit(circuit, shots, phases, seed, observables, observe_ticks, tick_stride, num_qubits, output_dir)` | `sparsegf2 run FILE\|- [...]` | run a circuit; measurement statistics and observables |
 | `run_ensemble(spec, trajectories=None, seed, output_dir, max_seconds=60)` | `sparsegf2 ensemble SPEC.json [...]` | ensembles of random monitored circuits |
-| `estimate_ensemble(spec, trajectories=None)` | (printed by `ensemble`) | pessimistic runtime estimate, trajectory count, result size |
+| `estimate_ensemble(spec, trajectories=None, threads=None)` | (printed by `ensemble`) | pessimistic runtime estimate (per thread count with `threads`), trajectory count, result size, layout of the saved result |
+| `benchmark_ensemble(spec, trajectories=None, threads=None, seconds=30, seed=0)` | `sparsegf2 benchmark SPEC.json [--trajectories N] [--threads T ...] [--seconds S] [--seed S]` | measured speed and storage on this machine, projected to other thread counts; writes nothing (section 3.6) |
 | `start_ensemble_job(spec, output_dir, trajectories=None, seed, chunk_size)` | `sparsegf2 ensemble ... --chunk-size K --output-dir D` | resumable background run |
 | `job_status(job_id, wait_seconds)` | (shown as progress) | progress, throughput, ETA |
 | `cancel_job(job_id)` | Ctrl-C | stop after the current chunk |
@@ -356,7 +357,15 @@ take the exact spec to pass back from the `"spec"` entry of `spec.json` instead.
 **Estimates and limits.** `estimate_ensemble` returns `estimated_seconds`, `trajectories`
 (the count that would run), `result_megabytes` (every probe value as a float64, plus the
 saved codes), `threads`, `fits_sync_limit` and `sync_limit_seconds`, and `notes` where
-the estimate can be too low (see below). `run_ensemble`,
+the estimate can be too low (see below). With `threads` (a list of positive integers) it
+adds `by_threads`, `[{"threads", "estimated_seconds"}, ...]` in the order given; threads
+beyond the trajectory count stay idle. It always adds `layout`: `arrays` (`name`, `shape`,
+`dtype`, uncompressed `megabytes` of each array that `output_dir` will hold, as
+`EnsembleResult.save` writes them: `value::<probe>`, `snapshot::` and `snapshot_counts::`
+for a `code_snapshot`, the graph arrays and the run's own), `files` (`result.npz`,
+`spec.json`, `provenance.json`) and a `note`. Disk use is lower, because the file is
+compressed, and a `snapshot::` array is an upper bound (each code fills only its first
+rows); `benchmark_ensemble` and `load_results` measure it. `run_ensemble`,
 `estimate_ensemble` and `start_ensemble_job` refuse a run whose result would exceed
 `MAX_RESULT_GB` (8 GB); the message suggests giving the large probes
 (`erasure_first_failure` samples, `code_snapshot`, vector probes) fewer checkpoints of
@@ -547,6 +556,38 @@ prints progress to stderr. Ctrl-C stops it after the current chunk, prints the p
 summary and exits with code 130; rerunning the same command resumes it (also after the
 process was killed: the rerun takes over the lock the dead process left).
 
+### 3.6 Cost of a run: `benchmark_ensemble` and the storage of a saved run
+
+`estimate_ensemble` is a model. `benchmark_ensemble(spec, trajectories=None, threads=None,
+seconds=30, seed=0)` measures. It runs one trajectory on one thread (this compiles the
+kernels: `warmup_seconds`), then the first trajectories of the run (with `seed`) on one
+thread and on `P = min(max(threads), threads_available, trajectories)` threads, doubling
+the count until a run takes `seconds / 4`, so a call takes up to about twice `seconds`.
+`threads_available` is the most threads Numba can use in the process, `cpus` the
+processors it may run on; `threads` defaults to `[1, threads_available]`. The result has
+
+* `measured`: `[{"threads", "trajectories", "seconds", "trajectories_per_second"}]`;
+* `projected`: `[{"threads", "seconds", "basis"}]` for each count in `threads`, the
+  seconds of the whole run (the trajectories; building the spec and graphs is extra).
+  `basis` is `"measured"` for one thread and `P`, and `"projected"` otherwise: the
+  simulator's thread model, calibrated so that it reproduces the `P`-thread rate. A note
+  says so when a count exceeds `threads_available`;
+* `estimate_ratio`: measured seconds per trajectory at `P` threads over
+  `estimate_ensemble`'s, to scale a cheap estimate;
+* `storage`: `sample_trajectories`, `disk_megabytes` (the size of `result.npz` for all
+  trajectories, measured on saved samples and scaled by what grows with the trajectories)
+  and `memory_megabytes`;
+* `estimated_seconds` (the plain estimate), `trajectories`, `seed`, `notes`.
+
+It writes nothing: the sample is saved in a temporary folder that is removed. The MCP tool
+is read-only and refuses `seconds` above 30. The CLI prints a table without `--json`.
+
+`load_results` adds `storage` for a saved run: `total_megabytes` (the `.npz` files on
+disk), `files` (`path` relative to the folder, `megabytes`) and `arrays` (`name`,
+compressed `megabytes`, and `file` for a single file). With several chunk files the
+arrays are summed by name (`arrays_summed_over_files`), at most 8 files are listed
+(`files_not_shown`), and at most 20 arrays (the rest as `(other arrays)`).
+
 ---
 
 ## 4. CLI details
@@ -567,6 +608,9 @@ process was killed: the rerun takes over the lock the dead process left).
   spec goes to the API as it is, which refuses a single graph with its own message.
   Without `--chunk-size` it logs the trajectory count and the runtime estimate to stderr
   before running.
+* `sparsegf2 benchmark SPEC.json --trajectories N --threads 1 32 [--seconds S] [--seed S]`
+  reads the spec as `ensemble` does and calls `benchmark_ensemble` (section 3.6); without
+  `--json` it prints a short table.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---
@@ -574,15 +618,17 @@ process was killed: the rerun takes over the lock the dead process left).
 ## 5. MCP details
 
 * Tools: `capabilities`, `inspect_circuit`, `run_circuit`, `run_ensemble`,
-  `estimate_ensemble`, `start_ensemble_job`, `job_status`, `cancel_job`, `list_jobs` and
-  `load_results`. Each description includes a worked example of its arguments; the spec
+  `estimate_ensemble`, `benchmark_ensemble`, `start_ensemble_job`, `job_status`,
+  `cancel_job`, `list_jobs` and `load_results`. Each description includes a worked example of its arguments; the spec
   keys, graph families and probe kinds in the `run_ensemble` description are generated
   from the library, so they never go stale. Tools return structured content (the API
   dict) plus the same JSON as compact text, so the text stays within the 8000-character
   budget.
 * Ensemble tool signatures: `run_ensemble(spec, trajectories=None, seed=None,
-  output_dir=None, max_seconds=60)`, `estimate_ensemble(spec, trajectories=None)` and
-  `start_ensemble_job(spec, output_dir, trajectories=None, seed=None, chunk_size=None)`.
+  output_dir=None, max_seconds=60)`, `estimate_ensemble(spec, trajectories=None,
+  threads=None)`, `benchmark_ensemble(spec, trajectories=None, threads=None, seconds=30,
+  seed=0)` (read-only; `seconds` at most 30 here, since a call takes up to twice that)
+  and `start_ensemble_job(spec, output_dir, trajectories=None, seed=None, chunk_size=None)`.
 * `run_ensemble` refuses runs estimated above `max_seconds` (default 60, must be positive)
   and points to `start_ensemble_job`. The estimate counts graph generation and
   preprocessing (large `realizations` collections), and the spec is built once for the

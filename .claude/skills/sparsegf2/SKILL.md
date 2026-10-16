@@ -13,14 +13,14 @@ verified against Stim.
 
 1. **MCP tools (preferred).** This repository's `.mcp.json` registers the `sparsegf2`
    server (`sparsegf2-mcp`). Its tools are `capabilities`, `inspect_circuit`,
-   `run_circuit`, `run_ensemble`, `estimate_ensemble`, `start_ensemble_job`,
-   `job_status`, `cancel_job`, `list_jobs` and `load_results`. Read the resource
+   `run_circuit`, `run_ensemble`, `estimate_ensemble`, `benchmark_ensemble`,
+   `start_ensemble_job`, `job_status`, `cancel_job`, `list_jobs` and `load_results`. Read the resource
    `docs://sparsegf2/quickstart` once. Prompts `study_purification_transition` and
    `study_erasure_protection` are ready-made study plans.
 2. **Shell.** `sparsegf2 <command> --json` prints one JSON object on stdout and exits with
    0 (ok), 2 (fix your input; also `inspect` of an invalid circuit), 1 (bug) or 130
    (interrupted). Commands: `capabilities`, `inspect FILE|-`,
-   `run FILE|-`, `ensemble SPEC.json`, `results PATH`.
+   `run FILE|-`, `ensemble SPEC.json`, `benchmark SPEC.json`, `results PATH`.
 3. **Python.** `from sparsegf2 import api` gives the same functions with JSON in and
    out. For full arrays use the library: `sparsegf2.Simulator`, `Circuit`,
    `mipt.MonitoredCircuit(...).run(...)`.
@@ -42,7 +42,9 @@ connecting the server (Claude Code, Claude Desktop, other clients) is described 
   - describe the protocol as a `run_ensemble` spec: `num_system`, `graph`, `layers`,
     `measurement_rate`, `schedule`, `reference`, `checkpoints`, `probes`,
     `stop_when_purified`;
-  - call `estimate_ensemble` first (runtime, trajectory count, `result_megabytes`);
+  - call `estimate_ensemble` first (runtime, trajectory count, `result_megabytes`; with
+    `threads` the runtime per thread count, and the `layout` of the saved data); for a
+    measured figure on this machine call `benchmark_ensemble` (writes nothing);
   - if the estimate is above about 60 s, use `start_ensemble_job` with an `output_dir`,
     poll `job_status` with `wait_seconds=30`, then call `load_results`. To resume after a
     cancel or a server restart (jobs live in the server process; an old `job_id` is then

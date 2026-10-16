@@ -4592,8 +4592,11 @@ graph t // c); omit trajectories to run all G * c.
 
 ## 3. Long runs
 
-estimate_ensemble(spec, trajectories) gives a rough runtime and the result's
-memory. Above ~60 s use
+estimate_ensemble(spec, trajectories, threads=[1, 32]) gives a rough runtime
+(per thread count), the result's memory and the layout of the saved arrays.
+benchmark_ensemble(spec, trajectories, threads=[1, 32]) measures the run's
+first trajectories on this machine and the size of result.npz; it writes
+nothing. Above ~60 s use
 start_ensemble_job(spec, output_dir=..., trajectories=...), then
 job_status(job_id, wait_seconds=30) until "completed", then
 load_results(output_dir). Jobs save every chunk; call start_ensemble_job
