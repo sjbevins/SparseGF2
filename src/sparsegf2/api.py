@@ -2070,6 +2070,15 @@ def _parallel_threads(threads: int) -> float:
     return threads / (1.0 + 0.04 * (threads - 1))
 
 
+def _running_threads(num_threads: int | None) -> int | None:
+    """The threads a run asked for ``num_threads`` runs on: at most every thread this process
+    may use (``NUMBA_NUM_THREADS``, as ``sparsegf2._parallel.threads`` clamps it); ``None``
+    stays ``None`` (Numba's current count)."""
+    import numba
+
+    return None if num_threads is None else min(num_threads, numba.config.NUMBA_NUM_THREADS)
+
+
 def _estimate_seconds(
     spec: dict, mc: mipt.MonitoredCircuit, trajectories: int, threads: int | None = None
 ) -> float:
@@ -3969,9 +3978,12 @@ def run_ensemble(
     mc = _build_spec(spec)
     graph_file = _graph_file_record(spec) if output_dir is not None else None
     trajectories = _trajectory_count(mc, trajectories)
+    if num_threads is not None:
+        num_threads = _require_int(num_threads, "num_threads", minimum=1)
     if max_seconds is not None:
         max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
-        estimate = _estimate_seconds(spec, mc, trajectories)
+        # priced on the threads it will run on: fewer threads take longer
+        estimate = _estimate_seconds(spec, mc, trajectories, _running_threads(num_threads))
         if estimate > max_seconds:
             raise ValueError(
                 f"this run is estimated at about {estimate:.0f} s, above "
@@ -3980,8 +3992,6 @@ def run_ensemble(
                 "max_seconds if you are willing to wait)."
             )
     seed = _resolve_seed(seed)
-    if num_threads is not None:
-        num_threads = _require_int(num_threads, "num_threads", minimum=1)
     out_path = _output_dir(output_dir) if output_dir is not None else None
     lock = None
     if out_path is not None:  # one writer per directory
@@ -4188,11 +4198,14 @@ _JOBS: dict[str, _Job] = {}
 _JOBS_LOCK = threading.Lock()
 
 
-def _default_chunk_size(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
-    """Chunks of roughly 10 estimated seconds, at least a few per thread."""
+def _default_chunk_size(
+    mc: mipt.MonitoredCircuit, trajectories: int, threads: int | None = None
+) -> int:
+    """Chunks of roughly 10 estimated seconds on ``threads`` threads (default: Numba's
+    current count), at least a few per thread."""
     import numba
 
-    threads = numba.get_num_threads()
+    threads = numba.get_num_threads() if threads is None else threads
     per_traj = max(_trajectory_us(mc) * 1e-6 / _parallel_threads(threads), 1e-9)
     size = int(10.0 / per_traj)
     return int(min(trajectories, max(size, 4 * threads)))
@@ -4300,7 +4313,7 @@ def start_ensemble_job(
             chunk_size=(
                 _require_int(chunk_size, "chunk_size", minimum=1)
                 if chunk_size is not None
-                else _default_chunk_size(mc, count)
+                else _default_chunk_size(mc, count, _running_threads(num_threads))
             ),
             num_threads=num_threads,
             created=time.time(),

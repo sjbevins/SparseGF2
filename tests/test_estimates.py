@@ -561,6 +561,45 @@ def test_the_estimate_for_given_thread_counts():
     assert few[0]["estimated_seconds"] == few[1]["estimated_seconds"]
 
 
+def test_the_run_guard_prices_the_threads_asked_for(monkeypatch):
+    # max_seconds keeps a synchronous call within a client's wait: a run on fewer threads takes
+    # longer, so it is priced at the count it will run on (num_threads, at most every thread)
+    seen = []
+
+    def estimate(spec, mc, trajectories, threads=None):
+        seen.append(threads)
+        return 1e9
+
+    monkeypatch.setattr(api, "_estimate_seconds", estimate)
+    every = numba.config.NUMBA_NUM_THREADS
+    for asked in (None, 1, every + 5):
+        with pytest.raises(ValueError, match="estimated at about"):
+            api.run_ensemble(LAYOUT_SPEC, 6, seed=1, num_threads=asked, max_seconds=60)
+    assert seen == [None, 1, every]
+
+
+def test_a_job_sizes_its_default_chunks_for_the_threads_asked_for(monkeypatch, tmp_path):
+    seen = []
+    chunk_size = api._default_chunk_size
+
+    def record(mc, trajectories, threads=None):
+        seen.append(threads)
+        return chunk_size(mc, trajectories, threads)
+
+    monkeypatch.setattr(api, "_default_chunk_size", record)
+    every = numba.config.NUMBA_NUM_THREADS
+    for i, asked in enumerate((None, 1, every + 5)):
+        job = api.start_ensemble_job(
+            LAYOUT_SPEC, 6, str(tmp_path / f"job{i}"), seed=1, num_threads=asked
+        )
+        api.job_status(job["job_id"], 30)
+    assert seen == [None, 1, every]
+    # a chunk is about 10 estimated seconds and at least 4 trajectories per thread
+    mc = api._build_spec(LAYOUT_SPEC)
+    assert chunk_size(mc, 10**9, 1) <= chunk_size(mc, 10**9, every)
+    assert chunk_size(mc, 10**9, 1) >= 4
+
+
 @pytest.mark.parametrize("threads", [0, -1, "4", 4, [], [0], [1, 0], [True], [1.5], ["2"]])
 def test_the_estimate_refuses_bad_thread_counts(threads):
     with pytest.raises(ValueError, match="threads"):

@@ -108,10 +108,10 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `capabilities(section=None)` | `sparsegf2 capabilities [--section S]` | supported instructions, observables, probes, spec keys, graph families, limits, examples |
 | `inspect_circuit(circuit)` | `sparsegf2 inspect FILE\|-` | parse and validate a circuit without running it |
 | `run_circuit(circuit, shots, phases, seed, observables, observe_ticks, tick_stride, num_qubits, output_dir)` | `sparsegf2 run FILE\|- [...]` | run a circuit; measurement statistics and observables |
-| `run_ensemble(spec, trajectories=None, seed, output_dir, max_seconds=60)` | `sparsegf2 ensemble SPEC.json [...]` | ensembles of random monitored circuits |
+| `run_ensemble(spec, trajectories=None, seed, output_dir, max_seconds=60, num_threads)` | `sparsegf2 ensemble SPEC.json [...]` | ensembles of random monitored circuits |
 | `estimate_ensemble(spec, trajectories=None, threads=None)` | (printed by `ensemble`) | pessimistic runtime estimate (per thread count with `threads`), trajectory count, result size, layout of the saved result |
 | `benchmark_ensemble(spec, trajectories=None, threads=None, seconds=30, seed=0)` | `sparsegf2 benchmark SPEC.json [--trajectories N] [--threads T ...] [--seconds S] [--seed S]` | measured speed and storage on this machine, projected to other thread counts; writes nothing (section 3.6) |
-| `start_ensemble_job(spec, output_dir, trajectories=None, seed, chunk_size)` | `sparsegf2 ensemble ... --chunk-size K --output-dir D` | resumable background run |
+| `start_ensemble_job(spec, output_dir, trajectories=None, seed, chunk_size, num_threads)` | `sparsegf2 ensemble ... --chunk-size K --output-dir D` | resumable background run |
 | `job_status(job_id, wait_seconds)` | (shown as progress) | progress, throughput, ETA |
 | `cancel_job(job_id)` | Ctrl-C | stop after the current chunk |
 | `list_jobs()` | | jobs in this process |
@@ -777,14 +777,27 @@ codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
   dict) plus the same JSON as compact text, so the text stays within the 8000-character
   budget.
 * Ensemble tool signatures: `run_ensemble(spec, trajectories=None, seed=None,
-  output_dir=None, max_seconds=60)`, `estimate_ensemble(spec, trajectories=None,
-  threads=None)`, `benchmark_ensemble(spec, trajectories=None, threads=None, seconds=30,
-  seed=0)` (read-only; `seconds` at most 30 here, since a call takes up to twice that)
-  and `start_ensemble_job(spec, output_dir, trajectories=None, seed=None, chunk_size=None)`.
+  output_dir=None, max_seconds=60, num_threads=N)`, `estimate_ensemble(spec,
+  trajectories=None, threads=None)`, `benchmark_ensemble(spec, trajectories=None,
+  threads=None, seconds=30, seed=0)` (read-only; `seconds` at most 30 here, since a call
+  takes up to twice that) and `start_ensemble_job(spec, output_dir, trajectories=None,
+  seed=None, chunk_size=None, num_threads=N)`.
+* `num_threads` (`run_ensemble`, `start_ensemble_job`): the threads the run uses. Its
+  default N is the number of threads the server process may use,
+  `numba.config.NUMBA_NUM_THREADS`, read when the server is built, so the tool's input
+  schema and description show the real number: 16 in Clank's sandbox (its containers set
+  `NUMBA_NUM_THREADS=16` to match their 16-CPU limit), every logical processor elsewhere.
+  A value above N runs on N (`sparsegf2._parallel.threads` clamps it, as the API does);
+  0 or less is refused (`num_threads must be at least 1, got 0`). Results are identical at
+  any thread count; only the time changes. Use it to leave cores free on a shared machine,
+  or as `estimate_ensemble`'s note advises ("run on at most K threads (num_threads)") when
+  `correlated_erasure` regions would not fit in memory on every thread.
 * `run_ensemble` refuses runs estimated above `max_seconds` (default 60, must be positive)
-  and points to `start_ensemble_job`. The estimate counts graph generation and
-  preprocessing (large `realizations` collections), and the spec is built once for the
-  estimate and the run.
+  and points to `start_ensemble_job`. The estimate is for the threads the run will use
+  (`num_threads`, at most N), counts graph generation and preprocessing (large
+  `realizations` collections), and the spec is built once for the estimate and the run. A
+  background job's default `chunk_size` (about 10 estimated seconds) is sized for its
+  `num_threads` too.
 * Errors: invalid input becomes an MCP tool error (`isError: true`) whose text is the
   API's message, so the model can correct the call. Every other failure is a tool error
   too, never the SDK's bare `Error executing tool X`: the model reads
@@ -794,7 +807,7 @@ codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
   a `TypeError` included, is a bug: report it rather than retry with other arguments.
 * Argument types are strict, as the API's own checks are, and are reported by the SDK's
   schema validation in the same way, naming the argument: an integer (`trajectories`,
-  `seed`, `shots`, `tick_stride`, `num_qubits`, `chunk_size`) must be a JSON integer or a
+  `seed`, `shots`, `tick_stride`, `num_qubits`, `chunk_size`, `num_threads`) must be a JSON integer or a
   whole-number float (`4.0` is 4; `2.5`, `"3"` and `true` are refused), a flag
   (`phases`, `observe_ticks`) `true` or `false` (not `"false"` or `0`), and
   `max_seconds` and `wait_seconds` a number (not `"inf"` or `true`). Pydantic's default

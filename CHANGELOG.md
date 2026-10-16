@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+* **A thread count on the MCP simulation tools.** `run_ensemble` and `start_ensemble_job`
+  take `num_threads`, passed to the API's own `num_threads`. Its default is
+  `numba.config.NUMBA_NUM_THREADS`, read when the server is built, so the schema and the
+  description show the threads this process may use (16 in Clank's sandbox, every thread
+  elsewhere); a larger value runs on that many, and 0 or less is refused. Before, a run
+  through MCP always used every thread Numba allowed. `run_ensemble`'s `max_seconds` guard
+  now prices a run on the threads it will use (it assumed every thread, so a one-thread run
+  could pass a guard meant for a 32-thread one), and a job's default chunk size is sized
+  for its `num_threads`.
 * **Geometry-correlated erasures** (the study "Geometry-correlated erasures in monitored
   quantum circuits"): an m-qubit erasure strikes a region A with probability
   proportional to exp(-J b(A)), b(A) the edges of an interaction graph leaving A, so

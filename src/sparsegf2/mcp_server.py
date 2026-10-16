@@ -102,23 +102,23 @@ Example: {"circuit": "H 0\\nCX 0 1\\nTICK\\nM 0", "shots": 1, "seed": 1,
 _RUN_ENSEMBLE = """\
 Run random monitored-circuit trajectories: probe means and standard errors per
 checkpoint (<= 50 shown), purification statistics (censored_fraction, tau quantiles,
-survival) and throughput. Refuses runs estimated above max_seconds (default 60): use
-start_ensemble_job.
+survival) and throughput. num_threads: threads to run on (default <THREADS>, all this
+process may use; more run on <THREADS>). Runs estimated above max_seconds (default 60) on
+them are refused: use start_ensemble_job.
 spec keys: <SPEC_KEYS>. graph: {"family": <GRAPHS>, params..., "seed" if random} (or
-give edges); "realizations": G in graph gives G graphs, circuits_per_graph circuits each
-(omit trajectories to run them all). schedule matching|random_edges|all_edges;
+give edges); "realizations": G gives G graphs, circuits_per_graph circuits each (omit
+trajectories to run all). schedule matching|random_edges|all_edges;
 reference none|purification|single; checkpoints "final"|"every_layer"|stride|list;
-probes [{"kind": <PROBES>, params..., "name"?, own "checkpoints"?}]. A layer = gates,
-then each system qubit measured with probability measurement_rate. tau=-1 means
-censored. Vector probes: a curve over m at the last checkpoint and a depth x m grid
-(vs_depth). P_C(m), the uncorrectable fraction of m-qubit erasures, is over trajectories
-with a code (count_with_code); the counts are conditioned only if code_dimension or
-erasure_first_failure covers their layers, else flagged.
+probes [{"kind": <PROBES>, params..., "name"?, own "checkpoints"?}]. A layer: gates, then
+Z measurements at rate measurement_rate. tau=-1 means censored. Vector probes: a curve
+over m and a depth x m grid (vs_depth). P_C(m) is over trajectories with a code
+(count_with_code), for the counts only if code_dimension or erasure_first_failure covers
+their layers (else flagged).
 
 Example: {"spec": {"num_system": 32, "graph": {"family": "watts_strogatz", "k": 4,
  "beta": 0.1, "seed": 1}, "layers": 256, "measurement_rate": 0.1, "reference": "single",
  "checkpoints": "every_layer", "probes": [{"kind": "code_dimension"}],
- "stop_when_purified": true}, "trajectories": 500, "seed": 7}"""
+ "stop_when_purified": true}, "trajectories": 500, "seed": 7, "num_threads": 8}"""
 
 _ESTIMATE = """\
 Rough, deliberately pessimistic runtime estimate (seconds) for run_ensemble with this spec
@@ -155,7 +155,8 @@ call again with the same spec and output_dir; seed and trajectories may be omitt
 stored seed and target are used, also for a graph collection). Only a larger trajectories
 extends a run. A spec that builds another protocol, or a changed graph file, is refused
 before anything runs, and so is a directory another job or process is writing to (one
-writer per output_dir). Poll with job_status, then call load_results(output_dir).
+writer per output_dir). num_threads: threads to run on (default <THREADS>, all this
+process may use; more run on <THREADS>). Poll with job_status, then load_results(output_dir).
 
 Example: {"spec": {"num_system": 128, "graph": {"family": "cycle"}, "layers": 1024,
  "measurement_rate": 0.12, "reference": "single", "checkpoints": 16,
@@ -286,6 +287,7 @@ Report means with standard errors and keep seeds fixed."""
 def build_server() -> Any:
     """Construct the :class:`mcp.server.mcpserver.MCPServer` with all tools, resources and prompts."""
     require_mcp()
+    import numba
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import CallToolResult, TextContent, ToolAnnotations
@@ -299,6 +301,15 @@ def build_server() -> Any:
     # integer is a JSON integer or a whole-number float, a boolean is true or false, and
     # a number is never a string or a boolean. The input schema is unchanged.
     Int = Annotated[int, Strict(), BeforeValidator(_whole_number)]
+    # The threads this process may use, read now so the schemas and descriptions show the
+    # real number (16 in Clank's sandbox, whose containers set NUMBA_NUM_THREADS=16 for their
+    # 16 CPUs; every thread elsewhere). A larger num_threads runs on this many.
+    all_threads = int(numba.config.NUMBA_NUM_THREADS)
+
+    def threads_to_use(num_threads: int) -> int:
+        if num_threads < 1:
+            raise ToolError(f"num_threads must be at least 1, got {num_threads}")
+        return num_threads
 
     server = MCPServer(
         SERVER_NAME,
@@ -362,6 +373,7 @@ def build_server() -> Any:
         )
         .replace("<GRAPHS>", "|".join(api.capabilities("graph_families")["graph_families"]))
         .replace("<PROBES>", "|".join(api.capabilities("probes")["probes"]))
+        .replace("<THREADS>", str(all_threads))
     )
 
     @server.tool(description=run_ensemble_description, annotations=computes)
@@ -371,6 +383,7 @@ def build_server() -> Any:
         seed: Int | None = None,
         output_dir: str | None = None,
         max_seconds: StrictFloat = api.SYNC_ENSEMBLE_MAX_SECONDS,
+        num_threads: Int = all_threads,
     ) -> Result:
         if not max_seconds > 0:
             raise ToolError(f"max_seconds must be positive, got {max_seconds:g}")
@@ -382,6 +395,7 @@ def build_server() -> Any:
             trajectories,
             seed=seed,
             output_dir=output_dir,
+            num_threads=threads_to_use(num_threads),
             command="mcp:run_ensemble",
             max_seconds=max_seconds,
         )
@@ -414,13 +428,16 @@ def build_server() -> Any:
             )
         return call(api.benchmark_ensemble, spec, trajectories, threads, seconds, seed)
 
-    @server.tool(description=_START_JOB, annotations=computes)
+    @server.tool(
+        description=_START_JOB.replace("<THREADS>", str(all_threads)), annotations=computes
+    )
     def start_ensemble_job(
         spec: dict[str, Any],
         output_dir: str,
         trajectories: Int | None = None,
         seed: Int | None = None,
         chunk_size: Int | None = None,
+        num_threads: Int = all_threads,
     ) -> Result:
         return call(
             api.start_ensemble_job,
@@ -429,6 +446,7 @@ def build_server() -> Any:
             output_dir=output_dir,
             seed=seed,
             chunk_size=chunk_size,
+            num_threads=threads_to_use(num_threads),
             command="mcp:start_ensemble_job",
         )
 
