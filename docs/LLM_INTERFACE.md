@@ -651,36 +651,68 @@ worked examples are in
 
 `sample_erasure_regions` runs the probe's sampler on a graph alone, so its settings can
 be checked before a long run (the chain does not depend on the code). `graph` is
-`{"family": ..., params}` with `num_nodes`, `{"family": "file", "path": ...}` (the first
-graph of a file) or `{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains`
-independent chains (chain i seeded `[seed, i]`) and returns `graph` (with its
-`geometry`), `size`, `samples`, `chains`, `method`, for chains `burn_in`, `thin`,
-`tempering` and `ladder` (`rungs`, `lowest`, `highest`, `max_step`), `seed`,
-`couplings` (per coupling, in the order given: `coupling`, `mean_boundary`, `stderr`,
-`variance`, `acceptance`, `exchange_acceptance`, `tau_int`, `ess`, `r_hat`, `slowest`,
-`min_boundary_seen`, `exact` and `deviation_se`), `exact_source` (the ring or path
-closed form, the enumeration of every region up to 10^8 of them, or the uniform law at
-J = 0), `nonincreasing_in_J`, `mixing` (one note per kind: R-hat above 1.01, an effective
-sample size below 400, exchange acceptance below 5%, a mean more than 5 standard errors
-from its exact value), `warnings`, `examples` (three regions at the largest coupling),
-`estimated_seconds`, `elapsed_seconds` and `notes`. An `r_hat` of 1000 stands for
-infinity (chains stuck apart). It is refused when its estimate exceeds `max_seconds`
-(60; the MCP tool has no such argument). An empty `mixing` list is no proof of mixing:
-repeat with another seed and a longer burn-in.
+`{"family": ..., params}` with `num_nodes` (beside it or inside it),
+`{"family": "file", "path": ...}` (the first graph of a file) or
+`{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains` independent chains (chain i
+seeded `[seed, i]`) for at most 12 couplings and returns `graph` (with its `geometry`),
+`size`, `samples`, `chains`, `method`, for chains `burn_in`, `thin`, `tempering` and
+`ladder` (`rungs`, `lowest`, `highest`, `max_step`), `seed`, and
+
+* `couplings`, one row per coupling in the order given: `coupling`, `mean_boundary`,
+  `stderr`, `variance`, `acceptance`, `exchange_acceptance`, `tau_int`, `ess`,
+  `ess_boundary`, `slowest`, `r_hat`, `r_hat_limit`, `r_hat_at`, `min_boundary_seen`,
+  `exact` and `deviation_se`. `stderr = sqrt(variance / ess_boundary)`, the effective
+  sample size of the boundary itself; `tau_int` (largest) and `ess` (smallest) are over the
+  boundary and the membership of 8 spread nodes, `slowest` says which. `r_hat` is the
+  R-hat of the series (the boundary or a node, `r_hat_at`) furthest above its own
+  `r_hat_limit`: the 99% point of the F distribution of the split R-hat for stationary
+  draws of that series' autocorrelation, shared over the `2 x 9 x couplings` series
+  tested, never below 1.01. On a cycle or a path the samples are exact and independent:
+  `tau_int` is 1, `ess` and `ess_boundary` are `chains x samples`, and `r_hat`,
+  `r_hat_limit`, `r_hat_at`, `slowest` and the acceptances are null;
+* `exact_source` (the ring or path closed form, the enumeration of every region up to
+  10^8 of them, or the uniform law at J = 0), `nonincreasing_in_J` and `proposition2`:
+  each step to the next coupling against `z_critical`, the normal quantile that shares a
+  1% false-alarm chance over the `steps` (3.1 for 12 couplings), with the `worst` step and
+  the `failed` ones as `{"J": [from, to], "increase", "z"}`; `False` means the estimates
+  are off, not the proposition (measured false alarms with a correct sampler: 1.5% of 400
+  calls with 12 couplings 0.001 apart);
+* `mixing`, one note per kind with what to change: R-hat above its limit (the chains
+  differ more than one stationary distribution allows: not in equilibrium, in different
+  regions, or too short for their autocorrelation), an effective sample size below 400,
+  exchange acceptance below 5%, a mean more than 5 standard errors from its exact value, a
+  failed Proposition-2 step. On correct swap chains the R-hat note fired in about 2% of
+  calls at 200 samples (a ring of 32 nodes, a 14-node Watts-Strogatz graph) and in none at
+  800; a record too short for its autocorrelation fires it, and thinning clears it.
+  An `r_hat` of 1000 stands for infinity (chains stuck apart);
+* `warnings` (the sampler's own), `examples` (three regions at the largest coupling),
+  `estimated_seconds`, `elapsed_seconds` and `notes`.
+
+The call is refused when its estimate exceeds `max_seconds` (60; the MCP tool has no such
+argument). An empty `mixing` list is no proof of mixing: repeat with another seed and a
+longer burn-in.
 
 `erasure_curves` reads a saved run (an output directory or `result.npz`) and returns, at
 `layer` (default each probe's last evaluation), over the trajectories that hold a code:
 `uniform` (per `erasure_first_failure` probe, the independent channel, exact for
 m <= w where `uncorrectable_region_counts` was evaluated at the same layer) and
 `correlated` (per `correlated_erasure` probe, one row per coupling), each with `count`,
-`count_with_code`, `q_plus`, `phi` (`mean` and `stderr` per `e`; default eight values
-log-spaced from 1/n to 1/2) and `e_delta` (`of_mean_phi`, the tolerance of the
-ensemble-mean Phi, and `per_code_mean`, `per_code_median`, `per_code_stderr` of each
-code's own; `monotone_fraction` for the correlated rows). A correlated entry adds
-`couplings` (at most 12 shown), `sampled_sizes`, `interpolated_sizes`,
-`interpolated_mass` (the binomial probability the interpolated sizes carry at each e),
-`complete` (that mass below 0.1%), `binomial_window` and `sampler`. Both tools write
-nothing.
+`count_with_code`, `q_plus`, `phi` (`mean`, `stderr` and the number of `codes` used, per
+`e`; default eight values log-spaced from 1/n to 1/2) and `e_delta`: `of_mean_phi`, the
+tolerance of the ensemble-mean Phi and the headline, with `of_mean_phi_range` (its value
+when the mean curve moves by plus and minus its standard error at every size), and
+`per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own tolerance (they
+describe the spread across codes and are biased upward for noisy curves);
+`monotone_fraction` for the correlated rows. A correlated entry adds `couplings` (at most
+12 shown), `sampled_sizes`, `interpolated_sizes`, `interpolated_mass` (the binomial
+probability the interpolated sizes carry at each e), `complete` (that mass below 0.1%),
+`binomial_window` and `sampler`. Without a code probe on the layer every trajectory counts
+and one that stored only zeros loses nothing (P(n) = 0). The standard errors treat
+trajectories as independent; a note warns when they ran on a few graphs (circuits on one
+graph are correlated). The work is bounded: the curves are at most 10^8 values (codes x
+couplings x (n + 1)) and the per-code tolerances at most 10^10 multiply-adds and 4,000
+codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
+`e_delta.codes`), and `elapsed_seconds` reports the time. Both tools write nothing.
 
 ---
 

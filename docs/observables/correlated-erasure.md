@@ -1872,28 +1872,78 @@ sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1
 ```
 
 `graph` is a family (`{"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1}`
-with `num_nodes`), a graph file (`{"family": "file", "path": ...}`, its first
-graph) or `{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains`
-independent calls of `erasures.sample_regions`, chain $i$ seeded `[seed, i]`,
-and returns per coupling (`couplings`, in the order given): `mean_boundary`
-with its `stderr` (from the effective sample size), `variance`, `acceptance`,
-`exchange_acceptance`, `tau_int`, `ess` and `r_hat` (the slowest of the
-boundary and of the membership of a few nodes, named by `slowest`: the
-positional diagnostics of §5.3), `min_boundary_seen`, and `exact`
-(`mean_boundary`, `variance`) with `deviation_se` where an exact value exists:
-the ring or path closed form, the enumeration of every region when
-$\binom{n}{m} \le 10^8$, or the uniform law at $J = 0$ (`exact_source` says
-which). At the top level: `graph` (with its `geometry`), `method`, the
-`ladder` (`rungs`, `lowest`, `highest`, `max_step`), `burn_in`, `thin`,
-`tempering`, `seed`, `nonincreasing_in_J` (Proposition 2 on the estimates,
-within 3 standard errors), `mixing` (one note per kind of problem, saying what
-to change: R-hat above 1.01, an effective sample size below 400, an exchange
-acceptance below 5%, a mean more than 5 standard errors from its exact
-value), `warnings` (the sampler's own), three `examples` of regions at the
-largest coupling, `estimated_seconds`, `elapsed_seconds` and `notes`. An
-`r_hat` of 1000 stands for infinity (chains stuck apart). It is refused when
-its estimated time exceeds `max_seconds` (the MCP tool keeps the default
-60 s). An empty `mixing` list is no proof of equilibrium (§4.9).
+with `num_nodes`, beside it or inside it), a graph file
+(`{"family": "file", "path": ...}`, its first graph) or
+`{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains` independent calls
+of `erasures.sample_regions`, chain $i$ seeded `[seed, i]`, for at most 12
+couplings, and returns per coupling (`couplings`, in the order given):
+
+* `mean_boundary` with `stderr` $= \sqrt{\texttt{variance} /
+  \texttt{ess\_boundary}}$, the effective sample size of the boundary itself;
+* `acceptance` and `exchange_acceptance`;
+* `tau_int` (the largest) and `ess` (the smallest) over the boundary and the
+  membership of 8 spread nodes, `slowest` naming the series (the positional
+  diagnostics of §5.3);
+* `r_hat`, `r_hat_limit` and `r_hat_at`: the R-hat over the chains of the
+  series furthest above its own limit, that limit and which series it is. The
+  limit is what stationary draws allow: for $M = 2 \cdot \text{chains}$ split
+  chains of length $L = \lfloor \text{samples} / 2 \rfloor$ and a series of
+  integrated autocorrelation time $\tau$, the split R-hat is about
+  $\sqrt{1 + (\tau F - 1)/L}$ with $F \sim F(M - 1,\, M(L - 1))$, so the
+  limit is that at the $1 - \alpha / k$ quantile of $F$ ($\alpha = 1\%$, $k =
+  2 \cdot 9 \cdot c$ series: bulk and folded, the boundary and 8 nodes, $c$
+  couplings), $\tau$ the series' own estimate (at least 1), and never below
+  1.01. For independent draws, 4 chains of 200, it is 1.0136 for one
+  coupling, 1.0172 for 8 and 1.0184 for 16; a chain's own $\tau$ raises it,
+  so that autocorrelation alone, which the effective sample size reports,
+  does not trip it;
+* `min_boundary_seen`, and `exact` (`mean_boundary`, `variance`) with
+  `deviation_se` where an exact value exists: the ring or path closed form,
+  the enumeration of every region when $\binom{n}{m} \le 10^8$, or the uniform
+  law at $J = 0$ (`exact_source` says which).
+
+On a cycle or a path the draws are exact and independent: `tau_int` is 1,
+`ess` and `ess_boundary` are $\text{chains} \cdot \text{samples}$, and `r_hat`,
+`r_hat_limit`, `r_hat_at`, `slowest` and the acceptances are null.
+
+At the top level: `graph` (with its `geometry`), `method`, the `ladder`
+(`rungs`, `lowest`, `highest`, `max_step`), `burn_in`, `thin`, `tempering`,
+`seed`, and
+
+* `nonincreasing_in_J` and `proposition2`. Proposition 2 says $\langle b
+  \rangle_J$ does not increase with $J$; the tool tests each step from a
+  coupling to the next (in increasing order) with $z = (\hat\mu_{j+1} -
+  \hat\mu_j) / \sqrt{s_j^2 + s_{j+1}^2}$ against `z_critical`
+  $= \Phi^{-1}(1 - \alpha/(c - 1))$, which shares a 1% chance of a false alarm
+  over the $c - 1$ steps (3.1 for 12 couplings). `proposition2` gives
+  `z_critical`, the `worst` step and the `failed` ones as `{"J": [from, to],
+  "increase", "z"}`. `False` means the estimates are off (too few samples, or a
+  chain that has not equilibrated), not the proposition; with a correct
+  sampler it came out `False` in 1.5% of 400 calls with 12 couplings 0.001
+  apart on a ring;
+* `mixing`, one note per kind of problem with what to change: R-hat above its
+  limit (the chains differ more than one stationary distribution allows: not in
+  equilibrium yet, in different regions, or too short for their
+  autocorrelation; more `burn_in`, then `thin` or `samples` or `chains`), an
+  effective sample size below 400, an exchange acceptance below 5%, a mean more
+  than 5 standard errors from its exact value, a failed Proposition-2 step.
+  Measured on correct swap chains (4 chains, default burn-in, $J = 0$ to 2),
+  the R-hat note fired in 2.7% and 2.3% of 300 calls at 200 samples on a ring of
+  32 nodes (size 8, the chain forced) and a 14-node Watts–Strogatz graph
+  (size 5), and in none of 100 at 800 samples, whereas the limit for
+  independent draws alone was exceeded in 100% and 87% of 60 calls at 200 (and
+  1.01 in 100% and 97%): what that R-hat sees is autocorrelation. A record too
+  short for its autocorrelation does fire it on a correct chain (the 14-node
+  graph with 12 couplings up to $J = 2.2$: 22% of 60 calls at 200 samples, none
+  with `thin=5`), and a graph whose regions move slowly (a 64-node
+  Watts–Strogatz graph, size 16, $J$ up to 2) fires it in 90% of 40 calls at 200
+  samples and in none of 20 with `thin=20`. An `r_hat` of 1000 stands for
+  infinity (chains stuck apart);
+* `warnings` (the sampler's own), three `examples` of regions at the largest
+  coupling, `estimated_seconds`, `elapsed_seconds` and `notes`.
+
+It is refused when its estimated time exceeds `max_seconds` (the MCP tool keeps
+the default 60 s). An empty `mixing` list is no proof of equilibrium (§4.9).
 
 **`erasure_curves`** turns a saved run into channels:
 
@@ -1907,22 +1957,45 @@ exact for $m \le w$ where an `uncorrectable_region_counts` probe was evaluated
 at the same layer) and each `correlated_erasure` probe (`correlated`, one row
 per coupling), at `layer` (default: each probe's last evaluation), over the
 trajectories that hold a code: `count`, `count_with_code`, `q_plus` (their
-fraction), `phi` (`mean` and `stderr` of $\Phi(e)$ at each `e`; default eight
-values log-spaced from $1/n$ to $1/2$), and `e_delta`: `of_mean_phi`, the
-tolerance of the ensemble-mean $\Phi$ (the ensemble's tolerance), and
-`per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own
-tolerance (they differ: $\Phi$ is linear in $P$, the tolerance is not), with
-`monotone_fraction` for the correlated curves (the fraction of codes whose
-curve is monotone in $m$, §6.7). A correlated entry also lists
-`sampled_sizes`, `interpolated_sizes` and `interpolated_mass` (the binomial
-probability the interpolated sizes carry at each $e$; `complete` when it stays
-below 0.1%), `binomial_window` (the sizes carrying all but $10^{-6}$ of the
-probability at the given $e$: the ones worth sampling), and `sampler`. The
-per-code curves are `analysis.correlated_failure_curve` of the stored
-fractions (P(0) = 0, P(n) = 1, linear interpolation between sampled sizes),
-then `failure_probability_from_curve` and `tolerance_from_curve` (§6.6), so
-the tool's numbers are exactly those functions' (§9(e) checks it). Exact
-small-$m$ curves need the saved codes (`StabilizerCode.boundary_failure_counts`).
+fraction), `phi` (`mean`, `stderr` and the number of `codes` of $\Phi(e)$ at
+each `e`; default eight values log-spaced from $1/n$ to $1/2$), and `e_delta`:
+
+* `of_mean_phi`, the tolerance of the ensemble-mean $\Phi$ (the ensemble's
+  tolerance, what `analysis.erasure_tolerance` returns, and the headline), with
+  `of_mean_phi_range`, its value when the mean curve moves by plus and minus its
+  standard error at every size (the tolerance of the higher curve, then of the
+  lower: a rough one-standard-error band, since the errors at different sizes
+  are positively correlated);
+* `per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own
+  tolerance. They differ from `of_mean_phi` ($\Phi$ is linear in $P$, the
+  tolerance is not) and describe the spread across codes; they are biased
+  upward for noisy curves;
+* `monotone_fraction` for the correlated curves (the fraction of codes whose
+  curve is monotone in $m$, §6.7).
+
+A correlated entry also lists `sampled_sizes`, `interpolated_sizes` and
+`interpolated_mass` (the binomial probability the interpolated sizes carry at
+each $e$; `complete` when it stays below 0.1%), `binomial_window` (the sizes
+carrying all but $10^{-6}$ of the probability at the given $e$: the ones worth
+sampling), and `sampler`. The per-code curves are
+`analysis.correlated_failure_curve` of the stored fractions (P(0) = 0,
+P(n) = 1[k > 0], linear interpolation between sampled sizes; without a
+`code_dimension` or `erasure_first_failure` probe on the layer every trajectory
+counts and one whose stored fractions are all 0 loses nothing, P(n) = 0), then
+`failure_probability_from_curve` and `tolerance_from_curve` (§6.6), so the
+tool's numbers are exactly those functions' (§9(e) checks it). Exact small-$m$
+curves need the saved codes (`StabilizerCode.boundary_failure_counts`). The
+standard errors treat trajectories as independent; for a graph collection a note
+says that circuits on one graph are correlated (about 15% too small in a test
+with strong disorder).
+
+The work is bounded, not only the output: the curves are at most $10^8$ values
+(codes $\times$ couplings $\times$ $(n + 1)$) and the per-code tolerances at most
+$10^{10}$ multiply-adds (codes $\times$ couplings $\times$ $(n + 1) \times
+2049$ grid points, about 3 s) and 4,000 codes; beyond that evenly spaced codes
+are used, with a note (`phi.codes`, `e_delta.codes`), at least 100 and 10 codes.
+`elapsed_seconds` reports the time. At most 12 couplings are shown
+(`truncated`).
 
 A call of the first on the Watts–Strogatz graph of §3.5 (fast at $n = 16$;
 §9(e) calls the second on a saved run):
@@ -2057,14 +2130,16 @@ for seed in (1, 2):
     print(f"seed {seed}: mean b per J {[round(x, 2) for x in means]};", check["mixing"] or "no notes")
 ```
 
-On this graph the check is not clean at $J = 2$: the four chains of 300
-records disagree a little about which nodes their regions hold (an R-hat
-above 1.01 on a node's membership), and the effective sample size there is of
-the order of 100. The two seeds' mean boundaries at $J = 2$ agree to a few
-tenths, so the bias is small, but the positions are the slow variable (§4.8).
-Measured with other settings (not run here): `thin=10, samples=500` raised the
-effective sample size at $J = 2$ to about 200–400 and brought the R-hat to
-1.01–1.02, and a burn-in of 2,048 sweeps instead of 512 did not by itself. The
+On this graph the check is not clean at $J = 1$ and $J = 2$: the effective
+sample size of the slowest series is 100 to 230 for the 1,200 records of four
+chains (the `mixing` list says so, with what to change), and for one of the two
+seeds the R-hat of a node's membership at $J = 2$ sits just above its limit (1.054
+against 1.052): the four chains disagree a little about which nodes their
+regions hold. The two seeds' mean boundaries at $J = 2$ agree to a few tenths,
+so the bias is small, but the positions are the slow variable (§4.8). Measured
+with other settings (not run here): `thin=10, samples=500` raised the effective
+sample size at $J = 2$ to about 430 and left no note, while a burn-in of 2,048
+sweeps instead of 512 did not by itself (R-hat 1.09 against a limit of 1.04). The
 probe's estimates at $J = 2$ are then noisier per trajectory than `samples`
 suggests (the ensemble error bar includes that), and a run that relies on
 $J = 2$ should repeat the check with its own settings and compare the probe's

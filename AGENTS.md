@@ -374,20 +374,35 @@ mathematics, the samplers with proofs, costs and worked examples.
   with a subset of the sizes. A saved run pins the sizes, burn-in and ladders it resolved.
 * **`sample_erasure_regions(graph, size, couplings, samples=200, *, num_nodes, burn_in,
   thin, tempering, chains=4, seed, method, ladder, max_step)`** (CLI `sparsegf2 regions`):
-  the sampler alone on a graph, `chains` independent runs. Per coupling: `mean_boundary`
-  and `stderr`, `acceptance`, `exchange_acceptance`, `tau_int`, `ess`, `r_hat` (the slowest
-  of the boundary and of a few nodes' membership: on a ring the boundary looks mixed long
-  before the regions move), the `exact` mean and variance where known and `deviation_se`;
-  `mixing` lists what looks wrong and what to change. The chain does not depend on the
+  the sampler alone on a graph, `chains` independent runs (chain i seeded `[seed, i]`), at
+  most 12 couplings. Per coupling: `mean_boundary` with `stderr = sqrt(variance /
+  ess_boundary)`, `acceptance`, `exchange_acceptance`, `tau_int` and `ess` (the slowest of
+  the boundary and of a few nodes' membership: on a ring the boundary looks mixed long
+  before the regions move), `r_hat` with its `r_hat_limit` and `r_hat_at`, the `exact` mean
+  and variance where known and `deviation_se`. On a cycle or a path the draws are exact and
+  independent: `tau_int` is 1, `ess` is `chains x samples`, and R-hat and the acceptances are
+  null. `nonincreasing_in_J` tests Proposition 2 on the estimates, each step to the next
+  coupling against a normal quantile `z_critical` that shares a 1% false-alarm chance over
+  the steps (`proposition2` gives the worst and the failed steps with their z); `False`
+  means the estimates are off, not the proposition. The `r_hat_limit` is what stationary
+  draws of that series' own autocorrelation allow, shared over all the series tested; the
+  note fires on about 2% of correct chain calls at 200 samples, and when it does the chains
+  differ more than that: not in equilibrium, in different regions, or too short for their
+  autocorrelation (more `burn_in`, then `thin` or `samples` or `chains`). `mixing` lists
+  what looks wrong and what to change, one note per kind. The chain does not depend on the
   code, so run it with the probe's graph, sizes, couplings and settings, on several seeds,
   before a long run: the probe stores only failure fractions, so its summary cannot warn
   about bad mixing. An empty `mixing` list is no proof.
 * **`erasure_curves(path, e=None, delta=0.01, layer=None)`** (CLI `sparsegf2 curves RUN`):
   from a saved run, per `erasure_first_failure` probe (`uniform`) and per coupling of a
-  `correlated_erasure` probe (`correlated`): `q_plus`, `phi` (mean and stderr at each e),
-  `e_delta` (`of_mean_phi`, the ensemble's tolerance; `per_code_*`), and for the
+  `correlated_erasure` probe (`correlated`): `q_plus`, `phi` (mean, stderr and the number of
+  `codes` at each e), `e_delta` (`of_mean_phi`, the tolerance of the ensemble-mean Phi and the
+  headline, with `of_mean_phi_range` for a one-standard-error shift of the curve; the
+  `per_code_*` summarize each code's own tolerance and are biased upward), and for the
   correlated channel the `interpolated_sizes` with the binomial mass they carry
-  (`interpolated_mass`, `complete`) and the `binomial_window` worth sampling.
+  (`interpolated_mass`, `complete`) and the `binomial_window` worth sampling. The work is
+  bounded (curves of at most 10^8 values, tolerances of at most 10^10 multiply-adds): beyond
+  that evenly spaced codes are used and a note says so; `elapsed_seconds` reports the time.
 * **Exact routes** (saved codes, `code_snapshot`): `code.boundary_failure_counts(edges, w)`
   gives every region of size <= w by boundary, and `.exact(couplings)` the exact P_J(m)
   for any J; `code.interval_failure_by_size()` is the ring's J -> inf limit (the n
