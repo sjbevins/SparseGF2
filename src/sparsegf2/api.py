@@ -1914,6 +1914,21 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
     return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
 
 
+def _region_failure_us(n: int, columns: int, single: bool) -> float:
+    """One region's failure (``region_failures``): ``I(A:R)`` over ``columns = min(m, n - m)``
+    qubits, priced at 3 times a fit to measurements.
+
+    Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-16, n = 64..512, m = n/8, n/4,
+    n/2, scratchpad ``t3fix2_cost.py``): about ``m'^2 (12 + 0.024 n)`` ns in the
+    single-reference picture (a scrambled state, k = 1: the costliest), and
+    ``m'^2 (9.5 + 0.0049 n)`` ns in the purification picture at its costliest (the scrambled
+    state before any measurement, k = n; codes of monitored dynamics on a Watts-Strogatz graph
+    or the brickwork ring cost 0.6 to 0.8 of that), ``m' = columns``.
+    """
+    slope = 12.0 + 0.024 * n if single else 9.5 + 0.0049 * n
+    return 3.0 + 3e-3 * columns * columns * slope
+
+
 def _correlated_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, words: int) -> float:
     """One evaluation of a correlated_erasure probe (with a code; k = 0 draws nothing).
 
@@ -1921,14 +1936,17 @@ def _correlated_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, words: int) -> floa
     proposals of a chain (measured 19 ns at mean degree 4 and 30 ns at degree 8 on one
     thread of an AMD Ryzen 9 9950X3D, n = 64..1024, 2026-10-16; priced at about 3 times
     that, 30 + 7.5 x the mean degree ns), averaged over the erasure graphs, or
-    ``c x samples`` exact samples (measured up to 12 us each at n = 1024, priced
-    3 + 0.04 n us); then their failures, two eliminations of the ``2 min(m, n - m)``
-    columns per region (:func:`_elimination_us`, 2.7 to 8.4 times the measured cost per
-    region at n = 64..512, m = n/8..3n/4, in both pictures) plus one of all ``2 n``
-    system columns per size (the kernel's check of k). The whole evaluation came out at
-    3.8 to 8.9 times its measured cost in those cases.
+    ``c x samples`` exact samples (measured 0.3 + 0.0137 n us each, n = 64..4096, ring and
+    path alike; priced 1 + 0.042 n us); then ``c x samples`` failures
+    (:func:`_region_failure_us`, for the costliest state of the spec's picture) and the
+    kernel's check of k, one evaluation over all ``n`` system qubits per size (priced at twice
+    a region of ``n`` columns: the fit's range ends at ``n / 2``). Measured on
+    the ring with exact samples (n = 64..512, purification and single pictures, m = n/8 to
+    n/2): the whole evaluation came out at about 3 to 5 times below its estimate in the
+    costliest states and 4 to 7 times below on monitored codes.
     """
     n = mc.num_system
+    single = mc.reference == "single"
     plan = mc._plans[p.name]
     c, samples = len(p.couplings), p.samples
     sweeps = plan.burn_in + (samples - 1) * p.thin
@@ -1939,14 +1957,14 @@ def _correlated_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, words: int) -> floa
             if not weights[cls]:
                 continue
             if key[0] == "exact":
-                regions = c * samples * (3.0 + 0.04 * n)
+                regions = c * samples * (1.0 + 0.042 * n)
             else:
                 degree = 2.0 * key[1] / n
                 rungs = plan.ladders[int(plan.ladder_id[cls, i])].size
                 regions = rungs * sweeps * n * 1e-3 * (30.0 + 7.5 * degree)
             total += weights[cls] * regions
-        failures = c * samples * 2 * _elimination_us(min(m, n - m), words)
-        total += failures + _elimination_us(n, words)
+        failures = c * samples * _region_failure_us(n, min(m, n - m), single)
+        total += failures + 2 * _region_failure_us(n, n, single)  # the check of k
     return total
 
 
@@ -2216,9 +2234,34 @@ def estimate_ensemble(
         ]
     out["layout"] = _result_layout(mc, trajectories)
     notes = _estimate_notes(mc)
+    per_thread = mc.correlated_bytes_per_thread()
+    if per_thread:
+        running = min(numba.get_num_threads(), trajectories)
+        out["working_megabytes"] = _num(running * per_thread / 1e6)
+        if counts is not None:
+            for row, t in zip(out["by_threads"], counts, strict=True):
+                row["working_megabytes"] = _num(min(t, trajectories) * per_thread / 1e6)
+        notes.append(_working_memory_note(per_thread, running))
     if notes:
         out["notes"] = notes
     return out
+
+
+def _working_memory_note(per_thread: int, running: int) -> str:
+    """The note on the regions the correlated_erasure probes hold in every running thread."""
+    total = running * per_thread
+    limit = mipt.MAX_WORKING_BYTES
+    note = (
+        f"correlated_erasure holds up to {per_thread / 1e6:.3g} MB of regions (8 x couplings x "
+        f"samples x (largest size + 1) bytes) in each running thread: {total / 1e6:.3g} MB on "
+        f"{running} thread{'s' if running != 1 else ''} (working_megabytes); a run needing "
+        f"more than {limit / 1e9:.3g} GB in all is refused"
+    )
+    if total > limit:
+        fits = max(limit // per_thread, 0)
+        advice = f"run on at most {fits} threads (num_threads)" if fits else "record fewer samples"
+        note += f": this one would be; {advice}, or fewer samples, smaller sizes or couplings"
+    return note
 
 
 MAX_BENCHMARK_SECONDS = 600.0
@@ -2684,12 +2727,14 @@ _VECTOR_MEANING = {
 
 
 _CORRELATED_GRID_SIZES = 9  # sizes per coupling in a correlated_erasure vs_depth grid
+_CORRELATED_COUPLINGS = 12  # couplings shown in a correlated_erasure summary (ends kept)
 
 _CORRELATED_MEANING = (
     "P_{C,G,J}(m): the fraction of m-qubit erasure regions A, drawn with probability "
     "proportional to exp(-J b_G(A)) (b_G(A): edges of the erasure graph G leaving A; J > 0 "
     "favours compact regions, J = 0 is uniform), that lose logical information; mean[i][j] "
-    "is couplings[i] at sizes[j]"
+    "is couplings[i] at sizes[j], and vs_depth.mean[i][d][j] is couplings[i] at "
+    "vs_depth.layers[d] and vs_depth.sizes[j]"
 )
 
 
@@ -2713,22 +2758,42 @@ def _sampler_text(sampler: dict[str, Any]) -> str:
     )
 
 
+def _correlated_shown(shown: int, sizes_shown: int) -> tuple[int, int, int]:
+    """How many couplings, sizes and vs_depth sizes a correlated_erasure summary shows.
+
+    At the full checkpoint budget (``shown`` = :data:`MAX_CHECKPOINTS_SHOWN`) at most
+    :data:`_CORRELATED_COUPLINGS` couplings by :data:`MAX_GRID_SIZES` sizes, and a
+    vs_depth grid of :data:`_CORRELATED_GRID_SIZES` sizes; as :func:`_bounded_summary`
+    shows fewer checkpoints to fit the size limit, fewer couplings (``shown / 2``, at least
+    2) and sizes (``sizes_shown``, the other vector probes' budget) too.
+    """
+    couplings = _CORRELATED_COUPLINGS
+    if shown < MAX_CHECKPOINTS_SHOWN:
+        couplings = max(2, min(couplings, shown // 2))
+    sizes = min(MAX_GRID_SIZES, sizes_shown)
+    return couplings, sizes, min(_CORRELATED_GRID_SIZES, sizes)
+
+
 def _correlated_summary(
     result: mipt.EnsembleResult,
     probe: mipt.Probe,
     own: np.ndarray,
     has_code: np.ndarray | None,
     depths_shown: int,
-) -> tuple[dict[str, Any], bool]:
+    shown: int = MAX_CHECKPOINTS_SHOWN,
+    sizes_shown: int = MAX_GRID_SIZES,
+) -> tuple[dict[str, Any], str | None]:
     """A correlated_erasure probe: P_{C,G,J}(m) per coupling over the sizes, and vs depth.
 
     The curves are averaged over the trajectories that hold a code (k > 0) when
     ``has_code`` (trajectories x the probe's evaluations, :func:`_code_holders_at`) is
     given, else over every trajectory (k = 0 counts as 0). ``mean``/``stderr`` (one row
-    per coupling) are at the last evaluation, or the last one with a code; at most
-    :data:`MAX_GRID_SIZES` sizes are shown. ``vs_depth`` gives the mean per coupling on a
-    grid of at most ``depths_shown`` evaluations by :data:`_CORRELATED_GRID_SIZES` sizes.
-    Returns the entry and whether sizes or evaluations were left out.
+    per coupling shown) are at the last evaluation, or the last one with a code.
+    ``vs_depth`` gives the mean per coupling on a grid of at most ``depths_shown``
+    evaluations by fewer sizes, indexed ``[coupling][depth][size]``. Couplings and sizes
+    are subsampled evenly, both ends kept, to the counts of :func:`_correlated_shown`
+    (``shown`` and ``sizes_shown`` are the summary's budgets). Returns the entry and, when
+    couplings, sizes or evaluations were left out, the sentence that says so (else None).
     """
     couplings, sizes, values = result.correlated(probe.name)
     trajectories, evaluations = values.shape[:2]
@@ -2739,7 +2804,7 @@ def _correlated_summary(
     )
     sampler = _sampler_text(result.spec.correlated_sampler(probe.name))
     if not trajectories or not evaluations:
-        return {"what": what, "vector": True, "count": 0, "sampler": sampler}, False
+        return {"what": what, "vector": True, "count": 0, "sampler": sampler}, None
 
     def rows(e: int) -> np.ndarray:
         return np.arange(trajectories) if has_code is None else np.flatnonzero(has_code[:, e])
@@ -2749,7 +2814,9 @@ def _correlated_summary(
         last = next((e for e in range(evaluations - 1, -1, -1) if has_code[:, e].any()), last)
     chosen = rows(last)
     mean, err = analysis.mean_and_error(values[chosen, last], axis=0)  # (couplings, sizes)
-    shown = _subsample(sizes.size, MAX_GRID_SIZES)
+    most_couplings, most_sizes, grid_most = _correlated_shown(shown, sizes_shown)
+    picked = _subsample(couplings.size, most_couplings)
+    columns = _subsample(sizes.size, most_sizes)
     entry: dict[str, Any] = {
         "what": what,
         "vector": True,
@@ -2759,25 +2826,47 @@ def _correlated_summary(
     if has_code is not None:
         entry["count_with_code"] = int(chosen.size)
     entry.update(
-        couplings=couplings,
-        sizes=sizes[shown],
-        mean=mean[:, shown],
-        stderr=err[:, shown],
+        couplings=couplings[picked],
+        sizes=sizes[columns],
+        mean=mean[np.ix_(picked, columns)],
+        stderr=err[np.ix_(picked, columns)],
         sampler=sampler,
     )
-    cut = shown.size < sizes.size
+    left_out = []
+    if picked.size < couplings.size:
+        left_out.append(f"{picked.size} of the {couplings.size} couplings")
+    if columns.size < sizes.size:
+        left_out.append(f"{columns.size} of the {sizes.size} sizes")
+    parts = []
+    if left_out:
+        parts.append(
+            f"{' and '.join(left_out)} are shown (evenly spaced, both ends kept; listed in "
+            "'couplings' and 'sizes')"
+        )
     if evaluations > 1:
         depth_idx = _subsample(evaluations, depths_shown)
-        grid_sizes = _subsample(sizes.size, _CORRELATED_GRID_SIZES)
+        grid_sizes = _subsample(sizes.size, grid_most)
         grid: dict[str, Any] = {"layers": own[depth_idx]}
         if has_code is not None:
             grid["count_with_code"] = [int(rows(int(e)).size) for e in depth_idx]
         grid["sizes"] = sizes[grid_sizes]
         means = [analysis.mean_and_error(values[rows(int(e)), e], axis=0)[0] for e in depth_idx]
-        grid["mean"] = np.stack([m[:, grid_sizes] for m in means], axis=1)  # (c, depths, sizes)
+        # indexed [coupling][depth][size], the couplings and sizes as listed
+        grid["mean"] = np.stack([m[np.ix_(picked, grid_sizes)] for m in means], axis=1)
         entry["vs_depth"] = grid
-        cut = cut or grid_sizes.size < sizes.size or depth_idx.size < evaluations
-    return entry, cut
+        if grid_sizes.size < sizes.size or depth_idx.size < evaluations:
+            depths = (
+                f"{depth_idx.size} of the {evaluations} evaluations"
+                if depth_idx.size < evaluations
+                else "every evaluation"
+            )
+            parts.append(f"vs_depth shows {depths} at {grid_sizes.size} of the {sizes.size} sizes")
+    if not parts:
+        return entry, None
+    return entry, (
+        "; ".join(parts) + "; EnsembleResult.correlated() on the saved result (output_dir) "
+        "has every value"
+    )
 
 
 def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict[str, Any]:
@@ -2886,15 +2975,12 @@ def _summarize_ensemble(
                 notes.append(_loses_nothing_note(keys[name]))
         elif probe.kind == "correlated_erasure":
             has_code = _code_holders_at(result, own)
-            summary, cut = _correlated_summary(result, probe, own, has_code, depths_shown)
-            correlated_cut = correlated_cut or cut
-            if cut:
-                notes.append(
-                    f"{keys[name]}: at most {MAX_GRID_SIZES} sizes are shown per coupling (listed "
-                    f"in 'sizes'), and vs_depth at most {depths_shown} evaluations by "
-                    f"{_CORRELATED_GRID_SIZES} sizes; EnsembleResult.correlated() on the saved "
-                    "result (output_dir) has every value"
-                )
+            summary, cut_note = _correlated_summary(
+                result, probe, own, has_code, depths_shown, shown, sizes_shown
+            )
+            correlated_cut = correlated_cut or cut_note is not None
+            if cut_note is not None:
+                notes.append(f"{keys[name]}: {cut_note}")
             if has_code is None:
                 notes.append(
                     f"{keys[name]}: trajectories without a code (k = 0) count as P = 0 in these "
@@ -5714,24 +5800,30 @@ _PROBE_EXTRAS: dict[str, dict[str, Any]] = {
     },
     "correlated_erasure": {
         "forms": [
-            {"couplings": [0, 1, 2], "sizes": "8:57:8", "samples": 100},
-            {"couplings": [0, 2], "sizes": [16, 32], "geometry": "cycle", "checkpoints": "final"},
+            {"couplings": [0, 1, 2], "sizes": "4:29:4", "samples": 100},
+            {"couplings": [0, 2], "sizes": [8, 16], "geometry": "cycle", "checkpoints": "final"},
         ],
         "note": (
             "P_{C,G,J}(m): fraction of m-qubit erasure regions, drawn with probability "
             "proportional to exp(-J b_G(A)) (b_G: edges of the erasure graph leaving A), that "
             "lose logical information; needs a reference; k = 0 gives 0. Values are "
             "coupling-major, len(couplings) x len(sizes) per evaluation "
-            "(EnsembleResult.correlated() reshapes them). couplings: finite and distinct "
-            "(J -> inf is a limit, not a coupling: StabilizerCode.interval_failure_by_size "
-            "gives the ring's); sizes: a list, a range 'a:b[:step]' or null for every m in "
-            "1..n-1. geometry: the trajectory's interaction graph (default), or 'cycle' or "
-            "'path' over the qubit labels. A cycle or path is sampled exactly; other graphs "
-            "by a swap chain with replica exchange (burn_in default max(200, 8 n) sweeps per "
-            "size and evaluation), whose mixing is checked with sample_erasure_regions. Cost "
-            "per evaluation and size about rungs x (burn_in + samples x thin) x n proposals: "
-            "keep sizes narrow (analysis.binomial_window), give it checkpoints of its own, "
-            "and see estimate_ensemble"
+            "(EnsembleResult.correlated() reshapes them). couplings: finite, distinct (J -> "
+            "inf is a limit, not a coupling: StabilizerCode.interval_failure_by_size gives the "
+            "ring's); sizes: a list, a range 'a:b[:step]' or null for every m in 1..n-1 (the "
+            "forms need n >= 29 and n >= 17). geometry: the trajectory's interaction graph "
+            "(default), or 'cycle' or 'path' over the qubit labels. method: auto (exact "
+            "samples on a cycle or path, else the chain), chain or exact. The chain: a swap "
+            "chain per rung of a replica-exchange ladder (tempering: exchanges between rungs); "
+            "ladder auto (the couplings, 0 and rungs at most max_step apart, default "
+            "1/sqrt(Var_0 b)), given (the couplings only) or a list of extra rungs; burn_in "
+            "sweeps before the first record (default max(200, 8 n), per size and evaluation), "
+            "thin sweeps between records; as in sample_erasure_regions, which checks the "
+            "mixing. Cost per evaluation and size about rungs x (burn_in + samples x thin) x n "
+            "proposals plus couplings x samples region evaluations: keep sizes narrow "
+            "(analysis.binomial_window), give it checkpoints of its own, see "
+            "estimate_ensemble. Memory: 8 x couplings x samples x (largest size + 1) bytes in "
+            "each running thread"
         ),
     },
 }

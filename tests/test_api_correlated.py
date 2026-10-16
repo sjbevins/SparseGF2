@@ -10,8 +10,10 @@ the same probe written differently continued), and the validation messages.
 
 from __future__ import annotations
 
+import json
 import math
 
+import numba
 import numpy as np
 import pytest
 
@@ -92,7 +94,7 @@ def test_json_summary_truncates_many_sizes_and_flags_it():
     assert entry["sizes"][-1] == 39 and out["truncated"] is True
     assert entry["sampler"] == "exact independent samples (cycle)"
     assert all(len(row) == api.MAX_GRID_SIZES for row in entry["mean"])
-    assert any("at most 17 sizes are shown" in note for note in out["notes"])
+    assert any("17 of the 39 sizes are shown" in note for note in out["notes"])
     assert not any("sample_erasure_regions" in note for note in out["notes"])  # exact samples
 
 
@@ -118,8 +120,101 @@ def test_capabilities_describe_the_probe():
     note = entry["note"]
     for word in ("coupling-major", "J -> inf", "binomial_window", "geometry", "burn_in"):
         assert word in note, word
+    # every parameter is explained, and the memory per running thread is stated
+    for word in ("method:", "ladder auto", "max_step", "tempering:", "thin sweeps", "Memory:"):
+        assert word in note, word
+    assert "sample_erasure_regions" in api.capabilities("functions")["functions"]
+    # the forms build at n = 32 (the size of the small examples)
+    for form in entry["forms"]:
+        spec = dict(SMALL_JSON, num_system=32, probes=[{"kind": "correlated_erasure", **form}])
+        assert api._build_spec(spec).probes[0].sizes
     assert "correlated_erasure" in api.quickstart()
     assert api.capabilities()  # the overview still fits
+
+
+def test_summary_shows_many_couplings_within_the_size_limit():
+    """Review L2: with 40 couplings beside other vector probes, the couplings and sizes shown
+    shrink with the summary's budget (ends kept), nothing is cut by the generic cutter, and
+    the indexing of vs_depth.mean is stated."""
+    couplings = [round(0.1 * j, 1) for j in range(40)]
+    spec = {
+        "num_system": 24, "graph": {"family": "cycle"}, "layers": 24, "measurement_rate": 0.05,
+        "reference": "purification", "checkpoints": 4,
+        "probes": [
+            {"kind": "code_dimension"},
+            {"kind": "erasure_first_failure", "samples": 20},
+            {"kind": "correlated_erasure", "couplings": couplings, "samples": 6},
+        ],
+    }  # fmt: skip
+    out = api.run_ensemble(spec, 3, seed=1)
+    assert len(json.dumps(out)) <= api.MAX_OUTPUT_CHARS and out["truncated"] is True
+    assert not any("cut to fit" in note for note in out.get("notes", []))
+    entry = out["probes"]["correlated_erasure"]
+    shown = entry["couplings"]
+    assert 2 <= len(shown) < 40 and shown[0] == 0.0 and shown[-1] == 3.9
+    assert len(entry["mean"]) == len(entry["stderr"]) == len(shown)
+    assert entry["sizes"][0] == 1 and entry["sizes"][-1] == 23
+    assert all(len(row) == len(entry["sizes"]) for row in entry["mean"])
+    grid = entry["vs_depth"]
+    assert np.array(grid["mean"]).shape == (len(shown), len(grid["layers"]), len(grid["sizes"]))
+    assert "vs_depth.mean[i][d][j] is couplings[i] at vs_depth.layers[d]" in entry["what"]
+    assert any(f"{len(shown)} of the 40 couplings" in note for note in out["notes"])
+    # the values shown are the saved ones (the chosen couplings and sizes)
+    res = api._build_spec(spec).run(3, seed=1)
+    c_all, s_all, values = res.correlated()
+    rows = [c_all.tolist().index(j) for j in shown]
+    cols = [s_all.tolist().index(m) for m in entry["sizes"]]
+    np.testing.assert_allclose(
+        np.array(entry["mean"], dtype=float),
+        values[:, -1].mean(axis=0)[np.ix_(rows, cols)],
+        rtol=1e-5,
+        atol=1e-9,
+    )
+
+
+def test_summary_shows_everything_when_it_fits():
+    spec = dict(SMALL_JSON, probes=[{"kind": "code_dimension"}, _json_probe()])
+    out = api.run_ensemble(spec, 3, seed=2)
+    entry = out["probes"]["correlated_erasure"]
+    assert entry["couplings"] == [0.0, 1.0] and entry["sizes"] == [2, 5, 8]
+    assert "truncated" not in out
+    assert not any("are shown" in note or "vs_depth shows" in note for note in out["notes"])
+
+
+def test_estimate_states_the_working_memory_of_every_running_thread(monkeypatch):
+    """Review L1: the estimate gives the working memory on the threads that will run, per
+    thread count too, and says when a run would be refused."""
+    spec = dict(SMALL_JSON, probes=[_json_probe(samples=1000)])
+    mc = api._build_spec(spec)
+    per_thread = mc.correlated_bytes_per_thread()
+    assert per_thread == 8 * 2 * 1000 * (8 + 1)
+    out = api.estimate_ensemble(spec, 3, threads=[1, 2, 64])
+    running = min(numba.get_num_threads(), 3)
+    assert out["working_megabytes"] == pytest.approx(running * per_thread / 1e6, rel=1e-5)
+    assert [row["working_megabytes"] for row in out["by_threads"]] == pytest.approx(
+        [per_thread / 1e6, 2 * per_thread / 1e6, 3 * per_thread / 1e6], rel=1e-5
+    )
+    (note,) = [n for n in out["notes"] if n.startswith("correlated_erasure holds")]
+    assert "is refused" in note and "this one would be" not in note
+    monkeypatch.setattr(mipt, "MAX_WORKING_BYTES", per_thread)
+    out = api.estimate_ensemble(spec, 3)
+    (note,) = [n for n in out["notes"] if n.startswith("correlated_erasure holds")]
+    if running > 1:
+        assert "this one would be; run on at most 1 threads" in note
+    # no such probe, no such field or note
+    plain = api.estimate_ensemble(dict(SMALL_JSON, probes=[{"kind": "code_dimension"}]), 3)
+    assert "working_megabytes" not in plain
+    assert not any("correlated_erasure" in n for n in plain.get("notes", []))
+
+
+def test_region_failure_pricing_follows_the_picture_and_the_size():
+    single = [api._region_failure_us(256, m, True) for m in (16, 32, 64, 128)]
+    purification = [api._region_failure_us(256, m, False) for m in (16, 32, 64, 128)]
+    assert single == sorted(single) and purification == sorted(purification)
+    assert all(a > b for a, b in zip(single, purification, strict=True))  # single costs more
+    # about 3 times the fits to the measurements at n = 512, m' = 256
+    assert api._region_failure_us(512, 256, True) == pytest.approx(3e-3 * 256**2 * 24.288 + 3)
+    assert api._region_failure_us(512, 256, False) == pytest.approx(3e-3 * 256**2 * 12.0088 + 3)
 
 
 def test_estimate_prices_the_chain_and_grows_with_its_work():

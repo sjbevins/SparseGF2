@@ -152,9 +152,11 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
         ({"kind": counts, "max_size": 2}, "purification", 2),
         ({"kind": counts, "max_size": 3}, "monitored", 1),
         ({"kind": "code_snapshot"}, "single", 4),
-        # the swap chain on the Watts-Strogatz graph, and the exact ring sampler
+        # the swap chain on the Watts-Strogatz graph, and the exact ring sampler in the
+        # costliest state of each picture
         ({**correlated, "burn_in": 100}, "monitored", 1),
         (correlated, "purification", 1),
+        (correlated, "single", 1),
     ]
 
 
