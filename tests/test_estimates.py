@@ -487,3 +487,119 @@ def test_absurd_inputs_give_finite_estimates():
         {"family": "watts_strogatz", "k": 2**70},
     ):
         assert math.isfinite(api._generation_us(graph, api.MAX_QUBITS))
+
+
+# ---------------------------------------------------------------------------
+# thread counts and the layout of the saved result
+# ---------------------------------------------------------------------------
+
+LAYOUT_SPEC = {
+    "num_system": 8,
+    "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 1, "realizations": 3},
+    "circuits_per_graph": 2,
+    "layers": 12,
+    "measurement_rate": 0.2,
+    "schedule": "random_edges",
+    "edge_weights": {"family": "power_law", "alpha": 2.0},
+    "reference": "single",
+    "checkpoints": 4,
+    "probes": [
+        {"kind": "code_dimension"},
+        {"kind": "entropy_profile", "checkpoints": "final"},
+        {"kind": "erasure_first_failure", "samples": 5},
+        {"kind": "code_snapshot", "checkpoints": "final"},
+    ],
+}
+
+
+def test_the_estimate_keeps_its_keys_and_adds_a_layout():
+    est = api.estimate_ensemble(LAYOUT_SPEC, 6)
+    assert {
+        "estimated_seconds",
+        "trajectories",
+        "result_megabytes",
+        "threads",
+        "fits_sync_limit",
+        "sync_limit_seconds",
+        "layout",
+    } <= set(est)
+    assert "by_threads" not in est
+    assert est["layout"]["files"] == ["result.npz", "spec.json", "provenance.json"]
+    assert "benchmark_ensemble" in est["layout"]["note"]
+
+
+def test_the_estimate_for_given_thread_counts():
+    spec = {
+        "num_system": 64,
+        "graph": {"family": "cycle"},
+        "layers": 200,
+        "measurement_rate": 0.1,
+        "reference": "single",
+        "checkpoints": "final",
+        "probes": [{"kind": "code_dimension"}],
+    }
+    est = api.estimate_ensemble(spec, 100, threads=[32, 1, 4])
+    assert [row["threads"] for row in est["by_threads"]] == [32, 1, 4]
+    seconds = {row["threads"]: row["estimated_seconds"] for row in est["by_threads"]}
+    assert seconds[1] > seconds[4] > seconds[32] > 0
+    # the plain estimate is the one at the current thread count
+    here = api.estimate_ensemble(spec, 100, threads=[numba.get_num_threads()])
+    assert here["by_threads"][0]["estimated_seconds"] == est["estimated_seconds"]
+    # trajectories are the unit of parallelism: threads beyond them are idle
+    few = api.estimate_ensemble(spec, 2, threads=[2, 64])["by_threads"]
+    assert few[0]["estimated_seconds"] == few[1]["estimated_seconds"]
+
+
+@pytest.mark.parametrize("threads", [0, -1, "4", 4, [], [0], [1, 0], [True], [1.5], ["2"]])
+def test_the_estimate_refuses_bad_thread_counts(threads):
+    with pytest.raises(ValueError, match="threads"):
+        api.estimate_ensemble(LAYOUT_SPEC, 6, threads=threads)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        LAYOUT_SPEC,
+        {
+            "num_system": 6,
+            "graph": {"family": "cycle"},
+            "layers": 6,
+            "measurement_rate": 0.1,
+            "reference": "none",
+            "checkpoints": "final",
+            "probes": [{"kind": "half_cut_entropy"}],
+        },
+        {
+            "num_system": 70,  # two words per row
+            "graph": {"family": "cycle"},
+            "layers": 4,
+            "measurement_rate": 0.1,
+            "reference": "purification",
+            "checkpoints": 2,
+            "probes": [
+                {"kind": "code_dimension"},
+                {"kind": "code_snapshot", "checkpoints": "final"},
+            ],
+        },
+    ],
+)
+def test_the_layout_matches_the_saved_file(spec, tmp_path):
+    trajectories = 6
+    layout = api.estimate_ensemble(spec, trajectories)["layout"]
+    api.run_ensemble(spec, trajectories, seed=1, output_dir=str(tmp_path / "run"))
+    with np.load(tmp_path / "run" / "result.npz") as z:
+        saved = {name: z[name] for name in z.files if name != "__meta__"}
+    stated = {row["name"]: row for row in layout["arrays"]}
+    assert set(stated) == set(saved)
+    for name, array in saved.items():
+        assert stated[name]["shape"] == list(array.shape), name
+        assert stated[name]["dtype"] == str(array.dtype), name
+        assert stated[name]["megabytes"] == pytest.approx(array.nbytes / 1e6, rel=1e-5, abs=1e-6)
+    has_codes = any(p["kind"] == "code_snapshot" for p in spec["probes"])
+    assert ("upper bound" in layout["note"]) == has_codes
+
+
+def test_the_layout_values_fit_the_memory_figure():
+    est = api.estimate_ensemble(LAYOUT_SPEC, 6)
+    values = sum(r["megabytes"] for r in est["layout"]["arrays"] if r["name"].startswith("value::"))
+    assert 0 < values <= est["result_megabytes"]

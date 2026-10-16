@@ -25,7 +25,11 @@ Functions
     (:class:`sparsegf2.mipt.MonitoredCircuit`) and summarize the probes and
     the purification statistics.
 :func:`estimate_ensemble`
-    A rough runtime estimate for :func:`run_ensemble`.
+    A rough runtime estimate for :func:`run_ensemble`, with the layout of the
+    saved result.
+:func:`benchmark_ensemble`
+    Measured speed and storage of a run on this machine, projected to other
+    thread counts; writes nothing.
 :func:`start_ensemble_job`, :func:`job_status`, :func:`cancel_job`, :func:`list_jobs`
     The same ensembles as resumable background jobs, saved chunk by chunk.
 :func:`load_results`
@@ -76,8 +80,10 @@ from sparsegf2.sampling import sample
 from sparsegf2.simulator import Simulator
 
 __all__ = [
+    "MAX_BENCHMARK_SECONDS",
     "MAX_OUTPUT_CHARS",
     "SYNC_ENSEMBLE_MAX_SECONDS",
+    "benchmark_ensemble",
     "cancel_job",
     "capabilities",
     "estimate_ensemble",
@@ -1978,12 +1984,15 @@ def _parallel_threads(threads: int) -> float:
     return threads / (1.0 + 0.04 * (threads - 1))
 
 
-def _estimate_seconds(spec: dict, mc: mipt.MonitoredCircuit, trajectories: int) -> float:
+def _estimate_seconds(
+    spec: dict, mc: mipt.MonitoredCircuit, trajectories: int, threads: int | None = None
+) -> float:
+    """The estimated seconds of a run on ``threads`` threads (default: Numba's current count)."""
     import numba
 
     # Trajectories are the unit of parallelism: fewer trajectories than threads
     # leave threads idle.
-    parallel = min(numba.get_num_threads(), trajectories)
+    parallel = min(numba.get_num_threads() if threads is None else threads, trajectories)
     kernel = trajectories * _trajectory_us(mc) * 1e-6 / _parallel_threads(parallel)
     return _CALL_OVERHEAD_SECONDS + _setup_us(spec, mc) * 1e-6 + kernel
 
@@ -2032,7 +2041,83 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     return trajectories
 
 
-def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> dict[str, Any]:
+def _require_thread_counts(threads: Any) -> list[int]:
+    """``threads`` as a non-empty list of positive integers, or an error that names it."""
+    if not isinstance(threads, (list, tuple)) or not threads:
+        raise ValueError(
+            f"threads must be a non-empty list of positive integers such as [1, 32], got {threads!r}"
+        )
+    return [_require_int(t, "threads", minimum=1) for t in threads]
+
+
+def _array_row(name: str, shape: Sequence[int], dtype: Any) -> dict[str, Any]:
+    """One array of the saved file: its shape, dtype and uncompressed megabytes."""
+    size = int(np.prod(shape, dtype=object)) * np.dtype(dtype).itemsize
+    return {"name": name, "shape": [int(s) for s in shape], "dtype": str(np.dtype(dtype)),
+            "megabytes": _num(size / 1e6)}  # fmt: skip
+
+
+def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, Any]:
+    """The arrays and files that ``run_ensemble(..., output_dir=...)`` saves for ``mc``.
+
+    Mirrors :meth:`sparsegf2.mipt.EnsembleResult.save`; sizes are uncompressed.
+    """
+    n = mc.num_system
+    wsys = (n + 63) // 64
+    edges = sum(len(g) for g in mc.graphs)
+    gate_set, order = np.asarray(mc.gate_set), np.asarray(mc.system_order)  # resolved by the spec
+    rows = [
+        _array_row("edges", (edges, 2), np.concatenate(mc.graphs).dtype),
+        _array_row("graph_ptr", (len(mc.graphs) + 1,), np.int64),
+        _array_row("gate_set", gate_set.shape, gate_set.dtype),
+        _array_row("system_order", order.shape, order.dtype),
+        _array_row("trajectories", (trajectories,), np.int64),
+        _array_row("checkpoint_layers", (len(mc.checkpoint_layers),), np.int64),
+        _array_row("final_layer", (trajectories,), np.int64),
+        _array_row("num_measurements", (trajectories,), np.int64),
+    ]
+    if mc.edge_weights is not None:
+        rows.append(_array_row("edge_weights", (edges,), np.float64))
+    snapshots = False
+    for p in mc.probes:
+        evaluations = len(mc.probe_layers(p.name))
+        shape = [trajectories, evaluations]
+        if p.is_vector:
+            shape.append(mipt._probe_length(p, n))
+        rows.append(_array_row(f"value::{p.name}", shape, np.float64))
+        if p.kind == "code_snapshot":
+            snapshots = True
+            rows.append(
+                _array_row(
+                    f"snapshot::{p.name}", (trajectories, evaluations, n, 2 * wsys), np.uint64
+                )
+            )
+            rows.append(
+                _array_row(f"snapshot_counts::{p.name}", (trajectories, evaluations), np.int64)
+            )
+    if mc.reference != "none":
+        rows.append(_array_row("purification_layer", (trajectories,), np.int64))
+    note = (
+        "Sizes are uncompressed. The file is saved with np.savez_compressed, so the disk use "
+        "is lower (benchmark_ensemble measures it), and a small __meta__ record holds the "
+        "spec; spec.json and provenance.json are small text files."
+    )
+    if snapshots:
+        note += (
+            " A snapshot:: array is stored at its full shape, an upper bound: each code "
+            "fills only its first generator rows (snapshot_counts:: says how many), the rest "
+            "is zero."
+        )
+    return {
+        "arrays": rows,
+        "files": [_RESULT_FILE, _SPEC_FILE, _PROVENANCE_FILE],
+        "note": note,
+    }
+
+
+def estimate_ensemble(
+    spec: dict[str, Any], trajectories: int | None = None, threads: list[int] | None = None
+) -> dict[str, Any]:
     """A rough (deliberately pessimistic) runtime estimate for :func:`run_ensemble`.
 
     Returns ``estimated_seconds`` (building the spec, generating and
@@ -2043,9 +2128,16 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
     result needs. Trajectories that stop early (``stop_when_purified``) make
     real runs faster. ``notes`` (when present) says where the estimate can be
     too low.
+
+    ``threads`` (a list of positive integers) adds ``by_threads``, the
+    estimate for each count in the order given (threads beyond the number of
+    trajectories stay idle). ``layout`` lists the arrays and files that
+    ``run_ensemble(..., output_dir=...)`` saves, with their shapes, dtypes and
+    uncompressed megabytes (disk use is lower; see :func:`benchmark_ensemble`).
     """
     import numba
 
+    counts = None if threads is None else _require_thread_counts(threads)
     mc = _build_spec(spec)
     trajectories = _trajectory_count(mc, trajectories)
     seconds = _estimate_seconds(spec, mc, trajectories)
@@ -2057,10 +2149,219 @@ def estimate_ensemble(spec: dict[str, Any], trajectories: int | None = None) -> 
         "fits_sync_limit": seconds <= SYNC_ENSEMBLE_MAX_SECONDS,
         "sync_limit_seconds": SYNC_ENSEMBLE_MAX_SECONDS,
     }
+    if counts is not None:
+        out["by_threads"] = [
+            {
+                "threads": t,
+                "estimated_seconds": _num(_estimate_seconds(spec, mc, trajectories, threads=t)),
+            }
+            for t in counts
+        ]
+    out["layout"] = _result_layout(mc, trajectories)
     notes = _estimate_notes(mc)
     if notes:
         out["notes"] = notes
     return out
+
+
+MAX_BENCHMARK_SECONDS = 600.0
+"""Largest ``seconds`` that :func:`benchmark_ensemble` accepts."""
+
+
+def _projected_rate(r1: float, rp: float | None, p: int, busy: int) -> float:
+    """Trajectories per second with ``busy`` busy threads, from measured rates.
+
+    ``r1`` is the measured rate on one thread; ``rp`` the measured rate on ``p``
+    threads (``None`` when only one thread was measured). The simulator's thread
+    model (:func:`_parallel_threads`) gives the shape, and a constant calibrates
+    it so that it reproduces the measured ``p``-thread rate; one busy thread is
+    the measured one-thread rate itself.
+    """
+    f = _parallel_threads
+    if busy == 1:
+        return r1  # measured
+    scale = 1.0 if rp is None or p == 1 else rp / (r1 * f(p) / f(1))
+    return r1 * f(busy) / f(1) * scale
+
+
+def _benchmark_minimum_seconds(mc: mipt.MonitoredCircuit, trajectories: int, p: int) -> float:
+    """The estimated seconds of the least :func:`benchmark_ensemble` can do: a one-thread
+    warm-up and measurement of one trajectory each, and, for ``p`` > 1 threads, a warm-up and
+    a measurement of ``p`` trajectories (one trajectory-time on ``p`` threads). Pessimistic,
+    like :func:`_estimate_seconds`, and without the setup."""
+    one = _trajectory_us(mc) * 1e-6
+    on_p = one * p / _parallel_threads(p)
+    return 2 * one + (2 * on_p if p > 1 else 0.0)
+
+
+def _measure(
+    mc: mipt.MonitoredCircuit, threads: int, first: int, limit: int, seconds: float, seed: int
+) -> tuple[mipt.EnsembleResult, float]:
+    """Run the run's first ``k`` trajectories on ``threads`` threads, doubling ``k`` from
+    ``first`` until a run takes ``seconds / 4`` or ``k`` reaches ``limit``; the last run and its
+    wall-clock seconds."""
+    k = first
+    while True:
+        start = time.perf_counter()
+        with _COMPUTE_LOCK:
+            result = mc.run(k, seed=seed, num_threads=threads)
+        elapsed = time.perf_counter() - start
+        if elapsed >= seconds / 4 or k >= limit:
+            return result, elapsed
+        k = min(limit, 2 * k)
+
+
+def _file_bytes(result: mipt.EnsembleResult, directory: Path) -> int:
+    """The size of ``result`` saved as ``directory/result.npz``, the file a run keeps."""
+    path = directory / _RESULT_FILE
+    result.save(path)
+    return path.stat().st_size
+
+
+def benchmark_ensemble(
+    spec: dict[str, Any],
+    trajectories: int | None = None,
+    threads: list[int] | None = None,
+    seconds: float = 30.0,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Measure the speed and storage of a run on this machine; write nothing.
+
+    After a warm-up (one trajectory, which compiles the kernels), the first
+    trajectories of the run (seed ``seed``) are timed on one thread and on
+    ``P = min(max(threads), available, trajectories)`` threads, where
+    ``available`` is the most threads Numba can use here. Each measurement doubles
+    its trajectory count until a run takes ``seconds / 4``, so the call takes up to
+    about ``2 * seconds`` plus the warm-up. ``threads`` defaults to
+    ``[1, available]``.
+
+    ``measured`` lists the timings. ``projected`` gives, for each count in
+    ``threads``, the seconds the whole run would take (the trajectories only, not
+    building the spec and its graphs), calibrated to the measured rates; a count
+    beyond the ``P`` measured is projected with the simulator's thread model
+    (``basis``: ``"projected"``), and a count beyond the threads of this process
+    gets a note. ``estimate_ratio`` is the measured seconds per trajectory at
+    ``P`` threads over :func:`estimate_ensemble`'s, to scale cheap estimates.
+    ``storage`` gives the megabytes of ``result.npz`` (compressed, measured on
+    the sample and scaled to all trajectories) and of the result in memory. The
+    sample is saved in a temporary folder that is removed.
+    """
+    import tempfile
+
+    import numba
+
+    mc = _build_spec(spec)
+    trajectories = _trajectory_count(mc, trajectories)
+    seconds = _require_number(seconds, "seconds", 0.0, MAX_BENCHMARK_SECONDS)
+    if seconds <= 0:
+        raise ValueError(f"seconds must be positive (at most {MAX_BENCHMARK_SECONDS:g}), got 0")
+    seed = _require_int(seed, "seed", minimum=0, maximum=None)
+    max_threads = int(numba.config.NUMBA_NUM_THREADS)
+    counts = sorted({1, max_threads}) if threads is None else _require_thread_counts(threads)
+    p = min(max(counts), max_threads, trajectories)
+    # The least work is the warm-up and the first measurement, whatever `seconds` is.
+    minimum = _benchmark_minimum_seconds(mc, trajectories, p)
+    if minimum > 2 * seconds:
+        raise ValueError(
+            f"even the least measurement is estimated at about {minimum:.0f} s, above 2 x "
+            f"seconds ({2 * seconds:g} s): measure a smaller run (fewer layers or a smaller "
+            "num_system) and scale the figures, or use 'sparsegf2 benchmark' in a shell with "
+            "a larger --seconds"
+        )
+    notes: list[str] = []
+    if any(job.status == "running" for job in _JOBS.values()):
+        notes.append("a background job was running: the timings are lower than an idle machine's")
+
+    start = time.perf_counter()
+    with _COMPUTE_LOCK:
+        first = mc.run(1, seed=seed, num_threads=1)
+        if p > 1:  # the first parallel region starts the thread pool
+            mc.run(p, seed=seed, num_threads=p)
+    warmup = time.perf_counter() - start
+
+    one, one_seconds = _measure(mc, 1, 1, trajectories, seconds, seed)
+    measured = [(1, one.num_trajectories, one_seconds)]
+    sample, sample_seconds = one, one_seconds
+    if p > 1:
+        sample, sample_seconds = _measure(mc, p, p, trajectories, seconds, seed)
+        measured.append((p, sample.num_trajectories, sample_seconds))
+    r1 = one.num_trajectories / one_seconds
+    rp = None if p == 1 else sample.num_trajectories / sample_seconds
+
+    projected = []
+    for t in counts:
+        busy = min(t, trajectories)
+        rate = _projected_rate(r1, rp, p, busy)
+        projected.append(
+            {
+                "threads": t,
+                "seconds": _num(trajectories / rate),
+                "basis": "measured" if busy in (1, p) else "projected",
+            }
+        )
+    if max(counts) > max_threads:
+        notes.append(
+            f"counts above {max_threads} are projected beyond the {max_threads} threads this "
+            "process has, with the simulator's thread model"
+        )
+    notes.append("seconds are for the trajectories; building the spec and its graphs is extra")
+
+    rate_p = r1 if rp is None else rp
+    modelled = _trajectory_us(mc) * 1e-6 / _parallel_threads(p)  # seconds per trajectory
+    with tempfile.TemporaryDirectory(prefix="sparsegf2-benchmark-") as folder:
+        one_bytes = _file_bytes(first, Path(folder))
+        big_bytes = _file_bytes(sample, Path(folder))
+    k = sample.num_trajectories
+    if k > 1 and big_bytes > one_bytes:
+        # the file has a part that does not grow with the trajectories (the graphs, the
+        # gate set): the growth per trajectory is what two sample sizes show
+        disk = one_bytes + (big_bytes - one_bytes) / (k - 1) * (trajectories - 1)
+    elif k > 1:
+        disk = float(one_bytes)  # no growth showed: the one-trajectory file is the floor
+        notes.append(
+            "disk_megabytes is rough: the sample file was not larger than the one-trajectory "
+            "file, so the one-trajectory size is used as a floor"
+        )
+    else:
+        disk = max(one_bytes, big_bytes) * trajectories / k
+        if trajectories > 1:
+            notes.append(
+                "disk_megabytes is an upper bound: one trajectory took longer than seconds / 4, "
+                "so its fixed part (graphs, spec) was scaled with the rest"
+            )
+    if 1 < k < 8:
+        notes.append(f"disk_megabytes is rough: it comes from a sample of only {k} trajectories")
+    notes.append(
+        "a background job writes chunk files before merging them, so its peak disk use is "
+        "about twice the final result"
+    )
+    return {
+        "trajectories": trajectories,
+        "seed": seed,
+        "threads_available": max_threads,
+        "cpus": len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else os.cpu_count(),
+        "estimated_seconds": _num(_estimate_seconds(spec, mc, trajectories)),
+        "warmup_seconds": _num(warmup),
+        "measured": [
+            {
+                "threads": t,
+                "trajectories": count,
+                "seconds": _num(elapsed),
+                "trajectories_per_second": _num(count / elapsed),
+            }
+            for t, count, elapsed in measured
+        ],
+        "projected": projected,
+        "estimate_ratio": _num(1.0 / rate_p / modelled),
+        "storage": {
+            "sample_trajectories": k,
+            "disk_megabytes": _num(disk / 1e6),
+            "memory_megabytes": _num(_result_bytes(mc, trajectories) / 1e6),
+        },
+        "notes": notes,
+    }
 
 
 _SCAN_KINDS = ("contiguous_distance", "erasure_first_failure")  # stop at the first failure
@@ -2341,7 +2642,7 @@ def _bounded_summary(result: mipt.EnsembleResult, extra: dict[str, Any]) -> dict
     long_extras = [
         key
         for key, value in extra.items()
-        if key not in ("files", "path")
+        if key not in ("files", "path", "storage")  # storage is bounded by construction
         and len(json.dumps(_jsonable(value, exact=True))) > MAX_OUTPUT_CHARS // 4
     ]
     if long_extras:  # e.g. a stored spec with a long explicit edge list; it is on disk
@@ -2939,19 +3240,24 @@ def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
     )
 
 
-def _load_directory(out: Path) -> tuple[mipt.EnsembleResult | None, dict | None]:
+def _load_directory(
+    out: Path, files_read: list[Path] | None = None
+) -> tuple[mipt.EnsembleResult | None, dict | None]:
     """Read an output directory, retrying while a running job merges chunks meanwhile.
 
     A merge deletes the chunks it absorbed (``FileNotFoundError`` for a reader
     that listed them) and, on Windows, a file being replaced cannot be opened
     for a moment (``PermissionError``). A file that still cannot be read after
     the retries (another program holds it, or this process may not read it) is
-    an input error that names it.
+    an input error that names it. ``files_read``, if given, is filled with the
+    files that were listed.
     """
 
     def read() -> tuple[mipt.EnsembleResult | None, dict | None]:
         meta = _read_meta(out)
         parts = _result_parts(out)
+        if files_read is not None:
+            files_read[:] = parts
         return (_load_parts_once(parts) if parts else None), meta
 
     try:
@@ -3447,19 +3753,27 @@ def load_results(path: str) -> dict[str, Any]:
     directory. The summary has the same form as :func:`run_ensemble`'s, plus
     the stored ``spec`` when ``spec.json`` exists: exactly as stored (its
     floats are not rounded for display), so passing it back to
-    :func:`start_ensemble_job` resumes or extends the run.
+    :func:`start_ensemble_job` resumes or extends the run. ``storage`` gives
+    the disk use of the saved ``.npz`` files: ``total_megabytes``, each file
+    (``files``) and each array (``arrays``, compressed sizes; with several
+    chunk files, summed by name).
     """
     if not isinstance(path, (str, os.PathLike)):
         raise ValueError("path must be a string")
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise ValueError(f"no such file or directory: {str(p)!r}")
+    parts: list[Path] = [p]
     try:
         if p.is_dir():
-            result, meta = _load_directory(p)
+            result, meta = _load_directory(p, parts)
             if result is None:
                 raise ValueError(f"no saved results in {str(p)!r} (expected result.npz or chunks/)")
             _merge_if_pending(p, result, meta)
+            # a merge replaced the chunks by result.npz
+            parts = [q for q in parts if q.exists()]
+            if (p / _RESULT_FILE).exists() and (p / _RESULT_FILE) not in parts:
+                parts.insert(0, p / _RESULT_FILE)
         else:
             result, meta = _retrying(functools.partial(_load_result_file, p)), None
     except OSError as exc:  # still in use after the retries, or not ours to read
@@ -3468,7 +3782,65 @@ def load_results(path: str) -> dict[str, Any]:
     if meta is not None:
         extra["spec"] = meta.get("spec")
         extra["trajectories_requested"] = meta.get("trajectories")
+    # a file replaced meanwhile: the data was read, only the sizes are missing
+    with contextlib.suppress(OSError, zipfile.BadZipFile):
+        root = p if p.is_dir() else p.parent
+        everything = [q for q in p.rglob("*") if q.is_file()] if p.is_dir() else [p]
+        extra["storage"] = _storage_summary(parts, root, everything)
     return _bounded_summary(result, extra)
+
+
+MAX_STORAGE_FILES = 8
+MAX_STORAGE_ARRAYS = 20
+
+
+def _storage_summary(parts: list[Path], root: Path, everything: list[Path]) -> dict[str, Any]:
+    """The disk use of a saved run, in megabytes: every file, and the arrays of its results.
+
+    ``everything`` is every regular file of the run (``result.npz``, chunks, ``spec.json``,
+    ``provenance.json``, ...); ``total_megabytes`` counts them all and ``files`` lists the
+    largest :data:`MAX_STORAGE_FILES` (``files_not_shown`` counts the rest). ``arrays`` are
+    the members of the ``.npz`` files ``parts``, by compressed size, with the names
+    abbreviated as in the run summary. With several result files (chunks of a run in
+    progress) they are summed by name; at most :data:`MAX_STORAGE_ARRAYS` are listed, the
+    smaller ones summed as one entry.
+    """
+    sizes = sorted(((q.stat().st_size, q) for q in everything), key=lambda s: (-s[0], str(s[1])))
+    files = [
+        {"path": q.relative_to(root).as_posix(), "megabytes": _num(size / 1e6)}
+        for size, q in sizes[:MAX_STORAGE_FILES]
+    ]
+    sums: dict[str, int] = {}
+    for path in parts:
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                name = info.filename.removesuffix(".npy")
+                sums[name] = sums.get(name, 0) + info.compress_size
+    rows = list(sums.items())
+    if len(rows) > MAX_STORAGE_ARRAYS:
+        keep = {name for name, _ in sorted(rows, key=lambda r: -r[1])[: MAX_STORAGE_ARRAYS - 1]}
+        rest = sum(size for name, size in rows if name not in keep)
+        rows = [r for r in rows if r[0] in keep] + [("(other arrays)", rest)]
+    shown = _summary_names([name for name, _ in rows])
+    single = len(parts) == 1
+    arrays = [
+        {
+            **({"file": parts[0].relative_to(root).as_posix()} if single else {}),
+            "name": shown[name],
+            "megabytes": _num(b / 1e6),
+        }
+        for name, b in rows
+    ]
+    out: dict[str, Any] = {
+        "total_megabytes": _num(sum(size for size, _ in sizes) / 1e6),
+        "files": files,
+        "arrays": arrays,
+    }
+    if len(sizes) > MAX_STORAGE_FILES:
+        out["files_not_shown"] = len(sizes) - MAX_STORAGE_FILES
+    if not single:
+        out["arrays_summed_over_files"] = len(parts)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -4100,6 +4472,7 @@ def _capability_sections() -> dict[str, Any]:
             "run_circuit",
             "run_ensemble",
             "estimate_ensemble",
+            "benchmark_ensemble",
             "start_ensemble_job",
             "job_status",
             "cancel_job",
@@ -4260,8 +4633,11 @@ graph t // c); omit trajectories to run all G * c.
 
 ## 3. Long runs
 
-estimate_ensemble(spec, trajectories) gives a rough runtime and the result's
-memory. Above ~60 s use
+estimate_ensemble(spec, trajectories, threads=[1, 32]) gives a rough runtime
+(per thread count), the result's memory and the layout of the saved arrays.
+benchmark_ensemble(spec, trajectories, threads=[1, 32]) measures the run's
+first trajectories on this machine and the size of result.npz; it writes
+nothing. Above ~60 s use
 start_ensemble_job(spec, output_dir=..., trajectories=...), then
 job_status(job_id, wait_seconds=30) until "completed", then
 load_results(output_dir). Jobs save every chunk; call start_ensemble_job

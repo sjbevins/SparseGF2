@@ -87,10 +87,19 @@ claude mcp add sparsegf2 -- sparsegf2-mcp
    (`"realizations"` in `graph`, see below) `trajectories` may be left out: every graph
    then gets `circuits_per_graph` circuits.
 6. **Long runs.** `estimate_ensemble` gives a pessimistic runtime estimate, the number of
-   trajectories and the memory of the result (`result_megabytes`). Above about 60 s, call
+   trajectories and the memory of the result (`result_megabytes`). With `threads=[1, 32]`
+   it adds `by_threads`, the estimate at each count, and it always gives `layout`: the
+   arrays and files that `output_dir` will hold, with shapes, dtypes and uncompressed
+   megabytes (disk use is lower). `benchmark_ensemble(spec, trajectories, threads=[1, 32])`
+   measures instead of modelling: it times the first trajectories of the run on this
+   machine (one thread, and all of them), projects the seconds of the whole run to each
+   count in `threads` (counts beyond the machine's threads are marked as projected),
+   and measures the size of `result.npz`. It writes nothing and takes about twice its
+   `seconds` (default 30). Above about 60 s, call
    `start_ensemble_job(spec, output_dir=..., trajectories=...)`, then
    `job_status(job_id, wait_seconds=30)` until it reports `completed`, then
-   `load_results(output_dir)`. Every chunk is saved as soon as it finishes. To resume
+   `load_results(output_dir)` (its `storage` gives the disk megabytes of each file and
+   array). Every chunk is saved as soon as it finishes. To resume
    after a crash or cancel, or to extend a finished run, call `start_ensemble_job` again
    with the same spec and `output_dir`.
 
@@ -220,7 +229,10 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
   n = 256 (AMD Ryzen 9 9950X3D, 2026-10-15): `erasure_first_failure` with 100 samples about
   2 ms; `uncorrectable_region_counts` about 1 ms for w = 2, 20 ms for w = 3 and 4 s for
   w = 4 (practical only at a few depths). Every n from 32 to 512, and what a region budget
-  costs, are in `benchmarks/results/erasure_cost.md`.
+  costs, are in `benchmarks/results/erasure_cost.md`. These are one machine's numbers, and
+  `estimate_ensemble` is a model: before a long study, run `benchmark_ensemble` on the
+  spec (it measures this machine, writes nothing) and read `estimate_ensemble`'s `layout`
+  and `by_threads` for the data and the thread counts.
 * `stabilizers` lists generators only up to 32 qubits. For large states use
   `stabilizer_weights` or `stabilizer_length_distribution`.
 * Results are summaries capped at about 8000 characters, and `truncated: true` means
