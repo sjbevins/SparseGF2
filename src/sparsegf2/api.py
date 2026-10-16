@@ -34,6 +34,12 @@ Functions
     The same ensembles as resumable background jobs, saved chunk by chunk.
 :func:`load_results`
     Summarize a saved ensemble (a ``.npz`` file or an output directory).
+:func:`sample_erasure_regions`
+    Geometry-correlated erasure regions on a graph (no circuit): the boundary's mean
+    against its exact value, chain diagnostics and notes on mixing; read-only.
+:func:`erasure_curves`
+    The failure probability and tolerance of the independent and correlated erasure
+    channels of a saved run, per coupling; read-only.
 
 Conventions shared by every function: seeds are non-negative ints (``None``
 draws a fresh one, which is reported back so the run can be repeated); qubit
@@ -71,7 +77,7 @@ from typing import Any, TypeVar
 
 import numpy as np
 
-from sparsegf2 import __version__, analysis, graphs, mipt, observables
+from sparsegf2 import __version__, analysis, erasures, graphs, mipt, observables
 from sparsegf2._compile import DEFAULT_MAX_OPS
 from sparsegf2.circuit import Circuit, Instruction, RepeatBlock, _strip_comment
 from sparsegf2.errors import PhaseFreeError
@@ -86,6 +92,7 @@ __all__ = [
     "benchmark_ensemble",
     "cancel_job",
     "capabilities",
+    "erasure_curves",
     "estimate_ensemble",
     "inspect_circuit",
     "job_status",
@@ -94,6 +101,7 @@ __all__ = [
     "quickstart",
     "run_circuit",
     "run_ensemble",
+    "sample_erasure_regions",
     "start_ensemble_job",
 ]
 
@@ -1292,8 +1300,8 @@ def _call_with(fn: Callable, given: dict, fill: dict, what: str) -> Any:
         raise ValueError(f"{what}: {exc}") from None
 
 
-def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any]:
-    """Edges (one array, or a list for a collection) and weights of a ``{"family": "file"}`` graph."""
+def _read_graph_file(graph: dict) -> tuple[int, list[np.ndarray], list[np.ndarray] | None]:
+    """``(num_nodes, graphs, weights)`` of a ``{"family": "file", "path": ...}`` graph."""
     extra = sorted(set(graph) - {"family", "path"})
     if extra:
         raise ValueError(f"graph (file): unknown key(s) {extra}; give only 'path'")
@@ -1304,9 +1312,15 @@ def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any
     if not p.is_file():
         raise ValueError(f"graph (file): no such file {str(p)!r}")
     try:
-        num_nodes, gs, ws = graphs.load(p)
+        return graphs.load(p)
     except OSError as exc:
         raise _unreadable_graph_file(p, exc) from None
+
+
+def _file_graph(graph: dict, n: int) -> tuple[np.ndarray | list[np.ndarray], Any]:
+    """Edges (one array, or a list for a collection) and weights of a ``{"family": "file"}`` graph."""
+    num_nodes, gs, ws = _read_graph_file(graph)
+    p = Path(graph["path"]).expanduser().resolve()
     if num_nodes != n:
         raise ValueError(f"graph (file): {p.name} has num_nodes {num_nodes}, but num_system is {n}")
     if len(gs) == 1:
@@ -4583,6 +4597,1088 @@ def list_jobs() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# erasure tools: regions on a graph (sample_erasure_regions), failure curves of a
+# saved run (erasure_curves)
+# ---------------------------------------------------------------------------
+
+MAX_REGION_COUPLINGS = 16
+"""Most couplings one :func:`sample_erasure_regions` call takes (one row each in the result)."""
+
+MAX_REGION_CHAINS = 32
+MAX_REGION_BYTES = 2**29
+"""Largest memory of the regions :func:`sample_erasure_regions` keeps for the position
+diagnostics (all chains and couplings): 512 MiB of int64 node numbers."""
+
+MAX_EXACT_REGIONS = 100_000_000
+"""Most regions :func:`sample_erasure_regions` enumerates to give the exact mean and variance of
+the boundary (about 8 ns per region compiled)."""
+
+RHAT_WARNING = 1.01
+"""R-hat above this over the chains gets a note (the threshold of Vehtari et al. 2021)."""
+
+ESS_WARNING = 400
+"""An effective sample size below this gets a note."""
+
+EXCHANGE_MIXING_WARNING = 0.05
+"""A replica-exchange acceptance below this between two rungs gets a note."""
+
+DEVIATION_WARNING = 5.0
+"""A mean boundary this many standard errors from its exact value gets a note."""
+
+R_HAT_INFINITE = 1000.0
+"""R-hat is infinite when every half-chain is constant but they differ (the chains are stuck
+apart); JSON has no infinity, so :func:`sample_erasure_regions` reports this number instead."""
+
+MAX_WARNINGS = 6
+MAX_CURVE_ERASURES = 16
+MAX_CURVE_COUPLINGS = 12
+MAX_TOLERANCE_CODES = 4000
+INTERPOLATION_MASS_WARNING = 1e-3
+"""Interpolated sizes that carry more binomial probability than this make a curve incomplete."""
+
+_ROW_CHUNK = 2000  # curves whose tolerance is computed at once (2049 grid points each)
+_REGION_TEXT_CHARS = 240
+
+
+def _region_graph(graph: Any, num_nodes: Any) -> tuple[np.ndarray, int, str, list[str]]:
+    """The one graph of :func:`sample_erasure_regions`: ``(edges, n, family, notes)``.
+
+    A family (``{"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1}``, with
+    ``num_nodes``), a graph file (its own ``num_nodes``; the first graph of a collection) or
+    ``{"edges": [[a, b], ...], "num_nodes": n}``. A collection built with ``realizations`` is
+    refused: this tool samples one graph.
+    """
+    form = (
+        'graph must be an object like {"family": "watts_strogatz", "k": 4, "beta": 0.1, '
+        '"seed": 1} (with num_nodes), {"family": "cycle"}, {"family": "file", "path": ...} or '
+        '{"edges": [[0, 1], ...], "num_nodes": n}'
+    )
+    if not isinstance(graph, dict) or not {"family", "edges"} & set(graph):
+        raise ValueError(f"{form}; got {_shown(graph)}")
+    given = (
+        None
+        if num_nodes is None
+        else _require_int(num_nodes, "num_nodes", minimum=1, maximum=MAX_QUBITS)
+    )
+    notes: list[str] = []
+    if "edges" in graph:
+        _check_keys(graph, ("edges", "num_nodes"), "graph (edges)")
+        inner = graph.get("num_nodes")
+        if inner is not None:
+            inner = _require_int(inner, "graph.num_nodes", minimum=1, maximum=MAX_QUBITS)
+        if inner is not None and given is not None and inner != given:
+            raise ValueError(
+                f"num_nodes is {given} but graph.num_nodes is {inner}: give one of them"
+            )
+        n = inner if inner is not None else given
+        if n is None:
+            raise ValueError(
+                "give num_nodes, the number of qubits n (also those without an edge), with a "
+                "graph of edges"
+            )
+        try:
+            return graphs.from_edges(_edge_list(graph["edges"]), n), n, "edges", notes
+        except ValueError as exc:
+            raise ValueError(f"graph (edges): {exc}") from None
+    if graph.get("family") == "file":
+        n_file, bank, _ = _read_graph_file(graph)
+        if given is not None and given != n_file:
+            raise ValueError(
+                f"graph (file): the file has num_nodes {n_file}, but num_nodes is {given}: "
+                "drop num_nodes (the file carries its own)"
+            )
+        if len(bank) > 1:
+            notes.append(
+                f"the graph file holds {len(bank)} graphs; only the first of {len(bank)} graphs "
+                "is sampled (save another one alone with graphs.save to check it)"
+            )
+        return bank[0], n_file, "file", notes
+    if "realizations" in graph:
+        raise ValueError(
+            "graph.realizations builds a collection of graphs, and this tool samples one: drop "
+            "'realizations' (graph i of a collection is built from the seed [seed, i]: give "
+            "that as 'seed' to check graph i)"
+        )
+    if given is None:
+        raise ValueError(
+            "give num_nodes, the number of qubits n, with a graph family (a graph file carries "
+            "its own)"
+        )
+    edges = _build_graph(graph, given)
+    assert isinstance(edges, np.ndarray), "without realizations a family yields one graph"
+    return edges, given, str(graph["family"]), notes
+
+
+def _region_couplings(couplings: Any) -> np.ndarray:
+    """The couplings of :func:`sample_erasure_regions` as given: finite, distinct, a few."""
+    if isinstance(couplings, (int, float, np.number)) and not isinstance(couplings, bool):
+        couplings = [couplings]
+    if not isinstance(couplings, (list, tuple)):
+        raise ValueError(
+            f"couplings must be a number or a list of numbers such as [0, 1, 2], got {couplings!r}"
+        )
+    if any(isinstance(x, (bool, np.bool_)) for x in couplings):
+        raise ValueError(f"couplings must be numbers, got {list(couplings)!r}")
+    given = erasures._couplings(list(couplings), distinct=True)
+    if given.size > MAX_REGION_COUPLINGS:
+        raise ValueError(
+            f"give at most {MAX_REGION_COUPLINGS} couplings per call (each adds rungs to the "
+            f"chain and a row to the result), got {given.size}: split the list over several "
+            "calls"
+        )
+    return given
+
+
+def _nonincreasing_in_coupling(
+    couplings: Sequence[float], means: Sequence[float], errors: Sequence[float]
+) -> bool | None:
+    """Proposition 2: the mean boundary does not increase with the coupling.
+
+    True when, along the couplings in increasing order, no later mean exceeds an earlier
+    one by more than three standard errors of their difference; None with fewer than two
+    couplings (nothing to compare). The estimates are noisy, so this is a test of the
+    estimates, not of the proposition.
+    """
+    if len(couplings) < 2:
+        return None
+    order = np.argsort(np.asarray(couplings, dtype=np.float64), kind="stable")
+    mu = np.asarray(means, dtype=np.float64)[order]
+    se = np.asarray(errors, dtype=np.float64)[order]
+    for i in range(len(mu) - 1):
+        for j in range(i + 1, len(mu)):
+            if mu[j] - mu[i] > 3.0 * math.hypot(se[i], se[j]) + 1e-12:
+                return False
+    return True
+
+
+def _exact_boundary(
+    edges: np.ndarray, n: int, m: int, geometry: str, couplings: np.ndarray
+) -> tuple[str, list[dict[str, float] | None]]:
+    """The exact mean and variance of the boundary per coupling, and where they come from.
+
+    The ring and the open path have closed forms (whatever their labeling); other graphs
+    are enumerated when ``C(n, m)`` is within :data:`MAX_EXACT_REGIONS`; otherwise only
+    ``J = 0`` is known (closed form of the uniform law).
+    """
+    js = couplings.tolist()
+    rows: list[dict[str, float] | None] = []
+    if geometry in ("cycle", "path"):
+        ring = geometry == "cycle"
+        law = erasures.ring_boundary_distribution if ring else erasures.path_boundary_distribution
+        for j in js:
+            values, p = law(n, m, j)
+            mean = float(np.dot(values, p))
+            rows.append({"mean_boundary": mean, "variance": float(np.dot(p, (values - mean) ** 2))})
+        return f"{'ring' if ring else 'path'} closed form (the graph is a {geometry})", rows
+    total = math.comb(n, m)
+    if total <= MAX_EXACT_REGIONS:
+        counts = erasures.boundary_counts(edges, n, m, budget=MAX_EXACT_REGIONS)
+        moments = erasures.boundary_moments(counts, js)
+        rows = [
+            {"mean_boundary": float(a), "variance": float(b)}
+            for a, b in zip(moments["mean"], moments["variance"], strict=True)
+        ]
+        return f"enumeration of all C({n}, {m}) = {total} regions", rows
+    mean0, var0 = erasures.uniform_boundary_moments(edges, n, m)
+    rows = [{"mean_boundary": mean0, "variance": var0} if j == 0 else None for j in js]
+    return (
+        f"uniform closed form at J = 0 only (C({n}, {m}) has {len(str(total))} digits: too many "
+        "regions to enumerate, and the graph is neither a cycle nor a path)"
+    ), rows
+
+
+def _regions_seconds(
+    *,
+    n: int,
+    m: int,
+    num_edges: int,
+    exact: bool,
+    rungs: int,
+    couplings: int,
+    burn_in: int,
+    samples: int,
+    thin: int,
+    chains: int,
+    enumerated: int,
+) -> float:
+    """A pessimistic estimate of the seconds :func:`sample_erasure_regions` takes.
+
+    The chain costs ``rungs x (burn_in + (samples - 1) thin) x n`` swap proposals per chain,
+    each ``O(degree)``: measured at 19 to 32 ns at mean degree 4 and 30 ns at 8 on one thread
+    of an AMD Ryzen 9 9950X3D (n = 64..1024, 2026-10-16), priced at ``30 + 7.5 x degree`` ns
+    (about 3 times that, as :func:`_correlated_us`). The exact samplers cost up to 12 us each
+    at n = 1024 (priced ``3 + 0.04 n`` us). The diagnostics cost about 17 ns per node of a
+    region (the 8 followed nodes) and 100 ns per sample (priced at 40 and 100 ns), and
+    enumerating costs 8 ns per region (priced at 32 ns).
+    """
+    if exact:
+        sampling = chains * couplings * samples * (3.0 + 0.04 * n) * 1e-6
+    else:
+        degree = 2.0 * num_edges / n
+        sweeps = burn_in + (samples - 1) * thin
+        sampling = chains * rungs * sweeps * n * (30.0 + 7.5 * degree) * 1e-9
+    diagnostics = (
+        2 * chains * couplings * samples * (40e-9 * m + 100e-9)
+    )  # sample_regions checks too
+    return 0.1 + sampling + diagnostics + 32e-9 * enumerated
+
+
+def _sig(x: float | None, digits: int = 5) -> float | None:
+    """``x`` to ``digits`` significant digits; None for None, NaN and infinities."""
+    if x is None or not math.isfinite(x):
+        return None
+    return float(f"{x:.{digits}g}")
+
+
+def _where(node: int | None) -> str:
+    """What a diagnostic followed: the boundary, or the membership of one node."""
+    return "boundary" if node is None else f"node {node}"
+
+
+def _listed(items: list[str], limit: int = 8) -> str:
+    """Comma-separated entries, the first ``limit`` of them and a count of the rest."""
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f" and {len(items) - limit} more"
+
+
+def _regions_mixing_notes(
+    rows: list[dict[str, Any]],
+    details: list[dict[str, Any]],
+    *,
+    method: str,
+    chains: int,
+    samples: int,
+    burn_in: int,
+    pair_acceptance: np.ndarray,
+    ladder: np.ndarray,
+) -> list[str]:
+    """The notes on how well the chains mixed: one per kind of problem, with what to change.
+
+    R-hat above :data:`RHAT_WARNING` (chains only: exact samples are independent), an
+    effective sample size below :data:`ESS_WARNING`, a mean boundary more than
+    :data:`DEVIATION_WARNING` standard errors from its exact value, and a replica-exchange
+    acceptance below :data:`EXCHANGE_MIXING_WARNING` between two rungs. The entries name the
+    coupling, the value and what was followed (the boundary, or the membership of a node).
+    """
+    chain = method == "chain"
+    rhat, ess, off, exchange = [], [], [], []
+    for row, info in zip(rows, details, strict=True):
+        j = f"J = {row['coupling']:g}"
+        if chain and info["r_hat"] is not None and info["r_hat"] > RHAT_WARNING:
+            shown = "infinite" if info["r_hat"] >= R_HAT_INFINITE else f"{info['r_hat']:.3f}"
+            rhat.append(f"{j} ({shown}, {_where(info['r_hat_node'])})")
+        if row["ess"] is not None and row["ess"] < ESS_WARNING:
+            ess.append(f"{j} ({row['ess']:.0f}, {_where(info['slowest'])})")
+        dev = row["deviation_se"]
+        if dev is not None and abs(dev) > DEVIATION_WARNING:
+            off.append(f"{j} ({dev:+.1f})")
+    notes = []
+    if rhat:
+        notes.append(
+            f"R-hat over {chains} chains above {RHAT_WARNING} at {_listed(rhat)}: the chains "
+            f"disagree, so they have not forgotten their starts; raise burn_in (now {burn_in}) "
+            "or samples, add couplings between so that replica exchange helps, and compare "
+            "another seed"
+        )
+    if ess:
+        notes.append(
+            f"effective sample size below {ESS_WARNING} at {_listed(ess)}: raise samples (now "
+            f"{samples}) or chains (now {chains}), or thin more"
+        )
+    if off:
+        notes.append(
+            f"mean boundary more than {DEVIATION_WARNING:g} standard errors from its exact value "
+            f"at {_listed(off)}: "
+            + (
+                "the chains are biased (too short a burn_in leaves the starting states' "
+                "boundaries behind) or the error is underestimated; raise burn_in and compare "
+                "another seed"
+                if chain
+                else "the sampler or the exact value is wrong: report it"
+            )
+        )
+    if chain:
+        for k, rate in enumerate(pair_acceptance.tolist()):
+            if math.isfinite(rate) and rate < EXCHANGE_MIXING_WARNING:
+                exchange.append(f"J = {ladder[k]:g} and {ladder[k + 1]:g} ({100 * rate:.1f}%)")
+    if exchange:
+        notes.append(
+            f"replica exchange accepted in under {100 * EXCHANGE_MIXING_WARNING:.0f}% of attempts "
+            f"between {_listed(exchange, 6)}: add couplings between them (or pass a smaller "
+            "max_step); the colder chains hardly move"
+        )
+    return notes
+
+
+def sample_erasure_regions(
+    graph: dict[str, Any],
+    size: int,
+    couplings: float | list[float],
+    samples: int = 200,
+    *,
+    num_nodes: int | None = None,
+    burn_in: int | None = None,
+    thin: int = 1,
+    tempering: bool = True,
+    chains: int = 4,
+    seed: int | None = None,
+    method: str = "auto",
+    ladder: str | list[float] = "auto",
+    max_step: float | None = None,
+    max_seconds: float = SYNC_ENSEMBLE_MAX_SECONDS,
+) -> dict[str, Any]:
+    """Sample geometry-correlated erasure regions on a graph and check how well they mix.
+
+    A region ``A`` of ``size`` nodes is drawn with probability ``exp(-J b(A)) / Z``, ``b(A)``
+    the edges of the graph leaving ``A`` (``J > 0`` favours compact regions, ``J = 0`` is
+    uniform). This is the graph side of the ``correlated_erasure`` probe, with no circuit:
+    ``chains`` independent runs of :func:`sparsegf2.erasures.sample_regions` (chain ``i``
+    seeded ``[seed, i]``; exact independent samples when the graph is a cycle or a path,
+    otherwise a swap chain with replica exchange), so the settings can be checked before a
+    long run uses them. ``graph`` is ``{"family": ..., params}`` with ``num_nodes``,
+    ``{"family": "file", "path": ...}`` (the first graph of a collection) or
+    ``{"edges": [[a, b], ...], "num_nodes": n}``; ``burn_in=None`` is
+    ``max(200, 8 n)`` sweeps.
+
+    Per coupling (in the order given): the mean boundary with its standard error (from the
+    effective sample size), its variance, the swap and replica-exchange acceptance, the
+    integrated autocorrelation time, effective sample size and R-hat (the slowest of the
+    boundary and the membership of a few nodes: the boundary alone looks mixed on a ring
+    long before the regions have moved), the smallest boundary seen, and the exact mean
+    and variance where they exist (``exact_source`` says which: the ring or path closed
+    form, the enumeration of every region, or the uniform law at ``J = 0``).
+    ``nonincreasing_in_J`` tests Proposition 2 on the estimates; ``mixing`` lists what looks
+    wrong (R-hat above 1.01, effective sample size below 400, exchange acceptance below 5%,
+    a mean far from its exact value) and what to change; ``warnings`` passes on the
+    sampler's own. No note is no proof of equilibrium: repeat with another seed and a
+    longer burn-in. An ``r_hat`` of 1000 stands for infinity (every half-chain constant,
+    and different: the chains are stuck apart); ``null`` means that nothing varied at all.
+    Three example regions at the largest coupling are written as node runs
+    ``start:stop[:step]``.
+
+    The call is refused when its estimated time (:func:`_regions_seconds`, pessimistic)
+    exceeds ``max_seconds``; the message says how to shrink it. Writes nothing.
+    """
+    start = time.perf_counter()
+    samples = _require_int(samples, "samples", minimum=8)
+    chains = _require_int(chains, "chains", minimum=1)
+    if chains > MAX_REGION_CHAINS:
+        raise ValueError(f"chains must be at most {MAX_REGION_CHAINS}, got {chains}")
+    thin = _require_int(thin, "thin", minimum=1)
+    burn = None if burn_in is None else _require_int(burn_in, "burn_in", minimum=0)
+    tempering = _require_bool(tempering, "tempering")
+    method = _require_name(method, "method", erasures.METHODS)
+    if method not in erasures.METHODS:
+        raise ValueError(f"method must be one of {list(erasures.METHODS)}, got {method!r}")
+    extra = erasures._ladder_extra(ladder)
+    step = None if max_step is None else erasures._max_step(max_step)
+    max_seconds = _require_number(max_seconds, "max_seconds", 0.0, math.inf)
+    seed = _resolve_seed(seed)
+    given = _region_couplings(couplings)
+    edges, n, family, notes = _region_graph(graph, num_nodes)
+    m = _require_int(size, "size")
+    if not 1 <= m <= n - 1:
+        raise ValueError(
+            f"size must be between 1 and {n - 1} (the number of erased nodes: 0 and {n} erase "
+            f"nothing or everything), got {m}"
+        )
+    if burn is None:
+        burn = erasures.default_burn_in(n)
+    geometry = _graph_geometry(edges, n)
+    if method == "exact" and geometry == "other":
+        erasures.sample_regions(edges, n, m, [0.0], 8, method="exact", seed=0)  # refuses
+    exact = method != "chain" and geometry != "other"
+    c = given.size
+    rungs = c
+    if not exact:
+        rungs = len(
+            erasures._chain_ladder(
+                np.sort(given),
+                ladder,
+                extra,
+                tempering,
+                step,
+                lambda: erasures.uniform_boundary_moments(edges, n, m)[1],
+            )[0]
+        )
+    if 8 * chains * c * samples * (m + 1) > MAX_REGION_BYTES:
+        raise ValueError(
+            f"the regions of {chains} chains x {c} couplings x {samples:,} samples of size {m} "
+            f"would take {8 * chains * c * samples * (m + 1) / 2**20:,.0f} MiB (limit "
+            f"{MAX_REGION_BYTES // 2**20} MiB): use fewer samples (thin more instead), chains "
+            "or couplings, or a smaller size"
+        )
+    enumerated = 0
+    if geometry == "other" and math.comb(n, m) <= MAX_EXACT_REGIONS:
+        enumerated = math.comb(n, m)
+    estimate = _regions_seconds(
+        n=n,
+        m=m,
+        num_edges=len(edges),
+        exact=exact,
+        rungs=rungs,
+        couplings=c,
+        burn_in=burn,
+        samples=samples,
+        thin=thin,
+        chains=chains,
+        enumerated=enumerated,
+    )
+    if estimate > max_seconds:
+        raise ValueError(
+            f"this call is estimated at about {estimate:.0f} s, above max_seconds="
+            f"{max_seconds:g}: shrink it with fewer chains (now {chains}), fewer samples (now "
+            f"{samples}) or a smaller burn_in (now {burn}) or thin (now {thin}), fewer "
+            "couplings (each adds rungs), or a smaller graph; or raise max_seconds (the CLI "
+            "option --max-seconds) if you are willing to wait"
+        )
+
+    regions = np.empty((chains, c, samples, m), dtype=np.int64)
+    bounds = np.empty((chains, c, samples), dtype=np.int64)
+    swap = np.empty((chains, c))
+    pairs: list[np.ndarray] = []
+    seen: dict[str, int] = {}
+    first: erasures.RegionSample | None = None
+    for i in range(chains):
+        drawn = erasures.sample_regions(
+            edges,
+            n,
+            m,
+            given,
+            samples,
+            burn_in=burn,
+            thin=thin,
+            tempering=tempering,
+            seed=[seed, i],
+            method=method,
+            ladder=ladder,
+            max_step=max_step,
+        )
+        first = drawn if first is None else first
+        regions[i], bounds[i], swap[i] = drawn.regions, drawn.boundaries, drawn.acceptance
+        pairs.append(drawn.exchange_acceptance)
+        for text in drawn.warnings:
+            seen[text] = seen.get(text, 0) + 1
+    assert first is not None
+    sample = first
+    used = sample.method
+    rungs_used = sample.ladder
+    pair_acceptance = analysis.mean_and_error(np.stack(pairs), axis=0)[0]
+    swap_mean = analysis.mean_and_error(swap, axis=0)[0]
+
+    source, truth = _exact_boundary(edges, n, m, sample.geometry, given)
+    rows: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
+    for k in range(c):
+        diag = erasures.chain_diagnostics(bounds[:, k])
+        where = erasures.region_diagnostics(regions[:, k], n)
+        tau_b, tau_p = diag["tau_int"], where["tau_int_max"]
+        slowest = None if tau_b >= tau_p else where["slowest"]
+        ess = min(diag["ess"], where["ess_min"])
+        r_values = [(diag["rhat"], None)] + [
+            (r, v) for r, v in zip(where["rhat"].tolist(), where["vertices"], strict=True)
+        ]
+        known = [(min(r, R_HAT_INFINITE), v) for r, v in r_values if not math.isnan(r)]
+        r_hat, r_node = max(known, key=lambda t: t[0]) if known else (None, None)
+        j = float(given[k])
+        position = int(np.searchsorted(rungs_used, j)) if used == "chain" else -1
+        near = [
+            pair_acceptance[p]
+            for p in (position - 1, position)
+            if 0 <= p < len(pair_acceptance) and math.isfinite(pair_acceptance[p])
+        ]
+        exact_row = truth[k]
+        deviation = None
+        if exact_row is not None and diag["std_error"] > 0:
+            deviation = (diag["mean"] - exact_row["mean_boundary"]) / diag["std_error"]
+        rows.append(
+            {
+                "coupling": j,
+                "mean_boundary": _sig(diag["mean"]),
+                "stderr": _sig(diag["std_error"]),
+                "variance": _sig(diag["variance"]),
+                "acceptance": _sig(swap_mean[k]),
+                "exchange_acceptance": _sig(min(near)) if near else None,
+                "tau_int": _sig(max(tau_b, tau_p)),
+                "ess": _sig(ess),
+                "r_hat": _sig(r_hat),
+                "slowest": _where(slowest),
+                "min_boundary_seen": int(np.min(bounds[:, k])),
+                "exact": exact_row,
+                "deviation_se": _sig(deviation),
+            }
+        )
+        details.append({"r_hat": r_hat, "r_hat_node": r_node, "slowest": slowest})
+
+    top = int(np.argmax(given))
+    examples = []
+    cut_examples = False
+    for k in range(3):
+        chain_i, record = k % chains, samples - 1 - (k // chains) * (samples // 3)
+        text = _compress_ints(regions[chain_i, top, record].tolist())
+        if len(text) > _REGION_TEXT_CHARS:
+            text, cut_examples = text[: _REGION_TEXT_CHARS - 3] + "...", True
+        examples.append({"boundary": int(bounds[chain_i, top, record]), "nodes": text})
+
+    mixing = _regions_mixing_notes(
+        rows,
+        details,
+        method=used,
+        chains=chains,
+        samples=samples,
+        burn_in=burn,
+        pair_acceptance=pair_acceptance,
+        ladder=rungs_used,
+    )
+    warnings_out = [f"{text} [in {k} of {chains} chains]" for text, k in seen.items()]
+    if len(warnings_out) > MAX_WARNINGS:
+        more = len(warnings_out) - MAX_WARNINGS
+        warnings_out = [*warnings_out[:MAX_WARNINGS], f"and {more} more"]
+    notes += _seed_notes(seed)
+    notes.append(
+        f"chain i runs erasures.sample_regions with seed [{seed}, i], i = 0..{chains - 1}; "
+        "boundary means and errors pool the chains (errors from the effective sample size)"
+    )
+    if used == "exact":
+        notes.append(
+            "the samples are exact and independent (the graph is a "
+            f"{sample.geometry}): burn_in, thin, tempering and ladder do not apply, and R-hat "
+            "and the exchange acceptance are not checked"
+        )
+    notes.append(
+        "an empty mixing list is no proof of equilibrium (a bias left by too short a burn_in "
+        "can pass every check): repeat with another seed and a longer burn_in and compare"
+    )
+    out: dict[str, Any] = {
+        "graph": {
+            "family": family,
+            "num_nodes": n,
+            "num_edges": len(edges),
+            "geometry": sample.geometry,
+        },
+        "size": m,
+        "samples": samples,
+        "chains": chains,
+        "method": used,
+    }
+    if used == "chain":
+        out.update(
+            burn_in=sample.burn_in,
+            thin=sample.thin,
+            tempering=sample.tempering,
+            ladder={
+                "rungs": len(rungs_used),
+                "lowest": rungs_used[0],
+                "highest": rungs_used[-1],
+                "max_step": sample.max_step,
+            },
+        )
+    out.update(
+        seed=seed,
+        couplings=rows,
+        exact_source=source,
+        nonincreasing_in_J=_nonincreasing_in_coupling(
+            [r["coupling"] for r in rows],
+            [r["mean_boundary"] for r in rows],
+            [r["stderr"] for r in rows],
+        ),
+        mixing=mixing,
+        warnings=warnings_out,
+        examples={"coupling": float(given[top]), "regions": examples},
+        estimated_seconds=estimate,
+        elapsed_seconds=time.perf_counter() - start,
+        notes=notes,
+    )
+    if cut_examples:
+        _mark_truncated(
+            out,
+            f"an example region is cut to {_REGION_TEXT_CHARS} characters (its node runs are "
+            "listed in full by erasures.sample_regions in Python)",
+        )
+    return _bounded(out)
+
+
+def _graph_geometry(edges: np.ndarray, n: int) -> str:
+    """``"cycle"`` or ``"path"`` when the graph is one cycle or one path through all its nodes
+    (in any labeling), else ``"other"``: the graphs whose regions are sampled exactly."""
+    indptr, indices = erasures._csr(n, np.ascontiguousarray(edges, dtype=np.int64))
+    _, kind = erasures._chain.geometry_order(indptr, indices, n)
+    return erasures._GEOMETRIES[int(kind)]
+
+
+def _read_saved_result(path: Any) -> tuple[mipt.EnsembleResult, Path]:
+    """A saved run (an output directory, its chunks included, or a ``.npz``), read-only."""
+    if not isinstance(path, (str, os.PathLike)):
+        raise ValueError("path must be a string")
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        raise ValueError(f"no such file or directory: {str(p)!r}")
+    try:
+        if p.is_dir():
+            result, _ = _load_directory(p)
+            if result is None:
+                raise ValueError(f"no saved results in {str(p)!r} (expected result.npz or chunks/)")
+        else:
+            result = _retrying(functools.partial(_load_result_file, p))
+    except OSError as exc:  # still in use after the retries, or not ours to read
+        raise _unreadable(p, exc) from None
+    return result, p
+
+
+def _curve_erasures(e: Any) -> list[float] | None:
+    """The erasure probabilities asked for (a number or a list), or None for the default grid."""
+    if e is None:
+        return None
+    values = [e] if isinstance(e, (int, float, np.number)) and not isinstance(e, bool) else e
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"e must be a number or a list of numbers in [0, 1], got {e!r}")
+    if not values:
+        raise ValueError("give at least one value of e")
+    if len(values) > MAX_CURVE_ERASURES:
+        raise ValueError(
+            f"e has {len(values)} values; give at most {MAX_CURVE_ERASURES} values (all are "
+            "shown): analysis.failure_probability_from_curve takes any number in Python"
+        )
+    out = []
+    for x in values:
+        if isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, float, np.number)):
+            raise ValueError(f"e must be numbers in [0, 1], got {x!r}")
+        if not 0.0 <= float(x) <= 1.0:
+            raise ValueError(f"e must be numbers in [0, 1], got {float(x):g}")
+        out.append(float(x))
+    return out
+
+
+def _default_erasures(n: int) -> list[float]:
+    """Eight probabilities log-spaced from ``1 / n`` (about one erased qubit) to 1/2, 2 digits."""
+    low = 1.0 / n
+    if low >= 0.5:
+        return [0.5]
+    grid = {float(f"{x:.2g}") for x in np.geomspace(low, 0.5, 8)}
+    return sorted(grid | {0.5})
+
+
+def _binomial_mass(n: int, es: Sequence[float], sizes: np.ndarray) -> np.ndarray:
+    """``sum over m in sizes of C(n, m) e^m (1 - e)^(n - m)`` for each ``e``: the probability
+    that a binomial erasure has one of these sizes."""
+    out = np.zeros(len(es))
+    if not sizes.size:
+        return out
+    m = sizes.astype(np.float64)
+    log_comb = np.array(
+        [math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1) for k in sizes.tolist()]
+    )
+    for i, x in enumerate(es):
+        if x == 0.0:
+            out[i] = float(np.any(sizes == 0))
+        elif x == 1.0:
+            out[i] = float(np.any(sizes == n))
+        else:
+            out[i] = float(np.exp(log_comb + m * math.log(x) + (n - m) * math.log1p(-x)).sum())
+    return np.minimum(out, 1.0)
+
+
+def _layers_text(layers: np.ndarray) -> str:
+    """A probe's evaluation layers for a message: all of them if few, else a range."""
+    values = layers.tolist()
+    if len(values) <= 10:
+        return str(values)
+    return f"{len(values)} layers from {values[0]} to {values[-1]}"
+
+
+def _chunk_rows(n: int, c: int) -> int:
+    """Codes per chunk: at most :data:`_ROW_CHUNK` curves and about 4 million curve values."""
+    c = max(c, 1)
+    return max(1, min(_ROW_CHUNK // c, (1 << 22) // (c * (n + 1))))
+
+
+def _curve_statistics(
+    chunks: Iterable[np.ndarray], n: int, es: list[float], delta: float, codes: int
+) -> dict[str, Any]:
+    """Ensemble statistics of failure curves, one chunk of codes at a time.
+
+    Each chunk is ``(rows, c, n + 1)``: the curve P(m), m = 0..n, of each code at each of
+    ``c`` couplings (``c = 1`` for the uniform channel). Returns, per coupling: the mean and
+    standard error of ``Phi(e)`` over all ``codes`` (``phi_mean``, ``phi_stderr``), the
+    tolerance ``e_delta`` of each code's own curve summarized by its mean, median and
+    standard error over at most :data:`MAX_TOLERANCE_CODES` codes spaced evenly
+    (``tol_mean``, ``tol_median``, ``tol_stderr``), the tolerance of the mean curve
+    (``tol_of_mean``: the ensemble's, what ``analysis.erasure_tolerance`` gives), and the
+    fraction of those codes whose curve is nondecreasing in m (``monotone``).
+    """
+    keep = min(codes, MAX_TOLERANCE_CODES)
+    mean = squares = curve_sum = np.zeros(0)  # running mean and sum of squares of Phi (Chan et al.)
+    tolerances: list[np.ndarray] = []
+    flags: list[np.ndarray] = []
+    done = 0
+    for chunk in chunks:
+        rows = chunk.shape[0]
+        phi = analysis.failure_probability_from_curve(chunk, n, es)  # (rows, c, len(es))
+        index = np.arange(done, done + rows)
+        picked = (index + 1) * keep // codes > index * keep // codes
+        if picked.any():
+            tol, mono = analysis.tolerance_from_curve(chunk[picked], n, delta, return_monotone=True)
+            tolerances.append(tol)
+            flags.append(mono)
+        here = phi.mean(axis=0)
+        around = ((phi - here) ** 2).sum(axis=0)
+        if not done:
+            mean, squares, curve_sum = here, around, chunk.sum(axis=0)
+        else:
+            gap = here - mean
+            squares = squares + around + gap**2 * done * rows / (done + rows)
+            mean = mean + gap * rows / (done + rows)
+            curve_sum = curve_sum + chunk.sum(axis=0)
+        done += rows
+    assert done == codes, "the chunks must hold every code"
+    with np.errstate(invalid="ignore", divide="ignore"):
+        stderr = np.sqrt(squares / (codes - 1) / codes)
+    each = np.concatenate(tolerances, axis=0)  # (kept, c)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        tol_err = np.std(each, axis=0, ddof=1) / math.sqrt(each.shape[0])
+    return {
+        "phi_mean": mean,
+        "phi_stderr": stderr,
+        "tol_mean": each.mean(axis=0),
+        "tol_median": np.median(each, axis=0),
+        "tol_stderr": tol_err,
+        "tol_of_mean": np.atleast_1d(analysis.tolerance_from_curve(curve_sum / codes, n, delta)),
+        "monotone": np.concatenate(flags, axis=0).mean(axis=0),
+        "tol_codes": each.shape[0],
+    }
+
+
+def _tolerance_entry(stats: dict[str, Any], pick: int | slice) -> dict[str, Any]:
+    """The ``e_delta`` fields of one coupling (``pick`` an index) or of the couplings shown."""
+    return {
+        "per_code_mean": stats["tol_mean"][pick],
+        "per_code_median": stats["tol_median"][pick],
+        "per_code_stderr": stats["tol_stderr"][pick],
+        "of_mean_phi": stats["tol_of_mean"][pick],
+        "codes": stats["tol_codes"],
+    }
+
+
+def _probe_column(
+    result: mipt.EnsembleResult, probe: mipt.Probe, layer: int | None, *, exactly: bool = False
+) -> int | None:
+    """The evaluation of ``probe`` at ``layer`` (``None``: its last, unless ``exactly``), or
+    None if there is none."""
+    own = np.asarray(result.layers(probe.name))
+    if layer is None and not exactly:
+        return int(own.size - 1) if own.size else None
+    hit = np.flatnonzero(own == layer)
+    return int(hit[0]) if hit.size else None
+
+
+def _subset_note(name: str, stats: dict[str, Any], codes: int) -> str | None:
+    if stats["tol_codes"] >= codes:
+        return None
+    return (
+        f"{name}: the per-code e_delta is computed for {stats['tol_codes']} of the {codes} codes "
+        "(evenly spaced) to bound the work; Phi and of_mean_phi use all of them"
+    )
+
+
+def _uniform_curves(
+    result: mipt.EnsembleResult,
+    probe: mipt.Probe,
+    column: int,
+    es: list[float],
+    delta: float,
+    notes: list[str],
+) -> dict[str, Any]:
+    """The independent-erasure channel of an ``erasure_first_failure`` probe at one layer.
+
+    The curve of each code is the hybrid P_C(m): exact up to w where an
+    ``uncorrectable_region_counts`` probe was evaluated at the same layer, sampled above.
+    """
+    n = result.spec.num_system
+    layer = int(result.layers(probe.name)[column])
+    first = np.asarray(result.values[probe.name][:, column, :])
+    code = first.min(axis=1) <= n  # some ordering fails by n qubits: k > 0
+    counts: np.ndarray | None = None
+    exact_info = None
+    found = [
+        (q, col)
+        for q in result.spec.probes
+        if q.kind == "uncorrectable_counts"
+        and (col := _probe_column(result, q, layer, exactly=True)) is not None
+    ]
+    if found:  # the largest exhaustive size w evaluated at this layer
+        best, col = max(found, key=lambda t: np.asarray(result.values[t[0].name]).shape[-1])
+        counts = np.asarray(result.values[best.name][:, col, :])
+        exact_info = {"probe": best.name, "max_size": int(counts.shape[-1])}
+    total = int(first.shape[0])
+    k = int(code.sum())
+    entry: dict[str, Any] = {
+        "layer": layer,
+        "count": total,
+        "count_with_code": k,
+        "q_plus": k / total if total else None,
+        "exact_counts": exact_info,
+        "what": (
+            "independent erasure, over the trajectories that hold a code (k > 0): Phi(e) = "
+            "sum_m C(n, m) e^m (1 - e)^(n - m) P_C(m), P_C(m) from the first-failure samples "
+            "(exact for m <= max_size where counts are given)"
+        ),
+        "phi": None,
+        "e_delta": None,
+    }
+    if k == 0:
+        return entry
+    rows = np.flatnonzero(code)
+    step = _chunk_rows(n, 1)
+
+    def chunks() -> Iterator[np.ndarray]:
+        for a in range(0, rows.size, step):
+            sel = rows[a : a + step]
+            curve = analysis.hybrid_failure_by_size(
+                first[sel], n, exact_counts=None if counts is None else counts[sel]
+            )
+            yield curve[:, None, :]
+
+    stats = _curve_statistics(chunks(), n, es, delta, k)
+    entry["phi"] = {"mean": stats["phi_mean"][0], "stderr": stats["phi_stderr"][0]}
+    entry["e_delta"] = _tolerance_entry(stats, 0)
+    note = _subset_note(probe.name, stats, k)
+    if note:
+        notes.append(note)
+    return entry
+
+
+def _correlated_curves(
+    result: mipt.EnsembleResult,
+    probe: mipt.Probe,
+    column: int,
+    es: list[float],
+    delta: float,
+    notes: list[str],
+) -> dict[str, Any]:
+    """The correlated channel of a ``correlated_erasure`` probe at one layer, per coupling.
+
+    At most :data:`MAX_CURVE_COUPLINGS` couplings (evenly spaced, ends included) are computed.
+    """
+    n = result.spec.num_system
+    layer = int(result.layers(probe.name)[column])
+    couplings, sizes, values = result.correlated(probe.name)
+    sampled = np.asarray(values[:, column])  # (T, c, s)
+    total = int(sampled.shape[0])
+    holders = _code_holders_at(result, np.array([layer]))
+    code = np.ones(total, dtype=bool) if holders is None else holders[:, 0]
+    k = int(code.sum())
+    unknown = np.ones(n + 1, dtype=bool)  # the sizes the probe did not sample
+    unknown[sizes] = False
+    unknown[[0, n]] = False  # P(0) = 0 and P(n) = 1[k > 0] are known
+    interpolated = np.flatnonzero(unknown)
+    mass = _binomial_mass(n, es, interpolated)
+    shown = _subsample(int(couplings.size), MAX_CURVE_COUPLINGS)
+    sampler = result.spec.correlated_sampler(probe.name)
+    entry: dict[str, Any] = {
+        "layer": layer,
+        "count": total,
+        "count_with_code": k if holders is not None else None,
+        "q_plus": (k / total if total else None) if holders is not None else None,
+        "num_couplings": int(couplings.size),
+        "couplings": couplings[shown],
+        "sampled_sizes": _compress_ints(np.sort(sizes).tolist()),
+        "num_interpolated": int(interpolated.size),
+        "interpolated_sizes": _compress_ints(interpolated.tolist()) if interpolated.size else None,
+        "interpolated_mass": mass,
+        "complete": bool(mass.max(initial=0.0) <= INTERPOLATION_MASS_WARNING),
+        "binomial_window": list(analysis.binomial_window(n, es, 1e-6)),
+        "sampler": _sampler_text(sampler),
+        "what": (
+            "correlated erasure, over the trajectories that hold a code (k > 0): the region of "
+            "M ~ Bin(n, e) erased qubits is drawn with probability proportional to exp(-J b(A)); "
+            "Phi_J(e) = sum_m C(n, m) e^m (1 - e)^(n - m) P_J(m), P_J(m) the sampled failure "
+            "fraction, linearly interpolated between sizes the probe did not sample"
+        ),
+        "phi": None,
+        "e_delta": None,
+    }
+    if holders is None:
+        entry.pop("count_with_code")
+        entry["what"] += "; here every trajectory counts, k = 0 as P = 0"
+        notes.append(
+            f"{probe.name}: no code_dimension or erasure_first_failure probe covers layer "
+            f"{layer}, so trajectories without a code (k = 0) count as P = 0 in these curves; "
+            "add one evaluated at the same layers to average over the codes (k > 0) only"
+        )
+    if k == 0:
+        return entry
+    rows = np.flatnonzero(code)
+    step = _chunk_rows(n, int(shown.size))
+
+    def chunks() -> Iterator[np.ndarray]:
+        for a in range(0, rows.size, step):
+            sel = rows[a : a + step]
+            yield analysis.correlated_failure_curve(sampled[sel][:, shown, :], sizes, n)[0]
+
+    stats = _curve_statistics(chunks(), n, es, delta, k)
+    entry["phi"] = {"mean": stats["phi_mean"], "stderr": stats["phi_stderr"]}
+    entry["e_delta"] = _tolerance_entry(stats, slice(None)) | {
+        "monotone_fraction": stats["monotone"]
+    }
+    note = _subset_note(probe.name, stats, k)
+    if note:
+        notes.append(note)
+    if interpolated.size:
+        notes.append(
+            f"{probe.name}: sizes {entry['interpolated_sizes']} were not sampled and are "
+            "linearly interpolated; interpolated_mass is the binomial probability they carry "
+            "at each e"
+            + (
+                ""
+                if entry["complete"]
+                else f" (above {100 * INTERPOLATION_MASS_WARNING:g}% somewhere: Phi there "
+                "leans on the interpolation; sample more sizes)"
+            )
+        )
+    if sampler["method"] != "exact":
+        notes.append(
+            f"{probe.name}: its regions come from a swap chain ({entry['sampler']}) whose "
+            "mixing is not checked here: check it with sample_erasure_regions on the same "
+            "graph, size, couplings and settings"
+        )
+    return entry
+
+
+def erasure_curves(
+    path: str,
+    e: float | list[float] | None = None,
+    delta: float = 0.01,
+    layer: int | None = None,
+) -> dict[str, Any]:
+    """Failure probability and tolerance of the erasure channels of a saved run, per coupling.
+
+    ``path`` is an output directory (chunks included) or a ``result.npz``. For the run's
+    ``erasure_first_failure`` probes (the independent channel, with the exact
+    ``uncorrectable_region_counts`` for ``m <= w`` where one was evaluated at the same layer)
+    and ``correlated_erasure`` probes (one curve per coupling), at ``layer`` (default: each
+    probe's last evaluation), over the trajectories that hold a code (k > 0): ``q_plus``
+    (the fraction of trajectories that do) and ``count_with_code``; ``phi``, ``Phi(e)`` with
+    its standard error at each ``e`` (default eight values log-spaced from 1/n to 1/2); and
+    ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}`` of each code's own curve
+    (``per_code_mean``, ``per_code_median``, ``per_code_stderr``) and of the mean curve
+    (``of_mean_phi``: the ensemble's tolerance, what ``analysis.erasure_tolerance`` returns
+    for the whole ensemble, not the mean of the per-code ones). For a correlated channel,
+    ``interpolated_sizes`` are the sizes the probe did not sample, whose curve is
+    interpolated, ``interpolated_mass`` the binomial probability they carry at each ``e``,
+    ``complete`` whether that stays below 0.1% and ``binomial_window`` the sizes (from, to)
+    that carry all but a millionth of the probability at the ``e`` given (the sizes worth
+    sampling). A curve that is exact for small sizes at
+    every coupling needs the saved codes (``StabilizerCode.boundary_failure_counts``).
+
+    The output is bounded: at most :data:`MAX_CURVE_COUPLINGS` couplings are shown (evenly
+    spaced, ends included; ``truncated`` is then set). Writes nothing.
+    """
+    if not isinstance(path, (str, os.PathLike)):
+        raise ValueError("path must be a string")
+    given = _curve_erasures(e)
+    level = _require_number(delta, "delta", 0.0, 1.0)
+    at = None if layer is None else _require_int(layer, "layer", minimum=0)
+    result, where = _read_saved_result(path)
+    n = result.spec.num_system
+    probes = result.spec.probes
+    firsts = [p for p in probes if p.kind == "erasure_first_failure"]
+    correlated = [p for p in probes if p.kind == "correlated_erasure"]
+    if not firsts and not correlated:
+        raise ValueError(
+            f"the run in {str(where)!r} has no erasure_first_failure or correlated_erasure "
+            f"probe (its probes: {[p.name for p in probes]}): add one to the spec and rerun, "
+            'for example {"kind": "erasure_first_failure", "samples": 100} or {"kind": '
+            '"correlated_erasure", "couplings": [0, 1, 2]}; uncorrectable_region_counts alone '
+            "covers only the sizes up to its w"
+        )
+    es = given if given is not None else _default_erasures(n)
+    columns = {p.name: _probe_column(result, p, at) for p in [*firsts, *correlated]}
+    if all(col is None for col in columns.values()):
+        evaluated = "; ".join(
+            f"{p.name} was evaluated at {_layers_text(np.asarray(result.layers(p.name)))}"
+            for p in [*firsts, *correlated]
+        )
+        raise ValueError(f"layer {at} was not evaluated by any erasure probe: {evaluated}")
+    notes: list[str] = []
+    uniform = {
+        p.name: _uniform_curves(result, p, col, es, level, notes)
+        for p in firsts
+        if (col := columns[p.name]) is not None
+    }
+    curves = {
+        p.name: _correlated_curves(result, p, col, es, level, notes)
+        for p in correlated
+        if (col := columns[p.name]) is not None
+    }
+    skipped = [name for name, col in columns.items() if col is None]
+    if skipped:
+        notes.append(f"layer {at} was not evaluated by {skipped}: they are left out")
+    for name, entry in {**uniform, **curves}.items():
+        if entry.get("count_with_code") == 0:
+            notes.append(
+                f"{name}: no trajectory holds a code (k > 0) at layer {entry['layer']}, so "
+                "there is no curve to average"
+            )
+    if curves:
+        notes.append(
+            "e_delta.per_code_* are the tolerances of each code's own Phi, summarized over the "
+            "codes; of_mean_phi is the tolerance of the ensemble-mean Phi (they differ: Phi is "
+            "linear in P(m), the tolerance is not linear in Phi)"
+        )
+    out: dict[str, Any] = {
+        "path": str(where),
+        "num_trajectories": result.num_trajectories,
+        "num_system": n,
+        "layer": at,
+        "delta": level,
+        "e": es,
+    }
+    if uniform:
+        out["uniform"] = uniform
+    if curves:
+        out["correlated"] = curves
+    out["notes"] = notes
+    return _bounded(_fit_curves(out))
+
+
+def _fit_curves(out: dict[str, Any]) -> dict[str, Any]:
+    """Show fewer couplings of the correlated entries until the result fits the output limit.
+
+    ``truncated`` is set (with a note) when a run has more couplings than are shown.
+    """
+    entries = out.get("correlated")
+    if not entries:
+        return out
+    cut_note = (
+        "only some couplings are shown (evenly spaced, ends included) to fit the size limit; "
+        "result.npz holds every value (EnsembleResult.correlated(), and "
+        "analysis.correlated_failure_curve computes any curve)"
+    )
+    candidate = out
+    for keep in (MAX_CURVE_COUPLINGS, 8, 6, 4, 3, 2, 1):
+        shown: dict[str, Any] = {}
+        for name, entry in entries.items():
+            pick = _subsample(len(entry["couplings"]), keep)
+            row = dict(entry)
+            row["couplings"] = entry["couplings"][pick]
+            if entry["phi"] is not None:
+                row["phi"] = {key: v[pick] for key, v in entry["phi"].items()}
+                row["e_delta"] = {
+                    key: (v[pick] if isinstance(v, np.ndarray) else v)
+                    for key, v in entry["e_delta"].items()
+                }
+            shown[name] = row
+        candidate = {**out, "correlated": shown}
+        if any(len(row["couplings"]) < row["num_couplings"] for row in shown.values()):
+            candidate["truncated"] = True
+            candidate["notes"] = [*out["notes"], cut_note]
+        if len(json.dumps(_clean(candidate))) <= MAX_OUTPUT_CHARS:
+            return candidate
+    return candidate
+
+
+# ---------------------------------------------------------------------------
 # self-description
 # ---------------------------------------------------------------------------
 
@@ -4669,6 +5765,8 @@ def _capability_sections() -> dict[str, Any]:
             "cancel_job",
             "list_jobs",
             "load_results",
+            "sample_erasure_regions",
+            "erasure_curves",
         ],
         "instructions": {
             kind: [g.name for g in all_gates(kind)] for kind in KINDS if all_gates(kind)
@@ -4821,6 +5919,12 @@ probability measurement_rate.
 Graph disorder: "graph": {..., "seed": 1, "realizations": G} plus
 "circuits_per_graph": c runs c circuits on each of G graphs (trajectory t on
 graph t // c); omit trajectories to run all G * c.
+
+Geometry-correlated erasures: the probe correlated_erasure measures P_{C,G,J}(m), the
+failure fraction of m-qubit regions drawn with weight exp(-J b_G(A)) (b_G: edges of the
+graph leaving A). Before a large run check the sampler on the graph with
+sample_erasure_regions(graph, size, couplings) (no circuit; mixing notes, exact checks);
+after it, erasure_curves(output_dir) gives Phi(e) and the tolerance e_delta per coupling.
 
 ## 3. Long runs
 
