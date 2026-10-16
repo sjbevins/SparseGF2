@@ -14,11 +14,17 @@ defined where it first appears, every formula is the one the code computes,
 and every statement about the code cites the function it describes as
 `path::function` (paths relative to `src/sparsegf2/`).
 
-**Status.** Sections 1 to 6 and 9 to 11 describe the code as committed: the
-graph side (`erasures.py`, `_kernel/erasure_chain.py`), the code side
-(`codes.py`, `_kernel/erasure_failure.py`) and the curves (`analysis.py`).
-Sections 7 and 8, on the in-run probe, its JSON form, the MCP tools and the
-cost of evaluating it during a run, are placeholders until those parts land.
+**What is built.** The graph side (`erasures.py`, `_kernel/erasure_chain.py`):
+boundaries, exact densities of states, the exact ring and path samplers and
+the swap chain with replica exchange, with diagnostics. The code side
+(`codes.py`, `_kernel/erasure_failure.py`): failures of sampled regions,
+exact boundary-resolved counts and the $J \to \infty$ limits on saved codes.
+The curves (`analysis.py`): exact $P_J(m)$, full curves, $\Phi$ and
+$\varepsilon_\delta$. The in-run probe `mipt.correlated_erasure`
+(`_kernel/ensemble.py`), and the read-only tools `sample_erasure_regions` and
+`erasure_curves` in the JSON service, the CLI (`sparsegf2 regions`,
+`sparsegf2 curves`) and the MCP server (§7). Everything here describes that
+code, at randomness contract 2.
 
 Companion documents: [random-region-erasure.md](random-region-erasure.md) (the
 uniform case $J = 0$ in depth: $P_C(m)$, $\Phi_C(e)$, $e_\delta$, the first-failure
@@ -728,8 +734,8 @@ routes.
 ### 3.8 Why exact large-$J$ answers need structure or small size
 
 For $m = n/2$, finding $b_{\min}(G, m)$ is the **minimum bisection** problem,
-which is NP-hard for general graphs (Garey, Johnson and Stockmeyer 1976; cited
-from memory, not re-checked for this document). So no general shortcut to
+which is NP-hard for general graphs (the abstract of Feige and Krauthgamer
+2002 states it; reference in §11). So no general shortcut to
 $\mathcal{M}_{G,m}$ is expected: the simulator gives the exact $J \to \infty$
 answer on structured graphs (the ring and the path, in closed form and in
 $O(n^2)$ column additions) and on small cases by enumeration within a budget.
@@ -959,7 +965,9 @@ Ryzen 9 9950X3D, 2026-10-16). Recording a region scans the mask, $O(n)$.
 
 ### 4.5 Replica exchange
 
-With `tempering` and a ladder of $L \ge 2$ rungs $J_0 \lt J_1 \lt \dots \lt J_{L-1}$,
+Replica exchange, or parallel tempering (Swendsen and Wang 1986; Hukushima
+and Nemoto 1996; Geyer 1991 is commonly credited too; see §11): with
+`tempering` and a ladder of $L \ge 2$ rungs $J_0 \lt J_1 \lt \dots \lt J_{L-1}$,
 one chain runs per rung. After every sweep, for $i = 0, \dots, L - 2$ in that
 order, the states of rungs $i$ and $i + 1$ are exchanged with probability
 
@@ -1320,10 +1328,12 @@ error whatever the correlation inside each chain:
 $\operatorname{Var}\hat P_t = \operatorname{Var}_C(P_C) + \mathbb{E}_C\operatorname{Var}(\hat P_t \mid C)$
 is estimated as a whole by the spread. Two conditions:
 
-1. **Independent streams per code.** With `correlated_failure`, pass a
-   different seed per code (for example `seed=[base, t]`). The same seed draws
-   the same regions for every code (common random numbers); the spread over
-   codes then misses the variance of that one region sample.
+1. **Independent streams per code.** The in-run probe has them: every
+   trajectory, evaluation and size draws from its own stream (§7.4). With
+   `correlated_failure` on saved codes, pass a different seed per code (for
+   example `seed=[base, t]`). The same seed draws the same regions for every
+   code (common random numbers); the spread over codes then misses the variance
+   of that one region sample.
 2. **Condition on a code.** A code with $k = 0$ fails nowhere, at every $J$.
    `analysis.mean_over_codes(values, holds_code)` averages only the rows with
    $k > 0$ and returns `(mean, std_error, count)`.
@@ -1700,24 +1710,376 @@ print("binomial window at n = 256, e = 0.1, tol = 1e-9:", (lo, hi))
 
 ## 7. From the kernels to the code you run
 
-*(to be completed once the in-run probe and the tools land)*
+### 7.1 The dispatch table
 
-This section will give the dispatch table from each kernel function to the
-Python function, the JSON form and the CLI and MCP entry points; the in-run
-probe's JSON form and its value layout; its random stream and draw order; and
-the MCP tools. Until then, the Python entry points are those named in §4 and
-§6: `erasures.sample_regions`, `StabilizerCode.correlated_failure`,
-`StabilizerCode.boundary_failure_counts`, the window limits, and the
-`analysis` curve functions.
+| compiled kernel (`_kernel/...`) | Python | JSON service, CLI and MCP |
+|---|---|---|
+| `erasure_chain.py::sample_chain`, `ring_exact_sample`, `path_exact_sample`, `geometry_order` | `erasures.sample_regions` (`RegionSample`), `sample_ring_regions`, `sample_path_regions` | `api.sample_erasure_regions`, `sparsegf2 regions`, MCP tool `sample_erasure_regions` (§7.5) |
+| `erasure_chain.py::enumerate_boundaries` | `erasures.boundary_counts`, `minimum_boundary_regions`; `boundary_moments` and `uniform_boundary_moments` in numpy and exact rationals | the exact values `sample_erasure_regions` compares with |
+| `erasure_failure.py::region_failures` | `StabilizerCode.region_failures`, `StabilizerCode.correlated_failure` (`CorrelatedFailure`) | (saved codes, Python only) |
+| `erasure_failure.py::boundary_failure_counts`, `boundary_columns` | `StabilizerCode.boundary_failure_counts` (`BoundaryCounts`), `codes.boundary_columns` | (saved codes, Python only) |
+| `erasure_failure.py::window_first_failure`; `entropy.py::erasure_profile_rows` | `StabilizerCode.window_first_failure`, `interval_failure_by_size`; `end_window_failure_by_size` | (saved codes, Python only) |
+| `ensemble.py::correlated_erasure_rows` (the exact samplers or `sample_chain`, then `region_failures`) | the probe `mipt.correlated_erasure`; `EnsembleResult.correlated` | `{"kind": "correlated_erasure", ...}` in `run_ensemble`, `estimate_ensemble`, `start_ensemble_job`; `sparsegf2 ensemble`; the MCP ensemble tools (§7.2, §7.3) |
+| (numpy) | `analysis.exact_correlated_failure`, `correlated_failure_curve`, `failure_probability_from_curve`, `tolerance_from_curve`, `binomial_window`, `mean_over_codes` | `api.erasure_curves`, `sparsegf2 curves`, MCP tool `erasure_curves` (§7.5) |
+
+The ensemble engine calls the graph-side kernels themselves, with the same
+ladders, so a trajectory's regions are exactly those that
+`erasures.sample_regions` would draw from the same random state (§7.4), and
+the graph-side tools check the very sampler the probe runs.
+
+### 7.2 The probe
+
+```text
+mipt.correlated_erasure(couplings, sizes=None, samples=100, name=None, *, burn_in=None,
+                        thin=1, tempering=True, method="auto", ladder="auto",
+                        max_step=None, geometry="interaction", checkpoints=None) -> Probe
+```
+
+At each of its evaluations, for every coupling $J$ in `couplings` and size $m$
+in `sizes`, the probe draws `samples` regions $A_s$ of size $m$ from
+$Q_J(\cdot \mid m)$ on the erasure graph and records the failing fraction,
+the estimate $\hat P_{C,G,J}(m)$ of §5.1 for the code the trajectory holds
+there (`mipt.py::correlated_erasure`):
+
+* `couplings`: one finite number or a list of distinct ones, any order
+  ($J = \pm\infty$ is refused, with the exact routes of §3.7);
+* `sizes`: distinct sizes in $[1, n-1]$, any order, as a list or a range
+  string `"a:b[:step]"` with Python slice semantics (`"2:15:2"` is 2, 4, ..., 14),
+  or None (default) for every $m = 1, \dots, n-1$, filled in for the spec's $n$;
+* `samples`, `burn_in` (None: `erasures.default_burn_in(n)` $= \max(200, 8n)$
+  sweeps), `thin`, `tempering`, `method`, `ladder`, `max_step`: exactly those of
+  `erasures.sample_regions` (§4), so a cycle or path is sampled exactly and
+  any other graph by the swap chain with its automatic ladder;
+* `geometry`, the erasure graph $G$: `"interaction"` (default; the trajectory's
+  own interaction graph, the study's $G$; for a graph collection, each
+  trajectory's own graph), or `"cycle"` / `"path"` over the qubit labels
+  $0, \dots, n-1$ (the physical ring or chain a Watts–Strogatz circuit is built
+  on; `"cycle"` needs $n \ge 3$);
+* `name` and `checkpoints` as for every probe. It needs a reference.
+
+In JSON the same arguments are keys of the probe object:
+
+```json
+{"kind": "correlated_erasure", "couplings": [0, 1, 2], "sizes": "8:57:8", "samples": 100,
+ "burn_in": null, "thin": 1, "tempering": true, "method": "auto", "ladder": "auto",
+ "max_step": null, "geometry": "interaction", "name": "correlated_erasure",
+ "checkpoints": "final"}
+```
+
+`ladder` is `"auto"`, `"given"` or a list of extra couplings; every key but
+`kind` and `couplings` may be left out. The spec is checked when it is built:
+sizes outside $[1, n-1]$, `method="exact"` on a graph that is neither a cycle
+nor a path, a list `ladder` without tempering, a ladder of too many rungs, and
+a working memory of more than 2 GiB per thread (one size's regions,
+$8cS(m+1)$ bytes) are refused there, naming `probes[i]` in JSON; `run` also
+refuses more than `mipt.MAX_WORKING_BYTES` (8 GiB) over all running threads.
+`MonitoredCircuit.correlated_sampler(name)` says before a run how the probe
+will draw: `method` (`"exact"`, `"chain"`, or `"mixed"` for a
+collection with both), `graphs`, `exact_graphs`, `geometries`, and for the
+chain `rungs` (the fewest and most of any ladder), `max_step`, `burn_in`,
+`thin` and `tempering`.
+
+**What it does with $k = 0$.** A code without logical qubits never fails: the
+probe records 0 and draws nothing, also for the evaluations after a
+`stop_when_purified` stop.
+
+### 7.3 The value layout
+
+`EnsembleResult.values[name]` is float64 of shape
+`(trajectories, evaluations, len(couplings) * len(sizes))`, coupling-major:
+column `c * len(sizes) + i` is `couplings[c]` at `sizes[i]`, both in the order
+given. `EnsembleResult.correlated(name=None)` returns
+`(couplings, sizes, values)` with `values` the same array as
+`(trajectories, evaluations, c, s)`:
+
+$$
+\texttt{values}[t, e, c, i] = \frac{1}{S}\sum_{s=1}^{S} F_C(A_s), \qquad A_1, \dots, A_S \text{ drawn at } J = \texttt{couplings}[c],\ m = \texttt{sizes}[i],
+$$
+
+for trajectory row $t$ at evaluation $e$ (the layers are
+`EnsembleResult.layers(name)`). `name` may be left out when the spec has one
+such probe. The JSON summary of `run_ensemble` and `load_results` shows, at
+the last evaluation where some trajectory holds a code: `what`, `at_layer`,
+`count`, `count_with_code` (the trajectories with $k > 0$, when a
+`code_dimension` or `erasure_first_failure` probe covers the layers; without
+one the mean is over every trajectory, $k = 0$ counting as 0, and a note says
+so), `couplings` and `sizes` (at most 12 couplings and 17 sizes shown, evenly
+spaced with the ends kept; fewer when the summary must shrink, with a note),
+`mean` and `stderr` (`mean[i][j]` is `couplings[i]` at `sizes[j]`), `sampler`
+(one line: the exact samplers, or the chain's rungs, burn-in and thinning) and
+`vs_depth` (`layers`, `count_with_code`, `sizes`, and `mean[i][d][j]` at
+`couplings[i]`, `layers[d]`, `sizes[j]`). For a chain, a note says to check
+its mixing with `sample_erasure_regions` before a large run: the probe stores
+only the failure fractions, so the summary cannot see a chain that has not
+mixed (§8.4). `estimate_ensemble` prices the probe and reports
+`working_megabytes`, the regions the running threads hold at once.
+
+### 7.4 The random streams, and what a saved run pins
+
+Under randomness contract 2 (`mipt.RANDOMNESS_CONTRACT`), each size of each
+evaluation draws from its own stream. With `key_probe` the run's probe key
+(words 2 and 3 of the run's `SeedSequence`), $h$ the 64-bit hash of the probe's
+name (the first 8 bytes of `blake2b(name, digest_size=8)`, little-endian), $t$
+the trajectory index and $L$ the layer, size $m$ draws from
+
+$$
+\texttt{stream\_state}\big(\texttt{key\_probe},\ \mathrm{mix}(\mathrm{mix}(t, h, L),\ m,\ 0)\big),
+\qquad \mathrm{mix}(a, b, c) = \mathrm{sm}(\mathrm{sm}(\mathrm{sm}(a) \oplus b) \oplus c),
+$$
+
+with `sm` splitmix64 (`_kernel/rng.py::mix`; `_kernel/ensemble.py`, module
+docstring). **Draw order** (`_kernel/ensemble.py::correlated_erasure_rows`):
+for each size in the order given, the stream is set as above, and then exactly
+the draws of `erasures.sample_regions` follow: the exact ring or path sampler
+with the couplings in increasing order (§4.2, §4.3), or the swap chain on the
+size's ladder, every rung started afresh from a uniform region with a full
+burn-in (§4.4–§4.7, §4.10). Failures are then evaluated without drawing. With
+$k = 0$ nothing is drawn. Consequences:
+
+* a size's values depend only on (seed, trajectory, probe name, layer, size,
+  the couplings and sampler settings, the erasure graph and the state), never
+  on the other sizes requested, other probes, or earlier evaluations;
+* `EnsembleResult.replay(t, probes=[...], checkpoints=[L])` reproduces them,
+  also for a probe with a subset of the sizes in another order (the couplings
+  may be in any order too);
+* nothing is carried from one evaluation to the next (no warm start), which
+  is what makes the values reproducible one by one, and is why every
+  evaluation pays a full burn-in (§8).
+
+**What a saved run pins.** The draws also depend on what the spec resolved
+for its $n$: the default sizes and burn-in, the exact-or-chain class of each
+erasure graph, and every replica-exchange ladder (which depend on
+`erasures.default_burn_in`, `coupling_ladder` and $\operatorname{Var}_0(b)$).
+A saved result stores them (`EnsembleResult.load` keeps the stored sizes,
+burn-in, classes and ladders), so a replay of a loaded run reproduces it even
+if those rules change in a later version, and a resume or merge under rules
+that now resolve otherwise is refused as another protocol. The pinned digest
+in `tests/test_randomness_contract.py` freezes the rules of this version.
+
+### 7.5 The two read-only tools
+
+Both are in the JSON service (`api.py`), the CLI and the MCP server, and
+neither writes anything.
+
+**`sample_erasure_regions`** checks the sampler on a graph, with no circuit:
+
+```text
+api.sample_erasure_regions(graph, size, couplings, samples=200, *, num_nodes=None,
+                           burn_in=None, thin=1, tempering=True, chains=4, seed=None,
+                           method="auto", ladder="auto", max_step=None, max_seconds=60)
+sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1 \
+    --size 16 --couplings 0 1 2 --samples 400 --chains 8 --seed 7 [--json]
+```
+
+`graph` is a family (`{"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1}`
+with `num_nodes`), a graph file (`{"family": "file", "path": ...}`, its first
+graph) or `{"edges": [[a, b], ...], "num_nodes": n}`. It runs `chains`
+independent calls of `erasures.sample_regions`, chain $i$ seeded `[seed, i]`,
+and returns per coupling (`couplings`, in the order given): `mean_boundary`
+with its `stderr` (from the effective sample size), `variance`, `acceptance`,
+`exchange_acceptance`, `tau_int`, `ess` and `r_hat` (the slowest of the
+boundary and of the membership of a few nodes, named by `slowest`: the
+positional diagnostics of §5.3), `min_boundary_seen`, and `exact`
+(`mean_boundary`, `variance`) with `deviation_se` where an exact value exists:
+the ring or path closed form, the enumeration of every region when
+$\binom{n}{m} \le 10^8$, or the uniform law at $J = 0$ (`exact_source` says
+which). At the top level: `graph` (with its `geometry`), `method`, the
+`ladder` (`rungs`, `lowest`, `highest`, `max_step`), `burn_in`, `thin`,
+`tempering`, `seed`, `nonincreasing_in_J` (Proposition 2 on the estimates,
+within 3 standard errors), `mixing` (one note per kind of problem, saying what
+to change: R-hat above 1.01, an effective sample size below 400, an exchange
+acceptance below 5%, a mean more than 5 standard errors from its exact
+value), `warnings` (the sampler's own), three `examples` of regions at the
+largest coupling, `estimated_seconds`, `elapsed_seconds` and `notes`. An
+`r_hat` of 1000 stands for infinity (chains stuck apart). It is refused when
+its estimated time exceeds `max_seconds` (the MCP tool keeps the default
+60 s). An empty `mixing` list is no proof of equilibrium (§4.9).
+
+**`erasure_curves`** turns a saved run into channels:
+
+```text
+api.erasure_curves(path, e=None, delta=0.01, layer=None)
+sparsegf2 curves runs/erasure --eps 0.02 0.05 0.1 --delta 0.01 [--layer L] [--json]
+```
+
+For each `erasure_first_failure` probe (`uniform`: the independent channel,
+exact for $m \le w$ where an `uncorrectable_region_counts` probe was evaluated
+at the same layer) and each `correlated_erasure` probe (`correlated`, one row
+per coupling), at `layer` (default: each probe's last evaluation), over the
+trajectories that hold a code: `count`, `count_with_code`, `q_plus` (their
+fraction), `phi` (`mean` and `stderr` of $\Phi(e)$ at each `e`; default eight
+values log-spaced from $1/n$ to $1/2$), and `e_delta`: `of_mean_phi`, the
+tolerance of the ensemble-mean $\Phi$ (the ensemble's tolerance), and
+`per_code_mean`, `per_code_median`, `per_code_stderr` of each code's own
+tolerance (they differ: $\Phi$ is linear in $P$, the tolerance is not), with
+`monotone_fraction` for the correlated curves (the fraction of codes whose
+curve is monotone in $m$, §6.7). A correlated entry also lists
+`sampled_sizes`, `interpolated_sizes` and `interpolated_mass` (the binomial
+probability the interpolated sizes carry at each $e$; `complete` when it stays
+below 0.1%), `binomial_window` (the sizes carrying all but $10^{-6}$ of the
+probability at the given $e$: the ones worth sampling), and `sampler`. The
+per-code curves are `analysis.correlated_failure_curve` of the stored
+fractions (P(0) = 0, P(n) = 1, linear interpolation between sampled sizes),
+then `failure_probability_from_curve` and `tolerance_from_curve` (§6.6), so
+the tool's numbers are exactly those functions' (§9(e) checks it). Exact
+small-$m$ curves need the saved codes (`StabilizerCode.boundary_failure_counts`).
+
+A call of the first on the Watts–Strogatz graph of §3.5 (fast at $n = 16$;
+§9(e) calls the second on a saved run):
+
+```python
+from sparsegf2 import api
+
+check = api.sample_erasure_regions(
+    {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": ws_seed}, 8, [0, 1, 2],
+    num_nodes=16, seed=1,
+)
+assert check["method"] == "chain" and check["exact_source"].startswith("enumeration")
+assert check["nonincreasing_in_J"]
+for row in check["couplings"]:
+    assert abs(row["deviation_se"]) < 5  # the pooled chains against the exact <b>_J
+print(f"{check['ladder']['rungs']} rungs; R-hat per J:", [row["r_hat"] for row in check["couplings"]])
+print("mixing notes:", check["mixing"])
+```
 
 ## 8. Cost and accuracy
 
-*(to be completed once the in-run probe and the tools land)*
+### 8.1 What an evaluation costs
 
-This section will give the cost of an evaluation (from the estimates and a
-measurement) and how to choose `samples`, `burn_in`, `thin` and the couplings
-for tempering. The per-proposal cost of the chain is in §4.4 and the cost of a
-sampler call in §4.7.
+Per evaluation of a trajectory that holds a code, and per size $m$, the probe
+pays
+
+* **the regions:** for the chain,
+  $L \cdot \big(\texttt{burn\_in} + (S - 1)\,\texttt{thin}\big) \cdot n$ swap
+  proposals for an $L$-rung ladder, at about 20 ns each at mean degree 4 and
+  30 ns at degree 8 (one thread); for the exact samplers, $c \cdot S$ samples
+  of a few microseconds each;
+* **the failures:** $c \cdot S$ regions, each two eliminations of
+  $2\min(m, n - m)$ columns, plus one elimination of all $2n$ system columns
+  per size (the kernel's check of $k$).
+
+Measured on one thread of the development machine (AMD Ryzen 9 9950X3D,
+2026-10-16): one size $m = n/4$, couplings 0, 1, 2, `samples=100`, default
+burn-in, purification picture after $2n$ layers at $p = 0.05$; the time with
+the probe minus the time without, per evaluation, against the probe's share of
+`estimate_ensemble` (`api.py::_correlated_us`):
+
+| erasure graph | $n$ | sampler | measured | estimate |
+|---|---|---|---|---|
+| Watts–Strogatz, $k = 4$, $\beta = 0.1$ | 64 | chain, 11 rungs, burn-in 512 | 9.0 ms | 29 ms |
+| | 128 | chain, 15 rungs, burn-in 1024 | 45 ms | 141 ms |
+| | 256 | chain, 19 rungs, burn-in 2048 | 211 ms | 671 ms |
+| ring (`cycle`, brickwork circuit) | 64 | exact | 1.1 ms | 4.5 ms |
+| | 128 | exact | 3.6 ms | 13 ms |
+| | 256 | exact | 11 ms | 48 ms |
+
+For the chain the burn-in dominates: at $n = 256$ it is 19 rungs × 2,048
+sweeps × 256 proposals, about $10^7$ proposals, against 19 × 99 × 256 for the
+100 records. The default burn-in grows as $8n$ and the rungs about as
+$\sqrt{\operatorname{Var}_0(b)} \propto \sqrt{n}$, so one size costs about
+$n^{2.5}$ proposals; the exact samplers cost little, and their evaluation is
+dominated by the failures. The estimate is pessimistic by design, by 3.1 to
+3.2 times for the chain and 3.7 to 4.2 times for the exact samplers here, so
+`run_ensemble`'s 60-second guard sends long runs to `start_ensemble_job`.
+
+**Every size.** The default `sizes=None` is every $m = 1, \dots, n-1$, and
+each size runs its own sampler with a full burn-in (§7.4). That costs about
+$n - 1$ times one size. Measured as above (Watts–Strogatz, couplings 0, 1, 2,
+`samples=100`, one evaluation, one thread):
+
+| $n$ | every size $1, \dots, n-1$ | every fourth size of the binomial window for $e \in [0.02, 0.2]$ |
+|---|---|---|
+| 64 | 0.52 s (estimate 1.8 s) | sizes `"1:31:4"`, 0.06 s (estimate 0.25 s) |
+| 256 | 52 s (estimate 164 s) | sizes `"1:85:4"`, 3.4 s (estimate 10.5 s) |
+
+(`analysis.binomial_window(n, [0.02, 0.2], 1e-6)` is $(0, 30)$ at $n = 64$ and
+$(0, 84)$ at $n = 256$.) Multiply by trajectories and evaluations and divide
+by the threads; `estimate_ensemble` does it for a spec.
+
+### 8.2 Choosing sizes, samples and couplings
+
+* **Sizes.** $\Phi_J(\varepsilon)$ needs $P_J(m)$ only where the binomial
+  weights are not negligible: `analysis.binomial_window(n, e, tol)` gives the
+  window for the rates $e$ you report (an array of rates gives the union), and
+  the sizes outside it change $\Phi$ by at most `tol` (§6.6). Sample a stride
+  inside the window (a range string such as `"8:57:4"`) and let
+  `correlated_failure_curve` interpolate between, then read
+  `interpolated_mass` in `erasure_curves`: where it is not small, $\Phi$ leans
+  on the interpolation, which can miss a non-monotone step for $J \ne 0$
+  (§9(d)). Small sizes are where sampling fails: a failure probability of
+  order $10^{-3}$ needs thousands of samples, and the exact counts of §6 on the
+  saved codes (`code_snapshot`, then `boundary_failure_counts`) do better.
+* **Samples.** One trajectory's estimate has variance about
+  $P(1-P)\,\tau/S$ (§5.1); the ensemble mean's squared standard error is
+  $\big(\operatorname{Var}_C P_C + \mathbb{E}_C[P(1-P)\tau/S]\big)/T$ over $T$ codes,
+  so more samples help only while the second term dominates. With the chain,
+  records are cheap next to the burn-in (100 records against $8n$ sweeps of
+  burn-in), so several hundred samples cost little more than 100; with the
+  exact samplers the cost is proportional to the samples.
+* **`burn_in` and `thin`.** Keep the default burn-in unless a graph-side
+  check (§8.3) shows that a shorter one gives the same values; raising
+  `thin` lowers the correlation of the records at a cost proportional to it.
+* **Couplings and the ladder.** The automatic ladder fills $[\min(J, 0), \max(J, 0)]$
+  with rungs at most $1/\sqrt{\operatorname{Var}_0(b)}$ apart, so the cost grows
+  with the span of the couplings (about
+  $\text{span}\cdot\sqrt{\operatorname{Var}_0(b)}$ rungs) and hardly with their
+  number: couplings inside the span are rungs the ladder runs anyway. A large
+  $J$ is expensive, and beyond the crossover where minimum-boundary regions
+  dominate it adds little: use the exact $J \to \infty$ routes of §3.7 for the
+  limit. On a cycle or path (a brickwork circuit, or `geometry="cycle"`) the
+  exact samplers cost the same at every $J$.
+* **Checkpoints.** Give the probe its own sparse `checkpoints` (`"final"`, or a
+  few depths): every evaluation pays the full burn-in again.
+
+### 8.3 Check the mixing before a large run
+
+The chain does not depend on the code, only on the erasure graph, the size,
+the couplings and the sampler settings. So its mixing can be checked on the
+graph alone, before the run, with exactly the probe's settings:
+`sample_erasure_regions` (or `erasures.sample_regions` in Python, with
+`region_diagnostics` and `chain_diagnostics`) at a few sizes of the window,
+with several chains and seeds. Look at `mixing`, `r_hat` (on the boundary and
+on positions), `deviation_se` where an exact value exists, and
+`exchange_acceptance`; then repeat with a longer burn-in and another seed and
+compare the means. For a graph collection, check a few of its graphs (graph
+$i$ has seed `[seed, i]`). The block checks two seeds of a Watts–Strogatz
+graph at $n = 64$:
+
+```python
+for seed in (1, 2):
+    check = api.sample_erasure_regions(
+        {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1}, 16, [0, 1, 2],
+        num_nodes=64, samples=300, seed=seed,
+    )
+    means = [row["mean_boundary"] for row in check["couplings"]]
+    exact0 = check["couplings"][0]["exact"]["mean_boundary"]  # J = 0: the uniform law
+    assert check["burn_in"] == 512 and abs(means[0] - exact0) < 5 * check["couplings"][0]["stderr"]
+    print(f"seed {seed}: mean b per J {[round(x, 2) for x in means]};", check["mixing"] or "no notes")
+```
+
+On this graph the check is not clean at $J = 2$: the four chains of 300
+records disagree a little about which nodes their regions hold (an R-hat
+above 1.01 on a node's membership), and the effective sample size there is of
+the order of 100. The two seeds' mean boundaries at $J = 2$ agree to a few
+tenths, so the bias is small, but the positions are the slow variable (§4.8).
+Measured with other settings (not run here): `thin=10, samples=500` raised the
+effective sample size at $J = 2$ to about 200–400 and brought the R-hat to
+1.01–1.02, and a burn-in of 2,048 sweeps instead of 512 did not by itself. The
+probe's estimates at $J = 2$ are then noisier per trajectory than `samples`
+suggests (the ensemble error bar includes that), and a run that relies on
+$J = 2$ should repeat the check with its own settings and compare the probe's
+values for two burn-ins on a few trajectories.
+
+### 8.4 What the probe cannot tell you
+
+The probe stores only failure fractions: no boundaries, acceptances or
+autocorrelations. Its summary and `erasure_curves` can therefore not warn
+about a chain that has not mixed; they say only which sampler ran and point to
+the graph-side check. The standard error across trajectories is valid for the
+mean of the chains' estimates whatever the correlation inside a chain (each
+trajectory has its own streams, §5.2), but it does not include a bias left by
+incomplete mixing, which only the check of §8.3 can show. On rings and paths
+(exact samples) there is nothing to check.
 
 ---
 
@@ -2088,6 +2450,89 @@ on a graph with shortcuts the exact curve can step down (§6.7), and the
 printed gap shows what interpolation can miss there. Sample the sizes that
 matter (the binomial window of §6.6) rather than relying on interpolation.
 
+### (e) A small ensemble with the probe, its summary and `erasure_curves`
+
+A JSON run (as the CLI and MCP send it) on the Watts–Strogatz graph of §3.5:
+40 trajectories, the probe on the interaction graph (the chain) at three
+couplings and every second size, a second probe on the ring of qubit labels
+(exact samples) at its own final checkpoint, and `code_dimension` and
+`erasure_first_failure` beside them. The example checks:
+
+* the layout of §7.3 and the summary's means, against the saved arrays;
+* replays of one trajectory, with the same probe and with a narrower one whose
+  sizes and couplings are in another order (§7.4);
+* the probe at $J = 0$ against the uniform first-failure estimator of the same
+  codes: the two are independent given the code and both unbiased for
+  $P_C(m)$ (§3.1), so their paired difference has mean 0;
+* `erasure_curves` against the `analysis` functions applied by hand (§7.5).
+
+```python
+run_spec = {
+    "num_system": 16,
+    "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": ws_seed},
+    "layers": 64,
+    "measurement_rate": 0.1,
+    "schedule": "random_edges",
+    "reference": "purification",
+    "checkpoints": 32,
+    "probes": [
+        {"kind": "code_dimension"},
+        {"kind": "erasure_first_failure", "samples": 200},
+        {"kind": "correlated_erasure", "couplings": [0, 1, 2], "sizes": "2:15:2", "samples": 200},
+        {"kind": "correlated_erasure", "name": "on_ring", "couplings": [0, 4], "sizes": [4, 8],
+         "samples": 200, "geometry": "cycle", "checkpoints": "final"},
+    ],
+}
+summary = api.run_ensemble(run_spec, trajectories=40, seed=3, output_dir="runs/correlated")
+entry = summary["probes"]["correlated_erasure"]
+print("samplers:", entry["sampler"], "|", summary["probes"]["on_ring"]["sampler"])
+
+res = mipt.EnsembleResult.load("runs/correlated/result.npz")
+n = res.spec.num_system
+couplings, sizes, values = res.correlated("correlated_erasure")  # values[t, e, c, i]
+assert values.shape == (40, len(res.layers("correlated_erasure")), 3, 7)
+assert np.array_equal(res.values["correlated_erasure"][:, :, 1 * 7 + 2], values[:, :, 1, 2])
+assert res.spec.correlated_sampler("correlated_erasure")["method"] == "chain"
+assert res.spec.correlated_sampler("on_ring") == {
+    "method": "exact", "graphs": 1, "exact_graphs": 1, "geometries": ["cycle"]
+}
+holds = res.values["code_dimension"][:, -1] > 0  # the summary conditions on k > 0
+mean, err = analysis.mean_and_error(values[holds, -1], axis=0)
+assert entry["count_with_code"] == holds.sum()
+assert np.allclose(entry["mean"], mean, rtol=1e-5, atol=1e-6)
+
+t = int(np.flatnonzero(holds)[0])
+last = int(res.layers("correlated_erasure")[-1])
+same = next(p for p in res.spec.probes if p.name == "correlated_erasure")
+assert np.array_equal(res.replay(t, probes=[same], checkpoints=[last]).correlated()[2][0, -1],
+                      values[t, -1])
+narrow = mipt.correlated_erasure([2, 0, 1], sizes=[8, 4], samples=200)  # same name, other order
+_, _, again = res.replay(t, probes=[narrow], checkpoints=[last]).correlated()
+assert np.array_equal(again[0, -1], values[t, -1][[2, 0, 1]][:, [3, 1]])  # J = 2, 0, 1; m = 8, 4
+
+first = res.values["erasure_first_failure"][holds, -1]
+paired = values[holds, -1, 0] - analysis.failure_by_size(first, n)[:, sizes]  # J = 0 - uniform
+d_mean, d_err = analysis.mean_and_error(paired, axis=0)
+assert np.all(np.abs(d_mean) <= 4 * d_err + 0.01)
+
+curves = api.erasure_curves("runs/correlated", e=[0.05, 0.1, 0.2], delta=0.05)
+row = curves["correlated"]["correlated_erasure"]
+per_code, filled = analysis.correlated_failure_curve(values[holds, -1], sizes, n)
+e = np.array([0.05, 0.1, 0.2])
+phi = analysis.failure_probability_from_curve(per_code, n, e)  # (codes, couplings, rates)
+assert np.allclose(row["phi"]["mean"], phi.mean(axis=0), rtol=1e-5)
+assert np.allclose(row["e_delta"]["of_mean_phi"],
+                   analysis.tolerance_from_curve(per_code.mean(axis=0), n, 0.05), rtol=1e-5)
+assert np.flatnonzero(filled).tolist() == list(range(1, 16, 2))  # the odd sizes, interpolated
+print("Phi_J(e) per J:", np.round(phi.mean(axis=0), 3).tolist())
+print("interpolated mass per e:", row["interpolated_mass"], " notes:", len(curves["notes"]))
+```
+
+The uniform entry of `erasure_curves` (`curves["uniform"]`) is the same channel
+at $J = 0$, from the first-failure samples; here the interpolated odd sizes
+carry about half the binomial mass, which `interpolated_mass` and a note
+report. A study would sample every size of the window.
+
 ---
 
 ## 10. Pitfalls
@@ -2132,9 +2577,19 @@ matter (the binomial window of §6.6) rather than relying on interpolation.
   (§6.7) or in $J$ (§6.1). `tolerance_from_curve` returns the last crossing,
   and with `return_monotone=True` says whether the curve was monotone; report
   that flag with $\varepsilon_\delta$.
-* **One seed for many codes.** `correlated_failure` with the same seed draws
-  the same regions for every code. For ensemble error bars give each code its
-  own seed (`seed=[base, t]`, §5.2).
+* **One seed for many codes.** `correlated_failure` on saved codes with the
+  same seed draws the same regions for every code. For ensemble error bars
+  give each code its own seed (`seed=[base, t]`, §5.2). The in-run probe needs
+  nothing of the kind: every trajectory, evaluation and size has its own
+  stream (§7.4).
+* **The probe cannot see bad mixing.** It stores only failure fractions, so
+  neither its summary nor `erasure_curves` can warn about a chain that has not
+  mixed. Check the sampler on the graph first, with the probe's settings and
+  several seeds (`sample_erasure_regions`, §8.3).
+* **Cost.** Every size of every evaluation pays a full burn-in, about
+  $n^{2.5}$ proposals per size on the chain: at $n = 256$ every size at one
+  evaluation took 52 s on one thread (§8.1). Give the probe a window of sizes
+  and its own few checkpoints, and read `estimate_ensemble` first.
 * **When $J$ cannot matter.** If the ensemble of codes is invariant in law
   under every permutation of the qubits while $G$ is fixed (for example, codes
   made by circuits whose gates act on uniformly random pairs of qubits), then $\mathbb{E}_C F_C(A)$ depends on
@@ -2143,10 +2598,10 @@ matter (the binomial window of §6.6) rather than relying on interpolation.
   for every $G$ and $J$: on average the correlation is invisible, and only
   code-to-code fluctuations remain. Geometry matters only for codes whose
   structure is aligned with $G$.
-* **The default sizes are every $m = 1, \dots, n-1$**, and each size runs its
-  own sampler, burn-in included, so a full `correlated_failure` costs about
-  $n - 1$ sampler runs. Choose sizes with `analysis.binomial_window` for the
-  rates you need.
+* **The default sizes are every $m = 1, \dots, n-1$**, for the probe and for
+  `correlated_failure`, and each size runs its own sampler, burn-in included,
+  so the default costs about $n - 1$ sampler runs. Choose sizes with
+  `analysis.binomial_window` for the rates you need.
 * **Exact enumeration has a budget.** `boundary_failure_counts` refuses more
   than `budget` regions in all (default two million), and
   `minimum_boundary_regions` and `boundary_counts` more than `budget` regions of
@@ -2229,10 +2684,27 @@ probability $p$ after every layer):
 * A. J. Bray, "Theory of phase ordering kinetics", Adv. Phys. 43, 357 (1994),
   [arXiv:cond-mat/9501089](https://arxiv.org/abs/cond-mat/9501089) (full text):
   $t^{1/3}$ coarsening for a conserved order parameter, $t^{1/2}$ without.
+* R. H. Swendsen and J.-S. Wang, "Replica Monte Carlo simulation of spin
+  glasses", Phys. Rev. Lett. 57, 2607 (1986) (verified through Wang and
+  Swendsen, [arXiv:cond-mat/0407273](https://arxiv.org/abs/cond-mat/0407273));
+  K. Hukushima and K. Nemoto, "Exchange Monte Carlo method and application to
+  spin glass simulations", J. Phys. Soc. Jpn. 65, 1604 (1996),
+  [arXiv:cond-mat/9512035](https://arxiv.org/abs/cond-mat/9512035): replica
+  exchange between temperatures. C. J. Geyer, "Markov chain Monte Carlo
+  maximum likelihood", Computing Science and Statistics: Proc. 23rd Symposium
+  on the Interface, 156 (1991), is commonly credited with parallel tempering
+  too (not checked in the paper).
 * D. J. Earl and M. W. Deem, "Parallel tempering: theory, applications, and new
   perspectives", Phys. Chem. Chem. Phys. 7, 3910 (2005),
   [arXiv:physics/0508111](https://arxiv.org/abs/physics/0508111) (abstract):
-  replica exchange.
+  a review.
+
+**Minimum bisection:**
+
+* U. Feige and R. Krauthgamer, "A polylogarithmic approximation of the minimum
+  bisection", SIAM J. Comput. 31(4), 1090 (2002)
+  ([PDF](https://www.wisdom.weizmann.ac.il/~robi/papers/FK-bisection2-SIGEST.pdf);
+  abstract): finding a minimum bisection is NP-hard (§3.8).
 
 **Autocorrelation times and R-hat:**
 

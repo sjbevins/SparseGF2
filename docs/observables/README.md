@@ -21,7 +21,7 @@ For a shorter tour of the whole simulator, read
 | lost information $\ell_C(A)$ | $I(A:R)$; correctable iff 0 | `lost_information(region)`, `erasure_lost_profile(samples)` | `observables.lost_logical_information`, `erasure_is_correctable`, `recovery_probability`, `erasure_profile`; `StabilizerCode.lost_information`, `is_correctable` | `bernoulli_erasure_curve` | [lost-information.md](lost-information.md) |
 | random-region failure $P_C(m)$ | probability that a uniformly random $m$-qubit erasure is uncorrectable | `erasure_first_failure(samples)` (sampled), `uncorrectable_region_counts(max_size)` (exact), `code_snapshot()` | `StabilizerCode.first_failure_sizes`, `uncorrectable_counts`; `observables.random_erasure_statistics` | `failure_by_size`, `exact_failure_by_size`, `hybrid_failure_by_size`, `junction_dip` | [random-region-erasure.md](random-region-erasure.md) |
 | independent erasure $\Phi_C(e)$, $e_\delta$, $\mu_C$, distance bounds | $\Phi_C(e) = \sum_m b_m(e) P_C(m)$ with binomial weights $b_m(e)$; $e_\delta = \sup\lbrace e : \Phi(e) \le \delta\rbrace$; $\mu_C = \mathbb{E}[D]$ | (from the probes above) | (from a saved code, as above) | `erasure_failure_probability`, `erasure_tolerance`, `mean_first_failure`, `distance_bounds` | [random-region-erasure.md](random-region-erasure.md) |
-| **new:** geometry-correlated failure $P_{C,G,J}(m)$, $\Phi_{C,G,J}(\varepsilon)$, $\varepsilon_\delta(J)$ | probability that an $m$-qubit region drawn with weight $e^{-J b_G(A)}$ ($b_G$: edges of $G$ leaving $A$) is uncorrectable, and its binomial mixture | (the in-run probe: its document section is to come) | `StabilizerCode.correlated_failure`, `boundary_failure_counts`, `interval_failure_by_size`, `end_window_failure_by_size`; regions from `erasures.sample_regions` | `exact_correlated_failure`, `correlated_failure_curve`, `failure_probability_from_curve`, `tolerance_from_curve`, `binomial_window`, `mean_over_codes` | [correlated-erasure.md](correlated-erasure.md) |
+| **new:** geometry-correlated failure $P_{C,G,J}(m)$, $\Phi_{C,G,J}(\varepsilon)$, $\varepsilon_\delta(J)$ | probability that an $m$-qubit region drawn with weight $e^{-J b_G(A)}$ ($b_G$: edges of $G$ leaving $A$) is uncorrectable, and its binomial mixture | `correlated_erasure(couplings, sizes, samples)` (sampled; `EnsembleResult.correlated`) | `StabilizerCode.correlated_failure`, `boundary_failure_counts`, `interval_failure_by_size`, `end_window_failure_by_size`; regions from `erasures.sample_regions` | `exact_correlated_failure`, `correlated_failure_curve`, `failure_probability_from_curve`, `tolerance_from_curve`, `binomial_window`, `mean_over_codes` | [correlated-erasure.md](correlated-erasure.md) |
 
 The JSON forms (CLI and MCP) use the same names: a probe is
 `{"kind": "<mipt function>", ...arguments}`, and a single-circuit observable
@@ -67,8 +67,9 @@ its own.
    open path, minimum-boundary regions elsewhere as $J \to \infty$), the exact
    ring and path samplers and the swap chain with replica exchange, with
    proofs, the estimators and their diagnostics, the exact boundary-resolved
-   counts, and $\Phi_{C,G,J}$ and $\varepsilon_\delta(J)$. Read
-   random-region-erasure.md first: $J = 0$ is its case.
+   counts, $\Phi_{C,G,J}$ and $\varepsilon_\delta(J)$, the in-run probe and
+   the tools `sample_erasure_regions` and `erasure_curves`, and their cost.
+   Read random-region-erasure.md first: $J = 0$ is its case.
 
 Documents for purification and the contiguous distance will follow the same
 structure.

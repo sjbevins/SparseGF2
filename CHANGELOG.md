@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+* **Geometry-correlated erasures** (the study "Geometry-correlated erasures in monitored
+  quantum circuits"): an m-qubit erasure strikes a region A with probability
+  proportional to exp(-J b(A)), b(A) the edges of an interaction graph leaving A, so
+  J = 0 is the uniform (independent-erasure) case and J > 0 favours compact regions.
+  * `sparsegf2.erasures` (new), the graph side: boundaries, exact densities of states
+    N_m(b) and their moments, minimum-boundary regions (the J -> inf support), the
+    uniform law's mean and variance of b in closed form, exact independent samplers for
+    any graph that is one cycle or one path (any labeling), and elsewhere a Metropolis
+    swap chain with replica exchange along an automatic ladder of couplings (spacing
+    1/sqrt(Var_0 b)) and a size-aware default burn-in (max(200, 8 n) sweeps), with
+    diagnostics (Sokal-window autocorrelation time, ESS, rank-normalized split R-hat,
+    the membership of a few nodes) and plain warnings; the ring and the open path in
+    closed form.
+  * `StabilizerCode`: `region_failures`, `correlated_failure` (sampled P_J(m) with
+    `failure_ess`), `boundary_failure_counts` (every region of size <= w counted by its
+    boundary, so `.exact(J)` gives P_J(m) exactly for every J), `window_first_failure`,
+    `interval_failure_by_size` (the ring's J -> inf limit) and
+    `end_window_failure_by_size` (the open path's: only the two end intervals).
+  * `analysis`: `exact_correlated_failure`, `correlated_failure_curve` (exact, sampled and
+    interpolated sizes, flagged), `failure_probability_from_curve` (Phi_J(e)),
+    `tolerance_from_curve` (e_delta(J), with a monotone flag: P_J(m) need not be monotone
+    in m for J != 0), `binomial_window` and `mean_over_codes`.
+  * The in-run probe `correlated_erasure` (JSON `{"kind": "correlated_erasure",
+    "couplings": [...], "sizes": ..., "samples": ...}`; `EnsembleResult.correlated()`),
+    with one random stream per size of each evaluation (new under randomness contract 2;
+    no existing stream changed); a saved run pins the sizes, burn-in and ladders it
+    resolved.
+  * Two read-only tools in the JSON service, the CLI and the MCP server:
+    `sample_erasure_regions` (`sparsegf2 regions`: the sampler alone on a graph, with
+    mixing diagnostics against exact values, to check settings before a long run) and
+    `erasure_curves` (`sparsegf2 curves`: Phi(e) and e_delta of a saved run, independent
+    and per coupling).
+  * Documents: `docs/observables/correlated-erasure.md` (the study transcribed with its
+    two corrections, the exact limits and the samplers with proofs, estimators,
+    diagnostics, costs and worked examples checked by brute force), AGENTS.md,
+    `docs/LLM_INTERFACE.md`, and `examples/correlated_erasure.py` (a brickwork ring and a
+    Watts–Strogatz ensemble end to end).
 * **Measured cost of a run, before running it:** new `benchmark_ensemble` (API, MCP tool,
   `sparsegf2 benchmark`) times the run's first trajectories on one thread and on all of
   them, projects the seconds of the whole run to any thread counts (marked `projected`
