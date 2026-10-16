@@ -343,6 +343,7 @@ def test_chain_estimates_the_exact_correlated_failure_within_its_effective_error
                     continue
                 series = fails[c].astype(float)
                 ess = erasures.chain_diagnostics(series)["ess"] if series.std() else samples
+                ess = min(ess, samples)  # as the library caps an effective size behind an error
                 se = math.sqrt(p * (1 - p) / ess)
                 gap = abs(values[t, 0, c, i] - p)
                 # 5 standard errors, plus 3 / ESS for the discreteness at tiny p (T2's rule)

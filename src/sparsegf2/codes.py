@@ -74,7 +74,11 @@ class CorrelatedFailure:
     * ``failure_ess``: float64[c, s], the effective number of independent
       records behind each entry: ``S`` for exact samples (independent), and
       for the chain ``S / tau_int`` of the series of failure indicators
-      (:func:`sparsegf2.erasures.chain_diagnostics`). A standard error is
+      (:func:`sparsegf2.erasures.chain_diagnostics`), capped at ``S``: the
+      estimated ``tau_int`` of a short series can fall below 1 from noise
+      (``chain_diagnostics`` floors it only at ``1 / log10(S)``), and records
+      cannot be worth more than independent ones, so the cap keeps the error
+      bar from shrinking below the binomial one (conservative). A standard error is
       ``sqrt(p (1 - p) / failure_ess)``; it is an estimate from the run
       itself (it can be too small when the chain has not mixed: compare seeds),
       and when no record or every record failed it gives 0, so read such an
@@ -635,7 +639,10 @@ class StabilizerCode:
                 if drawn.method == "chain" and samples >= 2:
                     for i in range(c):
                         series = indicators[i].astype(np.float64)
-                        ess[i, j] = erasures.chain_diagnostics(series)["ess"]
+                        # capped at the records: a short series can get tau < 1 from noise
+                        # (chain_diagnostics floors it only at 1 / log10(S)), which would
+                        # shrink the error bar below the binomial one
+                        ess[i, j] = min(erasures.chain_diagnostics(series)["ess"], float(samples))
             mean_boundary[:, j] = drawn.boundaries.mean(axis=1)
             acceptance[:, j] = drawn.acceptance
             pairs = drawn.exchange_acceptance

@@ -181,6 +181,25 @@ def test_chain_seeds_are_derived_from_the_seed():
     assert first.regions.shape == (3, 40, 6)  # [seed, chain] is the documented stream
 
 
+def test_effective_sizes_are_capped_at_the_draws_and_the_error_follows():
+    # the integrated autocorrelation time of 200 draws can be estimated below 1 from noise
+    # (an effective size above the draws); the tool caps ess and ess_boundary at chains x
+    # samples, keeps tau_int as estimated, and derives stderr from the capped size
+    n = 24
+    ws = graphs.watts_strogatz(n, 4, 0.2, seed=3)
+    out = api.sample_erasure_regions(
+        {"edges": ws.tolist(), "num_nodes": n}, 6, [0, 1], 200, seed=4, thin=5
+    )
+    draws = out["chains"] * out["samples"]
+    assert out["method"] == "chain"
+    rows = out["couplings"]
+    assert all(r["ess"] <= draws and r["ess_boundary"] <= draws for r in rows)
+    assert any(r["ess_boundary"] == draws for r in rows)  # the cap acted
+    for r in rows:
+        assert r["stderr"] == pytest.approx(math.sqrt(r["variance"] / r["ess_boundary"]), rel=1e-3)
+    assert any("capped at chains x samples" in note for note in out["notes"])
+
+
 def test_examples_are_regions_of_the_largest_coupling():
     out = _regions(graph=WS, num_nodes=24, size=6, samples=60, burn_in=60, couplings=(2, 0, 1))
     assert out["examples"]["coupling"] == 2

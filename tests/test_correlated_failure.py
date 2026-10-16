@@ -354,7 +354,8 @@ def _within_errors(code, edges, result, exact, **sampler):
             if drawn.method == "exact":
                 assert ess == result.samples
             else:
-                assert ess == erasures.chain_diagnostics(fails.astype(float))["ess"]
+                raw = erasures.chain_diagnostics(fails.astype(float))["ess"]
+                assert ess == min(raw, result.samples)  # capped at the records
             if 0.01 < p < 0.99:
                 assert ess >= ESS_FLOOR * result.samples, (result.couplings[i], m, ess)
             se = math.sqrt(p * (1 - p) / ess)
@@ -433,6 +434,26 @@ def test_correlated_failure_reports_its_sampler():
     assert ring.warnings == () and ring.size_warnings == ()
     assert ring.tempering is False  # the flag says what ran, not what was passed
     np.testing.assert_array_equal(ring.failure_ess, np.full((2, 1), 30.0))
+
+
+def test_the_effective_size_of_the_records_never_exceeds_the_records():
+    # chain_diagnostics floors tau_int only at 1 / log10(S), so a short indicator series can
+    # get an effective size above S from noise: an error bar built from it is too small
+    n, samples = 24, 100
+    code = _random_code(n, 4, 60, 8, seed=2)
+    edges = graphs.watts_strogatz(n, 4, 0.2, seed=3)
+    sizes = [4, 6, 8, 10]
+    result = code.correlated_failure(edges, [0.0, 1.0], sizes, samples, seed=1, thin=5)
+    assert result.method == "chain"
+    raw = np.zeros_like(result.failure_ess)
+    for j, m in enumerate(sizes):
+        drawn = erasures.sample_regions(edges, n, m, [0.0, 1.0], samples, thin=5, seed=[1, m])
+        for i in range(2):
+            indicators = code.region_failures(drawn.regions[i]).astype(np.float64)
+            raw[i, j] = erasures.chain_diagnostics(indicators)["ess"]
+    assert raw.max() > 1.2 * samples  # the scenario is not vacuous
+    assert result.failure_ess.max() <= samples
+    np.testing.assert_array_equal(result.failure_ess, np.minimum(raw, samples))
 
 
 def test_repeated_warnings_are_merged_across_sizes():
@@ -729,7 +750,8 @@ def _assert_brickwork_estimate(code, ring, result, target, bias, method, ladder)
             if method == "exact":
                 assert ess == result.samples
             else:
-                assert ess == erasures.chain_diagnostics(fails.astype(float))["ess"]
+                raw = erasures.chain_diagnostics(fails.astype(float))["ess"]
+                assert ess == min(raw, result.samples)  # capped at the records
             p = target[i, m - 1]
             if 0.01 < p < 0.99:
                 assert ess >= ESS_FLOOR * result.samples, (method, i, m, ess)

@@ -1041,7 +1041,11 @@ def chain_diagnostics(series) -> dict[str, Any]:
       ``tau`` (``N >= 50 tau`` is the usual rule), and meant for positively
       correlated draws (Metropolis chains). It is floored at
       ``1 / max(1, log10(total))`` (an effective size at most
-      ``total log10(total)``, as Stan caps it). A chain with no variation
+      ``total log10(total)``, as Stan caps it), so ``ess`` can exceed ``total``
+      (the estimate of a short series can fall below 1 from noise). Callers
+      that turn ``ess`` into an error bar cap it at ``total``
+      (``StabilizerCode.correlated_failure``, ``sparsegf2.api.sample_erasure_regions``):
+      conservative, and never smaller than the error of independent draws. A chain with no variation
       (``ptp == 0``, decided exactly) contributes no autocorrelation; when no
       chain varies ``tau`` is 1.
     * ``window``: ``W``; ``ess``: the effective sample size ``total / tau``;

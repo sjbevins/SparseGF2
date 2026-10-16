@@ -5183,6 +5183,9 @@ def sample_erasure_regions(
 
     * ``mean_boundary`` with ``stderr = sqrt(variance / ess_boundary)``, ``ess_boundary`` the
       effective sample size of the boundary itself;
+      ``ess_boundary`` and ``ess`` are capped at ``chains x samples``: the integrated
+      autocorrelation time of a short series can be estimated below 1 from noise, which would
+      make the error bar smaller than that of independent draws (``tau_int`` is as estimated);
     * ``acceptance`` of the swaps and ``exchange_acceptance`` of the replica exchanges next to
       the coupling (null for exact samples);
     * ``tau_int`` and ``ess``: the integrated autocorrelation time (largest) and effective sample
@@ -5359,11 +5362,15 @@ def sample_erasure_regions(
             where = erasures.region_diagnostics(regions[:, k], n)
             tau_b, tau_p = diag["tau_int"], where["tau_int_max"]
             slowest = None if tau_b >= tau_p else where["slowest"]
+            # an effective size feeds an error bar, so it is capped at the draws: the
+            # estimated tau of a short series can fall below 1 from noise (tau_int itself
+            # is reported as estimated)
             tau, ess, ess_boundary = (
                 max(tau_b, tau_p),
-                min(diag["ess"], where["ess_min"]),
-                diag["ess"],
+                min(diag["ess"], where["ess_min"], float(draws)),
+                min(diag["ess"], float(draws)),
             )
+            diag = {**diag, "std_error": math.sqrt(diag["variance"] / ess_boundary)}
             # R-hat of the boundary and of each followed node against its own limit; the row
             # shows the series furthest above (or nearest to) its limit
             candidates = [(diag["rhat"], tau_b, None)] + [
@@ -5454,7 +5461,8 @@ def sample_erasure_regions(
     notes.append(
         f"chain i runs erasures.sample_regions with seed [{seed}, i], i = 0..{chains - 1}; "
         "boundary means and errors pool the chains; stderr = sqrt(variance / ess_boundary), "
-        "while ess and tau_int are those of the slowest of the boundary and the followed nodes"
+        "while ess and tau_int are those of the slowest of the boundary and the followed nodes; "
+        "ess and ess_boundary are capped at chains x samples (tau_int is as estimated)"
     )
     if used == "exact":
         notes.append(

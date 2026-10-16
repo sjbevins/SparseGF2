@@ -1305,7 +1305,10 @@ $$
   `CorrelatedFailure.failure_ess` gives the effective number of independent
   records: $S$ for exact samples, and for the chain $S/\tau_{\mathrm{int}}$ of
   the series of failure indicators (`chain_diagnostics`; $S$ for a constant
-  series and for $k = 0$). The standard error is
+  series and for $k = 0$), capped at $S$: the estimated $\tau_{\mathrm{int}}$
+  of a short series can fall below 1 from noise (§5.3), which would shrink the
+  error bar below that of independent records, and records are not worth more
+  than independent ones, so the cap is conservative. The standard error is
   $\sqrt{\hat P(1-\hat P)/\mathrm{ESS}}$, an estimate from the run itself (too
   small when the chain has not mixed). With no failing record (or all
   failing) it gives 0: read such an entry as "below about $3/\mathrm{ESS}$"
@@ -1367,7 +1370,15 @@ draws each).
   longer than $\tau$ (emcee: at least about $50\tau$).
 * **Effective sample size and error.** $\mathrm{ESS} = \text{total}/\tau_{\mathrm{int}}$,
   `std_error` $= \sqrt{\mathrm{variance}\cdot\tau_{\mathrm{int}}/\text{total}}$,
-  `variance` the variance of all draws ($1/\text{total}$).
+  `variance` the variance of all draws ($1/\text{total}$). The floor on
+  $\tau_{\mathrm{int}}$ above lets ESS exceed the total (by up to a factor
+  $\max(1, \log_{10}\text{total})$): the Sokal-window estimate of a short series
+  can fall below 1 from noise. `chain_diagnostics` reports what it estimated,
+  but where ESS feeds an error bar it is **capped at the number of records**:
+  `CorrelatedFailure.failure_ess` at $S$ per size, and the tool's `ess`,
+  `ess_boundary` and the `stderr` derived from them at chains $\times$ samples
+  (`tau_int` is left as estimated). The cap is conservative: it never gives an
+  error bar smaller than that of independent draws.
 * **Constant series.** When every draw is equal, `constant` is True, `mean` is
   that value, `variance` and `std_error` are 0, $\tau_{\mathrm{int}} = 1$ and
   ESS = total. That is not evidence of mixing (§4.8): a stuck chain looks the
@@ -1879,7 +1890,8 @@ of `erasures.sample_regions`, chain $i$ seeded `[seed, i]`, for at most 12
 couplings, and returns per coupling (`couplings`, in the order given):
 
 * `mean_boundary` with `stderr` $= \sqrt{\texttt{variance} /
-  \texttt{ess\_boundary}}$, the effective sample size of the boundary itself;
+  \texttt{ess\_boundary}}$, the effective sample size of the boundary itself
+  (`ess` and `ess_boundary` are capped at chains $\times$ samples, §5.3);
 * `acceptance` and `exchange_acceptance`;
 * `tau_int` (the largest) and `ess` (the smallest) over the boundary and the
   membership of 8 spread nodes, `slowest` naming the series (the positional
