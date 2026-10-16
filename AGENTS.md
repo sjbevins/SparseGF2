@@ -353,8 +353,8 @@ mathematics, the samplers with proofs, costs and worked examples.
  "trajectories": 200, "seed": 1, "output_dir": "runs/correlated"}
 ```
 
-* **The probe's keys:** `couplings` (finite, distinct; J -> inf is refused: see the exact
-  routes below), `sizes` (a list, a range string `"a:b[:step]"` with Python slice
+* **The probe's keys:** `couplings` (distinct, each |J| <= 10^6; J -> inf is refused: see the
+  exact routes below), `sizes` (a list, a range string `"a:b[:step]"` with Python slice
   semantics, or null for every m in 1..n-1), `samples` (default 100), `geometry`
   (`"interaction"`, the trajectory's own graph, default; or `"cycle"` / `"path"` over the
   qubit labels), and the sampler's `method` (`"auto"`: exact independent samples when the

@@ -1550,13 +1550,15 @@ def test_warning_advice_depends_on_the_ladder():
 
 
 def test_extreme_ladders_are_refused_cleanly():
-    for couplings, step in (([0.0, 1e308], 0.1), ([-1e308, 1e308], 1.0), ([0.0, 1.0], 1e-320)):
+    top = erasures.MAX_ABS_COUPLING
+    for couplings, step in (([0.0, top], 0.1), ([-top, top], 1.0), ([0.0, 1.0], 1e-320)):
         with pytest.raises(ValueError, match="at most 256") as info:
             erasures.coupling_ladder(couplings, step)
         assert "a smaller largest |J|, a larger max_step, or ladder='given'" in str(info.value)
-    with pytest.raises(ValueError, match="at most 256") as info:
+    # a coupling above the bound is refused before any ladder is built, with a short message
+    with pytest.raises(ValueError, match=r"\|J\| <= 1,000,000") as info:
         erasures.coupling_ladder([0.0, 1e300], 0.1)
-    assert len(str(info.value)) < 400  # no 300-digit integer in the message
+    assert len(str(info.value)) < 600  # no 300-digit integer in the message
     args = (graphs.watts_strogatz(16, 4, 0.2, seed=1), 16, 4, [1.0], 5)
     for bad in (None, [], ["x"], [[1.0, 2.0]]):
         with pytest.raises(ValueError, match="ladder must be 'auto', 'given' or a list"):
@@ -1594,6 +1596,49 @@ def test_unsorted_couplings_give_the_sorted_run_with_rows_permuted():
     assert np.array_equal(a.boundaries[permutation], b.boundaries)
     assert np.array_equal(a.acceptance[permutation], b.acceptance, equal_nan=True)
     assert np.array_equal(a.exchange_acceptance, b.exchange_acceptance, equal_nan=True)
+
+
+def test_couplings_beyond_the_bound_are_refused_on_the_graph_side():
+    # |J| above about 9e307 made the ring sampler divide by zero and the ring distribution
+    # return NaN: every entry point now refuses |J| > MAX_ABS_COUPLING with one message
+    assert erasures.MAX_ABS_COUPLING == 1e6
+    ring, path = graphs.cycle(8), graphs.path(8)
+    message = r"coupling must satisfy \|J\| <= 1,000,000, got .*exact routes"
+    wide = graphs.watts_strogatz(12, 4, 0.2, seed=1)
+
+    def calls(big):
+        return (
+            lambda: erasures.sample_regions(ring, 8, 3, [big], 5, seed=1),
+            lambda: erasures.sample_regions(ring, 8, 3, [0.0, big], 5, seed=1),
+            lambda: erasures.sample_regions(path, 8, 3, [big], 5, seed=1, method="exact"),
+            lambda: erasures.sample_regions(wide, 12, 3, [big], 5, seed=1),
+            lambda: erasures.sample_ring_regions(8, 3, big, 5, seed=1),
+            lambda: erasures.sample_path_regions(8, 3, big, 5, seed=1),
+            lambda: erasures.ring_boundary_distribution(8, 3, big),
+            lambda: erasures.ring_partition_function(8, 3, big),
+            lambda: erasures.path_boundary_distribution(8, 3, big),
+            lambda: erasures.path_partition_function(8, 3, big),
+            lambda: erasures.boundary_moments(np.array([0, 2, 0, 10]), [big]),
+            lambda: erasures.coupling_ladder([0.0, big], 0.5),
+            lambda: erasures.sample_regions(ring, 8, 3, [1.0], 5, seed=1, ladder=[big]),
+        )
+
+    for big in (1e308, -1e308, 1e7, -2e6):
+        for call in calls(big):
+            with pytest.raises(ValueError, match=message):
+                call()
+    # the position of the offender is named in a list
+    with pytest.raises(ValueError, match=r"got 1e\+07 at position 2"):
+        erasures.sample_regions(ring, 8, 3, [0.0, 1.0, 1e7], 5, seed=1)
+    # the bound itself is allowed, and the ring still gives its (finite) answers there
+    top = erasures.MAX_ABS_COUPLING
+    for sign in (1.0, -1.0):
+        _, probability = erasures.ring_boundary_distribution(8, 3, sign * top)
+        assert np.all(np.isfinite(probability)) and probability.sum() == pytest.approx(1.0)
+    regions = erasures.sample_ring_regions(8, 3, top, 20, seed=1)
+    assert all(erasures.boundary(ring, 8, row.tolist()) == 2 for row in regions)  # intervals
+    drawn = erasures.sample_regions(ring, 8, 3, [top], 20, seed=1)
+    assert set(drawn.boundaries.ravel().tolist()) == {2}
 
 
 def test_remaining_input_errors():

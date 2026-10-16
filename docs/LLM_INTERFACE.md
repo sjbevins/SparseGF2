@@ -614,8 +614,8 @@ worked examples are in
  "max_step": null, "geometry": "interaction", "checkpoints": "final"}
 ```
 
-* `couplings`: one finite number or a list of distinct ones (J -> inf is a limit, not a
-  coupling, and is refused). `sizes`: a list, a range string `"a:b[:step]"` (Python slice
+* `couplings`: one number or a list of distinct ones, each with |J| <= 10^6 (J -> inf is a
+  limit, not a coupling, and is refused with the exact routes to use). `sizes`: a list, a range string `"a:b[:step]"` (Python slice
   semantics) or null for every m = 1..n-1. `geometry`: `"interaction"` (each trajectory's
   own graph, default), `"cycle"` or `"path"` over the qubit labels.
 * The sampler is `erasures.sample_regions`: with `method="auto"`, exact independent

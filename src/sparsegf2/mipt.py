@@ -605,8 +605,9 @@ def correlated_erasure(
     values)`` with ``values`` reshaped to ``(trajectories, evaluations,
     len(couplings), len(sizes))``.
 
-    **Arguments.** ``couplings``: one finite number or a list of distinct ones,
-    any order (``J -> +inf`` is a limit, not a coupling: its exact answers are
+    **Arguments.** ``couplings``: one number or a list of distinct ones, any order, each
+    with ``|J| <= erasures.MAX_ABS_COUPLING`` (10^6; ``J -> +inf`` is a limit, not a
+    coupling, and the bound refuses what the samplers cannot resolve: its exact answers are
     ``StabilizerCode.interval_failure_by_size`` on the ring,
     ``end_window_failure_by_size`` on the open path and
     ``erasures.minimum_boundary_regions`` on small graphs). ``sizes``: distinct
@@ -720,7 +721,8 @@ def _real(value, what: str) -> float:
 
 
 def _coupling_tuple(couplings) -> tuple[float, ...]:
-    """The couplings as given: finite, distinct, at least one."""
+    """The couplings as given: finite, at most :data:`erasures.MAX_ABS_COUPLING` in size,
+    distinct, at least one."""
     if isinstance(couplings, (str, bytes)):
         raise ValueError(f"couplings must be numbers (one, or a list), got {couplings!r}")
     if isinstance(couplings, (int, float, np.number)) and not isinstance(couplings, np.ndarray):
@@ -743,6 +745,8 @@ def _coupling_tuple(couplings) -> tuple[float, ...]:
                 "interval_failure_by_size on the ring, end_window_failure_by_size on the open "
                 "path and erasures.minimum_boundary_regions on small graphs)"
             )
+        if abs(j) > erasures.MAX_ABS_COUPLING:
+            raise ValueError(erasures.coupling_bound_message(j, position))
     if len(set(js)) != len(js):
         twice = next(j for j in js if js.count(j) > 1)
         raise ValueError(f"couplings must be distinct: {twice:g} appears {js.count(twice)} times")

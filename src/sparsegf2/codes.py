@@ -556,8 +556,9 @@ class StabilizerCode:
         For each size ``m`` in ``sizes`` (distinct integers in ``[0, n]``, any
         order; default every ``m = 1..n-1``, since ``P(0) = 0`` and
         ``P(n) = 1[k > 0]`` are known), :func:`sparsegf2.erasures.sample_regions`
-        draws ``samples`` regions at every coupling in ``couplings`` (finite,
-        distinct, any order) with ``burn_in`` (default ``None``: that
+        draws ``samples`` regions at every coupling in ``couplings`` (distinct, any
+        order, ``|J| <= erasures.MAX_ABS_COUPLING``: beyond it use the exact J -> inf routes
+        of this class) with ``burn_in`` (default ``None``: that
         function's size-aware default), ``thin``, ``tempering``, ``method``,
         ``ladder`` and ``max_step`` passed on (exact independent samples when
         the graph is one cycle or one path, in any labeling; otherwise a swap

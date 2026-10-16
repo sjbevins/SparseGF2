@@ -283,6 +283,9 @@ def test_exact_correlated_failure_equals_the_direct_sum_and_its_limits(code_name
         gap = np.abs(counts.exact(30.0 * sign)[0] - limit)
         assert np.all(gap <= slack)
         np.testing.assert_array_equal(counts.exact(1e4 * sign)[0], limit)
+        # the exact route has no bound: its shifted evaluation cannot overflow, so the J -> inf
+        # limit is reachable at any finite J (the samplers refuse |J| > MAX_ABS_COUPLING)
+        np.testing.assert_array_equal(counts.exact(1e308 * sign)[0], limit)
     assert np.all((exact >= 0) & (exact <= 1))
 
 
@@ -1015,6 +1018,7 @@ def test_mean_over_codes_drops_codes_without_logical_qubits():
         ({"sizes": [[1, 2]]}, "sizes must be a list of region sizes"),
         ({"sizes": []}, "give at least one region size"),
         ({"couplings": [0.0, math.inf]}, "couplings must be finite"),
+        ({"couplings": [0.0, 1e308]}, r"\|J\| <= 1,000,000.*exact routes"),
         ({"couplings": [1.0, 1.0]}, "couplings must be distinct"),
         ({"couplings": "J"}, "couplings must be numbers"),
         ({"samples": 0}, "samples must be at least 1"),

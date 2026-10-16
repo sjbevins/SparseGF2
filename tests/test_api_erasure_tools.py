@@ -84,6 +84,17 @@ def test_ring_means_agree_with_the_closed_form():
     assert means[0] > means[1] > means[2]  # the boundary falls with the coupling
 
 
+def test_the_largest_allowed_coupling_still_works_on_the_ring():
+    # |J| = 1e6 is the bound: the ring gives its intervals (boundary 2) there, at either sign
+    # of the regions' preference, and a coupling above it is refused with the exact routes
+    out = _regions(couplings=(0, erasures.MAX_ABS_COUPLING), size=8)
+    top = out["couplings"][1]
+    assert top["coupling"] == 1e6 and top["mean_boundary"] == 2 and top["min_boundary_seen"] == 2
+    assert out["method"] == "exact" and out["nonincreasing_in_J"] is True
+    with pytest.raises(ValueError, match=r"\|J\| <= 1,000,000.*interval_failure_by_size"):
+        _regions(couplings=(0, 1e6 * 1.0000001))
+
+
 def test_the_chain_on_a_ring_matches_the_closed_form_too():
     out = _regions(samples=2000, method="chain", seed=5)
     assert out["method"] == "chain" and out["graph"]["geometry"] == "cycle"
@@ -426,6 +437,7 @@ def test_the_estimate_prices_the_ladder_the_call_runs():
         ({"couplings": []}, "at least one coupling"),
         ({"couplings": [0, 0]}, "distinct"),
         ({"couplings": [float("inf")]}, "finite"),
+        ({"couplings": [1e308]}, r"\|J\| <= 1,000,000.*exact routes"),
         ({"couplings": ["a"]}, "couplings"),
         ({"couplings": [True]}, "couplings"),
         ({"couplings": list(range(40))}, "at most 12 couplings"),

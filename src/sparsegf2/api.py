@@ -5177,7 +5177,9 @@ def sample_erasure_regions(
     long run uses them. ``graph`` is ``{"family": ..., params}`` with ``num_nodes``,
     ``{"family": "file", "path": ...}`` (the first graph of a collection) or
     ``{"edges": [[a, b], ...], "num_nodes": n}``; ``burn_in=None`` is
-    ``max(200, 8 n)`` sweeps.
+    ``max(200, 8 n)`` sweeps. ``couplings``: at most :data:`MAX_REGION_COUPLINGS` distinct
+    numbers, each with ``|J| <= erasures.MAX_ABS_COUPLING`` (10^6; beyond it the exact
+    ``J -> inf`` routes of the code side apply).
 
     Per coupling (in the order given):
 
@@ -6189,7 +6191,7 @@ _PROBE_EXTRAS: dict[str, dict[str, Any]] = {
             "proportional to exp(-J b_G(A)) (b_G: edges of the erasure graph leaving A), that "
             "lose logical information; needs a reference; k = 0 gives 0. Values are "
             "coupling-major, len(couplings) x len(sizes) per evaluation "
-            "(EnsembleResult.correlated() reshapes them). couplings: finite, distinct (J -> "
+            "(EnsembleResult.correlated() reshapes them). couplings: distinct, |J| <= 1e6 (J -> "
             "inf is a limit, not a coupling: StabilizerCode.interval_failure_by_size gives the "
             "ring's); sizes: a list, a range 'a:b[:step]' or null for every m in 1..n-1 (the "
             "forms need n >= 29 and n >= 17). geometry: the trajectory's interaction graph "

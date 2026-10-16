@@ -678,6 +678,8 @@ def test_other_couplings_or_settings_are_another_protocol(ws_run):
         (dict(couplings=[]), "at least one coupling"),
         (dict(couplings=[0.0, math.inf]), "J -> \\+inf is a limit"),
         (dict(couplings=[math.nan]), "finite"),
+        (dict(couplings=[0.0, 1e308]), r"\|J\| <= 1,000,000, got 1e\+308 at position 1"),
+        (dict(couplings=[-2e6]), "exact routes"),
         (dict(couplings=[1.0, 1.0]), "distinct"),
         (dict(couplings=[True]), "numbers"),
         (dict(couplings="0.5"), "numbers"),

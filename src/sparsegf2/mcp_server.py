@@ -207,7 +207,8 @@ autocorrelation allow, shared over the series tested); min_boundary_seen; exact 
 deviation_se. nonincreasing_in_J: no step to the next coupling rises beyond z_critical (1%,
 Bonferroni; a test of the estimates, not of Proposition 2); proposition2 gives the worst and
 failed steps. mixing: one note per problem with what to change. No note is no proof: repeat
-with another seed and a longer burn_in. At most 12 couplings; refused if estimated above 60 s.
+with another seed and a longer burn_in. At most 12 couplings, each |J| <= 1e6; refused if
+estimated above 60 s.
 
 Example: {"graph": {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 1},
  "num_nodes": 64, "size": 16, "couplings": [0, 0.5, 1, 2], "samples": 200, "seed": 7}"""

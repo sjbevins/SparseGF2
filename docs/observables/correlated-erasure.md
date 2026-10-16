@@ -56,7 +56,7 @@ compiled.
 | $G = (V, E)$ | the interaction (erasure) graph; the simulator's $V = \lbrace 0, \dots, n-1\rbrace$ | `edges`, an `(E, 2)` integer array (`graphs.py`), repeated edges removed by `graphs.from_edges` |
 | $A$, $m$, $\bar A$ | an erased region, its size $m = \lvert A\rvert$, its complement $V \setminus A$ | `region`, `size` |
 | $\partial A$, $b(A)$ | the edge boundary and its size | `erasures.boundary` |
-| $J$ | the coupling, any finite real number | `couplings` |
+| $J$ | the coupling, a real number with $\lvert J\rvert \le 10^6$ (`erasures.MAX_ABS_COUPLING`) | `couplings` |
 | $Q_J(A \mid m)$, $Z_m(J)$ | the correlated law on regions of size $m$ and its partition function | `erasures.sample_regions`, `erasures.boundary_moments` |
 | $N_m(b)$ | the number of regions of size $m$ with boundary $b$ (density of states) | `erasures.boundary_counts`, `BoundaryCounts.total` |
 | $k$ | the number of logical qubits $k_C = S(R)$ | `StabilizerCode.num_logical` |
@@ -728,8 +728,13 @@ shifting with $b_{\max}$ (§6.3).
 
 A chain at a very large finite coupling is not a route to the limit: it finds
 local minima of $b$ and stays in them (§4.8). The couplings of every sampler
-must be finite, and $J = \pm\infty$ is refused with a message pointing to these
-routes.
+(the graph side, `StabilizerCode.correlated_failure`, the probe and the tools)
+must satisfy $\lvert J\rvert \le 10^6$ (`erasures.MAX_ABS_COUPLING`): beyond
+the crossover a larger $J$ adds nothing a sampler can resolve, and above about
+$9\times 10^{307}$ the exact ring sampler's log weights $-2Jr$ overflow. $J =
+\pm\infty$ and larger finite values are refused with a message pointing to the
+routes above, which have no bound (`BoundaryCounts.exact` shifts every sum by
+its extreme boundary, so it is exact at any finite $J$).
 
 ### 3.8 Why exact large-$J$ answers need structure or small size
 
@@ -748,7 +753,7 @@ $O(n^2)$ column additions) and on small cases by enumeration within a budget.
 
 `erasures.sample_regions(edges, num_nodes, size, couplings, samples, *, burn_in=None, thin=1, tempering=True, seed=None, method="auto", ladder="auto", max_step=None, max_bytes=MAX_RESULT_BYTES)`
 (`erasures.py::sample_regions`) draws `samples` regions of size $m$ = `size`
-at each coupling (finite and distinct, any order) and returns a
+at each coupling (distinct, any order, $\lvert J\rvert \le 10^6$) and returns a
 `RegionSample`: `regions` int64 `[c, S, m]` (nodes sorted in each row),
 `boundaries` `[c, S]`, `method`, `geometry`, `ladder`, `max_step`,
 `acceptance` `[c]`, `exchange_pairs` `[L-1, 2]`, `exchange_acceptance`
@@ -1752,8 +1757,9 @@ $Q_J(\cdot \mid m)$ on the erasure graph and records the failing fraction,
 the estimate $\hat P_{C,G,J}(m)$ of §5.1 for the code the trajectory holds
 there (`mipt.py::correlated_erasure`):
 
-* `couplings`: one finite number or a list of distinct ones, any order
-  ($J = \pm\infty$ is refused, with the exact routes of §3.7);
+* `couplings`: one number or a list of distinct ones, any order, each with
+  $\lvert J\rvert \le 10^6$ ($J = \pm\infty$ and larger values are refused, with
+  the exact routes of §3.7);
 * `sizes`: distinct sizes in $[1, n-1]$, any order, as a list or a range
   string `"a:b[:step]"` with Python slice semantics (`"2:15:2"` is 2, 4, ..., 14),
   or None (default) for every $m = 1, \dots, n-1$, filled in for the spec's $n$;
@@ -2653,9 +2659,9 @@ report. A study would sample every size of the window.
   cycles and paths), the automatic ladder and the default burn-in, read
   `min_exchange_acceptance` and the warnings, and confirm with several seeds and
   a longer run. No warning is no proof (§4.9).
-* **$J \to \infty$ is a limit, not a coupling.** Infinite couplings are refused;
-  a chain at a huge finite $J$ only finds local minima. Use the exact routes of
-  §3.7.
+* **$J \to \infty$ is a limit, not a coupling.** Infinite couplings and finite
+  ones with $\lvert J\rvert > 10^6$ are refused; a chain at a huge finite $J$
+  only finds local minima. Use the exact routes of §3.7.
 * **The open path.** Its $J \to \infty$ limit is the two end windows,
   `end_window_failure_by_size`, not `interval_failure_by_size(periodic=False)`,
   which weighs all windows equally.

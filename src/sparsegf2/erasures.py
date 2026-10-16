@@ -10,7 +10,8 @@ region ``A`` of ``V`` has size ``m = |A|`` and edge boundary::
 
     ∂A = {{u, v} in E : u in A, v not in A},        b(A) = |∂A|
 
-**The correlated law.** At coupling ``J`` (any finite real number)::
+**The correlated law.** At coupling ``J`` (a real number with ``|J| <= MAX_ABS_COUPLING``,
+10^6)::
 
     Q_J(A | m) = exp(-J b(A)) / Z_m(J),        Z_m(J) = sum over |A| = m of exp(-J b(A))
 
@@ -92,6 +93,7 @@ __all__ = [
     "ENUMERATION_BUDGET",
     "EXCHANGE_WARNING",
     "LADDERS",
+    "MAX_ABS_COUPLING",
     "MAX_LADDER_INSERTED",
     "MAX_RESULT_BYTES",
     "METHODS",
@@ -102,6 +104,7 @@ __all__ = [
     "boundary_counts",
     "boundary_moments",
     "chain_diagnostics",
+    "coupling_bound_message",
     "coupling_ladder",
     "default_burn_in",
     "minimum_boundary_regions",
@@ -123,6 +126,11 @@ ENUMERATION_BUDGET = 2_000_000
 
 SOKAL_WINDOW = 5.0
 """The constant ``c`` of Sokal's automatic window in :func:`chain_diagnostics`."""
+
+MAX_ABS_COUPLING = 1e6
+"""The largest ``|J|`` any coupling may have. Far below it a larger ``J`` adds nothing the
+samplers can resolve (past the crossover the regions are the minimum-boundary ones), and
+above about 9e307 the exact ring sampler's log weights overflow."""
 
 MAX_LADDER_INSERTED = 256
 """At most this many couplings :func:`coupling_ladder` inserts (a larger ``max_step`` lowers it)."""
@@ -195,6 +203,20 @@ def _region_mask(region: Any, n: int) -> np.ndarray:
     return mask
 
 
+def coupling_bound_message(value: float, position: int | None = None) -> str:
+    """The error text for a coupling above :data:`MAX_ABS_COUPLING`, shared by every entry
+    point (the graph side, the code side, the probe and the tools)."""
+    where = "" if position is None else f" at position {position}"
+    return (
+        f"coupling must satisfy |J| <= {MAX_ABS_COUPLING:,.0f}, got {value:g}{where}: a coupling "
+        "that large is the J -> inf limit, which the samplers cannot resolve (and the ring "
+        "sampler's weights overflow); use the exact routes: StabilizerCode."
+        "interval_failure_by_size (ring), end_window_failure_by_size (open path), "
+        "boundary_failure_counts(...).exact (any J, any graph) or "
+        "erasures.minimum_boundary_regions (small graphs)"
+    )
+
+
 def _coupling(coupling: Any) -> float:
     try:
         value = float(coupling)
@@ -205,6 +227,8 @@ def _coupling(coupling: Any) -> float:
             f"coupling must be finite, got {value} (J -> +inf is a limit, not a coupling: "
             "its regions are minimum_boundary_regions)"
         )
+    if abs(value) > MAX_ABS_COUPLING:
+        raise ValueError(coupling_bound_message(value))
     return value
 
 
@@ -225,6 +249,9 @@ def _couplings(couplings: Any, *, distinct: bool) -> np.ndarray:
             f"couplings must be finite, got {arr[bad[0]]} at position {int(bad[0])} "
             "(J -> +inf is a limit, not a coupling: its regions are minimum_boundary_regions)"
         )
+    big = np.flatnonzero(np.abs(arr) > MAX_ABS_COUPLING)
+    if big.size:
+        raise ValueError(coupling_bound_message(float(arr[big[0]]), int(big[0])))
     if distinct:
         values, counts = np.unique(arr, return_counts=True)
         if np.any(counts > 1):
@@ -648,7 +675,7 @@ def _ladder_extra(ladder: Any) -> np.ndarray | None:
     try:
         return _couplings(ladder, distinct=False)
     except ValueError as exc:
-        if "finite" in str(exc):
+        if "finite" in str(exc) or "coupling must satisfy" in str(exc):
             raise
         raise ValueError(message) from None
 
