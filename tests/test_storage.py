@@ -33,9 +33,17 @@ def test_a_saved_run_reports_its_files_and_arrays(tmp_path):
     api.run_ensemble(SPEC, 10, seed=3, output_dir=str(out))
     storage = api.load_results(str(out))["storage"]
     size = (out / "result.npz").stat().st_size
-    assert [f["path"] for f in storage["files"]] == ["result.npz"]
+    # every regular file counts, the largest first
+    everything = [f for f in out.rglob("*") if f.is_file()]
+    assert {f["path"] for f in storage["files"]} == {
+        f.relative_to(out).as_posix() for f in everything
+    }
+    assert {"result.npz", "spec.json", "provenance.json"} <= {f["path"] for f in storage["files"]}
+    assert storage["files"][0]["path"] == "result.npz"
     assert storage["files"][0]["megabytes"] == pytest.approx(size / 1e6, rel=1e-5)
-    assert storage["total_megabytes"] == pytest.approx(size / 1e6, rel=1e-5)
+    assert storage["total_megabytes"] == pytest.approx(
+        sum(f.stat().st_size for f in everything) / 1e6, rel=1e-5
+    )
     names = [a["name"] for a in storage["arrays"]]
     assert names == members(out / "result.npz")
     assert {a["file"] for a in storage["arrays"]} == {"result.npz"}
@@ -68,11 +76,13 @@ def test_many_chunks_are_summed_by_array_name_and_the_summary_stays_bounded(tmp_
     summary = api.load_results(str(out))
     storage = summary["storage"]
     assert len(json.dumps(summary)) <= api.MAX_OUTPUT_CHARS
-    total = sum(f.stat().st_size for f in files)
+    everything = [f for f in out.rglob("*") if f.is_file()]
+    total = sum(f.stat().st_size for f in everything)
     assert storage["total_megabytes"] == pytest.approx(total / 1e6, rel=1e-5)
     assert storage["arrays_summed_over_files"] == len(files)
-    assert len(storage["files"]) + storage["files_not_shown"] == len(files)
-    assert [f["path"] for f in storage["files"]][0] == "chunks/traj_000000000000.npz"
+    assert len(storage["files"]) + storage["files_not_shown"] == len(everything)
+    sizes = [f["megabytes"] for f in storage["files"]]
+    assert sizes == sorted(sizes, reverse=True)  # the largest are listed
     # one entry per array name, summed over the chunks
     assert [a["name"] for a in storage["arrays"]] == members(files[0])
     assert all("file" not in a for a in storage["arrays"])
@@ -84,12 +94,31 @@ def test_many_chunks_are_summed_by_array_name_and_the_summary_stays_bounded(tmp_
     assert row["megabytes"] == pytest.approx(expected / 1e6, rel=1e-5, abs=1e-6)
 
 
+def test_long_probe_names_are_abbreviated_and_the_summary_is_not_cut(tmp_path):
+    probes = [{"kind": "entropy", "region": list(range(i, i + 40))} for i in range(0, 20)]
+    spec = dict(SPEC, num_system=64, probes=probes, checkpoints="final")
+    out = tmp_path / "run"
+    api.run_ensemble(spec, 2, seed=1, output_dir=str(out))
+    summary = api.load_results(str(out))
+    storage = summary["storage"]
+    assert len(json.dumps(summary)) <= api.MAX_OUTPUT_CHARS
+    # the stored spec of 20 long probes is itself too long to show (the summary's own rule);
+    # nothing else is cut, and storage is shown whole
+    assert [n for n in summary["notes"] if n.startswith("not shown")] == [
+        "not shown: spec (too long)"
+    ]
+    assert len(storage["arrays"]) == api.MAX_STORAGE_ARRAYS
+    names = [a["name"] for a in storage["arrays"]]
+    assert len(set(names)) == len(names)
+    assert all(len(n) <= api.MAX_NAME_CHARS + len("value::") for n in names)
+
+
 def test_the_arrays_listed_are_bounded(tmp_path):
     probes = [{"kind": "code_dimension", "name": f"k{i}"} for i in range(40)]
     out = tmp_path / "run"
     api.run_ensemble(dict(SPEC, probes=probes), 4, seed=1, output_dir=str(out))
     storage = api.load_results(str(out))["storage"]
-    size = (out / "result.npz").stat().st_size
+    size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     assert len(storage["arrays"]) <= api.MAX_STORAGE_ARRAYS
     assert storage["arrays"][-1]["name"] == "(other arrays)"
     assert storage["total_megabytes"] == pytest.approx(size / 1e6, rel=1e-5)

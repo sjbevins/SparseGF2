@@ -2184,6 +2184,16 @@ def _projected_rate(r1: float, rp: float | None, p: int, busy: int) -> float:
     return r1 * f(busy) / f(1) * scale
 
 
+def _benchmark_minimum_seconds(mc: mipt.MonitoredCircuit, trajectories: int, p: int) -> float:
+    """The estimated seconds of the least :func:`benchmark_ensemble` can do: a one-thread
+    warm-up and measurement of one trajectory each, and, for ``p`` > 1 threads, a warm-up and
+    a measurement of ``p`` trajectories (one trajectory-time on ``p`` threads). Pessimistic,
+    like :func:`_estimate_seconds`, and without the setup."""
+    one = _trajectory_us(mc) * 1e-6
+    on_p = one * p / _parallel_threads(p)
+    return 2 * one + (2 * on_p if p > 1 else 0.0)
+
+
 def _measure(
     mc: mipt.MonitoredCircuit, threads: int, first: int, limit: int, seconds: float, seed: int
 ) -> tuple[mipt.EnsembleResult, float]:
@@ -2249,6 +2259,15 @@ def benchmark_ensemble(
     max_threads = int(numba.config.NUMBA_NUM_THREADS)
     counts = sorted({1, max_threads}) if threads is None else _require_thread_counts(threads)
     p = min(max(counts), max_threads, trajectories)
+    # The least work is the warm-up and the first measurement, whatever `seconds` is.
+    minimum = _benchmark_minimum_seconds(mc, trajectories, p)
+    if minimum > 2 * seconds:
+        raise ValueError(
+            f"even the least measurement is estimated at about {minimum:.0f} s, above 2 x "
+            f"seconds ({2 * seconds:g} s): measure a smaller run (fewer layers or a smaller "
+            "num_system) and scale the figures, or use 'sparsegf2 benchmark' in a shell with "
+            "a larger --seconds"
+        )
     notes: list[str] = []
     if any(job.status == "running" for job in _JOBS.values()):
         notes.append("a background job was running: the timings are lower than an idle machine's")
@@ -2297,13 +2316,25 @@ def benchmark_ensemble(
         # the file has a part that does not grow with the trajectories (the graphs, the
         # gate set): the growth per trajectory is what two sample sizes show
         disk = one_bytes + (big_bytes - one_bytes) / (k - 1) * (trajectories - 1)
+    elif k > 1:
+        disk = float(one_bytes)  # no growth showed: the one-trajectory file is the floor
+        notes.append(
+            "disk_megabytes is rough: the sample file was not larger than the one-trajectory "
+            "file, so the one-trajectory size is used as a floor"
+        )
     else:
         disk = max(one_bytes, big_bytes) * trajectories / k
-        if k == 1 and trajectories > 1:
+        if trajectories > 1:
             notes.append(
                 "disk_megabytes is an upper bound: one trajectory took longer than seconds / 4, "
                 "so its fixed part (graphs, spec) was scaled with the rest"
             )
+    if 1 < k < 8:
+        notes.append(f"disk_megabytes is rough: it comes from a sample of only {k} trajectories")
+    notes.append(
+        "a background job writes chunk files before merging them, so its peak disk use is "
+        "about twice the final result"
+    )
     return {
         "trajectories": trajectories,
         "seed": seed,
@@ -3753,7 +3784,9 @@ def load_results(path: str) -> dict[str, Any]:
         extra["trajectories_requested"] = meta.get("trajectories")
     # a file replaced meanwhile: the data was read, only the sizes are missing
     with contextlib.suppress(OSError, zipfile.BadZipFile):
-        extra["storage"] = _storage_summary(parts, p if p.is_dir() else p.parent)
+        root = p if p.is_dir() else p.parent
+        everything = [q for q in p.rglob("*") if q.is_file()] if p.is_dir() else [p]
+        extra["storage"] = _storage_summary(parts, root, everything)
     return _bounded_summary(result, extra)
 
 
@@ -3761,21 +3794,24 @@ MAX_STORAGE_FILES = 8
 MAX_STORAGE_ARRAYS = 20
 
 
-def _storage_summary(parts: list[Path], root: Path) -> dict[str, Any]:
-    """The disk use of the ``.npz`` files ``parts``: each file and each array, in megabytes.
+def _storage_summary(parts: list[Path], root: Path, everything: list[Path]) -> dict[str, Any]:
+    """The disk use of a saved run, in megabytes: every file, and the arrays of its results.
 
-    A file's size is its size on disk; an array's is the compressed size of its member of
-    the zip file. With several files (chunks of a run in progress) the arrays are summed by
-    name over the files and only the first :data:`MAX_STORAGE_FILES` files are listed; the
-    arrays are at most :data:`MAX_STORAGE_ARRAYS`, the smaller ones summed as one entry.
+    ``everything`` is every regular file of the run (``result.npz``, chunks, ``spec.json``,
+    ``provenance.json``, ...); ``total_megabytes`` counts them all and ``files`` lists the
+    largest :data:`MAX_STORAGE_FILES` (``files_not_shown`` counts the rest). ``arrays`` are
+    the members of the ``.npz`` files ``parts``, by compressed size, with the names
+    abbreviated as in the run summary. With several result files (chunks of a run in
+    progress) they are summed by name; at most :data:`MAX_STORAGE_ARRAYS` are listed, the
+    smaller ones summed as one entry.
     """
-    files: list[dict[str, Any]] = []
+    sizes = sorted(((q.stat().st_size, q) for q in everything), key=lambda s: (-s[0], str(s[1])))
+    files = [
+        {"path": q.relative_to(root).as_posix(), "megabytes": _num(size / 1e6)}
+        for size, q in sizes[:MAX_STORAGE_FILES]
+    ]
     sums: dict[str, int] = {}
-    total = 0
     for path in parts:
-        size = path.stat().st_size
-        total += size
-        files.append({"path": path.relative_to(root).as_posix(), "megabytes": _num(size / 1e6)})
         with zipfile.ZipFile(path) as z:
             for info in z.infolist():
                 name = info.filename.removesuffix(".npy")
@@ -3785,20 +3821,25 @@ def _storage_summary(parts: list[Path], root: Path) -> dict[str, Any]:
         keep = {name for name, _ in sorted(rows, key=lambda r: -r[1])[: MAX_STORAGE_ARRAYS - 1]}
         rest = sum(size for name, size in rows if name not in keep)
         rows = [r for r in rows if r[0] in keep] + [("(other arrays)", rest)]
+    shown = _summary_names([name for name, _ in rows])
     single = len(parts) == 1
     arrays = [
-        {**({"file": files[0]["path"]} if single else {}), "name": name, "megabytes": _num(b / 1e6)}
+        {
+            **({"file": parts[0].relative_to(root).as_posix()} if single else {}),
+            "name": shown[name],
+            "megabytes": _num(b / 1e6),
+        }
         for name, b in rows
     ]
     out: dict[str, Any] = {
-        "total_megabytes": _num(total / 1e6),
-        "files": files[:MAX_STORAGE_FILES],
+        "total_megabytes": _num(sum(size for size, _ in sizes) / 1e6),
+        "files": files,
         "arrays": arrays,
     }
-    if len(files) > MAX_STORAGE_FILES:
-        out["files_not_shown"] = len(files) - MAX_STORAGE_FILES
+    if len(sizes) > MAX_STORAGE_FILES:
+        out["files_not_shown"] = len(sizes) - MAX_STORAGE_FILES
     if not single:
-        out["arrays_summed_over_files"] = len(files)
+        out["arrays_summed_over_files"] = len(parts)
     return out
 
 

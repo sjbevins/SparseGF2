@@ -122,6 +122,38 @@ def test_bad_arguments_are_refused(kwargs, word):
         api.benchmark_ensemble(SPEC, **arguments)
 
 
+def test_a_run_too_slow_to_measure_is_refused_before_anything_runs(monkeypatch):
+    slow = dict(SPEC, num_system=1024, layers=100_000, checkpoints="final")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("nothing may run")
+
+    monkeypatch.setattr(api.mipt.MonitoredCircuit, "run", forbidden)
+    with pytest.raises(ValueError, match=r"estimated.*seconds.*(layers|--seconds)"):
+        api.benchmark_ensemble(slow, trajectories=100, seconds=1)
+    # the same spec is accepted when seconds covers the estimate (checked by the guard only)
+    mc = api._build_spec(slow)
+    assert api._benchmark_minimum_seconds(mc, 100, 4) > 2.0
+
+
+def test_the_storage_notes_and_floors(monkeypatch):
+    out = api.benchmark_ensemble(SPEC, trajectories=40, threads=[1], seconds=1)
+    notes = " ".join(out["notes"])
+    assert "background job" in notes and "twice" in notes  # chunks are written before the merge
+    small = api.benchmark_ensemble(SPEC, trajectories=3, threads=[1], seconds=1)
+    assert small["storage"]["sample_trajectories"] < 8
+    assert "rough" in " ".join(small["notes"])
+
+
+def test_a_sample_file_not_larger_than_one_trajectory_gets_a_floor(monkeypatch):
+    sizes = iter([5000, 4000])  # the one-trajectory file, then a smaller larger-sample file
+    monkeypatch.setattr(api, "_file_bytes", lambda result, directory: next(sizes))
+    out = api.benchmark_ensemble(SPEC, trajectories=40, threads=[1], seconds=1)
+    assert out["storage"]["sample_trajectories"] > 1
+    assert out["storage"]["disk_megabytes"] == pytest.approx(5000 / 1e6)
+    assert "rough" in " ".join(out["notes"])
+
+
 def test_a_single_graph_needs_trajectories():
     with pytest.raises(ValueError, match="trajectories"):
         api.benchmark_ensemble(SPEC, seconds=1)

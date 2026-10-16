@@ -582,11 +582,18 @@ processors it may run on; `threads` defaults to `[1, threads_available]`. The re
 It writes nothing: the sample is saved in a temporary folder that is removed. The MCP tool
 is read-only and refuses `seconds` above 30. The CLI prints a table without `--json`.
 
-`load_results` adds `storage` for a saved run: `total_megabytes` (the `.npz` files on
-disk), `files` (`path` relative to the folder, `megabytes`) and `arrays` (`name`,
-compressed `megabytes`, and `file` for a single file). With several chunk files the
-arrays are summed by name (`arrays_summed_over_files`), at most 8 files are listed
-(`files_not_shown`), and at most 20 arrays (the rest as `(other arrays)`).
+`load_results` adds `storage` for a saved run: `total_megabytes` (every file in the
+folder), `files` (the 8 largest: `path` relative to the folder, `megabytes`;
+`files_not_shown` counts the rest) and `arrays` (the members of the `.npz` files: `name`,
+abbreviated like the summary's probe names, compressed `megabytes`, and `file` for a
+single file). With several chunk files the arrays are summed by name
+(`arrays_summed_over_files`); at most 20 are listed (the rest as `(other arrays)`).
+
+`benchmark_ensemble` refuses a spec whose least possible measurement (a warm-up and one
+trajectory on one thread, and the same on `P` threads) is estimated above 2 x `seconds`,
+without running anything; its `notes` say when `disk_megabytes` is rough (a small sample,
+or a sample file no larger than the one-trajectory file) and that a background job writes
+chunks before merging, so its peak disk use is about twice the final result.
 
 ---
 
