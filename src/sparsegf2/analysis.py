@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "MONOTONE_SLACK",
     "bernoulli_erasure_curve",
     "binomial_window",
     "correlated_failure_curve",
@@ -563,8 +564,11 @@ def exact_correlated_failure(failed, total, couplings) -> np.ndarray:
 
     Numerically stable for any finite J: each sum is shifted by the smallest
     boundary with N_m(b) > 0 when J >= 0 (the largest when J < 0), so every
-    exponent is <= 0 and the denominator is at least 1. Returns float64 of shape
-    ``(..., c, w)``: entry ``[..., i, m - 1]`` is P at ``couplings[i]`` and size m.
+    exponent is <= 0 and the denominator is at least 1. The counts are
+    converted to float64 first, which is exact below 2**53 (far above any
+    enumeration budget; larger counts would be rounded before the checks).
+    Returns float64 of shape ``(..., c, w)``: entry ``[..., i, m - 1]`` is P at
+    ``couplings[i]`` and size m.
     """
     u = _count_array(failed, "failed")
     t = _count_array(total, "total")
@@ -692,14 +696,17 @@ def correlated_failure_curve(
     gives P(n). Leading axes broadcast. The curve, float64 ``(..., c, n + 1)``,
     takes each entry from the first source that has it:
 
-    1. P(0) = 0 (erasing nothing never fails) and P(n) = 1, or ``holds_code``
-       (erasing everything fails exactly when there is logical information;
-       pass it unless the codes are already conditioned on k > 0);
+    1. P(0) = 0 (erasing nothing never fails), and P(n) = 1[k > 0] (erasing
+       everything fails exactly when there is logical information): from
+       ``holds_code`` when given, else from ``exact`` when it covers m = n
+       (w = n), else 1 (codes already conditioned on k > 0; pass
+       ``holds_code`` for any other ensemble);
     2. the exact values for 1 <= m <= min(w, n - 1);
     3. the sampled values at the other sizes;
     4. linear interpolation in m between the nearest sizes known by 1-3 on
-       either side, P(m) = (1 - t) P(m_left) + t P(m_right),
-       t = (m - m_left) / (m_right - m_left).
+       either side, P(m) = P(m_left) + t (P(m_right) - P(m_left)),
+       t = (m - m_left) / (m_right - m_left), which is exactly P(m_left) on a
+       plateau.
 
     Returns ``(curve, interpolated)``, ``interpolated`` a boolean array of
     length n + 1, True where step 4 filled the entry (so a report can say that
@@ -759,6 +766,8 @@ def correlated_failure_curve(
                 f"holds_code needs the shape of the leading axes {lead[:-1]} (one entry per code, "
                 f"no coupling axis); got {h.shape}"
             ) from None
+    elif ex is not None and ex.shape[-1] == n:
+        top = np.broadcast_to(ex[..., n - 1], lead)  # the exact P(n) = 1[k > 0]
     curve = np.full(lead + (n + 1,), np.nan)
     known = np.zeros(n + 1, dtype=bool)
     curve[..., 0] = 0.0
@@ -778,14 +787,49 @@ def correlated_failure_curve(
         place = np.searchsorted(idx, gaps)
         left, right = idx[place - 1], idx[place]
         frac = (gaps - left) / (right - left)
-        curve[..., gaps] = (1.0 - frac) * curve[..., left] + frac * curve[..., right]
+        start = curve[..., left]
+        curve[..., gaps] = start + frac * (curve[..., right] - start)
     return curve, ~known
 
 
-def _weight_matrix(n: int, es: np.ndarray) -> np.ndarray:
-    """``W[i, m] = C(n, m) e_i^m (1 - e_i)^(n - m)``, shape ``(len(es), n + 1)``."""
+_CHUNK = 1 << 22
+"""Largest number of binomial weights held at once (32 MB of float64)."""
+
+MONOTONE_SLACK = 1e-12
+"""A step down in P(m) no larger than this still counts as monotone (:func:`tolerance_from_curve`)."""
+
+
+def _weight_rows(n: int, es: np.ndarray, log_binom: np.ndarray) -> np.ndarray:
+    """``W[i, m] = C(n, m) e_i^m (1 - e_i)^(n - m)`` in log space, shape ``(len(es), n + 1)``."""
+    w = np.zeros((es.size, n + 1))
+    w[es == 0.0, 0] = 1.0
+    w[es == 1.0, n] = 1.0
+    inner = (es > 0.0) & (es < 1.0)
+    if inner.any():
+        m = np.arange(n + 1)
+        e = es[inner][:, None]
+        w[inner] = np.exp(log_binom[None, :] + m * np.log(e) + (n - m) * np.log1p(-e))
+    return w
+
+
+def _phi_grid(flat: np.ndarray, n: int, es: np.ndarray) -> np.ndarray:
+    """Phi of every row of ``flat`` (``(r, n + 1)``) at every e: ``(r, len(es))``, in chunks of e."""
     log_binom = _log_binomial(n)
-    return np.stack([_binomial_weights(n, float(ei), log_binom) for ei in es.tolist()])
+    step = max(1, _CHUNK // (n + 1))
+    out = np.empty((flat.shape[0], es.size))
+    for a in range(0, es.size, step):
+        out[:, a : a + step] = flat @ _weight_rows(n, es[a : a + step], log_binom).T
+    return out
+
+
+def _phi_rows(flat: np.ndarray, n: int, es: np.ndarray, log_binom: np.ndarray) -> np.ndarray:
+    """Phi of row i of ``flat`` at ``es[i]``: ``(r,)``, in chunks of rows."""
+    step = max(1, _CHUNK // (n + 1))
+    out = np.empty(flat.shape[0])
+    for a in range(0, flat.shape[0], step):
+        weights = _weight_rows(n, es[a : a + step], log_binom)
+        out[a : a + step] = np.einsum("rm,rm->r", flat[a : a + step], weights)
+    return out
 
 
 def _curve_array(curve, n: int) -> np.ndarray:
@@ -810,12 +854,13 @@ def failure_probability_from_curve(curve, num_qubits: int, e):
     :func:`erasure_failure_probability` (equal to it up to rounding for the
     same exact P_C(m)). ``e`` is a number or a 1-D array; returns float64 of
     shape ``(...)`` or ``(..., len(e))``. The weights are those of
-    :func:`erasure_failure_probability`, in log space.
+    :func:`erasure_failure_probability`, in log space (lgamma), computed a
+    few million at a time, so large n is safe.
     """
     n = _curve_qubits(num_qubits)
     p = _curve_array(curve, n)
     es = _probabilities(e)
-    out = p @ _weight_matrix(n, es).T
+    out = _phi_grid(p.reshape(-1, n + 1), n, es).reshape(p.shape[:-1] + (es.size,))
     return out if np.ndim(e) else out[..., 0]
 
 
@@ -840,9 +885,12 @@ def tolerance_from_curve(curve, num_qubits: int, delta: float, *, return_monoton
     Returns a float for a 1-D curve, else an array of shape ``(...)`` (NaN
     for a curve with a NaN entry). With ``return_monotone=True`` returns
     ``(e_delta, monotone)``, ``monotone`` True where the curve is
-    nondecreasing in m, so that e_delta is the unique crossing; where it is
+    nondecreasing in m up to rounding (no step down by more than
+    :data:`MONOTONE_SLACK`, 1e-12, so a plateau that went through floating
+    point still counts), so that e_delta is the unique crossing; where it is
     False, say so (the curve was sampled or interpolated and is not monotone,
     so Phi may cross delta more than once and e_delta is the last crossing).
+    Memory stays below a few tens of MB at any n (Phi is evaluated in chunks).
     """
     n = _curve_qubits(num_qubits)
     p = _curve_array(curve, n)
@@ -856,14 +904,14 @@ def tolerance_from_curve(curve, num_qubits: int, delta: float, *, return_monoton
     finite = ~np.isnan(flat).any(axis=1)
     if np.any(flat[finite, 0] != 0):
         raise ValueError("curve[..., 0] = P(0) must be 0: erasing no qubit never fails")
-    monotone = np.all(np.diff(flat, axis=1) >= 0, axis=1) & finite
+    monotone = np.all(np.diff(flat, axis=1) >= -MONOTONE_SLACK, axis=1) & finite
     out = np.full(flat.shape[0], np.nan)
     rows = np.flatnonzero(finite)
     if level == 0.0:  # Phi(e) > 0 for every e > 0 as soon as some P(m) > 0
         out[rows] = np.where(np.any(flat[rows] > 0, axis=1), 0.0, 1.0)
     elif rows.size:
         grid = np.linspace(0.0, 1.0, 2049)
-        below = flat[rows] @ _weight_matrix(n, grid).T <= level  # (rows, 2049)
+        below = _phi_grid(flat[rows], n, grid) <= level  # (rows, 2049)
         last = 2048 - np.argmax(below[:, ::-1], axis=1)  # Phi(0) = 0 <= delta: always found
         done = below[:, -1]
         out[rows[done]] = 1.0
@@ -871,9 +919,10 @@ def tolerance_from_curve(curve, num_qubits: int, delta: float, *, return_monoton
         lo = grid[last[todo]]
         hi = grid[last[todo] + 1]
         values = flat[rows[todo]]
+        log_binom = _log_binomial(n)
         for _ in range(50 if todo.size else 0):
             mid = 0.5 * (lo + hi)
-            ok = np.einsum("rm,rm->r", values, _weight_matrix(n, mid)) <= level
+            ok = _phi_rows(values, n, mid, log_binom) <= level
             lo = np.where(ok, mid, lo)
             hi = np.where(ok, hi, mid)
         out[rows[todo]] = lo
