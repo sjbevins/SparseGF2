@@ -35,6 +35,23 @@ EXPECTED_TOOLS = {
     "load_results",
     "sample_erasure_regions",
     "erasure_curves",
+    "study_status",
+    "study_catalog",
+    "study_plan",
+    "study_start_run",
+    "study_aggregate",
+    "study_tableau",
+    "study_fss",
+}
+
+#: The study tools that only read (a store, or the catalog); study_start_run writes.
+STUDY_READ_ONLY = {
+    "study_status",
+    "study_catalog",
+    "study_plan",
+    "study_aggregate",
+    "study_tableau",
+    "study_fss",
 }
 
 
@@ -569,3 +586,131 @@ def test_stdio_transport_end_to_end():
     result, seeded = asyncio.run(asyncio.wait_for(runner(), timeout=120))
     assert ok(result)["measurements"] == api.run_circuit("H 0\nM 0", seed=1)["measurements"]
     assert ok(seeded)["seed"] == big and f'"seed":{big},' in seeded.content[0].text
+
+
+# ---------------------------------------------------------------------------------------------
+# the Watts-Strogatz study tools (sparsegf2.study.api)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def study_store(tmp_path_factory):
+    from _study_api_support import build
+
+    return build(tmp_path_factory.mktemp("mcp_study") / "store")
+
+
+def test_the_study_tools_are_annotated_and_described():
+    tools = {t.name: t for t in session(lambda c: c.list_tools()).tools}
+    for name in STUDY_READ_ONLY:
+        assert tools[name].annotations.read_only_hint is True, name
+        assert tools[name].annotations.open_world_hint is False, name
+    run = tools["study_start_run"]
+    assert run.annotations.read_only_hint is False and run.annotations.destructive_hint is False
+    for name in (*STUDY_READ_ONLY, "study_start_run"):
+        assert 300 < len(tools[name].description) < 2000, name
+        assert "Example:" in tools[name].description, name
+    assert tools["study_tableau"].input_schema["required"] == ["store", "n", "beta", "p", "g",
+                                                                "c", "t"]  # fmt: skip
+    assert "out" not in tools["study_tableau"].input_schema["properties"]  # writes nothing
+    assert "out" not in tools["study_fss"].input_schema["properties"]
+    assert "record" not in tools["study_aggregate"].input_schema["properties"]
+    for word in ("censored", "restricted_mean", "paired_rates", "horizon_policy", "zero_extended",
+                 "nan_policy"):  # fmt: skip
+        assert word in tools["study_aggregate"].description, word
+    for word in ("unverified", "excluded", "plateau", "bootstrap", "at_bound"):
+        assert word in tools["study_fss"].description + tools["study_status"].description, word
+    assert "job_status" in run.description and "stopped" in run.description
+
+
+def _same_result(a: dict, b: dict) -> None:
+    from _study_api_support import without_timing
+
+    assert without_timing(a) == without_timing(json.loads(json.dumps(b)))
+
+
+def test_the_study_tools_return_the_api_results(study_store):
+    from sparsegf2.study import api as sa
+
+    cases = [
+        ("study_status", {"store": study_store}, lambda: sa.status(study_store)),
+        ("study_catalog", {"observable": "k"}, lambda: sa.catalog("k")),
+        ("study_plan", {"store": study_store, "threads": 1}, lambda: sa.plan(study_store, 1)),
+        ("study_aggregate", {"store": study_store, "observable": "first_passage",
+                             "where": {"n": 6}, "ell": [0, 1]},
+         lambda: sa.aggregate(study_store, "first_passage", where={"n": 6}, ell=[0, 1])),
+        ("study_aggregate", {"store": study_store, "observable": "d_cyc",
+                             "field": "zero_extended", "paired_rates": ["0.1", 0.3]},
+         lambda: sa.aggregate(study_store, "d_cyc", field="zero_extended",
+                              paired_rates=["0.1", 0.3])),
+        ("study_tableau", {"store": study_store, "n": 6, "beta": "0.2", "p": 0.1, "g": 1, "c": 0,
+                           "t": 5}, lambda: sa.tableau(study_store, n=6, beta="0.2", p=0.1, g=1,
+                                                       c=0, t=5)),
+        ("study_fss", {"store": study_store, "observable": "peak_d_cyc", "beta": "0.2",
+                       "horizon_policy": "include", "max_horizon_fraction": 1, "starts": 1,
+                       "bootstrap": 2},
+         lambda: sa.fss(study_store, "peak_d_cyc", "0.2", horizon_policy="include",
+                        max_horizon_fraction=1, starts=1, bootstrap=2)),
+    ]  # fmt: skip
+    for name, arguments, expected in cases:
+        _same_result(ok(call(name, arguments)), expected())
+
+
+def test_study_errors_are_messages_that_say_what_to_change(study_store, tmp_path):
+    def err(name, arguments):
+        return error_text(call(name, arguments))
+
+    assert "is not a study store" in err("study_status", {"store": str(tmp_path / "none")})
+    assert "pass replay=true" in err("study_tableau", {"store": study_store, "n": 6,
+                                                       "beta": "0.2", "p": "0.1", "g": 0,
+                                                       "c": 0, "t": 3})  # fmt: skip
+    assert "zero_extended" in err("study_aggregate", {"store": study_store,
+                                                      "observable": "d_cyc"})  # fmt: skip
+    assert "exactly one of ell" in err("study_fss", {"store": study_store,
+                                                     "observable": "first_passage",
+                                                     "beta": "0.2"})  # fmt: skip
+    text = err("study_fss", {"store": study_store, "observable": "peak_d_cyc", "beta": "0.2",
+                             "horizon_policy": "include", "max_horizon_fraction": 1,
+                             "starts": 1, "bootstrap": 100_000})  # fmt: skip
+    assert "above max_seconds = 50" in text and "sparsegf2 study fss" in text
+    for name, given in (
+        ("study_plan", {"store": study_store, "benchmark": "true"}),
+        ("study_plan", {"store": study_store, "threads": True}),
+        ("study_tableau", {"store": study_store, "n": "6", "beta": "0.2", "p": "0.1", "g": 0,
+                           "c": 0, "t": 5}),
+        ("study_aggregate", {"store": study_store, "observable": "k", "index": 1.5}),
+        ("study_start_run", {"store": study_store, "max_units": True}),
+        ("study_fss", {"store": study_store, "observable": "peak_D", "beta": "0.2",
+                       "leave_one_out": 1}),
+    ):  # fmt: skip
+        assert error_text(call(name, given)), (name, given)
+
+
+def test_a_study_run_through_the_job_tools(tmp_path):
+    from _study_api_support import build
+
+    path = build(tmp_path / "s", run=False)
+
+    async def lifecycle(client):
+        started = ok(await client.call_tool(
+            "study_start_run", {"store": path, "max_units": 4, "num_threads": 1}
+        ))  # fmt: skip
+        status = ok(await client.call_tool(
+            "job_status", {"job_id": started["job_id"], "wait_seconds": 60}
+        ))  # fmt: skip
+        listed = ok(await client.call_tool("list_jobs", {}))
+        rest = ok(await client.call_tool("study_start_run", {"store": path, "num_threads": 1}))
+        final = ok(await client.call_tool(
+            "job_status", {"job_id": rest["job_id"], "wait_seconds": 60}
+        ))  # fmt: skip
+        study = ok(await client.call_tool("study_status", {"store": path}))
+        return started, status, listed, final, study
+
+    started, status, listed, final, study = session(lifecycle)
+    assert started["kind"] == "study_run" and started["units_total"] == 4
+    assert status["status"] == "stopped" and status["stopped"] == "max_units"
+    assert started["job_id"] in {j["job_id"] for j in listed["jobs"]}
+    assert final["status"] == "completed" and study["complete"]
+    assert "num_threads must be at least 1" in error_text(
+        call("study_start_run", {"store": path, "num_threads": 0})
+    )
