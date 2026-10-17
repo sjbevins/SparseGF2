@@ -12,7 +12,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import sqlite3
 import zlib
 
 import numpy as np
@@ -30,7 +29,6 @@ from sparsegf2.study.manifest import (
     check_extension,
     effective_checkpoints,
 )
-from sparsegf2.study.store import STORE_FILE
 
 
 @pytest.fixture(scope="module")
@@ -301,13 +299,8 @@ def test_a_code_only_store_and_a_revision_that_adds_the_joint_tableaux(tmp_path)
             if k[0] == "snapshot":  # the physical code stays; the joint state is filled in
                 new = after[k]
                 status, qubits, rank_, k_, joint, joint_digest, phys, phys_digest = v
-                assert (new[0], new[1], new[3], new[6], new[7]) == (
-                    status,
-                    qubits,
-                    k_,
-                    phys,
-                    phys_digest,
-                )
+                assert (new[1], new[3], new[6], new[7]) == (qubits, k_, phys, phys_digest)
+                assert (status, new[0]) == ("phys_only", "stored")  # G-STO-3, then filled in
                 assert (rank_, joint, joint_digest) == (None, None, None)
                 assert new[2] == 12 and new[4] is not None and new[5] is not None
             elif k[0] not in ("manifest",):
@@ -416,7 +409,7 @@ def test_recomputing_the_run_s_values_from_stored_codes_cross_checks_them(tmp_pa
             summary = runner.compute(store, name)
             assert (summary.inserted, summary.existing) == (0, 60), name
         key = store.trajectory_keys()[3]
-        con = sqlite3.connect(store.path / STORE_FILE)
+        con = sup.open_for_tampering(store)
         con.execute(
             "UPDATE observations SET value = 99 WHERE observable = 'k' AND t = 5 AND tid = ?",
             (store._tid(key),),
@@ -449,7 +442,7 @@ def test_replay_fails_loudly_on_a_store_that_does_not_reproduce(tmp_path):
     with sup.build(tmp_path / "s") as store:
         key = store.trajectory_keys()[4]
         tid = store._tid(key)
-        con = sqlite3.connect(store.path / STORE_FILE)
+        con = sup.open_for_tampering(store)
         con.execute(
             "UPDATE snapshots SET joint_digest = ? WHERE tid = ? AND t = 5", ("0" * 64, tid)
         )
@@ -501,7 +494,7 @@ def test_verify_passes_on_a_clean_store_and_fails_on_a_tampered_one(tmp_path):
         )
         raw = bytearray(zlib.decompress(blob))
         raw[20] ^= 0x40
-        con = sqlite3.connect(store.path / STORE_FILE)
+        con = sup.open_for_tampering(store)
         con.execute(
             "UPDATE snapshots SET joint = ? WHERE tid = ? AND t = 10",
             (zlib.compress(bytes(raw)), tid),

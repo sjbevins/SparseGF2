@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -28,7 +29,7 @@ import numpy as np
 from _rowspace_oracle import int_rows, rref, stim_tick_states
 from sparsegf2.study import runner
 from sparsegf2.study.manifest import ExperimentManifest
-from sparsegf2.study.store import TableauStore
+from sparsegf2.study.store import STORE_FILE, TableauStore
 
 #: A small manifest: two rates, three graphs of two circuits (stride 4), n = 6, 10 layers.
 BASE: dict[str, Any] = {
@@ -179,6 +180,18 @@ def assert_unchanged(before: dict[tuple[Any, ...], Any], after: dict[tuple[Any, 
     assert not missing, f"records disappeared: {missing[:3]}"
     changed = [k for k in before if before[k] != after[k]]
     assert not changed, f"records changed: {changed[:3]}"
+
+
+def open_for_tampering(store: TableauStore) -> sqlite3.Connection:
+    """A raw connection to the store's database with its append-only triggers dropped: what
+    damage from outside SQLite (a disk, an editor, another program) can do. Tests use it to
+    show that such changes are detected; the store itself never takes this route."""
+    con = sqlite3.connect(store.path / STORE_FILE)
+    names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")]
+    for name in names:
+        con.execute(f"DROP TRIGGER {name}")
+    con.commit()
+    return con
 
 
 # ---------------------------------------------------------------------------------------------

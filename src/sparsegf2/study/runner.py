@@ -31,7 +31,10 @@ stored records, through the native engine only (``mipt.MonitoredCircuit.run``):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import struct
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -56,14 +59,20 @@ from sparsegf2.study.identity import (
     canonical_json,
     dynamics_version,
     json_digest,
+    token_words,
 )
 from sparsegf2.study.manifest import CorrelatedErasure, ExperimentManifest, effective_checkpoints
 from sparsegf2.study.store import (
+    DIAGNOSTICS_SEED_TAG,
+    OUTCOME_SEED_TAG,
     SNAPSHOT_ABSENT,
+    SNAPSHOT_PHYS_ONLY,
     SNAPSHOT_STORED,
     TableauStore,
-    _git_commit,
     _now,
+    environment,
+    environment_digest,
+    git_provenance,
     graph_measures,
 )
 from sparsegf2.tableau import PhaseFreeTableau, physical_tableaux, to_bytes_batch
@@ -79,13 +88,17 @@ __all__ = [
     "WorkUnit",
     "circuit",
     "compute",
+    "diagnose_samplers",
+    "engine_probes",
     "extend",
+    "outcome_seed_of",
     "plan",
     "replay",
     "replay_signed",
     "requirements",
     "requirements_digest",
     "run",
+    "signed_digest",
     "verify",
 ]
 
@@ -126,10 +139,13 @@ def requirements(
     version), and for protocol F ``stop_when_purified``, ``snapshot`` (``"tableau_snapshot"``,
     the joint state and its physical code, or ``"code_snapshot"``, the physical code only),
     ``contiguous_distance``, ``uniform_erasure`` (samples and exact budget, or None),
-    ``correlated_erasure`` (each entry's settings with its probe name) and ``peak`` (the
-    predeclared peak rule of ``analysis.peak``, v1.4 §5.8). The rate is not part of it: every
-    rate of a condition records the same things. The code dimension is always recorded at
-    every layer (F).
+    ``correlated_erasure`` (each entry's settings with its probe name), ``peak`` (the
+    predeclared peak rule of ``analysis.peak``, v1.4 §5.8) and ``domain``: the depths over which
+    peaks and the checkpoint bounds of the first passages are taken, the last revision's own
+    schedule $S_r(n, \\beta)$ (G-OBS-2: a store built through revisions and a store made
+    directly under the last manifest give the same peaks; $S_r \\subseteq E_r$ is stored). The
+    rate is not part of it: every rate of a condition records the same things. The code
+    dimension is always recorded at every layer (F).
     """
     chain = list(revisions)
     latest = chain[-1]
@@ -157,6 +173,7 @@ def requirements(
             for entry, name in zip(obs.correlated_erasure, obs.probe_names(), strict=True)
         ],
         peak=latest.analysis.peak.to_dict(),
+        domain=list(latest.checkpoints(n, b, protocol)),
     )
     return out
 
@@ -166,7 +183,7 @@ def requirements_digest(req: Mapping[str, Any]) -> str:
     return json_digest(dict(req))
 
 
-def _probes(req: Mapping[str, Any]) -> list[mipt.Probe]:
+def engine_probes(req: Mapping[str, Any]) -> list[mipt.Probe]:
     """The engine probes of the requirements, with their stable names (:data:`PROBE_NAMES`)."""
     cps = list(req["checkpoints"])
     if req["protocol"] == "P":
@@ -242,7 +259,8 @@ class WorkUnit:
     ``protocol``, ``n``, ``beta``, ``p``: the condition; graphs ``g0 <= g < g1`` and circuits
     ``c0 <= c < c1`` (``graphs = (g0, g1)``, ``circuits = (c0, c1)``); ``layers``, the horizon;
     ``requirements``, the digest of what each trajectory records; ``revision``, the manifest
-    revision it was planned under.
+    revision it was planned under; ``rerun``: its trajectories are stored already and run again
+    for what a revision added (a deeper horizon, new depths, a new observable).
     """
 
     protocol: str
@@ -254,6 +272,7 @@ class WorkUnit:
     layers: int
     requirements: str
     revision: int
+    rerun: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -305,9 +324,12 @@ def plan(
     with the same run and consecutive labels go together, at most ``storage.graphs_per_unit``
     graphs, ``resources.max_unit_trajectories`` trajectories and ``resources.max_unit_bytes``
     (default :data:`DEFAULT_UNIT_BYTES`) of engine memory per unit (a graph's circuits are split
-    when even one graph exceeds them). Units are sorted by protocol, ``n``, ``beta``, ``p``,
-    first graph and first circuit. The three keywords override the manifest's sizes for this
-    plan only; how trajectories are split into units never changes a stored value.
+    when even one graph exceeds them). A unit holds either stored trajectories run again
+    (``rerun``: what a revision added, G-RUN-2) or new ones, and the reruns come first, so the
+    stored trajectories receive the new depths before any new trajectory is added. Then units
+    are sorted by protocol, ``n``, ``beta``, ``p``, first graph and first circuit. The three
+    keywords override the manifest's sizes for this plan only; how trajectories are split into
+    units never changes a stored value.
     """
     for name, value in (
         ("graphs_per_unit", graphs_per_unit),
@@ -333,13 +355,16 @@ def plan(
             cap = max(1, min(most, budget // per_trajectory))
             for p in cond.rates:
                 done = store.completed(protocol, cond.n, cond.beta, p, digest)
-                pieces: dict[tuple[int, int], list[int]] = {}
+                stored = store.stored_pairs(protocol, cond.n, cond.beta, p)
+                pieces: dict[tuple[bool, int, int], list[int]] = {}
                 for g in range(graphs_total):
                     missing = [c for c in range(circuits_total) if (g, c) not in done]
-                    for lo, hi in _runs(missing):
-                        for c0 in range(lo, hi, cap):
-                            pieces.setdefault((c0, min(hi, c0 + cap)), []).append(g)
-                for (c0, c1), labels in pieces.items():
+                    for rerun in (True, False):
+                        kind = [c for c in missing if ((g, c) in stored) == rerun]
+                        for lo, hi in _runs(kind):
+                            for c0 in range(lo, hi, cap):
+                                pieces.setdefault((rerun, c0, min(hi, c0 + cap)), []).append(g)
+                for (rerun, c0, c1), labels in pieces.items():
                     per_unit = max(1, min(per_unit_graphs, cap // max(1, c1 - c0)))
                     for g0, g1 in _runs(labels):
                         for start in range(g0, g1, per_unit):
@@ -354,10 +379,19 @@ def plan(
                                     layers=int(req["layers"]),
                                     requirements=digest,
                                     revision=number,
+                                    rerun=rerun,
                                 )
                             )
     units.sort(
-        key=lambda u: (PROTOCOLS.index(u.protocol), u.n, u.beta, u.p, u.graphs[0], u.circuits[0])
+        key=lambda u: (
+            not u.rerun,
+            PROTOCOLS.index(u.protocol),
+            u.n,
+            u.beta,
+            u.p,
+            u.graphs[0],
+            u.circuits[0],
+        )
     )
     return units
 
@@ -429,6 +463,7 @@ def run(
     and no data) and is raised again. Running again re-plans: units already done are skipped.
     """
     store._require_writer()
+    store.check_contract()
     todo = list(plan(store) if units is None else units)
     if max_units is not None:
         if max_units < 0:
@@ -475,7 +510,7 @@ def _unit_spec(
         kwargs["stop_when_purified"] = bool(stop)
     return mipt.MonitoredCircuit(
         edges=cast(Any, list(collection)),
-        probes=list(_probes(req) if probes is None else probes),
+        probes=list(engine_probes(req) if probes is None else probes),
         **kwargs,
     )
 
@@ -492,6 +527,8 @@ def _run_unit(
             f"unit {unit} was planned under other requirements or another revision: plan again "
             "(runner.plan) after a revision"
         )
+    provenance = _provenance()
+    _check_environment(store, manifest, provenance)
     n, beta, p = unit.n, unit.beta, unit.p
     collection = [cache.get(n, beta, g) for g in range(unit.graphs[1])]
     new_graphs = [(n, beta, g) for g in range(unit.graphs[1]) if (n, beta, g) in cache.new]
@@ -526,8 +563,7 @@ def _run_unit(
                 started_utc=started,
                 threads=used_threads,
                 trajectories=unit.trajectories,
-                sparsegf2_version=__version__,
-                git_commit=_git_commit(),
+                **provenance,
             )
             for row, u in enumerate(indices.tolist()):
                 snapshots += _ingest(
@@ -587,8 +623,7 @@ def _record_failure(
                 threads=used_threads,
                 trajectories=unit.trajectories,
                 error=f"{type(exc).__name__}: {exc}"[:2000],
-                sparsegf2_version=__version__,
-                git_commit=_git_commit(),
+                **_provenance(),
             )
     except Exception:  # pragma: no cover - the original error matters more
         pass
@@ -697,8 +732,9 @@ def _ingest(
         if (joint is None) == tableau_kind or phys is None:
             raise ValueError(f"{key}: the snapshot at t = {t} was not canonicalized")
         tx.put_snapshot(
-            tid, key, t, status=SNAPSHOT_STORED, num_qubits=joint_qubits, k=int(k[t]),
-            joint=joint, phys=phys, unit_id=unit_id, check_physical=False,
+            tid, key, t, status=SNAPSHOT_STORED if tableau_kind else SNAPSHOT_PHYS_ONLY,
+            num_qubits=joint_qubits, k=int(k[t]), joint=joint, phys=phys, unit_id=unit_id,
+            check_physical=False,
         )  # fmt: skip
 
     # observations at the checkpoints
@@ -706,20 +742,29 @@ def _ingest(
         tx.put_observation(tid, key, t, name, params, unit_id=unit_id, **fields)
 
     for t in cps.tolist():
-        put(t, "k", None, value=int(k[t]), se=0.0, data=None, method="k-trace")
+        put(t, "k", None, value=int(k[t]), se=0.0, data=None, method="k-trace", status="ok")
     context = digest
-    put(-1, "first_passage", None, value=_tau0(fp), se=0.0, data=fp.to_dict(), method="k-trace",
-        context=context)  # fmt: skip
+    # the domain of peaks and checkpoint bounds: the last revision's own schedule (G-OBS-2)
+    domain = np.array(req["domain"], dtype=np.int64)
+    on = np.isin(cps, domain)
+    dom_k = k_at[on]
+    dom_info = {"domain": domain, "schedule_digest": json_digest([int(t) for t in domain])}
+    fp_dom = ob.first_passage(k, domain, num_system=n)
+    put(-1, "first_passage", None, value=_tau0(fp), se=0.0,
+        data={**fp_dom.to_dict(), **dom_info}, method="k-trace", context=context,
+        status="ok" if fp.observed[0] else "censored")  # fmt: skip
     peak_rule = req["peak"]
     if req["contiguous_distance"]:
         raw = np.asarray(result.values["contiguous_distance"][row], dtype=np.float64)
         cd = ob.cyclic_distance(raw, k_at, num_system=n)
         for j, t in enumerate(cps.tolist()):
             put(t, "d_cyc", None, value=raw[j], se=0.0, method="engine-probe",
+                status="ok" if cd.has_code[j] else "undefined_no_code",
                 data={"has_code": bool(cd.has_code[j]), "zero_extended": int(cd.zero_extended[j])})  # fmt: skip
-        pk = ob.peak(cps, cd.zero_extended, rule="exact", k_at=k_at, horizon=layers)
-        put(-1, "peak_d_cyc", {"rule": "exact"}, value=pk.t_star, se=0.0, data=pk.to_dict(),
-            method="exact", context=context)  # fmt: skip
+        pk = ob.peak(domain, cd.zero_extended[on], rule="exact", k_at=dom_k, horizon=layers)
+        put(-1, "peak_d_cyc", {"rule": "exact"}, value=pk.t_star, se=0.0,
+            data={**pk.to_dict(), **dom_info}, method="exact", context=context,
+            status="missing" if pk.missing else "ok")  # fmt: skip
     uniform = req["uniform_erasure"]
     if uniform is not None:
         ff = np.asarray(result.values[PROBE_NAMES["erasure_first_failure"]][row])
@@ -731,24 +776,30 @@ def _ingest(
         method = "hybrid" if exact is not None else "orderings"
         params = {"samples": uniform["samples"], "exact_budget": uniform["exact_budget"]}
         for j, t in enumerate(cps.tolist()):
-            put(t, "uniform_failure", params, value=None, se=None, method=method, data={
+            put(t, "uniform_failure", params, value=None, se=None, method=method, status="vector", data={
                 "first_failure": ff[j].astype(np.int64),
                 "exact_counts": None if exact is None else exact[j].astype(np.int64),
                 "curve": profile.curve[j], "se": profile.se[j],
                 "max_exact": profile.max_exact, "samples": profile.samples,
             })  # fmt: skip
-            put(t, "D", params, value=robust.value[j], se=robust.se[j], method=method, data={
+            put(t, "D", params, value=robust.value[j], se=robust.se[j], method=method,
+                status="ok" if np.isfinite(robust.value[j]) else "undefined", data={
                 "has_code": bool(robust.has_code[j]), "samples": robust.samples,
                 "max_exact": robust.max_exact,
             })  # fmt: skip
         plateau = _peak_params("peak_D", peak_rule)
-        pk = ob.peak(cps, robust.value, robust.se, rule="plateau", z=peak_rule["z"],
-                     k_at=k_at, horizon=layers)  # fmt: skip
-        data = pk.to_dict()
+        pk = ob.peak(domain, robust.value[on], robust.se[on], rule="plateau", z=peak_rule["z"],
+                     k_at=dom_k, horizon=layers)  # fmt: skip
+        data = {**pk.to_dict(), **dom_info}
         data["sensitivity"] = [
             s.to_dict()
             for s in ob.peak_sensitivity(
-                cps, robust.value, robust.se, peak_rule["sensitivity_z"], k_at=k_at, horizon=layers
+                domain,
+                robust.value[on],
+                robust.se[on],
+                peak_rule["sensitivity_z"],
+                k_at=dom_k,
+                horizon=layers,
             )  # fmt: skip
         ]
         data["bootstrap"] = None
@@ -756,8 +807,9 @@ def _ingest(
             entry = ob.get("peak_D")
             seed = ob.region_seed(key, layers, 0, 0.0, "peak_D", entry.version)
             boot = ob.bootstrap_peak(
-                cps, ff, n, z=peak_rule["z"], replicates=peak_rule["bootstrap"], seed=list(seed),
-                exact_counts=exact, k_at=k_at, horizon=layers,
+                domain, ff[on], n, z=peak_rule["z"], replicates=peak_rule["bootstrap"],
+                seed=list(seed), exact_counts=None if exact is None else exact[on], k_at=dom_k,
+                horizon=layers,
             )  # fmt: skip
             lo, hi = boot.interval(0.95)
             finite = boot.t_star[np.isfinite(boot.t_star)]
@@ -768,7 +820,7 @@ def _ingest(
                 "sd": float(finite.std(ddof=1)) if finite.size > 1 else None,
             }  # fmt: skip
         put(-1, "peak_D", plateau, value=pk.t_star, se=None, data=data, method="plateau",
-            context=context)  # fmt: skip
+            context=context, status="missing" if pk.missing else "ok")  # fmt: skip
     for entry in req["correlated_erasure"]:
         name = entry["name"]
         couplings, sizes, values = result.correlated(name)
@@ -778,35 +830,31 @@ def _ingest(
         )  # fmt: skip
         method = str(prof.sampler["method"]) if prof.sampler else "sampled"
         for j, t in enumerate(cps.tolist()):
-            put(t, "correlated_failure", entry, value=None, se=None, method=method, data={
+            put(t, "correlated_failure", entry, value=None, se=None, method=method, status="vector", data={
                 "couplings": couplings, "sizes": sizes, "failure": prof.failure[j],
                 "se": prof.se[j], "interpolated_sizes": prof.interpolated_sizes,
                 "sampler": dict(prof.sampler or {}),
             })  # fmt: skip
-            put(t, "D_J", entry, value=None, se=None, method=method, data={
+            put(t, "D_J", entry, value=None, se=None, method=method, status="vector", data={
                 "couplings": couplings, "robustness": prof.robustness[j],
                 "robustness_se": prof.robustness_se[j], "complete": prof.complete,
                 "has_code": bool(prof.has_code[j]),
             })  # fmt: skip
         for i, coupling in enumerate(couplings.tolist()):
             params = _peak_params("peak_D_J", peak_rule, J=float(coupling))
-            pk = ob.peak(cps, prof.robustness[:, i], prof.robustness_se[:, i], rule="plateau",
-                         z=peak_rule["z"], k_at=k_at, horizon=layers)  # fmt: skip
-            data = pk.to_dict()
+            rob, rob_se = prof.robustness[on, i], prof.robustness_se[on, i]
+            pk = ob.peak(domain, rob, rob_se, rule="plateau", z=peak_rule["z"], k_at=dom_k,
+                         horizon=layers)  # fmt: skip
+            data = {**pk.to_dict(), **dom_info}
             data["sensitivity"] = [
                 s.to_dict()
                 for s in ob.peak_sensitivity(
-                    cps,
-                    prof.robustness[:, i],
-                    prof.robustness_se[:, i],
-                    peak_rule["sensitivity_z"],
-                    k_at=k_at,
-                    horizon=layers,
+                    domain, rob, rob_se, peak_rule["sensitivity_z"], k_at=dom_k, horizon=layers
                 )  # fmt: skip
             ]
             data["probe"] = name
             put(-1, "peak_D_J", params, value=pk.t_star, se=None, data=data, method="plateau",
-                context=f"{context}/{name}")  # fmt: skip
+                context=f"{context}/{name}", status="missing" if pk.missing else "ok")  # fmt: skip
     tx.put_completion(tid, digest, unit_id, revision)
     return len(cps)
 
@@ -928,7 +976,8 @@ def _trajectory_context(
     store: TableauStore, key: TrajectoryKey
 ) -> tuple[Any, ExperimentManifest, list[np.ndarray]]:
     """The stored trajectory record, the latest manifest, and its graph collection 0..g, with
-    the stored provenance checked against what the manifest gives."""
+    the stored provenance checked against what the manifest gives, and the contract checked."""
+    store.check_contract()
     rec = store.trajectory(key)
     manifest = store.manifest
     expected_seed = tuple(manifest.run_seed(key.n, key.beta, key.p))
@@ -978,7 +1027,8 @@ def replay(
     for, stored or not, also beyond the horizon. With ``verify`` every requested depth whose
     snapshot is stored must give the stored joint digest (or, for a store that kept codes only,
     the stored physical digest), and the k trace must equal the stored trace on their common
-    layers; a difference raises ``ValueError`` naming the depth.
+    layers; a difference raises ``ValueError`` naming the depth. A store written under another
+    randomness contract is refused (:meth:`TableauStore.check_contract`).
     """
     k = store.key(key)
     rec, manifest, collection = _trajectory_context(store, k)
@@ -1004,7 +1054,7 @@ def replay(
             if t not in stored:
                 continue
             snap = store.snapshot(k, t)
-            if snap.status != SNAPSHOT_STORED:
+            if snap.status == SNAPSHOT_ABSENT:
                 continue
             tab = tableaux[t]
             if snap.joint_digest is not None:
@@ -1040,7 +1090,7 @@ def circuit(store: TableauStore, key: TrajectoryKey | str, layers: int | None = 
     ``MonitoredCircuit.circuit(u, seed=run_seed)`` (v1.4 §8.1): the setup (for protocol F the
     Bell pairs ``H i; CX i n+i``; nothing for P), ``TICK``, then per layer its ``CLIFFORD_2Q``
     gates, its ``M`` measurements and a ``TICK``: the ordered gate and mask history of the
-    trajectory, for audit (v1.4 §4 "Tracking").
+    trajectory, for audit (v1.4 §4 "Tracking"; the on-demand ``layer`` record of v1.4 §8).
     """
     k = store.key(key)
     rec, manifest, collection = _trajectory_context(store, k)
@@ -1053,14 +1103,63 @@ def circuit(store: TableauStore, key: TrajectoryKey | str, layers: int | None = 
     return spec.circuit(rec.u, seed=list(rec.run_seed))
 
 
+def _text_words(text: str) -> tuple[int, int]:
+    """The two 32-bit words (low, high) of ``blake2b(text, digest_size=8)`` read little-endian:
+    the repository's convention for a string in a seed (``identity.token_words`` for tokens)."""
+    value = int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "little")
+    return value & 0xFFFFFFFF, value >> 32
+
+
+def outcome_seed_of(key: TrajectoryKey) -> tuple[int, ...]:
+    """The default seed of the outcome-aware replay of trajectory ``key`` (G-TAB-2, SI-24).
+
+    The twelve 32-bit words ``(OUTCOME_SEED_TAG, w(experiment_id), protocol, n, w(beta),
+    w(p), g, c, r)`` with ``OUTCOME_SEED_TAG = 0x57534F31`` (``"WSO1"``), ``w`` the two words of
+    the 8-byte BLAKE2b of the text (:func:`identity.token_words` for the tokens) and the
+    protocol as its index in :data:`~sparsegf2.study.identity.PROTOCOLS`. A fixed length and its
+    own tag keep it apart from the graph (WSG1), run (WSC1) and region (WSRO) seeds whatever the
+    master seeds; it names every field of the key, so every trajectory has its own outcomes.
+    """
+    words = (
+        OUTCOME_SEED_TAG,
+        *_text_words(key.experiment_id),
+        PROTOCOLS.index(key.protocol),
+        key.n,
+        *token_words(key.beta),
+        *token_words(key.p),
+        key.g,
+        key.c,
+        key.r,
+    )
+    if any(not 0 <= int(w) < 2**32 for w in words):
+        raise ValueError(f"trajectory {key}: a field does not fit one 32-bit word of a seed")
+    return tuple(int(w) for w in words)
+
+
+def signed_digest(xs: np.ndarray, zs: np.ndarray, signs: np.ndarray) -> str:
+    """The SHA-256 of a signed stabilizer group in Stim's canonical form (:data:`SIGNED_FORMAT`).
+
+    The bytes are ``b"SGF2SG1\\0"``, the number of qubits as uint32 little-endian, then per
+    generator its X and Z bits (``np.packbits(..., bitorder="big")`` of the ``2N`` columns)
+    and one sign byte (1 for a minus sign).
+    """
+    rows = np.concatenate([np.asarray(xs, dtype=np.uint8), np.asarray(zs, dtype=np.uint8)], axis=1)
+    body = np.packbits(rows, axis=1, bitorder="big")
+    data = b"SGF2SG1\x00" + struct.pack("<I", int(xs.shape[1]))
+    data += b"".join(r.tobytes() + bytes([int(s) & 1]) for r, s in zip(body, signs, strict=True))
+    return hashlib.sha256(data).hexdigest()
+
+
 @dataclass(frozen=True, eq=False)
 class SignedReplay:
     """One trajectory rerun outcome-aware by :func:`replay_signed`.
 
-    ``measurements``: the Born outcomes (0/1, one per ``M`` target of the circuit, in order),
-    sampled with ``outcome_seed``; ``signed[t]``: the signed stabilizer generators at depth
-    ``t`` as ``(xs, zs, signs)`` in Stim's canonical form; ``tableaux[t]``: the same group with
-    its signs dropped, as a :class:`~sparsegf2.tableau.PhaseFreeTableau`;
+    ``outcome_seed``: the seed of the Born outcomes (the recorded default :func:`outcome_seed_of`,
+    or the one given); ``measurements``: the outcomes (0/1, one per ``M`` target of the
+    circuit, in order); ``random``: which of them were random (the others were determined by
+    the state); ``signed[t]``: the signed stabilizer generators at depth ``t`` as
+    ``(xs, zs, signs)`` in Stim's canonical form, ``signed_digests[t]`` their
+    :func:`signed_digest`; ``tableaux[t]``: the same group with its signs dropped;
     ``verified_depths``: the depths whose stored digests it matched.
     """
 
@@ -1068,7 +1167,9 @@ class SignedReplay:
     depths: tuple[int, ...]
     outcome_seed: Any
     measurements: np.ndarray
+    random: np.ndarray
     signed: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]
+    signed_digests: dict[int, str]
     tableaux: dict[int, PhaseFreeTableau]
     verified_depths: tuple[int, ...]
 
@@ -1078,22 +1179,30 @@ def replay_signed(
     key: TrajectoryKey | str,
     depths: Any,
     *,
-    outcome_seed: Any = 0,
+    outcome_seed: Any = None,
     verify: bool = True,
+    record: bool = False,
 ) -> SignedReplay:
-    """The outcome-aware replay of v1.4 §4 and §7.4: the trajectory's exported circuit
-    (:func:`circuit`) on ``Simulator(N, phases=True, seed=outcome_seed)``.
+    """The outcome-aware replay of v1.4 §4, §7.4 and validation 5: the trajectory's exported
+    circuit (:func:`circuit`) on ``Simulator(N, phases=True)``.
 
-    Born outcomes are sampled by the simulator's stream (every random outcome is a fair coin
-    given the past, v1.4 §4), so the same ``outcome_seed`` gives the same outcomes and signed
-    groups. Dropping the signs must give the stored phase-free row space at every stored depth
-    (outcome independence, v1.4 §6.2; checked with ``verify``, ``ValueError`` otherwise).
+    Every random measurement outcome is a fair coin given the past and every determined one
+    is the eigenvalue the state fixes (the Born law of a stabilizer state, v1.4 §4), drawn from
+    the simulator's stream seeded by ``outcome_seed``: by default the trajectory's own
+    :func:`outcome_seed_of` (a tagged domain of its own), so the replay is reproducible from the
+    stored identity; the same seed gives the same outcomes and signed groups. Dropping the signs
+    must give the stored phase-free row space at every stored depth (outcome independence,
+    v1.4 §6.2; checked with ``verify``, ``ValueError`` otherwise). ``record`` (a writer store)
+    keeps the outcomes, the random flags and the signed digests in ``signed_runs``, never in the
+    phase-free records.
     """
     k = store.key(key)
     wanted = _depth_list(depths)
     circ = circuit(store, k, max(wanted))
+    seed = outcome_seed_of(k) if outcome_seed is None else outcome_seed
     qubits = 2 * k.n if k.protocol == "F" else k.n
-    sim = Simulator(qubits, phases=True, seed=outcome_seed)
+    sequence = np.random.SeedSequence(list(seed)) if isinstance(seed, (tuple, list)) else seed
+    sim = Simulator(qubits, phases=True, seed=sequence)
     want = set(wanted)
 
     def observe(s: Simulator, tick: int) -> Any:
@@ -1108,13 +1217,14 @@ def replay_signed(
         if value is not None:
             tableaux[tick], arrays = value
             signed[tick] = (arrays[0].copy(), arrays[1].copy(), arrays[2].copy())
+    digests = {t: signed_digest(*signed[t]) for t in sorted(signed)}
     verified: list[int] = []
     if verify:
         stored = set(store.depths(k))
         for t in wanted:
             if t in stored:
                 snap = store.snapshot(k, t)
-                if snap.status != SNAPSHOT_STORED:
+                if snap.status == SNAPSHOT_ABSENT:
                     continue
                 tab = tableaux[t]
                 digest = (
@@ -1129,12 +1239,23 @@ def replay_signed(
                         "stored row space"
                     )
                 verified.append(t)
+    measurements = np.asarray(out.measurements, dtype=np.uint8).copy()
+    random_flags = np.asarray(out.random, dtype=bool).copy()
+    if record:
+        store._require_writer()
+        with store.transaction() as tx:
+            tx.put_signed_run(
+                store._require_tid(k), k, outcome_seed=seed, layers=max(wanted), depths=wanted,
+                outcomes=measurements, random=random_flags, signed_digests=digests,
+            )  # fmt: skip
     return SignedReplay(
         key=k,
         depths=tuple(wanted),
-        outcome_seed=outcome_seed,
-        measurements=np.asarray(out.measurements).copy(),
+        outcome_seed=seed,
+        measurements=measurements,
+        random=random_flags,
         signed=signed,
+        signed_digests=digests,
         tableaux=tableaux,
         verified_depths=tuple(verified),
     )
@@ -1148,7 +1269,7 @@ def replay_signed(
 @dataclass(frozen=True)
 class ComputeSummary:
     """What :func:`compute` did: the observable's key, rows inserted, rows already stored
-    (compared and equal), snapshots read."""
+    (compared and equal), snapshots read (absent ones included)."""
 
     observable: str
     version: str
@@ -1175,16 +1296,20 @@ def compute(
 
     ``observable_id`` must have a ``compute`` (:attr:`ObservableDef.retrospective`: ``k``,
     ``code_rate``, ``stabilizer_rank``, ``d_cyc``, ``d_conn``, ``half_cut_entropy``,
-    ``mean_leakage``). Every stored snapshot that matches the filters is read
-    (:meth:`TableauStore.iter_snapshots`, ``batch_size`` at a time; absent snapshots are
-    skipped), given to :func:`sparsegf2.study.observables.compute` with the trajectory's key,
-    the stored physical code, the joint tableau where the observable needs it, and the graph;
-    each batch's values are written in one transaction under ``(observable, version,
-    params)``. A value already stored under that key (by an earlier call, or by the run for
-    ``k`` and ``d_cyc``, which it records from the engine) is compared, never replaced: the
-    recomputed value and error must equal it exactly, else ``ValueError``; so the call is
-    idempotent, and on the run's values it is a cross-check of the stored snapshots. Nothing is simulated: the circuits' random numbers are never drawn (the
-    sampled ``mean_leakage`` seeds its regions from the key, :func:`~sparsegf2.study.observables.region_seed`).
+    ``mean_leakage``). Every snapshot that matches the filters is read
+    (:meth:`TableauStore.iter_snapshots`, ``batch_size`` at a time) and given to
+    :func:`sparsegf2.study.observables.compute` with the trajectory's key, the stored physical
+    code, the joint tableau where the observable needs it, and the graph; each batch's values
+    are written in one transaction under ``(observable, version, params)``. A depth after a
+    ``stop_when_purified`` stop has no state: it gets a row of status
+    ``absent_after_purification`` (value NULL; SI-05: missing, never zero), unless the run
+    already stored a value there. A value already stored under that key (by an earlier call, or
+    by the run for ``k`` and ``d_cyc``, which it records from the engine) is compared, never
+    replaced: the recomputed value, error and status must equal it exactly, else
+    ``ValueError``; so the call is idempotent, and on the run's values it is a cross-check of
+    the stored snapshots. Nothing is simulated: the circuits' random numbers are never drawn
+    (the sampled ``mean_leakage`` seeds its regions from the key,
+    :func:`~sparsegf2.study.observables.region_seed`).
     """
     entry = ob.get(observable_id, version)
     if not entry.retrospective:
@@ -1199,7 +1324,7 @@ def compute(
     needs_graph = "graph" in entry.inputs
     inserted = existing = count = 0
     graph_cache: dict[tuple[int, str, int], np.ndarray] = {}
-    batch: list[tuple[TrajectoryKey, int, ob.ObservableValue]] = []
+    batch: list[tuple[TrajectoryKey, int, ob.ObservableValue | None]] = []
 
     def flush() -> None:
         nonlocal inserted, existing
@@ -1208,32 +1333,46 @@ def compute(
         with store.transaction() as tx:
             for key, depth, value in batch:
                 tid = store._require_tid(key)
+                if value is None:  # absent after a stop
+                    if store._has_observation(tid, depth, entry.id, entry.version, text):
+                        existing += 1
+                        continue
+                    tx.put_observation(
+                        tid, key, depth, entry.id, resolved, version=entry.version, value=None,
+                        se=None, data=None, method="none", status="absent_after_purification",
+                    )  # fmt: skip
+                    inserted += 1
+                    continue
                 new = tx.put_observation(
                     tid, key, depth, entry.id, resolved, version=entry.version,
                     value=value.value, se=value.se, data=dict(value.data), method=value.method,
-                    compare="value",
+                    compare="value", status=_value_status(entry.id, value),
                 )  # fmt: skip
                 inserted += int(new)
                 existing += int(not new)
         batch.clear()
 
     for snap in store.iter_snapshots(
-        protocol=protocol, n=n, beta=beta, p=p, t=t, batch_size=batch_size
+        protocol=protocol, n=n, beta=beta, p=p, t=t, batch_size=batch_size, status=None
     ):
         key = snap.key
-        edges = None
-        if needs_graph:
-            gk = (key.n, key.beta.token, key.g)
-            if gk not in graph_cache:
-                graph_cache[gk] = store.graph(key.n, key.beta, key.g).edges
-            edges = graph_cache[gk]
-        joint = snap.tableau() if needs_joint or key.protocol != "F" else None
-        code = snap.code() if key.protocol == "F" and not needs_joint else None
-        snapshot = ob.SnapshotInput(
-            num_system=key.n, t=snap.t, key=key, code=code, tableau=joint, edges=edges
-        )
-        batch.append((key, snap.t, ob.compute(entry.id, snapshot, resolved, version=entry.version)))
         count += 1
+        if snap.status == SNAPSHOT_ABSENT:
+            batch.append((key, snap.t, None))
+        else:
+            edges = None
+            if needs_graph:
+                gk = (key.n, key.beta.token, key.g)
+                if gk not in graph_cache:
+                    graph_cache[gk] = store.graph(key.n, key.beta, key.g).edges
+                edges = graph_cache[gk]
+            joint = snap.tableau() if needs_joint or key.protocol != "F" else None
+            code = snap.code() if key.protocol == "F" and not needs_joint else None
+            snapshot = ob.SnapshotInput(
+                num_system=key.n, t=snap.t, key=key, code=code, tableau=joint, edges=edges
+            )
+            value = ob.compute(entry.id, snapshot, resolved, version=entry.version)
+            batch.append((key, snap.t, value))
         if len(batch) >= batch_size:
             flush()
     flush()
@@ -1245,6 +1384,16 @@ def compute(
         existing=existing,
         snapshots=count,
     )
+
+
+def _value_status(observable: str, value: ob.ObservableValue) -> str:
+    """The status of a retrospective value: ``undefined_no_code`` for a quantity without a code
+    (``d_cyc`` at ``k = 0``, the engine's convention too), ``infinite``, ``undefined`` or ``ok``."""
+    v = float(value.value)
+    if math.isnan(v):
+        has_code = value.data.get("has_code")
+        return "undefined_no_code" if has_code is False else "undefined"
+    return "infinite" if math.isinf(v) else "ok"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1263,6 +1412,27 @@ class Verification:
     failures: tuple[str, ...] = field(default_factory=tuple)
 
 
+def _native_codes(
+    store: TableauStore, key: TrajectoryKey, depths: Sequence[int], num_threads: int | None
+) -> dict[int, PhaseFreeTableau]:
+    """The physical codes of a trajectory at ``depths`` from the engine's own ``code_snapshot``
+    (v1.4 §9.2 (g), (h)): the native route, against which the stored codes (derived from the
+    joint state, or stored from this probe) are checked."""
+    rec, manifest, collection = _trajectory_context(store, key)
+    req = requirements(store.revisions(), key.protocol, key.n, key.beta)
+    spec = _unit_spec(
+        manifest, req, key.protocol, key.n, key.beta, key.p, collection,
+        probes=[mipt.code_snapshot("native", checkpoints=list(depths))], layers=max(depths),
+        stop=False,
+    )  # fmt: skip
+    result = spec.run(indices=[rec.u], seed=list(rec.run_seed), num_threads=num_threads)
+    words, counts = result.snapshots["native"]
+    return {
+        t: PhaseFreeTableau.from_words(words[0, j, : counts[0, j]], key.n)
+        for j, t in enumerate(depths)
+    }
+
+
 def verify(
     store: TableauStore,
     sample: int | None = 8,
@@ -1275,9 +1445,15 @@ def verify(
     ``sample`` trajectories (all of them for ``None``) are drawn without replacement from the
     stored ones in natural-key order with ``numpy.random.Generator(PCG64(seed))``. For each:
     its graph is regenerated from its seed (same digest), every stored snapshot is decoded and
-    checked against its digest, and :func:`replay` must reproduce the stored k trace and every
-    stored digest. Returns a :class:`Verification` (it does not raise on a mismatch).
+    checked against its digest, :func:`replay` must reproduce the stored k trace and every
+    stored digest, and (protocol F) the engine's native ``code_snapshot`` must give the stored
+    physical code at every stored depth. Returns a :class:`Verification` (it does not raise on
+    a mismatch). A store of another randomness contract fails as a whole.
     """
+    try:
+        store.check_contract()
+    except ValueError as exc:
+        return Verification(ok=False, trajectories=0, snapshots=0, failures=(str(exc),))
     keys = store.trajectory_keys()
     if sample is not None and sample < len(keys):
         rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(seed)))
@@ -1295,7 +1471,7 @@ def verify(
             stored = []
             for t in store.depths(key):
                 snap = store.snapshot(key, t)
-                if snap.status == SNAPSHOT_STORED:
+                if snap.status != SNAPSHOT_ABSENT:
                     if snap.joint_blob is not None:
                         snap.tableau()
                     if key.protocol == "F":
@@ -1303,8 +1479,172 @@ def verify(
                     stored.append(t)
                     snapshots += 1
             replay(store, key, stored or [0], verify=True, num_threads=num_threads)
+            if key.protocol == "F" and stored:
+                native = _native_codes(store, key, stored, num_threads)
+                for t in stored:
+                    if native[t].digest() != store.snapshot(key, t).phys_digest:
+                        raise ValueError(
+                            f"the native code_snapshot at t = {t} differs from the stored "
+                            "physical code"
+                        )
         except (ValueError, KeyError) as exc:
             failures.append(f"{key}: {exc}")
     return Verification(
         ok=not failures, trajectories=len(keys), snapshots=snapshots, failures=tuple(failures)
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# provenance (G-RUN-3)
+# ---------------------------------------------------------------------------------------------
+
+
+def _provenance() -> dict[str, Any]:
+    """The provenance of a unit: the package version, the commit and whether the checkout had
+    uncommitted changes, ``RANDOMNESS_CONTRACT`` and the software environment with its digest."""
+    env = environment()
+    return {
+        "sparsegf2_version": __version__,
+        **git_provenance(),
+        "randomness_contract": int(mipt.RANDOMNESS_CONTRACT),
+        "environment": canonical_json(env),
+        "environment_digest": environment_digest(env),
+    }
+
+
+def _check_environment(
+    store: TableauStore, manifest: ExperimentManifest, provenance: Mapping[str, Any]
+) -> None:
+    """A confirmatory study runs every unit in one software environment (v1.4 §8.1: pin the
+    commit and the dependencies before production): refuse a unit whose environment differs
+    from the units already done, naming the differences. Exploratory studies record it only."""
+    if manifest.label != "confirmatory":
+        return
+    rows = (
+        store._db()
+        .execute("SELECT DISTINCT environment, environment_digest FROM units WHERE status = 'done'")
+        .fetchall()
+    )
+    for env_text, digest in rows:
+        if digest != provenance["environment_digest"]:
+            old, new = json.loads(env_text), json.loads(provenance["environment"])
+            changed = sorted(k_ for k_ in set(old) | set(new) if old.get(k_) != new.get(k_))
+            raise ValueError(
+                f"this confirmatory study ran its units with {[(c, old.get(c)) for c in changed]}; "
+                f"this process has {[(c, new.get(c)) for c in changed]}: run it in the recorded "
+                "environment (or label the study exploratory)"
+            )
+
+
+# ---------------------------------------------------------------------------------------------
+# sampler diagnostics (G-OBS-4)
+# ---------------------------------------------------------------------------------------------
+
+
+def _diagnostics_seed(n: int, beta: Token, g: int, probe: str, m: int) -> int:
+    """The seed of the diagnostics of one sampler: the first 63 bits of the BLAKE2b of the
+    canonical JSON of ``[DIAGNOSTICS_SEED_TAG, n, beta, g, probe, m]`` (chain ``i`` runs on
+    ``[seed, i]``, as in :func:`sparsegf2.api.sample_erasure_regions`)."""
+    text = canonical_json([DIAGNOSTICS_SEED_TAG, int(n), beta.token, int(g), probe, int(m)])
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little") >> 1
+
+
+def diagnose_samplers(
+    store: TableauStore,
+    *,
+    chains: int = 4,
+    samples: int | None = None,
+    graphs: Sequence[int] | None = None,
+    sizes: Sequence[int] | None = None,
+    max_seconds: float = math.inf,
+) -> int:
+    """Archive the graph-side mixing diagnostics of every correlated_erasure sampler (G-OBS-4).
+
+    The engine's correlated_erasure probe stores failing fractions only, so its sampler cannot
+    be judged from the run. This runs, for each correlated entry of the latest manifest, each
+    condition $(n, \\beta)$, each stored graph (``graphs``: a subset of labels; for the
+    ``cycle`` and ``path`` geometries one erasure graph, stored with ``g = -1``) and each size
+    (``sizes``: a subset), :func:`sparsegf2.api.sample_erasure_regions` with the probe's own
+    settings (burn-in, thinning, tempering, ladder, method) and ``chains`` independent chains of
+    ``samples`` draws (default the probe's, at least 8), and stores per coupling the method, the
+    effective sample size, ``tau_int``, the acceptances, R-hat and its limit, and the
+    ``mixing`` notes, in ``sampler_diagnostics`` keyed by the graph, the probe, a digest of its
+    settings, the size and the coupling. Existing rows are compared (the seeds are derived:
+    :func:`_diagnostics_seed`). Returns the number of rows written. An empty ``notes`` list is
+    no proof of equilibrium.
+    """
+    from sparsegf2 import api
+    from sparsegf2 import graphs as graphs_module
+
+    store._require_writer()
+    manifest = store.manifest
+    entries = list(
+        zip(
+            manifest.observables.correlated_erasure, manifest.observables.probe_names(), strict=True
+        )
+    )
+    written = 0
+    for cond in manifest.conditions():
+        n, beta = cond.n, cond.beta
+        labels = range(manifest.trials.graphs) if graphs is None else graphs
+        for entry, name in entries:
+            config = json_digest({**entry.to_dict(), "name": name})
+            if entry.geometry == "interaction":
+                targets = [
+                    (int(g), store.graph(n, beta, g).edges)
+                    for g in labels
+                    if store.has_graph(n, beta, g)
+                ]
+            else:
+                maker = graphs_module.cycle if entry.geometry == "cycle" else graphs_module.path
+                targets = [(-1, graphs_module.from_edges(maker(n), n))]
+            wanted = entry.expand_sizes(n) if sizes is None else [m for m in sizes]
+            for g, edges in targets:
+                for m in wanted:
+                    seed = _diagnostics_seed(n, beta, g, name, m)
+                    count = max(entry.samples, 8) if samples is None else int(samples)
+                    out = api.sample_erasure_regions(
+                        {"edges": np.asarray(edges).tolist(), "num_nodes": n}, int(m),
+                        [float(j) for j in entry.couplings], count, burn_in=entry.burn_in,
+                        thin=entry.thin, tempering=entry.tempering, chains=chains, seed=seed,
+                        method=entry.method,
+                        ladder=entry.ladder if isinstance(entry.ladder, str) else list(entry.ladder),
+                        max_step=entry.max_step, max_seconds=max_seconds,
+                    )  # fmt: skip
+                    notes = canonical_json(out.get("mixing") or [])
+                    with store.transaction() as tx:
+                        for row in out["couplings"]:
+                            written += int(
+                                tx.put_sampler_diagnostic(
+                                    n=n,
+                                    beta=beta.token,
+                                    g=g,
+                                    probe=name,
+                                    config=config,
+                                    m=int(m),
+                                    coupling=float(row["coupling"]),
+                                    method=out["method"],
+                                    chains=chains,
+                                    samples=count,
+                                    seed=canonical_json(seed),
+                                    ess=row["ess"],
+                                    tau_int=row["tau_int"],
+                                    acceptance=row["acceptance"],
+                                    exchange_acceptance=row["exchange_acceptance"],
+                                    r_hat=row["r_hat"],
+                                    r_hat_limit=row["r_hat_limit"],
+                                    notes=notes,
+                                    data={
+                                        k_: out.get(k_)
+                                        for k_ in (
+                                            "burn_in",
+                                            "thin",
+                                            "tempering",
+                                            "ladder",
+                                            "nonincreasing_in_J",
+                                        )
+                                    },
+                                )  # fmt: skip
+                            )
+    return written

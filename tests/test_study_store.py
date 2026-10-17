@@ -400,7 +400,7 @@ def test_invalid_records_are_refused_before_commit(tmp_path):
             (dict(joint=rank_deficient, phys=good.physical_tableau(6), k=6 - good.physical_tableau(6).rank), "pure"),
             (dict(joint=PhaseFreeTableau(mixed_rows, 12), phys=good.physical_tableau(6), k=0), "pure|physical"),
             (dict(joint=good, phys=bad_phys, k=good.physical_code(6).num_logical), "rank n - k"),
-            (dict(joint=None, phys=None, k=None), "physical code"),
+            (dict(joint=None, phys=None, k=None), "joint state|physical code"),
         ]  # fmt: skip
         for fields, message in cases:
             with pytest.raises(ValueError, match=message), store.transaction() as tx:
@@ -426,7 +426,7 @@ def test_invalid_records_are_refused_before_commit(tmp_path):
 
 
 def _tamper(store, sql, args=()):
-    con = sqlite3.connect(store.path / STORE_FILE)
+    con = sup.open_for_tampering(store)
     con.execute(sql, args)
     con.commit()
     con.close()

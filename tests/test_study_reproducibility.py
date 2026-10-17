@@ -9,7 +9,6 @@ unchanged (``_study_store_support.records``).
 
 from __future__ import annotations
 
-import sqlite3
 import zlib
 
 import numpy as np
@@ -19,7 +18,7 @@ import _study_store_support as sup
 from sparsegf2 import mipt
 from sparsegf2.study import observables as ob
 from sparsegf2.study import runner
-from sparsegf2.study.store import STORE_FILE, TableauStore
+from sparsegf2.study.store import TableauStore
 
 PAIRED = {"protocols": {"F": {}, "P": {"checkpoints": {"list": [4]}}}}
 
@@ -87,7 +86,7 @@ def test_the_logical_digest_sees_every_change_of_content(tmp_path, reference):
             "UPDATE traces SET final_layer = final_layer - 1 WHERE rowid = 2",
             "UPDATE graphs SET measures = '{}' WHERE g = 1",
         ):
-            con = sqlite3.connect(store.path / STORE_FILE)
+            con = sup.open_for_tampering(store)
             assert con.execute(change).rowcount == 1, change
             con.commit()
             con.close()
@@ -213,7 +212,7 @@ def test_a_deeper_horizon_fails_loudly_on_a_stored_prefix_that_does_not_reproduc
         forged = k.copy()
         forged[1:] = np.minimum(forged[1:], k[0] - 1)  # still a valid trace, another one
         assert not np.array_equal(forged, k)
-        con = sqlite3.connect(store.path / STORE_FILE)
+        con = sup.open_for_tampering(store)
         points = ob.k_change_points(forged).astype("<i4").tobytes()
         tau = ob.first_passage(forged).tau.astype("<i4").tobytes()
         con.execute(
