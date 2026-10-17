@@ -876,7 +876,7 @@ def _km_influence_chunks(
         coef[int(np.flatnonzero(~alive)[0]) :] = 0.0
     by_cluster = np.argsort(cluster, kind="stable")
     starts = np.searchsorted(cluster[by_cluster], np.arange(n_clusters + 1))
-    step = chunk or max(1, (1 << 21) // (J + 1))
+    step = chunk or max(1, (1 << 20) // (J + 1))  # about 2^20 entries per (clusters, J) array
     for first in range(0, n_clusters, step):
         last = min(n_clusters, first + step)
         rows = by_cluster[starts[first] : starts[last]]
