@@ -105,9 +105,12 @@ trajectory runs through `MonitoredCircuit.run` (phase-free engine).
   `stride > C`, circuits `C..stride-1` can be added later without renumbering (v1.4 §7.2's
   `u = gC + c` with `C = stride`). Adding graphs never renumbers.
 * **Run seed.** `gate_mode="shared"` (default, native coupling over `p`): `master_circuit_seed`
-  for every `p`. `gate_mode="independent"`: `(master_circuit_seed, h(p_token))` with `h` the
-  first 8 bytes (little-endian) of BLAKE2b of the token; gates and masks are then independent
-  across rates (no nesting).
+  for every `p`. `gate_mode="independent"`: `(master_circuit_seed, h(p_token))` with
+  `h(x) = int.from_bytes(blake2b(x.encode(), digest_size=8).digest(), "little")` (the
+  repository's probe-name convention, `mipt._name_hash`); gates and masks are then independent
+  across rates (no nesting). Seeds are below `2**32` (one `SeedSequence` word each, so the tuples
+  are injective), and the two master seeds must differ: `SeedSequence` pads entropy with zero
+  words, so the graph seed `(s, 0)` equals the plain run seed `s`.
 * **Versions** (strings, recorded per experiment and per record): `GRAPH_GENERATOR_VERSION`,
   `CLIFFORD_ENUMERATION_VERSION` (`j = 16 s + b`, v1.4 §9.1), `DYNAMICS_VERSION`,
   `ROWSPACE_FORMAT_VERSION`, `STORE_SCHEMA_VERSION`, one per observable.
@@ -139,16 +142,28 @@ trajectory runs through `MonitoredCircuit.run` (phase-free engine).
   or `{"table": {"16": 128, ...}}`. `checkpoints`: `{"count": N_T}` (the v1.4 §9 geometric rule:
   `a_j = exp(j ln T_max / (N_T - 1))`, `j = 0..N_T-1`, rounded to the nearest integer with ties
   upward, clamped to `[0, T_max]`, deduplicated, sorted, with `0, 1, T_max` included; for
-  `N_T = 1` just `{0, 1, T_max}`) or `{"list": [...]}`. Validation: `5 <= n` (warning at
+  `N_T = 1` just `{0, 1, T_max}`), `{"list": [...]}` (one list for every size: the entries above a
+  size's `T_max` are dropped for that size, and `0, 1, T_max` are always included) or
+  `{"table": {"16": [...], ...}}` (one list per size, every size covered). Validation: `5 <= n` (warning at
   `n = 5`), rates and `beta` in `[0, 1]`, `measurement_replicas == 1` (§9 D1), seeds
   non-negative ints, stride `>= circuits_per_graph`, `tableau_snapshots` with
   `stop_when_purified = true` allowed (later snapshots then recorded as absent, §4) but warned.
   `digest()` = SHA-256 of the canonical JSON (sorted keys, no spaces, tokens not floats).
 * **Revisions.** A store keeps every manifest revision. A new revision may add conditions,
-  rates, graphs, circuits (up to the stride), raise `T_max`, add checkpoints, add observables;
-  it may not change seeds, `gate_mode`, the stride, the protocol, or the settings of an
-  observable already recorded (a changed setting is a new observable version or name).
-  `manifest.check_extension(old, new)` names the first forbidden change.
+  rates, graphs, circuits (up to the stride), raise `T_max` (never lower it), change the
+  checkpoint rule, add observables; it may not change seeds, `gate_mode`, the stride, the
+  protocol, or the settings of an observable already recorded (a changed setting is a new
+  observable version or name). `manifest.check_extension(old, new)` names the first forbidden
+  change.
+* **Checkpoints across revisions (ruling R-CK).** Revision `r` has its own schedule
+  `S_r(n, beta)` from its own rule and `T_max`. The schedule used for work under revision `r` is
+  the union `E_r(n, beta) = (S_1 ∪ ... ∪ S_r)(n, beta) ∩ [0, T_max_r(n, beta)]`; since `T_max`
+  never decreases, `E_r ⊇ E_{r-1}`: a stored depth is never dropped, and raising `T_max` under the
+  geometric rule adds the new rule's depths to the old ones.
+  `manifest.effective_checkpoints(revisions, n, beta)` computes it.
+* **Graph lookup (engine constraint).** The engine finds trajectory `u`'s graph as
+  `edges[u // stride]`, so a unit for graphs `g0..g1-1` passes the collection `0..g1-1` (graphs
+  below `g0` are never run in that unit but keep the indexing).
 
 ## 4. Store (task 3): `TableauStore`, one SQLite file per experiment
 
@@ -271,3 +286,28 @@ the smallest size removed. Exploratory and confirmatory runs are kept apart by t
   masks independent across rates (the native stream couples gates and masks).
 * **D5.** The "abort on an absent original edge" check (v1.4 §2.2) is in the reference
   rewiring and the graph validation, since it is unreachable in the native generator (§0).
+
+## 10. Gate sampling over the 720 symplectic classes, and architecture-aware performance
+
+**Uniformity over the 720 classes (owner's request, 2026-10-17).** The native sampler draws the projective
+Clifford index `j = 16 s + b` uniformly from `[0, 11520)` with Lemire's unbiased `next_below(11520)`. Since
+`11520 = 16 * 720` and each symplectic class `s = j >> 4` has exactly 16 indices, `Pr(s) = 16 / 11520 = 1 / 720`
+exactly (not only in the ideal law: the integer draw itself is exactly uniform). In phase-free mode the kernel
+applies a gate only through `LIN2[j >> 4]` (`_kernel/tableau.py::apply_2q`; the sign bits `j & 15` enter only the
+sign row, which is not tracked), so every phase-free quantity depends on the gate only through its class: the
+phase-free ensemble IS uniform sampling of the 720 elements of `Sp(4, F_2)`. Drawing `s` directly with
+`next_below(720)` would give the same law but new realizations for the same seeds (a new randomness contract,
+forbidden by v1.4 §9.1 without a new protocol version) and no speedup (one bounded draw either way). Tests: the
+class of every index is its symplectic matrix (`clifford.py`); replacing every `j` by `16 (j >> 4)` leaves every
+phase-free tableau bit-identical; the classes of sampled gates are uniform on 720 (statistical, exports).
+
+**Performance (task T9).** Speed comes from measured bottlenecks, not assumptions. On the owner's Ryzen 9 9950X3D
+(16 cores, 32 threads; one CCD with 96 MB of 3D V-Cache L3, one with 32 MB; 1 MB L2 and 48 KB L1d per core) the
+per-trajectory working set is the tableau, `4N` columns of `ceil(N/64)` words for `N = 2n` qubits: `n^2 / 2`
+bytes (32 KB at n = 256, 512 KB at n = 1024, 2 MB at n = 2048). Below about n = 1400 it fits in L2 and the V-Cache
+cannot help a single trajectory; above, threads on the 32 MB CCD spill to memory first. T9 measures the cost
+breakdown (gates, measurements, probes, snapshots), thread count and placement (all 32, one per core, the V-Cache
+CCD only, the other CCD only), scheduling of uneven trajectories (`stop_when_purified`), and kernel
+micro-optimizations (a compact 720-entry gate table that stays in L1), then implements what measurably pays
+behind a `performance` setting (CPU topology detection, affinity presets, scheduling), with every setting proven
+and tested to leave every result bit-identical.
