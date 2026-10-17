@@ -260,7 +260,7 @@ def test_a_study_job_is_followed_by_the_job_tools(tmp_path):
     assert sa.status(path)["complete"]
 
 
-def test_a_study_job_can_be_cancelled_between_units(tmp_path):
+def test_a_study_job_can_be_canceled_between_units(tmp_path):
     path = build(tmp_path / "s", run=False)
     started = sa.start_run_job(path, num_threads=1)
     api.cancel_job(started["job_id"])
