@@ -871,6 +871,38 @@ def code_snapshot_rows(tab, n_sys, n_rows, ref_rows, out):
 
 
 @njit(cache=True)
+def joint_snapshot_rows(tab, n_qubits, n_rows, out):
+    """Write every stabilizer generator over every qubit row-major into ``out``; return ``n_rows``.
+
+    Row ``r`` of ``out`` (``r < n_rows``) becomes generator ``r`` of the tableau: the X bits of
+    qubits ``0 .. n_qubits - 1`` in words ``[0, wq)`` and their Z bits in ``[wq, 2 wq)``, bit
+    ``q & 63`` of word ``q >> 6`` within each half, ``wq = out.shape[1] // 2``: the layout of
+    :func:`code_snapshot_rows`, over all qubits and all rows (the joint state, references
+    included). It is the transpose of the column-major tableau, made in one pass over the set
+    bits of the ``2 n_qubits`` columns: ``O(n_rows * wq + nnz)`` for ``nnz`` set bits. Only the
+    stabilizer words ``[0, ceil(n_rows / 64))`` of each column are read (never the
+    destabilizers of a phase-tracking tableau).
+    """
+    wq = out.shape[1] // 2
+    for r in range(n_rows):
+        for v in range(2 * wq):
+            out[r, v] = ZERO
+    row_words = (n_rows + 63) >> 6
+    for q in range(n_qubits):
+        qb = np.uint64(1) << np.uint64(q & 63)
+        for half in range(2):
+            target = half * wq + (q >> 6)
+            for w in range(row_words):
+                x = tab[2 * q + half, w]
+                while x != ZERO:
+                    r = (w << 6) + np.int64(ctz(x))
+                    if r < n_rows:
+                        out[r, target] |= qb
+                    x &= x - np.uint64(1)
+    return n_rows
+
+
+@njit(cache=True)
 def first_failure_samples(tab, ws, ref_rows, k, prng, system, out):
     """``out[i]`` = first-failure size along a fresh uniformly random ordering of ``system``.
 

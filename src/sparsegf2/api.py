@@ -1919,6 +1919,12 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
         return 5.0 + _code_columns_us(n, words) + math.exp(min(log_us, 400.0))
     if p.kind == "code_snapshot":  # a bit test per generator (at most n) and system qubit
         return 2.0 + 0.022 * n * n + 1e-3 * num_qubits
+    if p.kind == "tableau_snapshot":
+        # all N rows over all N qubits, a transpose of the tableau: O(N^2 / 32 + set bits).
+        # Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-17, purification picture,
+        # scrambled states, the costliest): 8, 34 and 134 us at N = 128, 256 and 512, about
+        # 0.0005 us per N^2; priced at 4 times that
+        return 2.0 + 0.002 * num_qubits * num_qubits
     if p.kind == "correlated_erasure":
         return _correlated_us(p, mc, words)
     # any newer probe: priced as a pass over every qubit
@@ -2093,15 +2099,16 @@ def _estimate_seconds(
 
 
 def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
-    """Memory of the run's result: every probe value (float64) plus the saved codes."""
+    """Memory of the run's result: every probe value (float64) plus the saved codes or tableaux
+    (uint64 words: ``n x 2 ceil(n / 64)`` per code, ``N x 2 ceil(N / 64)`` per joint tableau)."""
     n = mc.num_system
     values = sum(len(mc.probe_layers(p.name)) * mipt._probe_length(p, n) for p in mc.probes)
-    codes = sum(
-        len(mc.probe_layers(p.name)) * n * 2 * ((n + 63) // 64)
-        for p in mc.probes
-        if p.kind == "code_snapshot"
-    )
-    return trajectories * 8 * (values + codes + 4)
+    snapshots = 0
+    for p in mc.probes:
+        if p.kind in mipt._SNAPSHOT_KINDS:
+            _, evaluations, rows, words = mipt._snapshot_shape(mc, p, 1)
+            snapshots += evaluations * rows * words
+    return trajectories * 8 * (values + snapshots + 4)
 
 
 def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
@@ -2129,9 +2136,9 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     if gigabytes > MAX_RESULT_GB:
         raise ValueError(
             f"the result would take about {gigabytes:.1f} GB of memory (limit {MAX_RESULT_GB:g} "
-            "GB): give the large probes (erasure_first_failure samples, code_snapshot, vector "
-            "probes) fewer checkpoints of their own, or split the trajectories into several "
-            "output directories"
+            "GB): give the large probes (erasure_first_failure samples, code_snapshot, "
+            "tableau_snapshot, vector probes) fewer checkpoints of their own, or split the "
+            "trajectories into several output directories"
         )
     return trajectories
 
@@ -2158,7 +2165,6 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     Mirrors :meth:`sparsegf2.mipt.EnsembleResult.save`; sizes are uncompressed.
     """
     n = mc.num_system
-    wsys = (n + 63) // 64
     edges = sum(len(g) for g in mc.graphs)
     gate_set, order = np.asarray(mc.gate_set), np.asarray(mc.system_order)  # resolved by the spec
     rows = [
@@ -2173,18 +2179,19 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     ]
     if mc.edge_weights is not None:
         rows.append(_array_row("edge_weights", (edges,), np.float64))
-    snapshots = False
+    snapshots = tableaux = False
     for p in mc.probes:
         evaluations = len(mc.probe_layers(p.name))
         shape = [trajectories, evaluations]
         if p.is_vector:
             shape.append(mipt._probe_length(p, n))
         rows.append(_array_row(f"value::{p.name}", shape, np.float64))
-        if p.kind == "code_snapshot":
-            snapshots = True
+        if p.kind in mipt._SNAPSHOT_KINDS:
+            snapshots = snapshots or p.kind == "code_snapshot"
+            tableaux = tableaux or p.kind == "tableau_snapshot"
             rows.append(
                 _array_row(
-                    f"snapshot::{p.name}", (trajectories, evaluations, n, 2 * wsys), np.uint64
+                    f"snapshot::{p.name}", mipt._snapshot_shape(mc, p, trajectories), np.uint64
                 )
             )
             rows.append(
@@ -2202,6 +2209,12 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
             " A snapshot:: array is stored at its full shape, an upper bound: each code "
             "fills only its first generator rows (snapshot_counts:: says how many), the rest "
             "is zero."
+        )
+    if tableaux:
+        note += (
+            " A tableau_snapshot's snapshot:: array holds every generator of the joint state "
+            "over all system and reference qubits at each evaluation (snapshot_counts:: is "
+            "their number, or -1 where a stopped trajectory saved nothing)."
         )
     return {
         "arrays": rows,
@@ -2993,6 +3006,12 @@ def _summarize_ensemble(
                 notes.append(
                     f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
                     "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
+                )
+            if probe.kind == "tableau_snapshot":
+                notes.append(
+                    f"{keys[name]}: the number of generators of the joint state (system plus "
+                    "reference qubits); the tableaux themselves are saved with output_dir "
+                    "(EnsembleResult.tableau(t, c) in Python: a PhaseFreeTableau)"
                 )
             if probe.kind == "lost_information":
                 notes.append(_loses_nothing_note(keys[name]))
