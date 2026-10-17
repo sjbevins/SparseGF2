@@ -3,7 +3,10 @@
 Strict reading (every malformed manifest is refused with a message that names the field),
 the canonical form and digest, the resolved conditions, the checkpoint rule of v1.4 §9
 (hand-computed schedules, an independent high-precision implementation, property tests),
-the keyword set that drives ``MonitoredCircuit``, and the revision rules of design §3.
+the keyword set that drives ``MonitoredCircuit``, and the revision rules of design §3 with the
+ruling R-CK: a checkpoint list serves every size (entries above a horizon are dropped), a table
+gives one list per size, any change of the rule and any larger horizon is an extension, and
+``effective_checkpoints`` is the union of the schedules of all revisions.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from sparsegf2.study.identity import Token
 from sparsegf2.study.manifest import (
     ExperimentManifest,
     check_extension,
+    effective_checkpoints,
     geometric_checkpoints,
     round_half_up_power,
 )
@@ -348,16 +352,69 @@ MALFORMED = [
     ("depth.layers", {"table": {"x": 64}}, "keys are sizes n as strings"),
     ("depth.layers", {"table": {16: 64}}, "keys are sizes n as strings"),
     ("depth.layers", {"table": {"16": 0, "24": 5}}, r"table\[16\]: must be at least 1"),
-    ("depth.checkpoints", {}, "manifest.depth.checkpoints: give exactly one of 'count' or 'list'"),
+    (
+        "depth.layers",
+        {"table": {"16": 64, "016": 70, "24": 96}},
+        r"layers.table: the size n = 16 appears twice",
+    ),
+    (
+        "depth.checkpoints",
+        {},
+        "manifest.depth.checkpoints: give exactly one of 'count', 'list' or 'table'",
+    ),
     ("depth.checkpoints", {"count": 3, "list": [1]}, "give exactly one of"),
+    ("depth.checkpoints", {"list": [1], "table": {"16": [1], "24": [1]}}, "give exactly one of"),
     ("depth.checkpoints", {"count": 0}, r"checkpoints.count: must be at least 1"),
     ("depth.checkpoints", {"count": 1001}, r"checkpoints.count: must be at most 1000"),
     ("depth.checkpoints", {"count": 2.5}, "checkpoints.count: must be an integer"),
-    ("depth.checkpoints", {"list": []}, r"checkpoints.list: give at least one entry"),
+    (
+        "depth.checkpoints",
+        {"list": []},
+        r"checkpoints.list: give at least one entry \(for just 0, 1 and T_max use",
+    ),
     ("depth.checkpoints", {"list": [-1, 3]}, r"checkpoints.list\[0\]: must be at least 0"),
     ("depth.checkpoints", {"list": [1, 2.0]}, r"checkpoints.list\[1\]: must be an integer"),
-    ("depth.checkpoints", {"list": [1, 129]}, r"checkpoint 129 exceeds T_max = 128 for n = 16"),
     ("depth.checkpoints", {"list": "1,2"}, "checkpoints.list: expected a list"),
+    ("depth.checkpoints", {"table": {}}, r"checkpoints.table: expected an object"),
+    ("depth.checkpoints", {"table": [1]}, r"checkpoints.table: expected an object"),
+    ("depth.checkpoints", {"table": {"16": [1, 4]}}, r"checkpoints.table: no entry for n = \[24\]"),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [1], "24": [1], "99": [1]}},
+        r"checkpoints.table: n = \[99\] is not in any condition",
+    ),
+    ("depth.checkpoints", {"table": {"x": [1]}}, "keys are sizes n as strings"),
+    ("depth.checkpoints", {"table": {16: [1], "24": [1]}}, "keys are sizes n as strings"),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [1], "016": [2], "24": [1]}},
+        r"checkpoints.table: the size n = 16 appears twice",
+    ),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [129], "24": [1]}},
+        r"checkpoints.table\[16\]: checkpoint 129 exceeds T_max = 128 for n = 16",
+    ),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [1], "24": [193]}},
+        r"checkpoints.table\[24\]: checkpoint 193 exceeds T_max = 192 for n = 24",
+    ),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [-1], "24": [1]}},
+        r"checkpoints.table\[16\]\[0\]: must be at least 0",
+    ),
+    (
+        "depth.checkpoints",
+        {"table": {"16": [1.5], "24": [1]}},
+        r"checkpoints.table\[16\]\[0\]: must be an integer",
+    ),
+    (
+        "depth.checkpoints",
+        {"table": {"16": 5, "24": [1]}},
+        r"checkpoints.table\[16\]: expected a list",
+    ),
     ("depth.layers", DELETE, r"manifest.depth: missing required key\(s\) \['layers'\]"),
     ("depth.checkpoints", DELETE, r"manifest.depth: missing required key\(s\) \['checkpoints'\]"),
     # trials
@@ -741,16 +798,86 @@ def test_explicit_checkpoint_lists_always_include_zero_one_and_horizon():
     assert listed.checkpoints(16, "0") == (0, 1, 5, 20, 64, 128)
     assert listed.checkpoints(24, "0.1") == (0, 1, 5, 20, 64, 128, 192)
     assert listed.to_dict()["depth"]["checkpoints"] == {"list": [5, 20, 64, 128]}  # sorted, unique
-    assert listed.depth.checkpoints.resolve(7) == (0, 1, 5, 7, 20, 64, 128)  # as given, for any T
+    # the rule is a function of the horizon and the size: entries above the horizon are dropped
+    assert listed.depth.checkpoints.resolve(7, 16) == (0, 1, 5, 7)
+    assert listed.depth.checkpoints.resolve(100, 16) == (0, 1, 5, 20, 64, 100)
 
 
-def test_a_checkpoint_list_must_fit_every_horizon():
+def test_a_checkpoint_list_serves_every_size_and_drops_what_is_above_its_horizon():
+    # ruling R-CK: one list for every size; the entries above a size's T_max are dropped for that
+    # size (not an error), and 0, 1 and T_max are always included
     data = mutated("depth.layers", {"table": {"16": 64, "24": 200}})
-    data["depth"]["checkpoints"] = {"list": [70]}
-    with pytest.raises(ValueError, match="checkpoint 70 exceeds T_max = 64 for n = 16"):
-        ExperimentManifest.from_json(data)
-    data["depth"]["checkpoints"] = {"list": [64]}
-    ExperimentManifest.from_json(data)
+    data["depth"]["checkpoints"] = {"list": [70, 5, 5, 20, 64, 130, 400]}
+    m = ExperimentManifest.from_json(data)
+    assert m.checkpoints(16, "0") == (0, 1, 5, 20, 64)  # 70, 130 and 400 dropped; 64 is T_max
+    assert m.checkpoints(24, "0.1") == (0, 1, 5, 20, 64, 70, 130, 200)  # 400 dropped, 200 added
+    assert m.checkpoints(16, "0.1") == m.checkpoints(16, "0")  # the same for every rate and beta
+    assert m.to_dict()["depth"]["checkpoints"] == {"list": [5, 20, 64, 70, 130, 400]}
+    assert ExperimentManifest.from_json(m.to_json()) == m
+    # 400 is above every horizon: it has no effect, which is flagged but not refused
+    assert any("[400]" in w and "no effect" in w for w in m.warnings)
+    data["depth"]["checkpoints"] = {"list": [70, 5, 20, 64, 130]}
+    assert not any("checkpoints.list" in w for w in ExperimentManifest.from_json(data).warnings)
+
+
+def test_a_checkpoint_table_gives_one_list_per_size():
+    data = mutated("depth.checkpoints", {"table": {"24": [3, 100], "16": [64, 5, 5]}})
+    m = ExperimentManifest.from_json(data)
+    assert m.checkpoints(16, "0") == (0, 1, 5, 64, 128)  # T_max(16) = 128
+    assert m.checkpoints(24, "0.1") == (0, 1, 3, 100, 192)  # T_max(24) = 192
+    assert m.to_dict()["depth"]["checkpoints"] == {"table": {"16": [5, 64], "24": [3, 100]}}
+    assert ExperimentManifest.from_json(m.to_json()) == m and m.digest() != load(EXAMPLE).digest()
+    # an empty list for a size means just 0, 1 and T_max; an entry equal to T_max is allowed
+    plain = ExperimentManifest.from_json(
+        mutated("depth.checkpoints", {"table": {"16": [], "24": [192]}})
+    )
+    assert plain.checkpoints(16, "0") == (0, 1, 128) and plain.checkpoints(24, "0") == (0, 1, 192)
+    # the table is a function of the size alone
+    with pytest.raises(ValueError, match="no entry for n = 20"):
+        m.depth.checkpoints.resolve(100, 20)
+    with pytest.raises(ValueError, match=r"table\[16\]: checkpoint 64 exceeds T_max = 50"):
+        m.depth.checkpoints.resolve(50, 16)
+
+
+@PROPERTY
+@given(
+    st.lists(st.integers(0, 300), min_size=1, max_size=10),
+    st.integers(1, 200),
+    st.sampled_from([5, 8, 16, 24]),
+)
+def test_the_list_form_is_the_list_below_the_horizon_with_zero_one_and_the_horizon(
+    depths, t_max, n
+):
+    rule = mf.CheckpointRule.from_dict({"list": depths}, "x")
+    expected = tuple(sorted({0, 1, t_max} | {d for d in depths if d <= t_max}))
+    assert rule.resolve(t_max, n) == expected
+    assert rule.resolve(t_max, n) == rule.resolve(t_max, n + 1)  # the same list for every size
+
+
+@PROPERTY
+@given(st.data())
+def test_the_table_form_is_the_size_entry_with_zero_one_and_the_horizon(data):
+    sizes = data.draw(
+        st.lists(st.sampled_from([5, 6, 8, 12, 16]), min_size=1, max_size=4, unique=True)
+    )
+    t_max = {n: data.draw(st.integers(1, 60)) for n in sizes}
+    table = {str(n): data.draw(st.lists(st.integers(0, t_max[n]), max_size=6)) for n in sizes}
+    manifest = ExperimentManifest.from_json(
+        {
+            "experiment_id": "t",
+            "conditions": [{"n": sizes, "beta": ["0.1"], "p": ["0.2"]}],
+            "depth": {
+                "layers": {"table": {str(n): t_max[n] for n in sizes}},
+                "checkpoints": {"table": table},
+            },
+            "trials": {"graphs": 2, "circuits_per_graph": 1},
+            "seeds": {"master_graph_seed": 1, "master_circuit_seed": 2},
+            "observables": {"uniform_erasure": None},
+        }
+    )
+    for n in sizes:
+        assert manifest.checkpoints(n, "0.1") == tuple(sorted({0, 1, t_max[n], *table[str(n)]}))
+    assert ExperimentManifest.from_json(manifest.to_json()) == manifest
 
 
 # ---------------------------------------------------------------------------
@@ -959,9 +1086,6 @@ def with_changes(*changes) -> ExperimentManifest:
     return load(data)
 
 
-# the sparse checkpoints of the example at n = 16 (T_max 128) and n = 24 (T_max 192)
-OLD_DEPTHS = sorted(set(geometric_checkpoints(128, 12)) | set(geometric_checkpoints(192, 12)))
-
 ALLOWED = {
     "identical": [],
     "more rates": [("conditions.0.p", ["0.1", "0.15", "0.2", "0.25"])],
@@ -972,12 +1096,21 @@ ALLOWED = {
     ],
     "more graphs": [("trials.graphs", 40)],
     "more circuits up to the stride": [("trials.circuits_per_graph", 8)],
-    "raise T_max with an explicit list that keeps the old depths": [
+    # ruling R-CK: any change of the checkpoint rule, and a larger T_max under any of them
+    "raise T_max under the geometric rule": [("depth.layers", {"per_n": 16})],
+    "raise T_max and switch to a list": [
         ("depth.layers", {"per_n": 16}),
-        ("depth.checkpoints", {"list": OLD_DEPTHS + [250]}),
+        ("depth.checkpoints", {"list": [3, 50, 400]}),
     ],
-    # N_T -> 2 N_T - 1 refines the schedule: a_(2j) of the new one is a_j of the old one
+    "raise T_max for one size only": [
+        ("depth.layers", {"table": {"16": 128, "24": 400}}),
+    ],
+    "fewer checkpoints": [("depth.checkpoints", {"count": 8})],
     "more checkpoints": [("depth.checkpoints", {"count": 23})],
+    "a list instead of the geometric rule": [("depth.checkpoints", {"list": [3, 50]})],
+    "a table instead of the geometric rule": [
+        ("depth.checkpoints", {"table": {"16": [3], "24": [50]}})
+    ],
     "a second correlated entry": [
         (
             "observables.correlated_erasure",
@@ -1011,7 +1144,8 @@ def test_adding_observables_and_a_larger_horizon_are_extensions():
     full = load(EXAMPLE)
     assert check_extension(lean, full) is None  # every observable switched on
     assert check_extension(full, lean) is not None
-    # T_max itself is a checkpoint: raising it keeps the old horizon in the explicit list
+    # ruling R-CK: a revision may raise T_max whatever it does with the checkpoint rule, because
+    # the schedule used for work is the union of the schedules of all revisions
     short = with_changes(("depth.layers", {"per_n": 4}), ("depth.checkpoints", {"list": [2, 8]}))
     forgot = with_changes(
         ("depth.layers", {"per_n": 8}), ("depth.checkpoints", {"list": [2, 8, 32]})
@@ -1019,10 +1153,11 @@ def test_adding_observables_and_a_larger_horizon_are_extensions():
     longer = with_changes(
         ("depth.layers", {"per_n": 8}), ("depth.checkpoints", {"list": [2, 8, 32, 64, 96]})
     )
-    assert "lose the depths [64]" in check_extension(short, forgot)
+    assert check_extension(short, forgot) is None  # the old horizon 64 need not be listed again
     assert check_extension(forgot, longer) is None
     assert check_extension(short, longer) is None
-    assert check_extension(longer, short) is not None
+    assert check_extension(longer, short) is not None  # lowering T_max is forbidden
+    assert "T_max for n = 16 changed from 128 to 64" in check_extension(forgot, short)
 
 
 FORBIDDEN = {
@@ -1071,11 +1206,6 @@ FORBIDDEN = {
     "lower T_max": (
         [("depth.layers", {"per_n": 4}), ("depth.checkpoints", {"list": [3]})],
         "T_max for n = 16 changed from 128 to 64: a revision may raise T_max",
-    ),
-    "geometric checkpoints move with T_max": ([("depth.layers", {"per_n": 16})], "lose the depths"),
-    "fewer checkpoints": (
-        [("depth.checkpoints", {"count": 8})],
-        "checkpoints of (n = 16, beta = 0) lose the depths",
     ),
     "snapshots off": (
         [("observables.tableau_snapshots", False)],
@@ -1141,3 +1271,213 @@ def test_a_chain_of_revisions_is_checked_pairwise(manifest):
         check_extension(third, manifest) is not None
         and check_extension(second, manifest) is not None
     )
+
+
+# ---------------------------------------------------------------------------
+# the effective schedule across revisions (ruling R-CK)
+# ---------------------------------------------------------------------------
+
+
+def one_size(
+    t_max: int,
+    rule: dict,
+    *,
+    sizes: tuple[int, ...] = (8,),
+    betas: tuple[str, ...] = ("0.1",),
+    **overrides,
+) -> ExperimentManifest:
+    """A manifest with the horizon ``t_max`` for every size and the checkpoint ``rule``."""
+    data = {
+        "experiment_id": "chain",
+        "conditions": [{"n": list(sizes), "beta": list(betas), "p": ["0.2"]}],
+        "depth": {"layers": {"fixed": t_max}, "checkpoints": rule},
+        "trials": {"graphs": 2, "circuits_per_graph": 1},
+        "seeds": {"master_graph_seed": 1, "master_circuit_seed": 2},
+        "observables": {"uniform_erasure": None},
+        **overrides,
+    }
+    return ExperimentManifest.from_json(data)
+
+
+def test_the_effective_schedule_is_the_union_of_the_schedules_of_the_revisions():
+    first = one_size(16, {"count": 5})  # 16^(j/4) = 2^j
+    second = one_size(64, {"count": 4})  # 64^(j/3) = 4^j
+    third = one_size(100, {"list": [3, 50, 200]})  # 200 is above T_max = 100: dropped
+    assert first.checkpoints(8, "0.1") == (0, 1, 2, 4, 8, 16)
+    assert second.checkpoints(8, "0.1") == (0, 1, 4, 16, 64)
+    assert third.checkpoints(8, "0.1") == (0, 1, 3, 50, 100)
+    # raising T_max under the geometric rule, and any other change of the rule, is an extension
+    assert check_extension(first, second) is None and check_extension(second, third) is None
+    assert check_extension(first, third) is None
+    assert effective_checkpoints([first], 8, "0.1") == (0, 1, 2, 4, 8, 16)  # one revision: its own
+    assert effective_checkpoints([first, second], 8, "0.1") == (0, 1, 2, 4, 8, 16, 64)
+    everything = (0, 1, 2, 3, 4, 8, 16, 50, 64, 100)
+    assert effective_checkpoints([first, second, third], 8, "0.1") == everything
+    # the depth 8 of the first revision is not a depth of the second's own schedule, yet it stays
+    assert 8 not in second.checkpoints(8, "0.1") and 8 in effective_checkpoints(
+        [first, second], 8, "0.1"
+    )
+    # a token, a string or a float name the same beta
+    assert effective_checkpoints([first, second], 8, 0.1) == effective_checkpoints(
+        [first, second], 8, "1/10"
+    )
+
+
+def test_a_size_or_beta_absent_from_an_earlier_revision_contributes_nothing_from_it():
+    first = one_size(16, {"count": 5}, sizes=(8,), betas=("0.1",))
+    second = one_size(64, {"list": [3, 10]}, sizes=(8, 12), betas=("0.1", "0.3"))
+    assert check_extension(first, second) is None
+    assert effective_checkpoints([first, second], 12, "0.1") == (0, 1, 3, 10, 64)  # n new
+    assert effective_checkpoints([first, second], 8, "0.3") == (0, 1, 3, 10, 64)  # beta new
+    assert effective_checkpoints([first, second], 8, "0.1") == (0, 1, 2, 3, 4, 8, 10, 16, 64)
+    with pytest.raises(ValueError, match=r"\(n = 9, beta = 0.1\) is not a condition"):
+        effective_checkpoints([first, second], 9, "0.1")
+    with pytest.raises(ValueError, match="revision 2 does not extend revision 1: condition"):
+        dropped_beta = one_size(64, {"count": 2}, sizes=(8, 12))  # beta 0.3 would disappear
+        effective_checkpoints([first, second, dropped_beta], 8, "0.1")
+
+
+def test_effective_checkpoints_refuses_what_is_not_an_extension_chain():
+    first, second = one_size(16, {"count": 5}), one_size(64, {"count": 4})
+    with pytest.raises(
+        ValueError,
+        match=r"revision 1 does not extend revision 0: T_max for n = 8 changed from 64 to 16",
+    ):
+        effective_checkpoints([second, first], 8, "0.1")  # the horizon decreases
+    reseeded = one_size(64, {"count": 4}, seeds={"master_graph_seed": 1, "master_circuit_seed": 3})
+    with pytest.raises(
+        ValueError, match="revision 1 does not extend revision 0: seeds.master_circ"
+    ):
+        effective_checkpoints([first, reseeded], 8, "0.1")
+    with pytest.raises(ValueError, match="revision 1 does not extend revision 0: condition"):
+        effective_checkpoints([first, one_size(64, {"count": 4}, sizes=(9,))], 9, "0.1")
+    third = one_size(32, {"count": 3})
+    with pytest.raises(ValueError, match="revision 2 does not extend revision 1"):
+        effective_checkpoints([first, second, third], 8, "0.1")  # the pair that breaks is named
+    with pytest.raises(ValueError, match="at least one revision"):
+        effective_checkpoints([], 8, "0.1")
+    with pytest.raises(TypeError, match="revision 1 is not an ExperimentManifest"):
+        effective_checkpoints([first, EXAMPLE], 8, "0.1")  # type: ignore[list-item]
+    # equal horizons, in either order, or one revision twice, are valid chains
+    again = one_size(16, {"list": [3, 5]})
+    both = (0, 1, 2, 3, 4, 5, 8, 16)
+    assert effective_checkpoints([first, again], 8, "0.1") == both
+    assert effective_checkpoints([again, first], 8, "0.1") == both
+    assert effective_checkpoints([first, first], 8, "0.1") == first.checkpoints(8, "0.1")
+
+
+RULE_KINDS = [
+    {"count": 3},
+    {"count": 12},
+    {"list": [7, 90]},
+    {"table": {"16": [5], "24": [60]}},
+]
+
+
+RULE_IDS = ["count3", "count12", "list", "table"]
+
+
+@pytest.mark.parametrize("old_rule", RULE_KINDS, ids=RULE_IDS)
+@pytest.mark.parametrize("new_rule", RULE_KINDS, ids=RULE_IDS)
+def test_any_change_of_the_checkpoint_rule_is_an_extension(old_rule, new_rule):
+    old = with_changes(("depth.checkpoints", old_rule))
+    new = with_changes(("depth.checkpoints", new_rule))
+    assert check_extension(old, new) is None and check_extension(new, old) is None
+    higher = with_changes(("depth.layers", {"per_n": 16}), ("depth.checkpoints", new_rule))
+    lower = with_changes(("depth.layers", {"per_n": 4}), ("depth.checkpoints", new_rule))
+    assert check_extension(old, higher) is None  # a larger T_max, whatever the rule becomes
+    assert "T_max for n = 16 changed from 128 to 64" in check_extension(old, lower)
+    assert check_extension(higher, old) is not None  # and a smaller one is refused
+
+
+POOL = [5, 6, 7, 8, 9, 10, 12, 16]
+
+
+def chain_manifest(sizes, t_max, rule) -> ExperimentManifest:
+    """A manifest of one block with a horizon per size (a layer table) and the rule."""
+    return ExperimentManifest.from_json(
+        {
+            "experiment_id": "chain",
+            "conditions": [{"n": sorted(sizes), "beta": ["0.1"], "p": ["0.2"]}],
+            "depth": {
+                "layers": {"table": {str(n): t_max[n] for n in sizes}},
+                "checkpoints": rule,
+            },
+            "trials": {"graphs": 2, "circuits_per_graph": 1},
+            "seeds": {"master_graph_seed": 1, "master_circuit_seed": 2},
+            "observables": {"uniform_erasure": None},
+        }
+    )
+
+
+@st.composite
+def checkpoint_rules(draw, sizes, t_max):
+    kind = draw(st.sampled_from(["count", "list", "table"]))
+    if kind == "count":
+        return {"count": draw(st.integers(1, 12))}
+    if kind == "list":  # entries may exceed some or all horizons: they are dropped
+        return {"list": draw(st.lists(st.integers(0, 300), min_size=1, max_size=8))}
+    return {
+        "table": {
+            str(n): draw(st.lists(st.integers(0, t_max[n]), max_size=6)) for n in sorted(sizes)
+        }
+    }
+
+
+@st.composite
+def revision_chains(draw):
+    """Valid chains of 1 to 4 revisions: horizons never fall, sizes may be added, any rule."""
+    sizes = draw(st.lists(st.sampled_from(POOL), min_size=1, max_size=3, unique=True))
+    t_max = {n: draw(st.integers(1, 40)) for n in sizes}
+    chain = []
+    for _ in range(draw(st.integers(1, 4))):
+        chain.append(chain_manifest(sizes, t_max, draw(checkpoint_rules(sizes, t_max))))
+        t_max = {n: t + draw(st.integers(0, 30)) for n, t in t_max.items()}
+        spare = [n for n in POOL if n not in sizes]
+        if spare and draw(st.booleans()):
+            added = draw(st.sampled_from(spare))
+            sizes = sorted([*sizes, added])
+            t_max[added] = draw(st.integers(1, 40))
+    return chain
+
+
+@PROPERTY
+@given(revision_chains())
+def test_effective_checkpoints_properties(chain):
+    earlier: dict[int, tuple[int, ...]] = {}
+    for k in range(len(chain)):
+        prefix = chain[: k + 1]
+        latest = prefix[-1]
+        for n in sorted({c.n for c in latest.conditions()}):
+            effective = effective_checkpoints(prefix, n, "0.1")
+            horizon = latest.layers(n, "0.1")
+            own = [m.checkpoints(n, "0.1") for m in prefix if m.has_condition(n, "0.1")]
+            assert list(effective) == sorted(set(effective))  # sorted, unique
+            assert effective == tuple(sorted(set().union(*own)))  # the union of the own schedules
+            assert all(0 <= d <= horizon for d in effective)  # never above the latest T_max
+            assert {0, 1, horizon} <= set(effective)
+            assert all(set(schedule) <= set(effective) for schedule in own)
+            if k == 0:  # one revision: its own schedule
+                assert effective == chain[0].checkpoints(n, "0.1")
+            if n in earlier:  # a superset of the effective schedule of every earlier prefix
+                assert set(earlier[n]) <= set(effective)
+            earlier[n] = effective
+    for i in range(len(chain)):  # every pair is an extension: extensions compose
+        for j in range(i + 1, len(chain)):
+            assert check_extension(chain[i], chain[j]) is None
+
+
+@PROPERTY
+@given(revision_chains())
+def test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension(chain):
+    if len(chain) < 2:
+        return
+    first, second = chain[0], chain[1]
+    n = first.conditions()[0].n
+    if check_extension(second, first) is None:  # equal horizons and conditions: either order
+        assert effective_checkpoints([second, first], n, "0.1") == tuple(
+            sorted(set(first.checkpoints(n, "0.1")) | set(second.checkpoints(n, "0.1")))
+        )
+    else:
+        with pytest.raises(ValueError, match="revision 1 does not extend revision 0"):
+            effective_checkpoints([second, first], n, "0.1")

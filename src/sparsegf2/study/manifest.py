@@ -14,8 +14,11 @@ Sections (all keys are listed in ``docs/study/02-identity-seeds-and-manifest.md`
   rational strings or JSON numbers. Duplicates are refused.
 * ``depth``: ``layers`` (``{"per_n": a}`` gives $T_{\\max} = a n$, ``{"fixed": T}``, or
   ``{"table": {"16": 128}}``) and ``checkpoints`` (``{"count": N_T}``, the geometric rule of
-  v1.4 §9, or ``{"list": [...]}``). The sparse checkpoints $\\mathcal T(n, \\beta)$ always include
-  $0, 1, T_{\\max}$; the global checkpoints of the engine are every layer.
+  v1.4 §9; ``{"list": [...]}``, one list for every size, whose entries above a size's
+  $T_{\\max}$ are dropped for that size; or ``{"table": {"16": [...]}}``, one list per size,
+  every size covered, every entry within $[0, T_{\\max}]$). The sparse checkpoints
+  $S(n, \\beta)$ of a revision always include $0, 1, T_{\\max}$; the global checkpoints of the
+  engine are every layer.
 * ``trials``: graphs $G_*$, circuits per graph $C$, the frozen circuit index stride $s \\ge C$
   and the measurement replicas $R = 1$ (design D1).
 * ``seeds``: ``master_graph_seed``, ``master_circuit_seed``, ``gate_mode``.
@@ -40,9 +43,13 @@ manifest                              probe
 
 Revisions. A store keeps every manifest revision. :func:`check_extension` says whether a new
 manifest only extends an old one (more conditions, rates, graphs, circuits, a larger $T_{\\max}$,
-more checkpoints, more observables) or changes something that would make the recorded data
-inconsistent (seeds, ``gate_mode``, the stride, the protocol, the settings of a recorded
-observable).
+any other checkpoint rule, more observables) or changes something that would make the recorded
+data inconsistent (seeds, ``gate_mode``, the stride, the protocol, a lower $T_{\\max}$, the
+settings of a recorded observable). Ruling R-CK (design §3): revision $r$ has its own schedule
+$S_r(n, \\beta)$ from its own rule and $T_{\\max}$, and the schedule used for work under it is the
+union $E_r = (S_1 \\cup \\dots \\cup S_r) \\cap [0, T_{\\max,r}]$, computed by
+:func:`effective_checkpoints`. Because $T_{\\max}$ never decreases along a valid chain,
+$E_r \\supseteq E_{r-1}$: a stored depth is never dropped.
 """
 
 from __future__ import annotations
@@ -90,6 +97,7 @@ __all__ = [
     "Trials",
     "UniformErasure",
     "check_extension",
+    "effective_checkpoints",
     "geometric_checkpoints",
     "round_half_up_power",
 ]
@@ -318,6 +326,7 @@ class Layers:
                         f"{where}.table: keys are sizes n as strings such as '16', got {key!r}"
                     )
                 pairs.append((int(key), _int(t, f"{where}.table[{key}]", minimum=1)))
+            _no_repeated_size([n for n, _ in pairs], f"{where}.table")
             return cls("table", table=tuple(sorted(pairs)))
         return cls(kind, value=_int(raw, f"{where}.{kind}", minimum=1))
 
@@ -339,40 +348,101 @@ class Layers:
         return {self.kind: self.value}
 
 
+def _no_repeated_size(sizes: Sequence[int], where: str) -> None:
+    """Refuse a table whose keys name one size twice (``"16"`` and ``"016"``)."""
+    twice = next((n for n in sizes if list(sizes).count(n) > 1), None)
+    if twice is not None:
+        raise ValueError(f"{where}: the size n = {twice} appears twice")
+
+
 @dataclass(frozen=True)
 class CheckpointRule:
-    """The sparse checkpoints: ``count`` (the geometric rule of v1.4 §9) or an explicit ``list``."""
+    r"""The sparse checkpoints $S(n,\beta)$ of one revision (v1.4 §9; design §3, ruling R-CK).
+
+    * ``count``: the geometric rule with ``count`` $= N_T$ points (:func:`geometric_checkpoints`);
+    * ``list``: one list of depths for every size. For a size with horizon $T_{\max}$ the
+      entries above $T_{\max}$ are **dropped** (not an error), and $0, 1, T_{\max}$ are added;
+    * ``table``: one list per size, every size of the conditions covered (the manifest refuses a
+      missing or an extra size); each entry must lie in $[0, T_{\max}(n)]$, and $0, 1, T_{\max}$
+      are added.
+    """
 
     kind: str
     count: int = 0
     depths: tuple[int, ...] = ()
+    table: tuple[tuple[int, tuple[int, ...]], ...] = ()
 
     @classmethod
     def from_dict(cls, data: Any, where: str) -> CheckpointRule:
-        d = _object(data, where, optional=("count", "list"))
+        d = _object(data, where, optional=("count", "list", "table"))
         if len(d) != 1:
-            raise ValueError(f"{where}: give exactly one of 'count' or 'list', got {sorted(d)}")
+            raise ValueError(
+                f"{where}: give exactly one of 'count', 'list' or 'table', got {sorted(d)}"
+            )
         kind, raw = next(iter(d.items()))
         if kind == "count":
             return cls(
                 "count", count=_int(raw, f"{where}.count", minimum=1, maximum=MAX_CHECKPOINT_COUNT)
             )
-        depths = [
-            _int(v, f"{where}.list[{i}]", minimum=0)
-            for i, v in enumerate(_list(raw, f"{where}.list"))
-        ]
-        return cls("list", depths=tuple(sorted(set(depths))))
+        if kind == "list":
+            if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)) and not raw:
+                raise ValueError(
+                    f"{where}.list: give at least one entry (for just 0, 1 and T_max use "
+                    "{'count': 1})"
+                )
+            depths = [
+                _int(v, f"{where}.list[{i}]", minimum=0)
+                for i, v in enumerate(_list(raw, f"{where}.list"))
+            ]
+            return cls("list", depths=tuple(sorted(set(depths))))
+        if not isinstance(raw, Mapping) or not raw:
+            raise ValueError(
+                f"{where}.table: expected an object {{'16': [1, 4, 16], ...}} with one list per size"
+            )
+        entries = []
+        for key, values in raw.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9]+", key):
+                raise ValueError(
+                    f"{where}.table: keys are sizes n as strings such as '16', got {key!r}"
+                )
+            depths = [
+                _int(v, f"{where}.table[{key}][{i}]", minimum=0)
+                for i, v in enumerate(_list(values, f"{where}.table[{key}]", nonempty=False))
+            ]
+            entries.append((int(key), tuple(sorted(set(depths)))))
+        _no_repeated_size([n for n, _ in entries], f"{where}.table")
+        return cls("table", table=tuple(sorted(entries)))
 
-    def resolve(self, t_max: int) -> tuple[int, ...]:
-        """The checkpoints for horizon ``t_max``: sorted, unique, containing $0, 1, T_{\\max}$."""
+    def resolve(self, t_max: int, n: int) -> tuple[int, ...]:
+        r"""The schedule $S(n,\beta)$ for horizon ``t_max`` at size ``n``: sorted, unique,
+        containing $0, 1, T_{\max}$, within $[0, T_{\max}]$.
+
+        ``count``: the geometric schedule. ``list``: the entries not above ``t_max``, plus
+        $0, 1, T_{\max}$. ``table``: the entries of size ``n`` (each must be at most ``t_max``).
+        """
         if self.kind == "count":
             return geometric_checkpoints(t_max, self.count)
-        return tuple(sorted({0, 1, t_max, *self.depths}))
+        if self.kind == "list":
+            return tuple(sorted({0, 1, t_max, *(d for d in self.depths if d <= t_max)}))
+        for size, depths in self.table:
+            if size == n:
+                if depths and depths[-1] > t_max:
+                    raise ValueError(
+                        f"depth.checkpoints.table[{n}]: checkpoint {depths[-1]} exceeds "
+                        f"T_max = {t_max} for n = {n}"
+                    )
+                return tuple(sorted({0, 1, t_max, *depths}))
+        raise ValueError(
+            f"depth.checkpoints.table has no entry for n = {n}; it covers "
+            f"{[s for s, _ in self.table]}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         if self.kind == "count":
             return {"count": self.count}
-        return {"list": list(self.depths)}
+        if self.kind == "list":
+            return {"list": list(self.depths)}
+        return {"table": {str(n): list(depths) for n, depths in self.table}}
 
 
 @dataclass(frozen=True)
@@ -878,9 +948,9 @@ class ExperimentManifest:
 
     Build it with :meth:`from_json` (a dict, JSON text or a ``Path``). ``to_json()`` is the
     canonical text and ``digest()`` its SHA-256. The constructor validates the cross-field
-    rules: no duplicate condition, a layer table that covers exactly the sizes in use,
-    explicit checkpoints within $[0, T_{\\max}]$ for every size, correlated-erasure sizes
-    within $[1, n - 1]$, an exact-count budget of at least $n$, and different master seeds.
+    rules: no duplicate condition, a layer table and a checkpoint table that cover exactly the
+    sizes in use, table entries within $[0, T_{\\max}(n)]$, correlated-erasure sizes within
+    $[1, n - 1]$, an exact-count budget of at least $n$, and different master seeds.
     """
 
     experiment_id: str
@@ -917,13 +987,25 @@ class ExperimentManifest:
                     f"manifest.depth.layers.table: n = {extra} is not in any condition"
                 )
         rule = self.depth.checkpoints
+        if rule.kind == "table":
+            listed = [n for n, _ in rule.table]
+            missing = [n for n in sizes if n not in listed]
+            extra = [n for n in listed if n not in sizes]
+            if missing:
+                raise ValueError(f"manifest.depth.checkpoints.table: no entry for n = {missing}")
+            if extra:
+                raise ValueError(
+                    f"manifest.depth.checkpoints.table: n = {extra} is not in any condition"
+                )
         for n in sizes:
             t_max = self.depth.layers.t_max(n)
-            if rule.kind == "list" and rule.depths and rule.depths[-1] > t_max:
-                raise ValueError(
-                    f"manifest.depth.checkpoints.list: checkpoint {rule.depths[-1]} exceeds "
-                    f"T_max = {t_max} for n = {n}"
-                )
+            if rule.kind == "table":
+                depths = dict(rule.table)[n]
+                if depths and depths[-1] > t_max:
+                    raise ValueError(
+                        f"manifest.depth.checkpoints.table[{n}]: checkpoint {depths[-1]} "
+                        f"exceeds T_max = {t_max} for n = {n}"
+                    )
             for entry in self.observables.correlated_erasure:
                 bad = [m for m in entry.expand_sizes(n) if not 1 <= m <= n - 1]
                 if bad or not entry.expand_sizes(n):
@@ -1104,13 +1186,23 @@ class ExperimentManifest:
         return self.depth.layers.t_max(n)
 
     def checkpoints(self, n: int, beta: Token | str | float) -> tuple[int, ...]:
-        """The sparse checkpoints $\\mathcal T(n, \\beta)$: sorted, unique, containing $0, 1, T_{\\max}$.
+        """The schedule $S(n, \\beta)$ of **this revision**: sorted, unique, containing $0, 1, T_{\\max}$.
 
-        The geometric rule of v1.4 §9 (``geometric_checkpoints``) or the explicit list, which
-        was checked at construction to lie in $[0, T_{\\max}]$. Expensive probes run here; the
-        reference purification and the code dimension are observed at every layer.
+        The geometric rule of v1.4 §9 (``geometric_checkpoints``), the list (entries above this
+        size's $T_{\\max}$ dropped) or the size's entry of the table (checked at construction to
+        lie in $[0, T_{\\max}]$). The schedule used for work under a revision that follows
+        earlier ones is the union of the schedules of all of them,
+        :func:`effective_checkpoints`. Expensive probes run at those depths; the reference
+        purification and the code dimension are observed at every layer.
         """
-        return self.depth.checkpoints.resolve(self.layers(n, beta))
+        n, _, _ = self._condition(n, beta)
+        return self.depth.checkpoints.resolve(self.depth.layers.t_max(n), n)
+
+    def has_condition(self, n: int, beta: Token | str | float) -> bool:
+        """Whether $(n, \\beta)$ is a condition of this manifest (with at least one rate)."""
+        n = _int(n, "n")
+        beta_t = _token(beta, "beta")
+        return any(c.n == n and c.beta == beta_t for c in self.conditions())
 
     # -- seeds and keys -----------------------------------------------------------------
 
@@ -1192,6 +1284,15 @@ class ExperimentManifest:
                 f"a work unit of graphs_per_unit x circuits_per_graph = {unit} trajectories is "
                 f"above max_unit_trajectories = {self.resources.max_unit_trajectories}"
             )
+        rule = self.depth.checkpoints
+        if rule.kind == "list":
+            horizon = max(self.depth.layers.t_max(c.n) for c in self.conditions())
+            useless = [d for d in rule.depths if d > horizon]
+            if useless:
+                out.append(
+                    f"checkpoints.list entries {useless} exceed T_max for every size and are "
+                    "dropped everywhere: they have no effect in this revision"
+                )
         return tuple(out)
 
 
@@ -1203,9 +1304,11 @@ class ExperimentManifest:
 def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | None:
     """``None`` if ``new`` only extends ``old``, else a message naming the first forbidden change.
 
-    Allowed (design §3, "Revisions"): more conditions and rates (every old $(n, \\beta, p)$
-    stays), more graphs, more circuits per graph (up to the frozen stride), a larger
-    $T_{\\max}$, more checkpoints (every old checkpoint stays), more observables (every old
+    Allowed (design §3, "Revisions" and ruling R-CK): more conditions and rates (every old
+    $(n, \\beta, p)$ stays), more graphs, more circuits per graph (up to the frozen stride), a
+    larger $T_{\\max}$ (per size; a lower one is forbidden), **any** change of the checkpoint
+    rule (the schedule used for work is the union of the schedules of all revisions,
+    :func:`effective_checkpoints`, so no stored depth is dropped), more observables (every old
     observable keeps its settings), and any change of ``storage``, ``resources`` and
     ``analysis`` (they do not touch recorded data). Forbidden: a change of ``schema``,
     ``experiment_id``, ``label``, the seeds, ``gate_mode``, the stride, ``dynamics`` or the
@@ -1283,14 +1386,6 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
             return changed(
                 f"T_max for n = {c.n}", before, after, "a revision may raise T_max, not lower it"
             )
-    for c in old_conditions:
-        lost = sorted(set(old.checkpoints(c.n, c.beta)) - set(new.checkpoints(c.n, c.beta)))
-        if lost:
-            return (
-                f"the checkpoints of (n = {c.n}, beta = {c.beta}) lose the depths {lost}: a revision "
-                "may only add checkpoints (when T_max grows, give an explicit list that keeps the "
-                "old depths)"
-            )
     a, b = old.observables, new.observables
     for name in ("tableau_snapshots", "contiguous_distance"):
         if getattr(a, name) and not getattr(b, name):
@@ -1311,3 +1406,40 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
                 "frozen (add a new entry with another name instead)"
             )
     return None
+
+
+def effective_checkpoints(
+    revisions: Sequence[ExperimentManifest], n: int, beta: Token | str | float
+) -> tuple[int, ...]:
+    r"""The checkpoints used for work under the last of ``revisions`` at $(n, \beta)$ (ruling R-CK).
+
+    ``revisions`` are the manifest revisions of one experiment, oldest first. Revision $i$ has
+    its own schedule $S_i(n,\beta)$ (:meth:`ExperimentManifest.checkpoints`); the effective
+    schedule of the last revision $r$ is
+    $$E_r(n,\beta) = \big(S_1 \cup \cdots \cup S_r\big)(n,\beta) \cap [0, T_{\max,r}(n,\beta)],$$
+    returned sorted. A revision that does not contain $(n,\beta)$ contributes nothing. The list
+    must be a valid chain: every consecutive pair satisfies :func:`check_extension` (so the
+    horizon never decreases, no condition is dropped, ...), else ``ValueError`` names the pair
+    and the first forbidden change. $(n,\beta)$ must be a condition of the last revision.
+
+    Because $T_{\max}$ never decreases along a chain and each $S_i \subseteq [0, T_{\max,i}]$,
+    $E_r = S_1 \cup \cdots \cup S_r$ and $E_r \supseteq E_{r-1}$: a depth stored under an
+    earlier revision is never dropped, and it contains $0, 1, T_{\max,r}$. For one revision it
+    is that revision's own schedule.
+    """
+    chain = list(revisions)
+    if not chain:
+        raise ValueError("effective_checkpoints needs at least one revision")
+    for k, manifest in enumerate(chain):
+        if not isinstance(manifest, ExperimentManifest):
+            raise TypeError(f"revision {k} is not an ExperimentManifest")
+    for k in range(1, len(chain)):
+        message = check_extension(chain[k - 1], chain[k])
+        if message is not None:
+            raise ValueError(f"revision {k} does not extend revision {k - 1}: {message}")
+    horizon = chain[-1].layers(n, beta)  # ValueError unless (n, beta) is a condition of the last
+    points: set[int] = set()
+    for manifest in chain:
+        if manifest.has_condition(n, beta):
+            points.update(manifest.checkpoints(n, beta))
+    return tuple(sorted(p for p in points if 0 <= p <= horizon))
