@@ -2699,13 +2699,21 @@ class EnsembleResult:
             )
 
     @staticmethod
-    def concatenate(results: Sequence[EnsembleResult]) -> EnsembleResult:
+    def concatenate(
+        results: Sequence[EnsembleResult], *, same_version: bool = True
+    ) -> EnsembleResult:
         """Merge chunks of the same protocol and seed (e.g. from separate jobs).
 
         The chunks must have identical specs, seeds, package versions and
         randomness contracts and cover different trajectories
         (``first_trajectory=``); anything else raises ``ValueError`` rather
         than mixing protocols or counting a trajectory twice.
+
+        ``same_version=False`` drops the package-version check (the merged
+        result reports the first chunk's version). Only a caller that has
+        checked by other means that the versions draw the same trajectories may
+        pass it: ``sparsegf2.study.sweep`` does, after replaying saved
+        trajectories with the current code.
         """
         if not results:
             raise ValueError("nothing to concatenate")
@@ -2730,7 +2738,7 @@ class EnsembleResult:
                 raise ValueError(f"{refuse}: the probes differ")
             if not np.array_equal(r.checkpoint_layers, first.checkpoint_layers):
                 raise ValueError("checkpoint layers differ")
-            if r.version != first.version:
+            if same_version and r.version != first.version:
                 raise ValueError(
                     f"{refuse}: they come from different sparsegf2 versions ({first.version} "
                     f"vs {r.version}), whose trajectories need not agree; rerun with one version"

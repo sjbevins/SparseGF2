@@ -333,7 +333,8 @@ DIR/
     result-000000000000.npz  saved parts: each an EnsembleResult file (mipt.py:EnsembleResult.save),
     result-000000000016.npz  named by its first stream index u, rows in increasing u
     spec.json                the condition's engine spec in the API's JSON form, its seed
-    provenance.json          versions, platform, git commit, command; one entry per resume
+    provenance.json          versions, platform, git commit, command; one entry per resume;
+                             parts: each saved part with the package version that wrote it
 ```
 
 `sweep.json` (`study/sweep.py:_index`): `format`, `digest`, the canonical `spec`, `versions`
@@ -354,7 +355,9 @@ outcome seed words of every row.
 ## 10. Resume, grow, replay
 
 `sweep.run(spec, DIR)` (`study/sweep.py:run`) takes the directory's lock, checks a stored
-spec against the new one (`_check_growth`) and the stored versions against this code, writes
+spec against the new one (`_check_growth`) and the stored versions against this code (below),
+replays the first and the last saved trajectory of every condition it will add to
+(`_replay_check`, `verify`: every stored value and snapshot word must be equal), writes
 the graph files (`_write_graphs`: every graph rebuilt from its seed; a recorded edge digest that
 no longer reproduces is refused), writes `sweep.json`, then runs each condition's missing
 indices (`_run_condition`: target `SweepSpec.indices(n)` minus the saved ones) in chunks with
@@ -375,6 +378,12 @@ were added holds the shorter collection; `parts`/`load` check that it is the cur
 those first graphs (`mipt.py:_protocol_difference`) and read it on the current spec
 (`study/sweep.py:_rebased`). `tests/test_sweep.py` checks that a grown directory equals a fresh
 run of the grown spec, bitwise.
+
+**Across package versions.** A later `sparsegf2` may grow a directory when every other entry
+of `versions` is equal and the replay check above passes; otherwise `run` refuses, saying that
+the versions disagree, before anything is written. Each part keeps the version that wrote it
+(in the part file and under `parts` in `provenance.json`), and `load` joins parts of different
+versions (`EnsembleResult.concatenate(..., same_version=False)`, which only the sweep passes).
 
 **Replay.** `sweep.replay(DIR, n, beta, p, u)` simulates trajectory `u` again from its seed (a
 one-row result; other `probes` or `checkpoints` may be given, which observe the same
@@ -445,8 +454,9 @@ a value and say so, or record without stopping. `paired_se` against
 * `n >= 5` (the generator needs `k = 4 < n`); `n`, `g`, the master seeds and `c` are 32-bit
   words; `u = g * stride + c` must fit int64 (`study/identity.py:stream_index`).
 * `stride` is frozen: more circuits per graph than `stride` need a new directory.
-* A directory is extended only by the same `sparsegf2` version and randomness contract that
-  made it (`run` compares every entry of `versions`); reading it needs the same contract.
+* A directory grows only under the randomness contract, graph generator, Clifford numbering,
+  dynamics, row-space format and seed tags recorded in `versions`, and reading it needs the
+  same contract. The package version may differ (section 10).
 * One snapshot probe per spec (`mipt.py:MonitoredCircuit.__post_init__`). A tableau snapshot
   costs `N * 2 ceil(N/64) * 8` bytes per evaluation and trajectory (64 KiB at `N = 512`): give
   it few checkpoints. `load` holds a whole condition in memory; `parts` holds one part.

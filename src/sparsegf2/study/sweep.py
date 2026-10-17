@@ -26,6 +26,7 @@ from typing import Any, cast
 import numpy as np
 
 from sparsegf2 import api, graphs, mipt
+from sparsegf2._version import __version__
 from sparsegf2.study import identity
 from sparsegf2.study.identity import Token
 
@@ -538,10 +539,15 @@ def run(
 ) -> dict[str, Any]:
     """Generate (or resume, or grow) the sweep ``spec`` in ``directory``; returns :func:`status`.
 
-    Every graph file is written first; then each condition runs its missing trajectories in
-    chunks of ``chunk_size`` (default: about 10 estimated seconds, at most
-    :data:`PART_BYTES` of result), each saved as soon as it finishes. Results do not depend on
-    ``num_threads`` or ``chunk_size``. The directory's lock admits one writer.
+    A directory made by another package version may grow when every other recorded version
+    (randomness contract, graph generator, Clifford numbering, dynamics, row-space format, seed
+    tags) is equal and, before anything is written, this code replays the first and the last
+    saved trajectory of each condition that grows identically (:func:`verify`). Every graph
+    file is written first; then each condition runs its missing trajectories in chunks of
+    ``chunk_size`` (default: about 10 estimated seconds, at most :data:`PART_BYTES` of
+    result), each saved as soon as it finishes and listed with this package version under
+    ``parts`` in the condition's ``provenance.json``. Results do not depend on ``num_threads``
+    or ``chunk_size``. The directory's lock admits one writer.
     """
     sweep = spec if isinstance(spec, SweepSpec) else SweepSpec.from_json(spec)
     if num_threads is not None:
@@ -557,11 +563,15 @@ def run(
             _check_growth(SweepSpec.from_json(index["spec"]), sweep)
             now = identity.version_record(sweep.picture)
             for key, value in index["versions"].items():
-                if now.get(key) != value:
+                if key != "sparsegf2" and now.get(key) != value:
                     raise ValueError(
                         f"{str(root)!r} was made with {key} {value!r}, this is {now.get(key)!r}; "
                         "trajectories of different versions need not agree: use a new directory"
                     )
+            for n, beta, p in sweep.conditions():  # before anything is written
+                done = _saved_indices(root / _name(n, beta, p))
+                if done.size and np.setdiff1d(sweep.indices(n), done).size:
+                    _replay_check(root, n, beta, p, done)
         for n in sweep.sizes:
             for beta in sweep.betas:
                 _write_graphs(root, sweep, n, beta)
@@ -573,6 +583,31 @@ def run(
     out = status(root)
     out.update(ran=ran, seconds=round(time.perf_counter() - started, 3))
     return out
+
+
+def _replay_check(root: Path, n: int, beta: Token, p: Token, done: np.ndarray) -> None:
+    """Refuse to add to a condition whose first and last saved trajectories this code does not
+    replay exactly (every stored value and snapshot word): the saved parts were then made by a
+    version that draws other trajectories."""
+    for u in sorted({int(done.min()), int(done.max())}):
+        try:
+            same, why = verify(root, n, beta, p, u)["identical"], ""
+        except ValueError as exc:
+            same, why = False, f" ({exc})"
+        if not same:
+            raise ValueError(
+                f"n = {n}, beta = {beta}, p = {p}: the saved trajectory u = {u} does not replay "
+                f"identically with this code (sparsegf2 {__version__}){why}; the versions "
+                "disagree, so this sweep cannot grow: use a new directory"
+            )
+
+
+def _record_part(folder: Path, name: str) -> None:
+    """Add ``name`` and this package version to the ``parts`` of ``provenance.json``."""
+    path = folder / "provenance.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.setdefault("parts", {})[name] = __version__
+    api._atomic_write_text(path, json.dumps(record, indent=2))
 
 
 def _run_condition(
@@ -614,7 +649,9 @@ def _run_condition(
     for start in range(0, todo.size, size):
         chunk = todo[start : start + size]
         result = mc.run(indices=chunk, seed=seed, num_threads=num_threads)
-        api._atomic_save_result(result, folder / f"result-{int(chunk[0]):012d}.npz")
+        name = f"result-{int(chunk[0]):012d}.npz"
+        api._atomic_save_result(result, folder / name)
+        _record_part(folder, name)
         if log is not None:
             log(
                 f"n={n} beta={beta} p={p}: {done.size + start + chunk.size}/"
@@ -706,7 +743,8 @@ def load(directory: str | Path, n: int, beta: Any, p: Any) -> mipt.EnsembleResul
     found = list(parts(directory, n, beta, p))
     if not found:
         raise ValueError(f"nothing saved for n = {n}, beta = {beta}, p = {p}")
-    merged = found[0] if len(found) == 1 else mipt.EnsembleResult.concatenate(found)
+    # parts of other package versions passed the replay check of run before they were joined
+    merged = mipt.EnsembleResult.concatenate(found, same_version=False)
     return _take(merged, np.argsort(merged.trajectories, kind="stable"))
 
 

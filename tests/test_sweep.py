@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 import _ws_reference as wsref
+import sparsegf2
 from sparsegf2 import api, cli, graphs, mipt
 from sparsegf2.study import identity as ident
 from sparsegf2.study import sweep
@@ -303,18 +304,70 @@ def test_a_change_that_would_alter_saved_data_is_refused(reference, change, frag
     assert (directory / "sweep.json").read_bytes() == before
 
 
-def test_a_directory_of_another_version_is_refused(tmp_path):
+def test_a_directory_of_another_algorithm_or_contract_is_refused(tmp_path):
     directory = tmp_path / "old"
-    sweep.run(spec_with(sizes=[6], betas=["0"], rates=["0.1"], graphs=1), directory)
+    small = spec_with(sizes=[6], betas=["0"], rates=["0.1"], graphs=1)
+    sweep.run(small, directory)
     index = json.loads((directory / "sweep.json").read_text())
-    index["versions"]["sparsegf2"] = "0.0.0"
+    index["versions"]["dynamics"] = "another-dynamics-1"
     (directory / "sweep.json").write_text(json.dumps(index))
-    with pytest.raises(ValueError, match="sparsegf2"):
-        sweep.run(spec_with(sizes=[6], betas=["0"], rates=["0.1"], graphs=1), directory)
+    with pytest.raises(ValueError, match="dynamics"):
+        sweep.run(small, directory)
     index["versions"]["randomness_contract"] = 1
     (directory / "sweep.json").write_text(json.dumps(index))
     with pytest.raises(ValueError, match="randomness contract 1"):
         sweep.load(directory, 6, "0", "0.1")
+
+
+def made_by_an_older_version(directory, old="3.0.0.dev0") -> None:
+    """Rewrite a sweep as an older package version would have left it: every part's version,
+    the index's and the provenance's."""
+    for path in directory.glob("n*/result-*.npz"):
+        part = mipt.EnsembleResult.load(path)
+        part.version = old
+        part.save(path)
+    index_path = directory / "sweep.json"
+    index = json.loads(index_path.read_text())
+    index["versions"]["sparsegf2"] = old
+    index_path.write_text(json.dumps(index))
+    for path in directory.glob("n*/provenance.json"):
+        record = json.loads(path.read_text())
+        record["parts"] = {name: old for name in record["parts"]}
+        path.write_text(json.dumps(record))
+
+
+def test_a_sweep_grows_across_package_versions_after_a_replay_check(reference, tmp_path):
+    _, expected = reference
+    directory = tmp_path / "older"
+    sweep.run(SPEC, directory)
+    made_by_an_older_version(directory)
+    out = sweep.run(spec_with(graphs=3), directory)  # replays, then grows: 1 graph more each
+    assert out["complete"] and out["ran"] == 8 * 2
+    folder = directory / "n6_beta0_p0.1"
+    versions = {mipt.EnsembleResult.load(p).version for p in folder.glob("result-*.npz")}
+    assert versions == {"3.0.0.dev0", sparsegf2.__version__}
+    parts = json.loads((folder / "provenance.json").read_text())["parts"]
+    assert set(parts.values()) == versions and len(parts) == len(list(folder.glob("result-*")))
+    for key, old in expected.items():  # load reads parts of both versions; old rows unchanged
+        new = sweep.load(directory, *key)
+        keep = np.isin(new.trajectories, old.trajectories)
+        assert_same(sweep._take(new, np.flatnonzero(keep)), old)
+
+
+def test_a_part_that_does_not_replay_stops_the_growth(tmp_path):
+    directory = tmp_path / "altered"
+    small = spec_with(sizes=[6], betas=["0"], rates=["0.1"])
+    sweep.run(small, directory)
+    made_by_an_older_version(directory)
+    (path,) = (directory / "n6_beta0_p0.1").glob("result-*.npz")
+    part = mipt.EnsembleResult.load(path)
+    part.values["code_dimension"][0, 3] += 1  # u = 0, the first saved trajectory
+    part.save(path)
+    before = (directory / "sweep.json").read_bytes()
+    with pytest.raises(ValueError, match="u = 0 does not replay identically.*versions disagree"):
+        sweep.run({**small, "graphs": 3}, directory)
+    assert (directory / "sweep.json").read_bytes() == before
+    assert sweep.status(directory)["saved"] == 4  # nothing was added
 
 
 # ---------------------------------------------------------------------------

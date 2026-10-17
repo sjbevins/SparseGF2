@@ -8,7 +8,11 @@
   the probes; `sweep.run` generates it into a directory (one graph file per `(n, beta)`, the
   `EnsembleResult` parts of each condition saved as they finish, an index `sweep.json`), resumes
   it, and grows it (sizes, rates, graphs, circuits per graph) without changing a saved
-  trajectory; a change that would alter saved data is refused naming the field. Seeds: graph
+  trajectory; a change that would alter saved data is refused naming the field. A later
+  package version may grow a sweep when the randomness contract and the algorithm versions are
+  equal and the first and last saved trajectory of each growing condition replay exactly
+  (`EnsembleResult.concatenate(..., same_version=False)` joins parts of several versions for
+  the sweep only). Seeds: graph
   `g` of `(n, beta)` from `(WSG1, master, n, beta, g)`, one run seed per `(n, beta)` shared by
   all rates (shared gates, nested masks), trajectory `u = g * stride + c`, and an outcome-seed
   domain (`WSO1`) for later signed runs (`study.identity`). `load`, `parts`, `rows`, `replay`,
