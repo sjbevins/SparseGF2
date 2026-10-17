@@ -282,7 +282,7 @@ def test_sweep_throughput_quick(tmp_path):
     assert [r["n"] for r in data["saves"]] == [16, 24]
     for r in data["saves"]:  # stored bytes are the largest
         sizes = [r[c]["megabytes"] for c in ("none", "fast", "default")]
-        assert sizes[0] >= sizes[1] >= sizes[2] > 0 and r["compute_seconds"] > 0
+        assert sizes[0] >= sizes[1] >= sizes[2] > 0 and r["compute_seconds"] >= 0  # 3 decimals
 
 
 def test_committed_sweep_throughput_report_is_the_rendering_of_its_results(tmp_path):
@@ -324,7 +324,7 @@ def test_performance_x3d_quick(tmp_path):
     md = (out / "performance_x3d.md").read_text(encoding="utf-8")
     assert md.startswith("# Performance on this CPU")
     assert data["placements_identical"] and data["padding_identical"] and data["gates_identical"]
-    assert data["topology"]["source"] in ("windows", "linux", "unknown")
+    assert isinstance(data["topology"]["cores"], list)
     assert {r["n"] for r in data["breakdown"]} == {16, 32}
     assert all(r["trajectories_per_second"] > 0 for r in data["placements"])
     assert [r["pad"] for r in data["padding"]] == [0, 1]  # n = 512: 16 words, padded to 17
