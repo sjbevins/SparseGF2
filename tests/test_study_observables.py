@@ -1774,8 +1774,8 @@ def test_a_snapshot_is_checked_against_its_n():
     keyed = ob.SnapshotInput(n, n, key=_key(n), tableau=tableau)
     assert ob.compute("k", keyed).value == code.num_logical
     assert ob.compute("k", ob.SnapshotInput(n, n, tableau=tableau)).value == code.num_logical
-    # with a key: an F snapshot of n = 6 under any other n, or under a P key, is refused (n' = 2n
-    # and n' = n + 1, the widths the unkeyed check cannot tell apart, included)
+    # with a key: an F snapshot of n = 6 under any other n, or under a P key, is refused (also
+    # n' = 12 and 11, where its 12 qubits are n' and n' + 1, widths the unkeyed check accepts)
     for wrong in (4, 5, 7, 8, 11, 12):
         with pytest.raises(
             ValueError, match=f"protocol-F snapshot of n = {wrong} .* has {2 * wrong}"

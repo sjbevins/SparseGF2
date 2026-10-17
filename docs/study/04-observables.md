@@ -77,6 +77,7 @@ and no random stream: it reads what the engine produced.
 | $X_A$ | for a subspace $X$ and qubits $A$: its elements supported in $A$ | subspace | |
 | $X\vert_A$ | the restriction of $X$ to the $x$ and $z$ coordinates of $A$ | subspace | |
 | $N_t$ | the normalizer $W_t^{\perp}$: Paulis commuting with every stabilizer | subspace | |
+| $S(X)$, $\rho_X$ | the entropy (bits) of the reduced state $\rho_X$ of the qubits $X$; always with an argument (the integer $S$ below is a sample count) | integer $\ge 0$ here (stabilizer states); density matrix | `PhaseFreeTableau.entropy` |
 | $I_t(A:R)$ | $S(A) + S(R) - S(A \cup R)$, bits | integer in $[0, 2k_t]$ | `StabilizerCode.lost_information`, `PhaseFreeTableau.mutual_information` |
 | $f_t(A)$ | $\mathbf 1\lbrace I_t(A:R) > 0\rbrace$: the erasure of $A$ fails | 0/1 | `StabilizerCode.region_failures` |
 | $\tau_\ell$ | $\min\lbrace t : k_t \le \ell\rbrace$ | depth or censored | `FirstPassage.tau`, `.observed` |
@@ -93,20 +94,23 @@ and no random stream: it reads what the engine produced.
 | $P_{\mathcal C}(m)$, $P_{\mathcal C,G,J}(m)$ | failure probability of a uniform / $Q_{G,J}$ region of size $m$ | probability | `FailureProfile.curve`, `CorrelatedProfile.curve` |
 | $\bar\ell(m, J)$ | $\mathbb E_{A \sim Q_{G,J}(\cdot\mid m)} I(A:R)$ | bits | `Leakage.value`, `mean_leakage_exact` |
 | $b_m(\varepsilon)$ | $\binom nm \varepsilon^m (1-\varepsilon)^{n-m}$ | probability | `analysis` binomial weights |
+| $\varepsilon$, $\nu$ | an erasure rate (not the measurement rate $p$); the number of rates in one call | probability; integer | `e`, `len(e)` |
 | $\Phi(\varepsilon)$ | $\sum_m b_m(\varepsilon) P(m)$ | probability | `ChannelFailure.value` |
 | $D(J)$ | $\sum_{m=0}^{n-1} (1 - P_{\mathcal C,G,J}(m))$, $0$ at $k = 0$ | real in $[1, (n+1)/2]$ or 0 | `Robustness.value`, `CorrelatedProfile.robustness` |
 | $\pi$, $M_\pi$ | a uniformly random ordering of $V$; its first failing prefix size | permutation; integer | |
 | $D_j$ | the engine's first-failure sizes, $j = 1, \dots, S$ ($n+1$: never fails) | integers | `erasure_first_failure` values |
-| $S$ | orderings (or regions) per evaluation | integer | `samples` |
-| $w$ | the exhaustive cutoff: exact counts for $m = 1, \dots, w$ | integer | `max_exact`, width of `exact_counts` |
+| $S$ | orderings (or regions) per evaluation (without an argument; $S(X)$ is an entropy) | integer | `samples` |
+| $w$ | the exhaustive cutoff: exact counts for $m = 1, \dots, w$ (without an argument; $w(x)$ below is the word map of a seed) | integer | `max_exact`, width of `exact_counts` |
 | $Y_j$, $Z_j$ | $\max(D_j, w+1) - (w+1)$; $T_\varepsilon(\max(D_j, w+1))$ | per-ordering values | in `integrated_robustness`, `uniform_channel_failure` |
 | $T_\varepsilon(d)$ | $\Pr[\mathrm{Bin}(n, \varepsilon) \ge d]$ | probability | `_binomial_tails` |
 | $d(t)$, $\mathrm{se}(t)$ | a depth trace at the checkpoints and its standard error | reals | `d`, `se` of `peak` |
 | $d^*$, $\mathcal A$, $T^*$ | the maximum over $\mathcal T_+$, the maximizing set, its log midpoint | real, set, real | `Peak.d_star`, `.maximizing_set`, `.t_star` |
 | $z$ | the plateau width in standard errors | real $\ge 0$ | `z` |
+| $q$ | the number of checkpoints on a true plateau (§4.6) | integer $\ge 1$ | |
 | $\Phi_{\mathcal N}$ | the standard normal distribution function (not the channel failure $\Phi$) | function | |
 | $\tau_{\mathrm{int}}$ | the integrated autocorrelation time of a chain's records | real $\ge 1$ | `erasures.chain_diagnostics` |
-| $\xi$ | the trajectory key $(\text{experiment}, n, \beta, p, g, c, r)$ | identity | `identity.TrajectoryKey` |
+| $\kappa$ | the true standard deviation of a chain estimate over its binomial error, about $\sqrt{\tau_{\mathrm{int}}}$ | real $\ge 1$ | |
+| $\xi$ | the trajectory key $(\text{experiment}, n, \beta, p, g, c, r, \text{protocol})$, in the code's field order; the seeds read every field but the protocol (Proposition 18(c)) | identity | `identity.TrajectoryKey` |
 | $w(x)$ | the 32-bit words (low, high) of `blake2b(x, digest_size=8)` read little-endian | two integers | `observables._text_words` |
 
 Subscripts $t$ are dropped when one depth is meant. All entropies and informations are in bits.
@@ -294,13 +298,18 @@ built-in entries are listed in §7(h).
 **Convention (canonical parameters).** A key must be one text per parameter set, so every
 parameter has a kind (`KINDS`; the built-in names in `PARAM_KINDS`) with one canonical form:
 `int` (an int or numpy integer; a bool, a float such as `3.0` or a string is refused), `real` (an
-int, float or numpy number, finite, stored as a float with $-0.0$ written as $0.0$), `reals` (a
-real or a 1-D list of them, stored as a tuple of floats), `bool`, `text`, `sizes` (a range string,
-or ints) and `ladder` (a string, or reals); a trailing `?` also allows None. `resolve_params` puts
-every given value in that form (and the defaults are stored in it), so $J = 1$, $1.0$ and
-`numpy.float64(1)` give one key, couplings `[0, 1, 2]` and `[0.0, 1.0, 2.0]` give one key, and the
-design manifest's `analysis.peak` (`sensitivity_z: [0, 1, 2]`) keys as the default. A string where
-a number belongs is refused, also by `region_seed`.
+int, float or numpy number, finite as a float64, stored as a float with $-0.0$ written as $0.0$;
+an integer beyond float64, such as $10^{400}$, is refused by name), `reals` (a real or a 1-D list
+of them, stored as a tuple of floats), `bool`, `text`, `sizes` (ints, stored as a tuple; or a
+range string `"a:b[:step]"`, read by the engine's parser `mipt._size_tuple` with Python slice
+semantics and stored as its expansion, since a range does not depend on $n$: `"1:4:2"` and
+`[1, 3]` are one value, as the manifest stores them) and `ladder` (a string, or reals); a trailing
+`?` also allows None (`sizes = None`, every $m = 1..n-1$, depends on $n$ and stays None).
+`resolve_params` puts every given value in that form (and the defaults are stored in it), so
+$J = 1$, $1.0$ and `numpy.float64(1)` give one key, couplings `[0, 1, 2]` and `[0.0, 1.0, 2.0]` give
+one key, a correlated entry keys alike as written in the manifest file and as the parsed manifest
+holds it, and the design manifest's `analysis.peak` (`sensitivity_z: [0, 1, 2]`) keys as the
+default. A string where a number belongs is refused, also by `region_seed`.
 
 **Convention (an entry computes under its own key).** `compute(id, snapshot, params, version=None)`
 resolves the entry (the one registered last when `version` is None) and hands it to the entry's
@@ -326,7 +335,7 @@ part; restriction to $V$ maps $U$ one to one onto $W$ (`03-phase-free-tableau.md
 so $r = \dim U$. *A gate* $C$ on the system acts on phase-free vectors by a symplectic map $M$ of
 the system coordinates, the identity on the reference: $\widetilde{\mathsf S}' = (M \oplus I)\widetilde{\mathsf S}$.
 It maps vectors with zero reference part to vectors with zero reference part and is invertible,
-so $U' = (M \oplus I)U$ and $r' = r$. *A measurement* of $Z_q$, $q \in V$, has the vector $\mu$
+so $U' = (M \oplus I)U$ and $r' = r$. *A measurement* of $Z$ on a system qubit $Q_i$, $i \in V$, has the vector $\mu$
 (zero reference part). The pure state's group is maximal isotropic, $\widetilde{\mathsf S}^\perp = \widetilde{\mathsf S}$.
 If $\mu \in \widetilde{\mathsf S}^\perp$ the outcome is deterministic and nothing changes.
 Otherwise $\widetilde{\mathsf S}' = (\widetilde{\mathsf S} \cap \mu^\perp) \oplus \mathrm{span}(\mu)$
@@ -656,8 +665,9 @@ of $J$'s IEEE-754 binary64 pattern with $-0.0$ written as $0.0$, and every other
 (below $2^{32}$, refused otherwise). (a) Distinct inputs give distinct tuples unless two different
 strings of one field share a 64-bit blake2b digest. (b) No region seed equals a graph seed or a run
 seed of the study, as a `SeedSequence` entropy, whatever the master seeds. (c) The regions depend
-on every field of $\xi$: the same $(g, c)$ at two rates draws independent regions; a new version
-draws new ones. (d) The seed of the peak bootstrap of trajectory $\xi$ for observable `id` at
+on every field of $\xi$ except the protocol: the same $(g, c)$ at two rates draws independent
+regions; a new version draws new ones; the F and P trajectories of one
+$(\text{experiment}, n, \beta, p, g, c, r)$ have one seed. (d) The seed of the peak bootstrap of trajectory $\xi$ for observable `id` at
 `version` is the 15-word tuple
 $\big(\mathtt{WSRB},\ w(\text{experiment\_id}),\ n,\ w(\beta),\ w(p),\ g,\ c,\ r,\ w(\text{id}),\ w(\text{version})\big)$
 with $\mathtt{WSRB} = \mathtt{0x57535242}$; (a) and (b) hold for it too, and no bootstrap seed
@@ -669,8 +679,19 @@ seeds start with $\mathtt{0x57534731}$ (`"WSG1"`) and $\mathtt{0x57534331}$ (`"W
 region seeds with $\mathtt{0x5753524F}$: the first words differ. Every one of these tuples has at
 least 4 words, so `SeedSequence` pads none of them (it pads only entropy shorter than its 4-word
 pool), and each field is one word, so no field spills into the next. The generated streams then
-coincide only through a collision of `SeedSequence`'s hash. (c) Every field enters the tuple.
-(d) The same argument, with the first word $\mathtt{0x57535242}$, distinct from the other three. ∎
+coincide only through a collision of `SeedSequence`'s hash. (c) Every field of $\xi$ but the
+protocol enters the tuple, and the protocol does not. (d) The same argument, with the first word
+$\mathtt{0x57535242}$, distinct from the other three. ∎
+
+**Convention (the protocol is not in the seeds).** The protocol is left out on purpose, as it is
+from the graph and run seeds (design §3, §12): the F and P trajectories of one
+$(\text{experiment}, n, \beta, p, g, c, r)$ share their graph, gates and measurement masks, and a
+sampler run on both would draw the same regions (common random numbers: their difference carries
+no region noise). It changes no value today: a P state has no reference, so its physical code has
+$k = 0$, `mean_leakage` returns 0 without drawing, and P records no first-failure orderings, so no
+`peak_D` bootstrap. Adding the protocol would change the length and the value of every seed. A
+test pins the convention (`test_region_seed_derivation`,
+`test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy`).
 
 `observables.py::region_seed` builds the tuple; `mean_leakage` passes it to
 `erasures.sample_regions(..., seed=list(seed))`. Through the registry, `compute` hands the entry
@@ -726,15 +747,16 @@ reports it at every `sensitivity_z`, as v1.4 §5.8 asks.
 orderings (Proposition 13: $s_Y/\sqrt S$ estimates the true error) and for $\hat D(J)$ from exact
 samples. For $\hat D(J)$ from the swap chain, which is every Watts–Strogatz interaction graph at
 every $J$ (a degree-4 graph is never one cycle or one path), the binomial `robustness_se` is a
-lower bound: if the true standard deviation is $\rho\,\mathrm{se}$ with $\rho \approx
-\sqrt{\tau_{\mathrm{int}}} \gt 1$ at every checkpoint, the plateau spans only $z/\rho$ true
+lower bound: if the true standard deviation is $\kappa\,\mathrm{se}$ with $\kappa \approx
+\sqrt{\tau_{\mathrm{int}}} \gt 1$ at every checkpoint, the plateau spans only $z/\kappa$ true
 standard deviations, each comparison leaves out a true maximizer with probability about
-$\Phi_{\mathcal N}(-z/\rho)$, the bound becomes $q(q-1)\Phi_{\mathcal N}(-z/\rho)$, and since $\rho$
-changes with $J$, $n$, $\beta$ and `thin`, the effective width of the predeclared rule differs
-between conditions (so does that of every `sensitivity_z`). Measured factors are in §9. The
-record says which case applies (`Peak.se_exact`, from `CorrelatedProfile.se_exact`); a `thin` near
-the chain's $\tau_{\mathrm{int}}$, measured on the graph with `erasures.sample_regions` at the
-probe's settings, brings $\rho$ near 1.
+$\Phi_{\mathcal N}(-z/\kappa)$, the bound becomes $q(q-1)\Phi_{\mathcal N}(-z/\kappa)$, and since
+$\kappa$ changes with $J$, $n$, $\beta$ and `thin`, the effective width of the predeclared rule
+differs between conditions (so does that of every `sensitivity_z`). Measured factors are in §9.
+The record says which case applies (`Peak.se_exact`, from `CorrelatedProfile.se_exact`; the
+runner passes it for every stored `peak_D` and `peak_D_J`, `docs/study/05-store-and-reproducibility.md`);
+a `thin` near the chain's $\tau_{\mathrm{int}}$, measured on the graph with `erasures.sample_regions`
+at the probe's settings, brings $\kappa$ near 1.
 
 **Proposition 20 (the bootstrap of $T^*$ of $D(0)$).** `bootstrap_peak` resamples, for each
 replicate and independently at each checkpoint, $S$ of that checkpoint's $S$ orderings with
@@ -745,7 +767,9 @@ resampling them independently reproduces their joint law. It measures the Monte 
 of $T^*$ for one trajectory, not the ensemble's (graphs are resampled by `stats.graph_bootstrap`).
 Its seed is given (`None`, fresh entropy, is refused); the study's is `bootstrap_seed` of the
 trajectory key and the observable's id and version (Proposition 18(d)), so a stored bootstrap is a
-function of the stored data and its key. ∎
+function of the stored data and its key. The seed contains neither the horizon nor the
+checkpoints; the runner seeds every stored `peak_D` bootstrap this way and records the seed in
+its data (`bootstrap.seed`). ∎
 
 There is no such bootstrap for $D(J)$: the correlated probe stores failing fractions, not the
 regions, so there is nothing to resample, and a parametric (binomial) bootstrap of the fractions
@@ -790,9 +814,9 @@ $\hat D$: the curve summed over $m \lt n$; error from the $Y_j$ (Proposition 13)
 $\hat\Phi$: `analysis.erasure_failure_probability`; the tails $T_\varepsilon(d)$ for all $d$ from
 the step curves $\mathbf 1\lbrace m \ge d\rbrace$ through `analysis.failure_probability_from_curve`
 (binomial weights in log space); error from the $Z_j$ (Proposition 14), formed one rate at a time
-(a $(\dots, S)$ array per rate, never the $(\dots, S, q)$ array of all of them, so the memory is a
-few copies of the input whatever the number $q$ of rates). Time $O(S + n)$ per code for $\hat D$,
-$O(Sq + n)$ per code for $\hat\Phi$ and its error, plus $O(n^2)$ per $\varepsilon$ once. Float64;
+(a $(\dots, S)$ array per rate, never the $(\dots, S, \nu)$ array of all of them, so the memory is
+a few copies of the input whatever the number $\nu$ of rates). Time $O(S + n)$ per code for
+$\hat D$, $O(S\nu + n)$ per code for $\hat\Phi$ and its error, plus $O(n^2)$ per $\varepsilon$ once. Float64;
 unbiased; errors are plug-in estimates (NaN with one ordering, at every rate; `se` always has the
 shape of `value`). The rates are copied: the caller's array is neither shared nor made read-only.
 
@@ -829,13 +853,22 @@ last. Building an entry gives every parameter a kind (its own `kinds`, else `PAR
 parameter with neither is refused) and stores the defaults in canonical form. `resolve_params`
 refuses unknown names (listing the allowed ones) and missing required ones, and puts every given
 value in the canonical form of its kind (§3.10), refusing what does not fit; `params_key` is
-`identity.canonical_json` of the result. `SnapshotInput` checks its stored data against $n$: the
-key's $n$, the code's qubits ($n$) and the joint tableau's ($n$, $n + 1$ or $2n$: no reference, one
-reference, purification), so a snapshot paired with another condition's $n$ is refused, not
-computed into plausible wrong values. `compute` resolves the entry and the parameters, calls
-`entry.compute(snapshot, params, entry)` and returns the value with its key (`observable_id`,
-`version`, `params_key`). `catalog_markdown` escapes `|` in every cell (`\|`), so every row has
-the header's six cells.
+`identity.canonical_json` of the result. `SnapshotInput` checks its stored data when it is built:
+the key's $n$ is `num_system`; the code has exactly $n$ qubits; the joint tableau has exactly the
+width of the key's protocol, $2n$ for F (the system and its references) and $n$ for P (design §12),
+or, without a key, one of the widths a joint state of $n$ system qubits can have ($n$, $n + 1$ or
+$2n$); and every edge endpoint lies in $0..n-1$, with no self-loop (the list is normalized once).
+So a snapshot paired with another size's key is refused rather than computed into plausible
+wrong values, also when its width is one the keyless check accepts ($n$ or $n + 1$ under an F key
+of $n$, $n + 1$ or $2n$ under a P key of $n$). Two pairings no width can expose remain the caller's to get
+right: the graph of a smaller size (an edge list has no node count) and an F state of $n$ under a
+P key of $2n$; the store pairs both by the trajectory's key. `compute` resolves the entry and the
+parameters, calls `entry.compute(snapshot, params, entry)` and returns the value with its key
+(`observable_id`, `version`, `params_key`). `catalog_markdown` writes every cell as GitHub table
+text: a row is split at each `|` not preceded by a backslash, the backslash of `\|` is dropped,
+and the cell is then inline Markdown, where `\\` is one backslash; so each `\` is written `\\` and
+then each `|` is written `\|` (in the id's code span, where backslashes are literal, only `|` is
+escaped). Every row has the header's six cells and every cell reads back as its text.
 
 ## 6. From the mathematics to the code
 
@@ -1196,17 +1229,19 @@ print(ob.params_key("mean_leakage", {"m": 7, "J": 1.0}))
 a joint state ($S(X) = \lvert X\rvert - \log_2\#\lbrace g : \operatorname{supp} g \subseteq X\rbrace$), every
 Pauli commuting with a code ($\dim N_A - \dim W_A$), every subset, every permutation, every cyclic
 interval, every connected subset (breadth-first search), and $Q_{G,J}$ by enumeration; random joint
-states come from Stim. All tests are in `tests/test_study_observables.py`.
+states come from Stim. The tests are in `tests/test_study_observables.py`, except those of the
+stored peaks, which need the runner (`tests/test_study_runner_peaks.py`).
 
 | property | test | what is compared |
 |---|---|---|
-| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table (six cells in every row, pipes escaped, the definitions recovered) |
+| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table read by a GitHub-table model written in the test (six cells in every row, every id and definition read back exactly) |
+| the table keeps backslashes and pipes | `test_the_catalog_table_keeps_backslashes_and_pipes` | a registered definition with a backslash before a pipe, two backslashes before a pipe and a lone backslash, and an id with a pipe, read back exactly by the same model (escaping only the pipes loses the backslash before a pipe) |
 | versions: a changed entry needs a new version | `test_register_get_and_versions` | refusal, a second version, `get` by version, refusals of bad entries |
-| canonical parameter keys | `test_parameters_are_resolved_and_keyed_canonically`, `test_numerically_equal_parameters_have_one_key`, `test_entries_declare_the_kind_of_every_parameter` | defaults, unknown and missing names, key equality, `json.dumps` reference; one key for $J$ = 1, 1.0, numpy scalars, $\pm 0$, int and float coupling lists, a scalar or one-element $\varepsilon$, the design manifest's `analysis.peak`; strings, bools, fractional ints and NaN refused; kinds required and defaults canonical |
+| canonical parameter keys | `test_parameters_are_resolved_and_keyed_canonically`, `test_numerically_equal_parameters_have_one_key`, `test_entries_declare_the_kind_of_every_parameter` | defaults, unknown and missing names, key equality, `json.dumps` reference; one key for $J$ = 1, 1.0, numpy scalars, $\pm 0$, int and float coupling lists, a scalar or one-element $\varepsilon$, a range string of sizes and its expansion (`"1:4:2"`, `" 1 : 4 : 2 "`, `"1:5:2"`, `[1, 3]`), a correlated entry as written and as `CorrelatedErasure.from_dict` parses it, the design manifest's `analysis.peak`; strings, bools, fractional ints, NaN, $\pm 10^{400}$ (a `ValueError` naming the parameter, also in `region_seed`) and malformed or empty ranges refused; kinds required and defaults canonical |
 | parameters a function consumes | `test_peak_parameters_are_only_those_a_function_consumes` | `peak_D` keeps `bootstrap`, `peak_D_J` has none |
 | `compute` refusals | `test_compute_refuses_what_it_cannot_compute` | missing inputs, no key, wrong $n$, bad route |
 | `compute` passes the entry and keys the value | `test_compute_hands_the_entry_to_its_compute_and_keys_the_value` | the entry and canonical parameters reach `compute`; `observable_id`, `version`, `params_key`; a non-`ObservableValue` refused |
-| a snapshot checked against $n$ | `test_a_snapshot_is_checked_against_its_n` | a 12-qubit joint tableau refused at $n$ = 4, 5, 7, 8 and accepted at 6, 11, 12; a 6-qubit code refused at $n$ = 5, 8; types |
+| a snapshot checked against $n$ | `test_a_snapshot_is_checked_against_its_n` | the 12-qubit F tableau of $n = 6$: under F keys refused at $n$ = 4, 5, 7, 8, 11, 12 (at 12 and 11 its 12 qubits are $n$ and $n + 1$, widths the keyless check accepts) and under P keys at 6 and 11; without a key refused at 4, 5, 7, 8 and accepted at 6, 11, 12; an 8-qubit P state: $k = 0$ under its P key, refused under F keys of 8 and 7, accepted under an F key of 4 (what no width can see); a 6-qubit code refused at $n$ = 5, 8 with and without a key; edges with an endpoint $\ge n$ or a self-loop refused when built, the list normalized; types |
 | change points (§3.2) | `test_change_points_round_trip_and_are_canonical`, `test_change_points_refuse_what_is_not_a_trace` | hand cases; 300 random traces against a loop; every refusal |
 | Propositions 2, 3 | `test_first_passage_matches_its_definition` | 300 random traces: $\tau$, $\widehat\tau^{\mathrm{chk}}$ against $\min$ over layers and checkpoints; $\tau \le \widehat\tau^{\mathrm{chk}}$; $k_t = \min\lbrace\ell : \tau_\ell \le t\rbrace$ (exact) |
 | hand-made first passages, censoring, zero fill | `test_first_passage_on_hand_made_traces` | multi-drop, plateaus, censoring, `survival_data`, `to_dict`, change-point input |
@@ -1222,14 +1257,14 @@ states come from Stim. All tests are in `tests/test_study_observables.py`.
 | Proposition 13(b) | `test_integrated_robustness_formulas` | 50 random sample sets: value and error against loops; contradicting counts and $k$ refused |
 | $\hat D(0)$ unbiased | `test_D0_estimates_match_the_exact_value`, `test_D0_from_the_engine_probes_matches_the_exact_value` | within 4.5 exact standard deviations; false alarm below $2\cdot10^{-4}$ and $10^{-4}$ (normal approximation); engine counts = oracle counts (exact) |
 | Proposition 14 | `test_uniform_channel_failure_formulas`, `test_uniform_channel_failure_matches_the_exact_value` | value and error against loops (exact), `se` of the shape of `value` (also with one ordering and several rates); 48 comparisons within 4.5 exact sd, false alarm below $3.3\cdot10^{-4}$ |
-| rates copied; memory bounded in $q$ | `test_channel_failure_never_shares_or_freezes_the_callers_rates`, `test_uniform_channel_failure_memory_does_not_grow_with_the_rate_count` | the caller's array (and the base of a view) stays writable and unchanged in the result; peak traced memory at 40 rates $\le 12\times$ the input (measured 5.1; the former dense array, 82) |
+| rates copied; memory bounded in $\nu$ | `test_channel_failure_never_shares_or_freezes_the_callers_rates`, `test_uniform_channel_failure_memory_does_not_grow_with_the_rate_count` | the caller's array (and the base of a view) stays writable and unchanged in the result; peak traced memory at 40 rates $\le 12\times$ the input (measured 5.1; the former dense array, 82) |
 | Proposition 16 | `test_correlated_profile_bookkeeping` | hand curves, $D(J)$ and $\Phi_J$ with the interpolation weights written out, refusals; `se_exact` only for an exact sampler |
 | exact correlated samples | `test_correlated_probe_matches_the_exact_law` ($n$ = 6, 7, 8) | every $\hat P_J(m)$: exact binomial $p$-value above $10^{-4}$/comparisons (Bonferroni); $D(J)$, $\Phi_J$ within 4.5 sd; below $9.6\cdot10^{-4}$ in all; `se_exact` |
 | the chain, across trajectories | `test_correlated_probe_on_interaction_graphs_is_unbiased_across_trajectories` | mean of $\hat D(J) - D(J)$ over $\ge 40$ trajectories, Student $\lvert t\rvert \le 4$ (false alarm $5.6\cdot10^{-4}$); not `se_exact` |
-| Proposition 18(a)–(c) | `test_region_seed_derivation` | the tuple rebuilt in the test (blake2b, struct); 192 distinct seeds over every field; tags; refusals |
-| Proposition 18(d), Proposition 20's seed | `test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy` | the tuple rebuilt in the test; 32 distinct seeds over every field; the tag apart from WSRO, WSG1, WSC1; a recorded seed reproduces the bootstrap; `None`, floats, strings, bools, negatives, empty and `SeedSequence` refused |
+| Proposition 18(a)–(c) | `test_region_seed_derivation` | the tuple rebuilt in the test (blake2b, struct); 192 distinct seeds over every field; the F and P keys of one trajectory give one seed; tags; refusals |
+| Proposition 18(d), Proposition 20's seed | `test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy` | the tuple rebuilt in the test; 32 distinct seeds over every field; one seed for the F and P keys; the tag apart from WSRO, WSG1, WSC1; a recorded seed reproduces the bootstrap; `None`, floats, strings, bools, negatives, empty and `SeedSequence` refused |
 | versions keep their own seeds | `test_a_registered_version_keeps_its_own_region_seeds` | with a version 2 and a renamed copy registered, version 1's seed and value are unchanged; the three seeds are distinct and each the tuple of its own id and version |
-| Proposition 17 | `test_mean_leakage_is_keyed_and_reproducible`, `test_mean_leakage_matches_the_exact_law_with_exact_samples`, `test_mean_leakage_with_the_chain_is_unbiased`, `test_mean_leakage_caps_the_chain_ess_at_the_sample_count` | reproducibility and the regions of the seed; ESS = capped `chain_diagnostics` (a correlated case, and a tempered case whose Sokal ESS is 106.7 > S = 60: ESS = S, error $s/\sqrt S$); exact samples within 4.5 exact sd (12 comparisons, $10^{-4}$); the chain, $\lvert t\rvert \le 4$ over 48 seeds ($5\cdot10^{-4}$) |
+| Proposition 17 | `test_mean_leakage_is_keyed_and_reproducible`, `test_mean_leakage_matches_the_exact_law_with_exact_samples`, `test_mean_leakage_with_the_chain_is_unbiased`, `test_mean_leakage_caps_the_chain_ess_at_the_sample_count` | reproducibility and the regions of the seed; ESS = capped `chain_diagnostics` (a correlated case; an untempered chain at $J = 0$, one rung and no replica exchange, whose Sokal ESS is 106.7 > S = 60, and a tempered chain at $J = 0.5$ with 91.8 > 60: ESS = S, error $s/\sqrt S$; and a diagnostic forced to $10^9$); exact samples within 4.5 exact sd (12 comparisons, $10^{-4}$); the chain, $\lvert t\rvert \le 4$ over 48 seeds ($5\cdot10^{-4}$) |
 | Proposition 11 | `test_connected_distance_against_the_oracle`, `test_connected_and_cyclic_distances_can_differ`, `test_connected_distance_is_at_most_cyclic_on_the_unrewired_graph` | 30+ random codes and graphs (cycles, paths, WS, disconnected) = oracle (with $\infty$); the two examples; $d_{\mathrm{conn}} \le d_{\mathrm{cyc}}$ on $C(n,2)$; refusal above `max_n` |
 | half-cut entropy | `test_half_cut_entropy_matches_the_engine_probe_and_the_oracle` | engine probe = stored tableau = oracle ($n \le 7$) |
 | retrospective `compute` | `test_compute_from_stored_snapshots_matches_the_engine_probes` | $k$, rate, rank, $d_{\mathrm{cyc}}$, $d_{\mathrm{conn}}$ against the engine probes |
@@ -1238,6 +1273,7 @@ states come from Stim. All tests are in `tests/test_study_observables.py`.
 | the plateau rule as defined, unequal errors | `test_plateau_rule_uses_the_first_maximizers_error`, `test_plateau_rule_matches_its_definition_on_random_traces` | hand cases whose sets depend on $\mathrm{se}(t^\circ)$ (a checkpoint at 0; a first maximizer that is not the smallest depth; a last error unlike $\mathrm{se}(t^\circ)$); 400 random traces (with $t = 0$, ties, several $z$) against the rule written out in the test |
 | the plateau's error rate | `test_plateau_rule_keeps_a_true_plateau_with_the_stated_probability` | 4000 trials, a 3-point plateau, $z = 2$: exclusion rate $\le 0.1365 + 4$ sd (false alarm $4\cdot10^{-5}$) |
 | the plateau's record of its errors | `test_peaks_record_whether_their_errors_are_true` | `se_exact` as given (None for the exact rule), in `to_dict`, in missing peaks and the sensitivity sweep; True for the $D(0)$ bootstrap |
+| the stored peaks follow the catalog | `tests/test_study_runner_peaks.py`: `test_stored_peaks_record_their_errors_and_the_catalog_bootstrap_seed`, `test_the_version_record_carries_the_bootstrap_seed` | in a store built by the runner: `peak_D` and its sensitivity `se_exact` True, its bootstrap seed `bootstrap_seed(key, "peak_D", version)` and the bootstrap rebuilt from the stored orderings, counts and $k$ with it equal to the stored one (the earlier `region_seed` derivation differs on all 12 trajectories); `peak_D_J` `se_exact` False for the chain on the interaction graph and True for exact samples on a cycle; the bootstrap seed's tag and length in the store's version record |
 | Proposition 20 | `test_bootstrap_peak_reproduces_its_documented_draws`, `test_bootstrap_peak_keeps_the_exact_counts_in_every_replicate`, `test_bootstrap_peak_of_noiseless_samples_is_the_estimate` | the draws rebuilt from the documented stream, peaked by the rule written out; noisy samples with counts up to $w = 2$, each replicate's hybrid $\hat D(0)$ and $s_Y/\sqrt S$ rebuilt (the plain estimator changes $T^*$ in 34 of the 60 replicates, and the test requires at least 5, so it tells them apart); noiseless samples; $k = 0$ |
 | the module's examples | `src/sparsegf2/study/observables.py` doctests | `--doctest-modules` |
 
@@ -1246,11 +1282,18 @@ A mutation check (a script outside the repository) planted 35 single-line faults
 of $n - 1$, which is equivalent: validated inputs force $\tilde P(n) = 1$ when $k > 0$. After the
 review, 18 more faults, one per fix (the latest version's seed in a computed value, unnormalized
 parameters, string couplings, a bootstrap listed for `peak_D_J`, an unchecked bootstrap seed, a
-one-column error with one ordering, shared rates, the dense $(\dots, S, q)$ array, unchecked
+one-column error with one ordering, shared rates, the dense $(\dots, S, \nu)$ array, unchecked
 snapshot widths (two), no Markdown escaping, four wrong plateau widths ($\mathrm{se}$ indexed
 before restricting to $t > 0$, $\sqrt2\,\mathrm{se}(t)$, the last checkpoint's error,
 $\mathrm{se}(t)$ twice), replicates without the counts, no ESS cap, no `se_exact` record), were all
-killed.
+killed. After the second review, 8 more in `observables.py` (a range string of sizes kept as
+text, an integer beyond float64 let through as an `OverflowError` by `_real` and by `_coupling`,
+a keyed joint tableau's width not tied to its protocol (two), edges not checked when built,
+backslashes not doubled in a cell, backslashes doubled in the id's code span) were killed; a
+ninth, sending a range string to the text branch, is equivalent (the sizes branch returns first).
+Seven in `runner.py` and `store.py` (no `se_exact` on `peak_D`, on its sensitivity, on
+`peak_D_J`, on its sensitivity, or a constant True there; `region_seed` for the bootstrap; the
+bootstrap seed's tag left out of the version record) each fail `tests/test_study_runner_peaks.py`.
 
 ## 9. Limitations and departures
 
@@ -1283,7 +1326,7 @@ killed.
   left out more often than $q(q-1)\Phi_{\mathcal N}(-z)$, $T^*_J$ moves toward single, noisy maxima,
   `sensitivity_z` understates the rule's fragility, and the effective width differs between
   conditions, which matters when $T^*_J$ enters a finite-size-scaling comparison. The record says
-  so (`Peak.se_exact` False); the remedy is a `thin` near the chain's $\tau_{\mathrm{int}}$
+  so (`Peak.se_exact` False, stored by the runner on every `peak_D_J` and its sensitivity); the remedy is a `thin` near the chain's $\tau_{\mathrm{int}}$
   (measured with `erasures.sample_regions` at the probe's settings), as `thin` = 20 achieved above.
 * **No bootstrap of $T^*_J$** (a partial departure from v1.4 §5.8, which asks for a
   bootstrap-supported plateau rule for Monte Carlo estimates of $D$). The correlated probe keeps
@@ -1309,4 +1352,11 @@ killed.
 * **Seeds (ruling R-SEED).** The retrospective seeds use the full trajectory key, not the stream
   index $u$ the T4 task brief first named (the design table says only "keyed region sampler"). The
   token words come from `identity.token_words`; the other strings use a private helper with the
-  same convention (Proposition 18).
+  same convention (Proposition 18). The protocol is not a field of these seeds, as it is not of the
+  graph and run seeds: F and P of one trajectory would draw the same regions, and P draws none
+  today (Proposition 18, the convention after the proof).
+* **Pairing a snapshot with its data.** `SnapshotInput` refuses every width that contradicts the
+  key, but an edge list carries no node count and an F state of $n$ qubits has the width of a P
+  state of $2n$, so a graph of a smaller size, or an F state under a P key of twice its $n$,
+  cannot be refused by a check of the data alone; the store pairs snapshots and graphs by the
+  trajectory's key (§5.9).
