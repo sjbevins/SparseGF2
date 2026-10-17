@@ -1155,6 +1155,16 @@ def test_direct_construction_and_replace_obey_the_rules_of_reading(manifest):
             r"manifest.analysis.peak.z: must be at least 0",
         ),
         ({"trials": {"graphs": 20}}, r"manifest.trials: expected a Trials, got dict"),
+        (
+            {
+                "protocols": (
+                    mf.ProtocolSettings("F"),
+                    mf.ProtocolSettings("P", mf.CheckpointRule("count", count=0)),
+                )
+            },
+            r"manifest.protocols.P.checkpoints.count: must be at least 1, got 0",
+        ),
+        ({"protocols": ("F",)}, r"manifest.protocols\[0\]: expected a ProtocolSettings, got str"),
         ({"label": "pilot"}, r"manifest.label: must be one of"),
     ]
     for changes, fragment in cases:

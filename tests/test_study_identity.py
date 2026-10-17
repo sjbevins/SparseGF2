@@ -984,6 +984,20 @@ def test_canonical_json_normalizes_numpy_tuples_and_negative_zero():
     assert canonical_json("é") == '"\\u00e9"'  # ASCII only
 
 
+def test_canonical_json_keeps_the_json_type_of_equal_numbers():
+    # equal data means equal JSON values *of one type*: 1, 1.0 and True are equal in Python but
+    # are three texts and three digests (the documented convention; -0.0 is the one float that
+    # is rewritten, to 0.0, because it equals 0.0 as a float)
+    assert 1 == 1.0 == True  # noqa: E712
+    values = (1, 1.0, True, np.int64(1), np.float64(1.0), np.bool_(True))
+    assert [canonical_json(v) for v in values] == ["1", "1.0", "true", "1", "1.0", "true"]
+    assert len({json_digest({"a": v}) for v in (1, 1.0, True)}) == 3
+    assert json_digest([-0.0]) == json_digest([0.0]) != json_digest([0])
+    for value in (1, 1.0, True, 0.0, None, "1"):  # each reads back as itself, type included
+        again = json.loads(canonical_json(value))
+        assert again == value and type(again) is type(value)
+
+
 @pytest.mark.parametrize(
     "bad, fragment",
     [

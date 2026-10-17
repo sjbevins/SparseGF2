@@ -1160,6 +1160,20 @@ def _check_sections(manifest: ExperimentManifest) -> None:
     )
     for name, cls in sections:
         _reparsed(getattr(manifest, name), cls, f"manifest.{name}")
+    protocols = manifest.protocols  # design §12: the names are checked by the constructor
+    if isinstance(protocols, (str, bytes)) or not isinstance(protocols, Sequence):
+        raise ValueError("manifest.protocols: give a tuple of ProtocolSettings objects")
+    for i, settings in enumerate(protocols):
+        if not isinstance(settings, ProtocolSettings):
+            raise ValueError(
+                f"manifest.protocols[{i}]: expected a ProtocolSettings, got {_kind(settings)}"
+            )
+        if settings.checkpoints is not None:  # a protocol's own checkpoint rule
+            _reparsed(
+                settings.checkpoints,
+                CheckpointRule,
+                f"manifest.protocols.{settings.name}.checkpoints",
+            )
 
 
 class _Resolved(NamedTuple):

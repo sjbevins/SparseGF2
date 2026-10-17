@@ -602,6 +602,11 @@ def canonical_json(obj: Any) -> str:
     as plain JSON numbers and lists; tuples as lists; ``-0.0`` as ``0.0``. NaN, infinities,
     fractions, bytes and non-string keys are refused. The text of equal data is equal
     whatever the key order or whitespace of the source, so its SHA-256 identifies the data.
+    "Equal" includes the JSON type: booleans, integers and floats are kept apart, so ``1``,
+    ``1.0`` and ``True`` (equal in Python) are three texts and three digests. A record whose
+    numeric field is an integer on one code path and a float on another gets two digests for
+    one value: a writer fixes the type of each field (the manifest reads every real field as a
+    float and refuses ``16.0`` in an integer field).
     """
     return json.dumps(
         _canonical(obj, "$"),
