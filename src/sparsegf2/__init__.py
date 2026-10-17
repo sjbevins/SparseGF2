@@ -11,6 +11,9 @@ Verified against Stim. The main pieces:
   checkpoints), and :mod:`~sparsegf2.graphs` for the interaction graphs.
 * :mod:`~sparsegf2.codes`: :class:`StabilizerCode`, the code a circuit
   generated, for erasure analysis after the run.
+* :mod:`~sparsegf2.tableau`: :class:`PhaseFreeTableau`, a phase-free
+  stabilizer group as a canonical GF(2) row space (digests, entropies, the
+  physical code of a joint system-reference state).
 * :mod:`~sparsegf2.erasures`: geometry-correlated erasure regions on a
   graph (regions of fixed size drawn with probability proportional to
   ``exp(-J * boundary)``, exact densities of states, ring closed forms).
@@ -20,7 +23,7 @@ Verified against Stim. The main pieces:
   small Cliffords with stable indices, and the gate library under Stim's names.
 """
 
-from sparsegf2 import analysis, codes, erasures, graphs, mipt, observables
+from sparsegf2 import analysis, codes, erasures, graphs, mipt, observables, tableau
 from sparsegf2._version import __version__
 from sparsegf2.circuit import (
     Circuit,
@@ -47,6 +50,7 @@ from sparsegf2.pauli import PauliString
 from sparsegf2.result import RunResult, SampleResult
 from sparsegf2.sampling import sample
 from sparsegf2.simulator import Simulator
+from sparsegf2.tableau import PhaseFreeTableau
 
 __all__ = [
     "Circuit",
@@ -55,6 +59,7 @@ __all__ = [
     "Instruction",
     "PauliString",
     "PhaseFreeError",
+    "PhaseFreeTableau",
     "RepeatBlock",
     "RunResult",
     "SampleResult",
@@ -74,6 +79,7 @@ __all__ = [
     "random_clifford_indices",
     "sample",
     "symplectic_group",
+    "tableau",
     "target_combiner",
     "target_inv",
     "target_rec",
