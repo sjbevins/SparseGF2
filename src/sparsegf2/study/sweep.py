@@ -29,9 +29,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+import numba
 import numpy as np
 
 from sparsegf2 import api, graphs, mipt
+from sparsegf2 import performance as _performance
 from sparsegf2._version import __version__
 from sparsegf2.study import identity
 from sparsegf2.study.identity import Token
@@ -588,6 +590,7 @@ def run(
     chunk_size: int | None = None,
     compression: str = DEFAULT_COMPRESSION,
     writers: int = DEFAULT_WRITERS,
+    physical_cores: bool = False,
     log: Callable[[str], None] | None = None,
     command: str = "sweep.run",
 ) -> dict[str, Any]:
@@ -604,8 +607,11 @@ def run(
     threads while the next one computes, with ``compression`` ``"fast"``, ``"none"`` or
     ``"default"`` (``EnsembleResult.save``; not part of the sweep's identity), and listed with
     this package version and its compression under ``parts`` in the condition's
-    ``provenance.json``. Results do not depend on ``num_threads``, ``chunk_size``,
-    ``compression`` or ``writers``. The directory's lock admits one writer.
+    ``provenance.json``. ``physical_cores=True`` runs one engine thread per physical core
+    (:func:`sparsegf2.performance.physical_cores`; measured faster only from about n = 1800). A
+    computed chunk is a whole number of rounds of the running threads, at least one (a part may
+    then exceed :data:`PART_BYTES`). Results do not depend on ``num_threads``, ``chunk_size``,
+    ``compression``, ``writers`` or ``physical_cores``. The directory's lock admits one writer.
     """
     sweep = spec if isinstance(spec, SweepSpec) else SweepSpec.from_json(spec)
     if num_threads is not None:
@@ -647,8 +653,10 @@ def run(
             "log": log,
             "command": command,
         }
-        for n, beta, p in sweep.conditions():
-            ran += _run_condition(root, sweep, n, beta, p, options)
+        placed = _performance.physical_cores(num_threads) if physical_cores else None
+        with placed or contextlib.nullcontext():
+            for n, beta, p in sweep.conditions():
+                ran += _run_condition(root, sweep, n, beta, p, options)
     finally:
         lock.release()
     out = status(root)
@@ -723,6 +731,15 @@ def _save_part(result: mipt.EnsembleResult, folder: Path, name: str, compression
     _record_part(folder, name, compression)
 
 
+def _rounds(size: int, cap: int, running: int) -> int:
+    """``size`` trajectories as whole rounds of ``running`` threads: at most ``cap`` (itself at
+    least ``running``), rounded down to a multiple of ``running``, and at least ``running``. A
+    chunk is done when its slowest thread is; a last round of ``r < running`` trajectories
+    would leave ``running - r`` threads idle for a whole trajectory."""
+    size = min(size, cap)
+    return max(running, size - size % running)
+
+
 def _run_condition(
     root: Path,
     sweep: SweepSpec,
@@ -753,9 +770,11 @@ def _run_condition(
     _record_indices(folder, sweep, n, beta, p)
     mc = sweep.monitored_circuit(n, beta, p, _collection(root, sweep, n, beta))
     threads_, chosen = options["num_threads"], options["chunk_size"]
-    cap = max(1, PART_BYTES // max(1, api._result_bytes(mc, 1)))
+    running = api._running_threads(threads_) or numba.get_num_threads()
+    # a part holds at most PART_BYTES, or one trajectory per running thread if that is more
+    cap = max(running, PART_BYTES // max(1, api._result_bytes(mc, 1)))
     size = min(
-        cap, chosen or api._default_chunk_size(mc, int(todo.size), api._running_threads(threads_))
+        cap, chosen or _rounds(api._default_chunk_size(mc, int(todo.size), running), cap, running)
     )
     seed, writers, log = list(sweep.run_seed(n, beta)), options["writers"], options["log"]
     start = 0
@@ -779,7 +798,7 @@ def _run_condition(
                 )
             if chosen is None and result.elapsed_seconds > 0:  # chunks of CHUNK_SECONDS
                 rate = chunk.size / result.elapsed_seconds
-                size = max(1, min(cap, int(CHUNK_SECONDS * rate)))
+                size = _rounds(int(CHUNK_SECONDS * rate), cap, running)
             del result
         for future in pending:
             future.result()

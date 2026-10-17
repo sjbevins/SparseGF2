@@ -412,6 +412,7 @@ would understate the error.
 | per trajectory | $k_t$, $\mathbf 1\{\tau_\ell>t\}$, $\min(\tau_\ell,T_{\max})$, $d^0_t$, $h_t$, $\widehat D_t$, $T^*$, horizon flag |
 | average | per graph, then over graphs (§2); ratios by §6.3; nonlinear and multi-depth by §8 |
 | report | censored fraction per $(n,\beta,p,\ell)$; undefined and horizon-limited $T^*$ fractions; $N_G$, $C$; which estimand (§6.3, §7.2) |
+| cost | trajectories per hour per $(n,p)$ to $T_{\max}=10^6$ with $k$, first passages and $d_{\mathrm{cyc}}$, then $+D(0)$, then $+D(J)$, and disk per trajectory: SWEEPS §12, "Depth scans to 10^6" (`benchmarks/results/depth_scan.md`) |
 
 ## 10. Exact replication
 

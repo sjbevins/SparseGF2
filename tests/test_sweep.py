@@ -375,7 +375,8 @@ def test_a_part_that_does_not_replay_stops_the_growth(tmp_path):
     small = spec_with(sizes=[6], betas=["0"], rates=["0.1"])
     sweep.run(small, directory)
     made_by_an_older_version(directory)
-    (path,) = (directory / "n6_beta0_p0.1").glob("result-*.npz")
+    parts = (directory / "n6_beta0_p0.1").glob("result-*.npz")  # one per round of threads
+    path = next(p for p in parts if 0 in mipt.EnsembleResult.load(p).trajectories)
     part = mipt.EnsembleResult.load(path)
     part.values["code_dimension"][0, 3] += 1  # u = 0, the first saved trajectory
     part.save(path)

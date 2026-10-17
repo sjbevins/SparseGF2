@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+* **Depth scans to 10^6, priced** (`benchmarks/depth_scan.py`, `results/depth_scan.{json,md}`,
+  SWEEPS.md section 12 "Depth scans to 10^6"): the owner's workload at n = 32 to 512, p = 0.02
+  to 0.5, beta = 0 and 0.1, on every thread: layers per second by depth (to 10^6 where
+  affordable, extrapolated and labeled otherwise), `stop_when_purified` from the exact first
+  passages, the cost and bytes per evaluation of d_cyc, D(0), D(J) and snapshots, disk per
+  trajectory on a 61-point grid, and trajectories per hour for k with d_cyc, + D(0) and
+  + D(J). `EnsembleResult.save` no longer stores what `load` rebuilds exactly: the gate set when
+  it is all 11,520 Cliffords (31 kB compressed per file) and the layers of a symbolic checkpoint
+  rule (`"every_layer"`, `"final"`, a stride; kept in the metadata), which in a sweep at
+  T = 10^6 was 2.7 MB in every part, 98% of a part without snapshots; `estimate_ensemble`'s
+  layout follows. Loaded results are bitwise the same, and files written before load as they
+  did.
 * **Exact first passages, online.** With a reference, the ensemble engine reads the code
   dimension k after every layer (a popcount, whatever the checkpoints) and records
   `EnsembleResult.first_passage`, int64 `(trajectories, n + 1)`: the first layer with
@@ -16,6 +28,19 @@
   trajectory at `T = 10^6`); a sweep written before names its probes in `sweep.json` and keeps
   working (grow it with that stored spec). Tests compare the first passages with dense
   every-layer traces (33 rates, `T` up to `10^5`) and with Stim `10^4` layers deep.
+* **Faster phase-free ensembles at large n, and a CPU-specific option.** The ensemble engine
+  pads each tableau column of `16 j` words with one zero word (`mipt._row_padding`), so the
+  columns that a measurement scans at one word offset no longer share a fraction of the cache
+  sets; `apply_2q` reads its 16 masks before the word loop, which lets the compiler vectorize
+  it. Neither changes a result. Sweep chunks are whole rounds of the running threads, at least
+  one (a part may exceed `PART_BYTES` for that). The default stays every logical processor,
+  no pinning. One opt-in placement, the only one measured to help (from about n = 1800): one
+  thread per physical core, `sparsegf2.performance.physical_cores()` (restores affinity and
+  threads, also on an exception; `cpu_cores()` reads the cores),
+  `MonitoredCircuit.run(..., physical_cores=True)`, `sweep.run(..., physical_cores=True)` and
+  `sparsegf2 sweep run --physical-cores`. Placements on one CCD, the V-Cache CCD included, gave
+  no measured gain and are not offered. Measurements in
+  `benchmarks/results/performance_x3d.md` and docs/SWEEPS.md section 12.
 * **Watts–Strogatz sweeps** (`sparsegf2.study`, [`docs/SWEEPS.md`](docs/SWEEPS.md)). A
   `SweepSpec` names a grid of conditions `(n, beta, p)` (exact rate tokens), the graphs and
   circuits per graph, the depth, the checkpoints (the geometric rule of v1.4 §9 or a list) and

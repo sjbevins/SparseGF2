@@ -82,10 +82,12 @@ def condition_spec(n: int, p: str, snapshots: bool, trajectories: int) -> dict:
     }
 
 
-def measure(n: int, p: str, snapshots: bool, trajectories: int, scratch: Path) -> dict:
+def measure(n: int, p: str, snapshots: bool, trajectories: int, scratch: Path, **options) -> dict:
+    """One condition through ``sweep.run`` in a fresh directory (``options``: its keyword
+    arguments, such as ``writers`` or ``performance``)."""
     directory = scratch / f"n{n}_p{p}_{'snap' if snapshots else 'k'}"
     start = time.perf_counter()
-    out = sweep.run(condition_spec(n, p, snapshots, trajectories), directory)
+    out = sweep.run(condition_spec(n, p, snapshots, trajectories), directory, **options)
     seconds = time.perf_counter() - start
     assert out["complete"] and out["saved"] == trajectories
     folder = directory / out["conditions"][0]["path"]

@@ -143,6 +143,7 @@ Needs the optional extra: pip install 'sparsegf2[mcp]'.
 
 _SWEEP_HELP = """examples:
   sparsegf2 sweep run sweep.json runs/ws --threads 32   # generate, resume or grow
+  sparsegf2 sweep run sweep.json runs/ws --physical-cores   # one thread per core (large n)
   sparsegf2 sweep status runs/ws --json
   sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # trajectory u = 3, rerun and compared
 
@@ -371,6 +372,11 @@ def _build_parser() -> _Parser:
         help="how saved parts are compressed (fast: zlib level 1, the default)",
     )
     q.add_argument("--writers", type=int, default=4, help="threads that save parts (4)")
+    q.add_argument(
+        "--physical-cores",
+        action="store_true",
+        help="one engine thread per physical core (faster from about n = 1800; SWEEPS.md 12)",
+    )
     q = actions.add_parser("status", help="saved and target trajectories per condition")
     q.add_argument("directory", metavar="DIR")
     q = actions.add_parser("replay", help="rerun one trajectory and compare it with the saved one")
@@ -749,6 +755,7 @@ def _cmd_sweep(args: argparse.Namespace) -> _Outcome:
             chunk_size=args.chunk_size,
             compression=args.compression,
             writers=args.writers,
+            physical_cores=args.physical_cores,
             log=_log,
             command=_command_line(),
         )

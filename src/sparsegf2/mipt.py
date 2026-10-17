@@ -120,6 +120,7 @@ import numpy as np
 
 from sparsegf2 import erasures
 from sparsegf2 import graphs as _graphs
+from sparsegf2 import performance as _performance
 from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel import erasure_chain as _chain
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
@@ -1611,6 +1612,7 @@ class MonitoredCircuit:
         first_trajectory: int | None = None,
         indices: Sequence[int] | np.ndarray | None = None,
         num_threads: int | None = None,
+        physical_cores: bool = False,
     ) -> EnsembleResult:
         """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``,
         or exactly the trajectories listed in ``indices``.
@@ -1626,7 +1628,10 @@ class MonitoredCircuit:
         ``indices[i] // circuits_per_graph``, circuit stream ``indices[i]``,
         probe streams keyed by it), and ``result.trajectories`` is ``indices``
         in the given order. Runs in parallel over CPU cores (``num_threads``
-        limits that). Returns an :class:`EnsembleResult`.
+        limits that). ``physical_cores=True`` runs one thread per physical core
+        (:func:`sparsegf2.performance.physical_cores`: process-wide, restored afterwards;
+        measured faster only from about n = 1800). Neither changes a result. Returns an
+        :class:`EnsembleResult`.
         """
         if indices is not None:
             if trajectories is not None or first_trajectory is not None:
@@ -1646,6 +1651,13 @@ class MonitoredCircuit:
             count = _integer(trajectories, "trajectories")
             self._check_trajectories(first, count)
             index = np.arange(first, first + count, dtype=np.int64)
+        trajectories = int(index.size)
+        if physical_cores:
+            with _performance.physical_cores(num_threads):
+                return self._run(index, seed, num_threads)
+        return self._run(index, seed, num_threads)
+
+    def _run(self, index: np.ndarray, seed, num_threads: int | None) -> EnsembleResult:
         trajectories = int(index.size)
         if trajectories:
             with threads(num_threads):
@@ -1689,7 +1701,7 @@ class MonitoredCircuit:
                     a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
                     bool(a["ce_need_graph"]), index, out, snap, snap_rows, tau, final, meas,
                     passages, _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2,
-                    IDENTITY_SYM2,
+                    IDENTITY_SYM2, _row_padding((self.num_qubits + 63) // 64),
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
         values, snapshots = {}, {}
@@ -1993,6 +2005,19 @@ def _int_array(values, what: str) -> np.ndarray:
     return _read_only(raw.astype(np.int64).reshape(-1))
 
 
+def _row_padding(words: int) -> int:
+    """Zero words appended to each tableau column of ``words`` words in the ensemble engine.
+
+    A column of ``words = 16 j`` words is an even number (``2 j``) of 64-byte cache lines, so
+    successive columns, which a measurement reads at one fixed word offset, fall on a fraction
+    of the cache sets (a quarter of them at ``words = 32``) and evict each other. One more word
+    spreads them over every set. The padding never changes a result
+    (:func:`sparsegf2._kernel.ensemble.run_ensemble`); docs/SWEEPS.md section 12 has the
+    measurements.
+    """
+    return 1 if words % 16 == 0 else 0
+
+
 def _seed_sequence(seed) -> np.random.SeedSequence:
     return seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
 
@@ -2216,6 +2241,11 @@ def _carried_plan(p: Probe, source: MonitoredCircuit) -> _CorrelatedPlan | None:
             burn_in=int(p.burn_in or 0),
         )
     return None
+
+
+def _every_clifford(gate_set: np.ndarray | None) -> bool:
+    """Whether ``gate_set`` is the default, every two-qubit Clifford index in order."""
+    return np.array_equal(gate_set, np.arange(num_cliffords(2)))
 
 
 def _json_default(obj):
@@ -2657,13 +2687,21 @@ class EnsembleResult:
         arrays: dict[str, Any] = {
             "edges": np.concatenate(spec.graphs),
             "graph_ptr": np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64),
-            "gate_set": spec.gate_set,
             "system_order": spec.system_order,
             "trajectories": self.trajectories,
-            "checkpoint_layers": self.checkpoint_layers,
             "final_layer": self.final_layer,
             "num_measurements": self.num_measurements,
         }
+        # What load rebuilds exactly is not stored: the default gate set (all 11,520
+        # Cliffords, 31 kB compressed) and the layers of a symbolic checkpoint rule ("final",
+        # "every_layer" or a stride, in meta; every layer of T = 10^6 is 8 MB, 2.7 MB
+        # compressed, in every file).
+        if not _every_clifford(spec.gate_set):
+            arrays["gate_set"] = spec.gate_set
+        if meta["checkpoints"] is None or not np.array_equal(
+            self.checkpoint_layers, spec.checkpoint_layers
+        ):
+            arrays["checkpoint_layers"] = self.checkpoint_layers
         if spec.edge_weights is not None:
             w = spec.edge_weights
             arrays["edge_weights"] = np.concatenate(w) if isinstance(w, tuple) else w
@@ -2711,14 +2749,21 @@ class EnsembleResult:
                 cuts = z["graph_ptr"][1:-1]
                 edges = list(np.split(edges, cuts))
                 weights = None if weights is None else list(np.split(weights, cuts))
-            layers = z["checkpoint_layers"].astype(np.int64)
-            symbolic = meta.get("checkpoints")
+            # absent: the default gate set, and the layers of the symbolic rule (save)
+            layers = (
+                z["checkpoint_layers"].astype(np.int64) if "checkpoint_layers" in z.files else None
+            )
+            rule = meta.get("checkpoints")  # "final", "every_layer" or a stride; None: a list
+            if rule is None:
+                if layers is None:
+                    raise ValueError(f"{path}: neither checkpoint layers nor a checkpoint rule")
+                rule = layers
             spec = MonitoredCircuit(
                 edges=edges,
-                gate_set=z["gate_set"],
+                gate_set=z["gate_set"] if "gate_set" in z.files else None,
                 system_order=z["system_order"],
                 edge_weights=weights,
-                checkpoints=layers if symbolic is None else symbolic,
+                checkpoints=rule,
                 probes=probes,
                 **{
                     k: s[k]
@@ -2726,7 +2771,7 @@ class EnsembleResult:
                     if k in s and not (k == "gates_per_layer" and s["schedule"] != "random_edges")
                 },
             )
-            if not np.array_equal(spec.checkpoint_layers, layers):
+            if layers is not None and not np.array_equal(spec.checkpoint_layers, layers):
                 raise ValueError(f"{path}: the stored checkpoints do not match the stored layers")
             # The spec resolves a budget or mapping again; it must give the stored size and
             # name, under which the values are stored.
@@ -2743,7 +2788,7 @@ class EnsembleResult:
                 spec=spec,
                 seed_entropy=meta["seed_entropy"],
                 trajectories=z["trajectories"],
-                checkpoint_layers=z["checkpoint_layers"],
+                checkpoint_layers=spec.checkpoint_layers.copy() if layers is None else layers,
                 values={p.name: z[f"value::{p.name}"] for p in probes},
                 purification_layer=z["purification_layer"]
                 if "purification_layer" in z.files

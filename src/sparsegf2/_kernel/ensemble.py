@@ -485,6 +485,7 @@ def run_ensemble(
     order, periodic, key_struct, key_probe, phash, ce_param, ce_int, ce_float, geo_indptr,
     geo_indices, geo_order, geo_kind, ce_need_graph, indices, out, snap, snap_rows, out_tau,
     out_final, out_meas, out_first, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
+    row_pad,
 ):  # fmt: skip
     """Simulate trajectory ``indices[t]`` into row ``t`` of the outputs, for every row ``t``.
 
@@ -512,6 +513,12 @@ def run_ensemble(
     ``out_first`` (int64, ``(trajectories, n_sys + 1)`` filled with -1, or
     ``(trajectories, 0)`` without a reference) receives the first passages
     (module docstring).
+
+    Each trajectory's tableau has ``ws + row_pad`` words per column (``ws = ceil(n / 64)``).
+    The ``row_pad`` words are zero and stay zero: every gate maps the zero words of its four
+    columns to zero, and measurements and probes read and write words ``< ws`` only. So the
+    padding changes no result; it only spreads the columns over the cache sets when ``ws``
+    words would be an even number of cache lines (``mipt._row_padding``).
     """
     num_traj = out.shape[0]
     num_gck = gck.shape[0]
@@ -530,7 +537,7 @@ def run_ensemble(
         rng = np.empty(4, dtype=np.uint64)
         prng = np.empty(4, dtype=np.uint64)  # seeded per sampled evaluation
         stream_state(key_struct, u, rng)
-        tab = np.zeros((2 * n + 1, ws), dtype=np.uint64)
+        tab = np.zeros((2 * n + 1, ws + row_pad), dtype=np.uint64)
         init_zero(tab, n, ws, False)
         anti = np.zeros(ws, dtype=np.uint64)
         supp = np.zeros(max(n, ws), dtype=np.int64)
