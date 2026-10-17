@@ -674,7 +674,8 @@ def status(directory: str | Path) -> dict[str, Any]:
     conditions = []
     for c in index["conditions"]:
         saved = int(_saved_indices(root / c["path"]).size)
-        conditions.append({**{k: c[k] for k in ("n", "beta", "p", "trajectories")}, "saved": saved})
+        keys = ("n", "beta", "p", "path", "trajectories")
+        conditions.append({**{k: c[k] for k in keys}, "saved": saved})
     target = sum(c["trajectories"] for c in conditions)
     saved = sum(c["saved"] for c in conditions)
     return {

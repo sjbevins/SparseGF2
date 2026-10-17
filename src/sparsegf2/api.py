@@ -4063,6 +4063,11 @@ def run_ensemble(
 def load_results(path: str) -> dict[str, Any]:
     """Summarize a saved ensemble: a ``.npz`` written by ``EnsembleResult.save`` or an output directory.
 
+    A sweep's directory (``sweep.json``, ``docs/SWEEPS.md``) gives its index: every
+    condition's saved and target trajectories, the versions and the spec. One of its condition
+    folders gives the summary of all its saved parts together (``sparsegf2.study.sweep.load``);
+    one above the memory limit is refused with a message naming ``sweep.parts``.
+
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or canceled
     job. The chunks of a finished run that its job could not merge (a reader
@@ -4080,6 +4085,10 @@ def load_results(path: str) -> dict[str, Any]:
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise ValueError(f"no such file or directory: {str(p)!r}")
+    if p.is_dir() and (p / "sweep.json").is_file():
+        return _sweep_index_summary(p)
+    if p.is_dir() and (p.parent / "sweep.json").is_file():
+        return _sweep_condition_summary(p)
     parts: list[Path] = [p]
     try:
         if p.is_dir():
@@ -4104,6 +4113,66 @@ def load_results(path: str) -> dict[str, Any]:
         root = p if p.is_dir() else p.parent
         everything = [q for q in p.rglob("*") if q.is_file()] if p.is_dir() else [p]
         extra["storage"] = _storage_summary(parts, root, everything)
+    return _bounded_summary(result, extra)
+
+
+def _sweep_index_summary(root: Path) -> dict[str, Any]:
+    """``load_results`` of a sweep's directory: its index and every condition's counts."""
+    from sparsegf2.study import sweep
+
+    index = sweep._read_index(root)
+    assert index is not None, "the caller found sweep.json"
+    status = sweep.status(root)
+    out = {
+        "path": str(root),
+        "kind": "sweep",
+        "digest": index["digest"],
+        "complete": status["complete"],
+        "trajectories": status["trajectories"],
+        "saved": status["saved"],
+        "versions": index["versions"],
+        "conditions": status["conditions"],
+        "spec": index["spec"],
+        "notes": [
+            "a sweep (docs/SWEEPS.md): load_results(<this path>/<conditions[i].path>) summarizes "
+            "one condition; in Python sparsegf2.study.sweep.load(path, n, beta, p)"
+        ],
+    }
+    return _bounded(out, exact=("spec",))
+
+
+def _sweep_condition_summary(folder: Path) -> dict[str, Any]:
+    """``load_results`` of one condition of a sweep: every saved part, as one result."""
+    from sparsegf2.study import sweep
+
+    root = folder.parent
+    index = sweep._read_index(root)
+    assert index is not None, "the caller found sweep.json"
+    entry = next((c for c in index["conditions"] if c["path"] == folder.name), None)
+    if entry is None:
+        raise ValueError(f"{str(folder)!r} is not a condition of the sweep in {str(root)!r}")
+    files = sweep._part_paths(folder)
+    if not files:
+        raise ValueError(f"nothing saved yet in {str(folder)!r}")
+    size = 0
+    for path in files:
+        with zipfile.ZipFile(path) as z:
+            size += sum(info.file_size for info in z.infolist())
+    n, beta, p = entry["n"], entry["beta"], entry["p"]
+    if size > MAX_RESULT_GB * 2**30:
+        raise ValueError(
+            f"condition {folder.name} holds {size / 2**30:.1f} GB of results, above the "
+            f"{MAX_RESULT_GB:g} GB memory limit: read its parts one at a time in Python with "
+            f"sparsegf2.study.sweep.parts({str(root)!r}, {n}, {beta!r}, {p!r})"
+        )
+    result = sweep.load(root, n, beta, p)
+    everything = [q for q in folder.iterdir() if q.is_file()]
+    extra = {
+        "path": str(folder),
+        "sweep": {"root": str(root), "n": n, "beta": beta, "p": p},
+        "trajectories_requested": entry["trajectories"],
+        "storage": _storage_summary(files, folder, everything),
+    }
     return _bounded_summary(result, extra)
 
 

@@ -539,8 +539,9 @@ sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # rerun trajectory u = 3, 
   `sweep.parts(...)` (one saved part at a time), `sweep.rows(...)` (`g`, `c`, `u` and the
   seeds of every row), `sweep.replay(...)`, `sweep.verify(...)`. Average with equal weight per
   graph (`result.graph_index`) and never average a censored purification time (`-1`).
-* No MCP tools of its own: each saved part (`<condition>/result-*.npz`) is an ordinary
-  `EnsembleResult` file that `load_results` reads.
+* No MCP tools of its own: `load_results(DIR)` gives the index (every condition's saved and
+  target trajectories, the versions, the spec), `load_results(DIR/<condition>)` the summary of
+  all its saved parts, and `load_results` of one part file (`result-*.npz`) that part.
 
 ## Where things are
 

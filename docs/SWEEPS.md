@@ -60,8 +60,11 @@ per-size values resolved, tokens as canonical strings) and `SweepSpec.digest` it
 The command line: `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K]`,
 `sparsegf2 sweep status DIR`, `sparsegf2 sweep replay DIR N BETA P U` (`cli.py:_cmd_sweep`;
 `--json` for one JSON object, exit codes 0, 2 for bad input, 1 for an internal error or a
-replay that differs, 130 for Ctrl-C). There are no MCP tools for sweeps: every saved part is an
-ordinary `EnsembleResult` file, which the existing `load_results` tool summarizes.
+replay that differs, 130 for Ctrl-C). There are no MCP tools of the sweep's own: the existing
+`load_results` (`api.py:load_results`) reads a sweep's directory (the index: every condition's
+`path`, saved and target trajectories, the versions, the spec), one condition's folder (the
+summary of all its parts, through `sweep.load`; above the memory limit it refuses and names
+`sweep.parts`) and a single part file.
 
 ## 2. The phase-free state and its update rules
 

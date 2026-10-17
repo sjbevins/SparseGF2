@@ -115,7 +115,7 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `job_status(job_id, wait_seconds)` | (shown as progress) | progress, throughput, ETA |
 | `cancel_job(job_id)` | Ctrl-C | stop after the current chunk |
 | `list_jobs()` | | jobs in this process |
-| `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks) |
+| `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks; a sweep or one of its conditions, section 3.8) |
 | `sample_erasure_regions(graph, size, couplings, samples=200, num_nodes=None, burn_in=None, thin=1, tempering=True, chains=4, seed=None, method="auto", ladder="auto", max_step=None)` | `sparsegf2 regions --family F --n N ... --size M --couplings J... [...]` | read-only: geometry-correlated erasure regions on a graph alone (no circuit), with mixing diagnostics against exact values (section 3.7) |
 | `erasure_curves(path, e=None, delta=0.01, layer=None)` | `sparsegf2 curves RUN [--eps E...] [--delta D] [--layer L]` | read-only: Phi(e) and e_delta of a saved run's erasure probes, independent and correlated (section 3.7) |
 | `study.sweep.run(spec, directory, num_threads, chunk_size)` (Python only, no MCP tool) | `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K]` | generate, resume or grow a Watts–Strogatz sweep (section 3.8) |
@@ -744,8 +744,11 @@ every layer and `tableau_snapshot` at the checkpoints), `picture` (`"purificatio
 Running again resumes; a spec that adds sizes, betas, rates, graphs or circuits grows the
 sweep without changing a saved trajectory, and one that would change saved data is refused.
 `sweep replay` prints `identical` and the saved tableau digests, and exits with 1 when the
-rerun differs. There is no MCP tool: `load_results` reads any saved part
-(`DIR/<condition>/result-*.npz`).
+rerun differs. There is no sweep tool: `load_results(DIR)` returns the index (`kind:
+"sweep"`, every condition with its `path`, `saved` and target `trajectories`, the `versions`
+and the `spec`); `load_results(DIR/<path>)` the usual summary of all the condition's saved
+parts together (refused above the memory limit, with the Python call `sweep.parts` that reads
+them one at a time); and `load_results` of one part file (`result-*.npz`) that part.
 
 ---
 

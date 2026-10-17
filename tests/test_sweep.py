@@ -456,3 +456,21 @@ def test_the_cli_runs_reports_and_replays(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["identical"] is True
     assert cli.main(["sweep", "replay", directory, "6", "0", "0.2", "x", "--json"]) == 2
     assert "U must be an integer" in json.loads(capsys.readouterr().out)["error"]["message"]
+
+
+def test_load_results_reads_a_sweep_and_its_conditions(reference, monkeypatch):
+    directory, results = reference
+    index = api.load_results(str(directory))
+    assert index["kind"] == "sweep" and index["complete"] and index["saved"] == 32
+    assert len(index["conditions"]) == 8 and index["versions"] == ident.version_record()
+    assert index["spec"] == SweepSpec.from_json(SPEC).to_json()
+    first = index["conditions"][0]
+    summary = api.load_results(str(directory / first["path"]))
+    result = results[(first["n"], first["beta"], first["p"])]
+    expected = api._bounded_summary(result, {})
+    assert summary["num_trajectories"] == expected["num_trajectories"] == 4
+    assert summary["probes"] == expected["probes"] and summary["sweep"]["n"] == first["n"]
+    assert summary["storage"]["total_megabytes"] > 0
+    monkeypatch.setattr(api, "MAX_RESULT_GB", 1e-9)
+    with pytest.raises(ValueError, match=r"memory limit.*sweep\.parts"):
+        api.load_results(str(directory / first["path"]))
