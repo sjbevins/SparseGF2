@@ -252,3 +252,52 @@ def test_committed_correlated_erasure_report_is_the_rendering_of_its_results(tmp
     assert all(("e" in c) == (float(c) < 1e-4) for c in cells)  # one format: scientific if small
     assert "1.671e-10" in table and "0.000 " not in table
     assert "Only J = 0 is compared with an exact value" in committed
+
+
+def test_sweep_throughput_quick(tmp_path):
+    out = tmp_path / "st"
+    script = str(ROOT / "benchmarks" / "sweep_throughput.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--quick", "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "sweep_throughput.json").read_text(encoding="utf-8"))
+    md = (out / "sweep_throughput.md").read_text(encoding="utf-8")
+    assert md.startswith("# Sweep throughput")
+    for key in ("cpu_model", "physical_cores", "logical_processors", "numba_num_threads"):
+        assert key in data["environment"]
+    assert len(data["rows"]) == 2 * 2 * 2  # sizes x rates x with and without snapshots
+    for row in data["rows"]:
+        assert row["seconds"] > 0 and row["trajectories_per_second"] > 0
+        assert row["disk_bytes_per_trajectory"] > 0 and row["layers"] == 4 * row["n"]
+    snap = {(r["n"], r["p"]): r for r in data["rows"] if r["snapshots"]}
+    plain = {(r["n"], r["p"]): r for r in data["rows"] if not r["snapshots"]}
+    assert all(snap[k]["disk_bytes_per_trajectory"] > plain[k]["disk_bytes_per_trajectory"]
+               for k in snap)  # fmt: skip
+
+
+def test_committed_sweep_throughput_report_is_the_rendering_of_its_results(tmp_path):
+    results = ROOT / "benchmarks" / "results"
+    script = str(ROOT / "benchmarks" / "sweep_throughput.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--from-json", str(results / "sweep_throughput.json"),
+         "--out", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rendered = (tmp_path / "sweep_throughput.md").read_text(encoding="utf-8")
+    assert rendered == (results / "sweep_throughput.md").read_text(encoding="utf-8")
+    data = json.loads((results / "sweep_throughput.json").read_text(encoding="utf-8"))
+    assert not data["quick"]
+    assert {(r["n"], r["p"], r["snapshots"]) for r in data["rows"]} == {
+        (n, p, s) for n in (64, 128, 256, 512) for p in ("0.05", "0.2") for s in (False, True)
+    }

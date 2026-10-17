@@ -459,6 +459,30 @@ a value and say so, or record without stopping. `paired_se` against
 
 ## 12. Performance options
 
+### Baseline
+
+`benchmarks/sweep_throughput.py` times `sweep.run` on one condition at a time (results in
+`benchmarks/results/sweep_throughput.md`): beta = 0.1, the purification picture, T = 4n,
+`code_dimension` at every layer, without and with a `tableau_snapshot` on 12 geometric
+checkpoints, default threads and chunks. On an AMD Ryzen 9 9950X3D (16 cores, 32 threads,
+Windows 11, Numba 0.68 `omp`), sparsegf2 3.0.0.dev12, before any CPU-specific option:
+
+| n | trajectories/s, k only (p = 0.05 / 0.2) | with snapshots (p = 0.05 / 0.2) | disk bytes per trajectory with snapshots (p = 0.05 / 0.2) |
+|---:|---:|---:|---:|
+| 64 | 11,800 / 9,620 | 1,030 / 1,170 | 18,875 / 7,877 |
+| 128 | 4,080 / 3,100 | 366 / 504 | 62,422 / 20,192 |
+| 256 | 1,010 / 580 | 122 / 171 | 232,114 / 63,792 |
+| 512 | 139 / 69 | 29 / 40 | 867,010 / 222,618 |
+
+Without snapshots the engine takes most of the wall time from n = 256 on (20.1 of 22.1 s at
+n = 512, p = 0.05); below that, building the graph files and saving the parts take as long as
+the simulation or longer (3.1 of 4.2 s at n = 64, p = 0.05), and every part stores the condition's whole graph collection (4,478 bytes per
+trajectory at n = 512, p = 0.05). With snapshots, compressing and writing the parts takes most
+of the time (the engine's share is 0.61 of 23.95 s at n = 64 and 5.11 of 26.07 s at n = 512,
+p = 0.05).
+
+### CPU-specific option
+
 (Left for the performance task.)
 
 ## 13. Limits
