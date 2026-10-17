@@ -70,7 +70,8 @@ mathematics, the independent reference implementations and conformance tests
 | $C(n,2)$, $E_0(n)$ | the circulant graph and its edge set | graph, set of pairs | `identity.circulant_edges` |
 | $L_n$ | the oriented original edges $((a_1,b_1), \dots, (a_m,b_m))$, offset-major | list of $m = 2n$ pairs | `identity.original_edge_list`, `graphs._ring_lattice(n, 4)` |
 | $\beta$ | rewiring probability | $[0,1]$ | `beta` |
-| $B_j$ | the rewiring decision at visit $j$ | $\lbrace 0,1\rbrace$ | `next_double(rng) < beta` |
+| $\beta'$ | the realized rewiring probability $P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself for dyadic $\beta$, within $2^{-52}$ of it otherwise | $[0,1]$ | the double `Token.float64` compared with `next_double` |
+| $B_j$ | the rewiring decision at visit $j$ | $\lbrace 0,1\rbrace$ | `next_double(rng) < beta` (the float64 of the token) |
 | $G^{(j)}$ | the graph after visit $j$ | simple graph | `adj` |
 | $N_G(a)$ | the neighbors of $a$ in $G$ | subset of $V$ | `adj[a]` |
 | $A_j$ | the eligible targets $V \setminus (N_{G^{(j-1)}}(a_j) \cup \lbrace a_j\rbrace)$ | subset of $V$ | the loop condition `w != a and w not in adj[a]` |
@@ -92,7 +93,8 @@ mathematics, the independent reference implementations and conformance tests
 | $T$ | the horizon (layers) | integer | `layers` |
 | $N = 2^{32}$ | the range of the 32-bit draw behind `next_below` | integer | |
 | $\mathrm{rng}$ | an xoshiro256** state | four `uint64` | `_kernel/rng.py` |
-| $u$ | the trajectory index; trajectory $u$ runs on graph $\lfloor u/s\rfloor$ for the stride $s$ (document 02) | integer | `first_trajectory + t` |
+| $u$ | the trajectory index; trajectory $u$ runs on graph $\lfloor u/\bar C\rfloor$ for the circuit index stride $\bar C$ (document 02) | integer | `first_trajectory + t` |
+| $\lvert A\rvert$ | the size of an eligible set $A$ (in §5.4, of the set of one rewiring event) | integer | `len(v.eligible)` |
 
 ## 3. Definitions
 
@@ -177,11 +179,14 @@ accepts any seed; it uses the xoshiro256** state
 `np.random.SeedSequence(seed).generate_state(4, dtype=np.uint64)` (`_kernel/rng.py::seed_state`; an
 all-zero state would become $(1,0,0,0)$) and two draws:
 
-* `next_double(rng)` $= k\,2^{-53}$ with $k$ the top 53 bits of `next_u64`, so $B_j = [\texttt{next\_double} < \beta]$;
+* `next_double(rng)` $= k\,2^{-53}$ with $k$ the top 53 bits of `next_u64`, so $B_j = [\texttt{next\_double} < \mathrm{fl}(\beta)]$,
+  where $\mathrm{fl}(\beta)$ is the double the study passes (`Token.float64` of the token, document 02, §3.1). Hence
+  $\Pr(B_j = 1) = \beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself when $\beta$ is dyadic with at most 53
+  binary digits ($0$, $1/4$, $1/2$, $1$, ...), and within $2^{-52}$ of $\beta$ otherwise ($\beta' - \beta = 8.9\times10^{-17}$ at $\beta = 0.1$);
 * `next_below(rng, bound)` (Lemire's method on the top 32 bits of `next_u64`, Proposition 5): a uniform
   integer in $[0, \text{bound})$.
 
-For each visit $(a, b)$ in the order of $L_n$ it draws the double; if it is below $\beta$ and
+For each visit $(a, b)$ in the order of $L_n$ it draws the double; if it is below $\mathrm{fl}(\beta)$ and
 $\deg(a) < n-1$ (equivalently $A_j \ne \varnothing$) it repeats `w = next_below(rng, n)` until
 $w \ne a$ and $w \notin N(a)$ (the neighbor set still contains $b$), then deletes $\lbrace a,b\rbrace$ and
 adds $\lbrace a,w\rbrace$. **This is rejection sampling from the uniform law on $V$** (Proposition 6).
@@ -231,7 +236,8 @@ gates and the mask uniforms are the same at every $p$ (so curves across $p$ are 
 nested, Proposition 12). It does **not** couple them across $n$ or $\beta$. Finite-size fits and comparisons
 between rewiring probabilities treat the samples of different $(n, \beta)$ as independent, and samples built
 from one raw stream are not: the same raw draws would feed `next_below(|E|)` at different $|E|$, and the first
-rewiring decisions $B_j = [U_j < \beta]$ would coincide. (The first draft of the design shared the seed
+rewiring decisions $B_j = [U_j < \beta]$ would be the same draws: the same at two sizes, and nested at two rewiring
+probabilities ($[U_j < \beta_1] \le [U_j < \beta_2]$ for $\beta_1 < \beta_2$). (The first draft of the design shared the seed
 $(M, g)$ across conditions, as the native collection convention does; ruling R-SEED replaced it.) The seeds are
 fixed-length tuples of 32-bit words that name the condition (document 02, §3.3). With the tags
 $\tau_G = \texttt{0x57534731}$ and $\tau_C = \texttt{0x57534331}$ (the ASCII codes of `WSG1` and `WSC1`) and
@@ -394,11 +400,23 @@ eligible set $A$ is $n/\lvert A\rvert$ (the test `test_rejection_sampling_uses_n
 * (b) The decisions $B_1, \dots, B_m$ are i.i.d. Bernoulli($\beta$), whatever the graph, so the number
   $R = \sum_j B_j$ of rewiring *attempts* is Binomial($2n$, $\beta$), with mean $2n\beta$ and variance
   $2n\beta(1-\beta)$. (Some attempts do nothing: when $A_j = \varnothing$.)
+* (b') The native generator compares the uniform with the double $\mathrm{fl}(\beta)$ (§3.4), so in the ideal model its
+  decisions are i.i.d. Bernoulli($\beta'$) with $\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11), and its graphs have the
+  law $\mu_{n,\beta'}$ of (a) at $\beta'$. For dyadic $\beta$ with at most 53 binary digits $\beta' = \beta$; otherwise
+  $0 < \lvert\beta' - \beta\rvert < 2^{-52}$ and the total variation distance between $\mu_{n,\beta'}$ and $\mu_{n,\beta}$ is at most
+  $2n\lvert\beta' - \beta\rvert < 2n\cdot 2^{-52}$.
 * (c) $\mu_{n,\beta}$ is in general not uniform on the simple graphs with $2n$ edges (§7, example (a)).
 
 *Proof.* (a) is the definition of §3.3 read as a chain. (b): $B_j$ is drawn without reference to the state.
-(c) is shown by exhibiting the exact law: at $n = 6$ and $\beta = 1/2$ the most likely graph has
-probability $0.0228$, ten times the uniform value $1/455$. ∎
+(b'): $B_j = [U_j < \mathrm{fl}(\beta)]$ with $U_j$ uniform on the multiples of $2^{-53}$, whose probability is
+Proposition 11 with $q = \mathrm{fl}(\beta)$, and the bound $\lvert\beta' - \beta\rvert < 2^{-52}$ is the one proved there. For the
+distance, couple the two processes on the same uniforms: draw $V_j$ uniform on $[0,1)$ and set $B_j = [V_j < \beta]$ and
+$B'_j = [V_j < \beta']$, with the same target draws. The two graphs can differ only if some $B_j \ne B'_j$, which has
+probability $\lvert\beta' - \beta\rvert$ at each of the $m = 2n$ visits, so by the union bound the graphs differ with probability at
+most $2n\lvert\beta' - \beta\rvert$, which bounds the total variation distance. (c) is shown by exhibiting the exact law: at
+$n = 6$ and $\beta = 1/2$ the most likely graph has probability $0.0228$, ten times the uniform value $1/455$. ∎
+The exact-law and moment tests use dyadic $\beta$ ($1/4$, $1/2$, $1$), where $\mu_{n,\beta'} = \mu_{n,\beta}$; the decision tests at
+$\beta = 0.1$ cannot resolve a difference of $9\times10^{-17}$.
 
 **Proposition 8 (the mapping from random numbers to targets is part of the generator).** Let
 $\mathrm{Rej}$ be the native sampler of §3.4 and $\mathrm{Idx}$ the sampler that draws one
@@ -498,7 +516,8 @@ the collection other than $u$'s own, or the number of threads.
 positions of one stream, or distinct streams), which are independent in the ideal model. Prefix: layer $t$ draws
 from the stream position reached after layers $1, \dots, t-1$, by code (`gen_layer`) that does not read the
 horizon; the stream is `stream_state(key_struct, u)`, a function of the seed and $u$ only. Probes draw from the
-separate key `key_probe` (the last two words of the seed), checkpoints only decide when to look, and each
+separate key `key_probe` (the last two of the four words of `SeedSequence(σ).generate_state(4)`, §3.7; not words of
+the seed tuple $\sigma$ itself), checkpoints only decide when to look, and each
 trajectory owns its state array, so scheduling cannot change it (`tests/test_invariance.py`,
 `tests/test_randomness_contract.py`). ∎ A layer is not independently addressable: the state after $t-1$ layers
 is reached only by replaying them, which is why extending the horizon reruns from layer 0 (design D3).
@@ -522,8 +541,10 @@ seed determines $(M_g, n, \beta, g)$ and a run seed $(M_c, n, \beta)$ (and $p$ i
 and a run seed differ in the first word. Different tuples are different entropy, hence independent streams in the ideal
 model, and functions of independent streams are independent. (c) is Proposition 12 for the shared mode, and for the
 independent mode the seeds differ by the words of $p$ (document 02, Proposition 6). ∎ *What the tests check.* Independence
-cannot be proved for a pseudorandom generator (v1.4 §7.1). The tests look where a shared seed shows at once (§8): the visit of the first rewiring
-attempt of graph $g$ at two sizes, or two values of $\beta$, would be identical if the first draws were shared; and the
+cannot be proved for a pseudorandom generator (v1.4 §7.1). The tests look where a shared seed shows at once (§8): if the
+first draws were shared, the visit of the first rewiring attempt of graph $g$ would be identical at two sizes, and nested at
+two values of $\beta$ (with the decisions $[U_j < \beta]$ on one sequence of uniforms, the first attempt at the larger $\beta$
+never comes after the one at the smaller); and the
 index of the first gate would be equal at two values of $\beta$ (the same $2n$ values from the same draws), and its
 cell $[e/2n, (e+1)/2n)$ would contain the same first draw at two sizes. Each statistic has an exact null law under independence; each
 is degenerate under the shared seeds of the first draft, which the tests use as the negative control.
@@ -535,7 +556,7 @@ is degenerate under the shared seeds of the first draft, which the tests use as 
 Input $n \ge 5$, $\beta$, a seed. Output the sorted edge array $(2n, 2)$.
 
 1. Seed an xoshiro256** state from the seed; `adj[v]` $\leftarrow$ the neighbors of $v$ in $C(n,2)$ from $L_n$.
-2. For each $(a, b)$ in $L_n$: draw $x$ = `next_double`; if $x \ge \beta$ continue.
+2. For each $(a, b)$ in $L_n$: draw $x$ = `next_double`; if $x \ge \mathrm{fl}(\beta)$ continue.
 3. If $\lvert\mathrm{adj}[a]\rvert = n - 1$ continue (empty eligible set).
 4. Repeat `w = next_below(n)` until $w \ne a$ and $w \notin \mathrm{adj}[a]$.
 5. Delete $b$ from `adj[a]` and $a$ from `adj[b]`; add $w$ to `adj[a]` and $a$ to `adj[w]`.
@@ -543,7 +564,9 @@ Input $n \ge 5$, $\beta$, a seed. Output the sorted edge array $(2n, 2)$.
 
 Cost: $2n$ doubles plus, per rewiring, an expected $n/\lvert A\rvert$ bounded draws (Proposition 6), $O(n\bar d)$ for
 the neighbor tests; 60 to 100 microseconds per graph at $n$ between 7 and 24 in this implementation
-(measured). Exactness: exact in the ideal model; the generator only approximates it. The result is validated by
+(measured). Exactness: in the ideal model the output has exactly the law $\mu_{n,\beta'}$ of the realized probability
+$\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, which is $\mu_{n,\beta}$ for dyadic $\beta$ and within total variation $2n\cdot2^{-52}$ of it
+otherwise (Proposition 7(b')); the pseudorandom generator only approximates the ideal model (§9). The result is validated by
 `identity.validate_graph` (Proposition 4).
 
 ### 5.2 The exact law by dynamic programming
@@ -574,11 +597,14 @@ lines and an `M` line of the measured sites before each `TICK`.
   `tests/_ws_reference.py::chi2_sf`, checked against the closed forms for even $\nu$, $\nu = 1, 3$ and published
   critical values). A test passes when $p > 10^{-6}$.
 * **z-tests.** A sum of independent terms with known mean and variance, standardized; passes when $\lvert z\rvert < 4.5$
-  (two-sided false-alarm 6.8e-6). Variances are computed from the exact law, never from the sample.
-* **Randomized probability integral transform (PIT).** For a rewiring with eligible set of size $s$ and target at
-  position $r$ of the sorted set, $u = (r + V)/s$ with $V$ uniform from an independent generator. Given the past
+  (two-sided false-alarm 6.8e-6 under the normal approximation). Means and variances are computed from the exact
+  law, never from the sample. This includes the spread at $n = 7$: with $\mu$, $\sigma^2$ and $\mu_4$ the exact mean,
+  variance and fourth central moment of a statistic, $V = \frac1N\sum_i (x_i - \mu)^2$ has $\mathbb E V = \sigma^2$ and
+  $\operatorname{Var} V = (\mu_4 - \sigma^4)/N$ exactly for independent draws, and $z = (V - \sigma^2)/\sqrt{(\mu_4 - \sigma^4)/N}$.
+* **Randomized probability integral transform (PIT).** For a rewiring with eligible set $A$ and target at
+  position $r$ of the sorted set, $u = (r + V)/\lvert A\rvert$ with $V$ uniform from an independent generator. Given the past
   the target is uniform on $A$, so $u$ is uniform on $(0,1)$ and independent of the past; the sequence of $u$ over all
-  rewirings, whatever their sizes $s$, is exactly i.i.d. uniform. A 20-bin chi-square tests it
+  rewirings, whatever the sizes $\lvert A\rvert$, is exactly i.i.d. uniform. A 20-bin chi-square tests it
   (`tests/test_study_sampling.py::target_pit_p`).
 * **Correlation families.** With $Y = M - p$, a product $Y_a Y_b$ of two different positions has mean 0 and variance
   $(p(1-p))^2$, and products of different pairs are uncorrelated. Over $N$ independent terms
@@ -586,12 +612,50 @@ lines and an `M` line of the measured sites before each `TICK`.
   families are two sites of one layer, one site at lags 1–3, two sites in consecutive layers and neighboring
   trajectories (`correlation_pvalues`). Given the gates the masks are independent Bernoulli($p$), so for any weights
   $c$ that depend on the gates only $z_i = \sum Y c/\sqrt{p(1-p)\sum c^2}$ is standard normal, and the $z_i$ of different sites
-  are independent (`gate_dependence_pvalues`).
-* **False-alarm accounting.** Roughly 84 such tests run with fixed seeds, about 40 chi-square tests at $10^{-6}$ and
-  about 44 z-tests at $6.8\times10^{-6}$ (counting each assertion of §8 once). A correct implementation at fresh
-  seeds would fail at least one with probability below $4\times10^{-4}$; at the fixed seeds the outcome is
-  deterministic. Passing says no deviation was found at the stated sensitivity, not that the generator is
-  random (v1.4 §7.4).
+  are independent (`gate_dependence_pvalues`). At the level of layers, the measured count $X$ of a layer is
+  Binomial($n$, $p$) and the mean $Y$ of the classes (or edge indices) of its $h$ gates has the mean and variance of one
+  uniform draw on 720 values (or $\lvert E\rvert$), the variance divided by $h$; under independence the products
+  $(X - \mathbb EX)(Y - \mathbb EY)$ of different layers are uncorrelated with variance $\operatorname{Var}X\operatorname{Var}Y$, so
+  $z = \sum (X - \mathbb EX)(Y - \mathbb EY)/\sqrt{N\operatorname{Var}X\operatorname{Var}Y}$ has mean 0 and variance 1 exactly
+  (`test_masks_are_independent_of_the_gate_draws`; the "next layer" pairs take $Y$ from the following layer).
+* **False-alarm accounting.** Every component test is counted: a maximum over 48 positions is 48 z-tests, the
+  minimum of six $p$-values is six tests, a Bonferroni-corrected maximum ($k$ times the tail of the largest of $k$
+  scores, `frequency_pvalues`) is one $p$-value test. With $\alpha = 10^{-6}$ per $p$-value test and $6.8\times10^{-6}$ per
+  z-test, the union bound (valid whatever the dependence between the tests) on the chance that a correct
+  implementation fails at least one at fresh seeds is
+  $$46 \times 10^{-6} + 149 \times 6.8\times10^{-6} = 1.06\times10^{-3}.$$
+  At the fixed seeds the outcome is deterministic. Passing says no deviation was found at the stated sensitivity,
+  not that the generator is random (v1.4 §7.4). The inventory (tests of `tests/test_study_sampling.py`, with their
+  parametrizations; negative controls, which must *fail* the null, are not counted):
+
+  | test | $p$-value tests | z-tests |
+  |---|---|---|
+  | `test_chi_square_helper_pools_small_cells_and_detects_bias` (numpy's multinomial) | 1 | |
+  | `test_the_mapping_from_random_numbers_to_targets_matters_not_only_the_law` | 1 | |
+  | `test_the_native_generator_has_the_exact_law_at_n_6` ($\beta = 1/4, 1/2$) | 2 | |
+  | `test_each_plausible_misreading_of_the_rewiring_rule_is_rejected` (the correct reading: one test, repeated on the same graphs in the three parametrizations) | 1 | |
+  | `test_the_native_generator_has_the_exact_moments_at_n_7` (3 values of $\beta$, 2 statistics, mean and spread) | | 12 |
+  | `test_rewiring_decisions_are_bernoulli_beta` ($\beta = 0.1, 0.5$: the total, the histogram, the 48 positions and their sum of squares, lag 1) | 4 | 100 |
+  | `test_targets_are_uniform_on_the_eligible_set_computed_before_the_deletion` (2 values of $\beta$) | 4 | |
+  | `test_rejection_sampling_uses_n_over_the_eligible_size_draws_on_average` (2 values of $\beta$) | | 2 |
+  | `test_edge_draws_are_uniform_over_the_graphs_edges` (pooled, by position, 24 vertex incidences) | 2 | 24 |
+  | `test_edges_are_drawn_with_replacement_in_sampled_order` | 1 | 2 |
+  | `test_disjoint_pairs_of_edge_draws_are_independent_and_uniform` | 2 | |
+  | `test_clifford_indices_are_uniform_over_11520_and_their_classes_over_720` | 5 | |
+  | `test_the_clifford_test_has_the_power_to_see_a_bias` (the fair sample) | 1 | |
+  | `test_masks_are_independent_bernoulli_p_at_every_site` | 2 | 1 |
+  | `test_masks_have_no_site_or_layer_correlation_beyond_chance` | 6 | |
+  | `test_masks_are_independent_of_the_gate_draws` | 3 | 4 |
+  | `test_the_correlation_tests_have_the_power_to_see_planted_dependence` (the clean samples) | 11 | |
+  | the four tests of Proposition 14 (independent conditions) | | 4 |
+  | **total** | **46** | **149** |
+
+  Two further assertions are statistical in principle, with false-alarm probabilities below $10^{-190}$ by the Chernoff
+  bound $e^{-N\,\mathrm{KL}}$ for independent Bernoulli trials: that more than 70% of the 28,800 layers of
+  `test_edges_are_drawn_with_replacement_in_sampled_order` repeat an edge (expected 77.7%, standard error 0.25%), and
+  that more than 19,000 of the 20,000 graphs at $\beta = 0.1$ rewire at least once (expected 19,872). They are not
+  counted. The test of Proposition 8 allows 2 coincidences among 200 graphs; it is about the two mappings, not a
+  sampling test, and it is not counted either.
 * **Sensitivity.** For a relative deviation $\delta$ in every cell, the noncentrality of the chi-square is
   $\lambda = N\delta^2$. The class test ($N = 345{,}600$ draws, 719 degrees of freedom, null standard deviation
   $\sqrt{2\cdot719} = 37.9$) rejects a $\pm5\%$ bias ($\lambda = 864$) at once and cannot see a 1% bias
@@ -985,16 +1049,16 @@ The sample sizes are the ones in the tests.
 | Proposition 3, 4(b), (e), (f) | `test_graph_properties_hold_at_every_size_and_rewiring_probability`, `test_c_n_2_is_the_complete_graph_up_to_five_vertices_and_a_ring_after`; `tests/test_study_identity.py::test_circulant_edges_follow_the_definition`, `test_original_edge_list_is_offset_major_and_matches_the_native_ring`, `test_validate_graph_*` | exact, $n = 5, \dots, 40$ (odd and even), simple, $2n$ edges, degree $\ge 2$, $\beta = 0$ is $C(n,2)$, $n = 5$ is $K_5$ |
 | Proposition 4(a) (abort) | `test_the_abort_fires_on_a_corrupted_order_and_never_on_the_real_one`, `test_no_reachable_state_lacks_the_visited_edge` | the abort fires on a corrupted order; exhaustive over all reachable graphs for $n = 5, 6, 7$ |
 | Proposition 7(a) (exact law) | `test_the_native_generator_has_the_exact_law_at_n_6` | χ² over all 428 graphs at $\beta = 1/4, 1/2$ with 100,000 graphs each; a wrong $\beta$ ($+0.05$) is rejected |
-| exact law, moments | `test_the_native_generator_has_the_exact_moments_at_n_7` | z-tests of the mean degree variance and new-edge count at $\beta = 1/4, 1/2, 1$, 25,000 graphs, variance from the exact law |
+| exact law, moments | `test_the_native_generator_has_the_exact_moments_at_n_7` | z-tests of the mean and of the spread (the second moment about the exact mean, with the exact fourth central moment, §5.4) of the degree variance and the new-edge count at $\beta = 1/4, 1/2, 1$, 25,000 graphs; every moment from the exact law; the twelve $\lvert z\rvert$ are below 1.9 |
 | three misreadings (§3.3) | `test_each_plausible_misreading_of_the_rewiring_rule_is_rejected` | eligible set after the deletion, vertex-major order, retained endpoint $b$: each rejected at $n = 6$ with 30,000 graphs; the correct reading passes on the same seeds |
 | Proposition 7(b) (decisions) | `test_rewiring_decisions_are_bernoulli_beta` | $n = 24$, 20,000 graphs each at $\beta = 0.1, 0.5$: z-test of the attempt total; χ² of the attempt histogram against Binomial(48, $\beta$); χ² and max-z over the 48 positions; z-test of lag-1 products; a wrong $\beta$ is rejected |
 | Propositions 5, 6 (targets) | `test_targets_are_uniform_on_the_eligible_set_computed_before_the_deletion`, `test_rejection_sampling_uses_n_over_the_eligible_size_draws_on_average`, `test_a_biased_target_sampler_fails_the_uniformity_test` | χ² of the position among the 19 eligible vertices of each graph's first rewiring; χ² of the randomized PIT over all events; z-test of the number of draws against $\sum n/\lvert A\rvert$; "smallest eligible vertex" rejected |
 | study protocol exact (v1.4 §7.3, requirement 10) | `test_the_exported_circuit_is_the_oracle_and_the_direct_transcription`, `test_each_layer_has_floor_n_over_two_gates_on_edges_with_the_low_endpoint_first` | exact: text equals `tests/_protocol_oracle.py` and a transcription of the draws for $n \in \lbrace 5, 6, 9, 16, 17\rbrace$, both gate modes; $\lfloor n/2\rfloor$ gates, $a < b$, on graph edges, for $n = 5, \dots, 11, 16, 17, 24, 25$ |
 | Proposition 9 (a)–(b) | `test_edge_draws_are_uniform_over_the_graphs_edges`, `test_edges_are_drawn_with_replacement_in_sampled_order`, `test_disjoint_pairs_of_edge_draws_are_independent_and_uniform` | 345,600 draws over 48 edges: χ² pooled and by position; z-tests of the vertex incidences ($\propto$ degree, 24 tests); occupancy law χ²; collision rates 1/48 within and across layers; 256-cell χ² of disjoint pairs |
 | Propositions 5, 9(c), 10 | `test_clifford_indices_are_uniform_over_11520_and_their_classes_over_720`, `test_the_clifford_test_has_the_power_to_see_a_bias`, `test_j_over_16_is_the_symplectic_class_and_j_mod_16_the_sign_bits` | χ² over 11,520 indices (30 each), 720 classes, 16 sign patterns, class $\times$ sign, consecutive pairs; a $\pm5\%$ class bias is rejected; exact: `clifford.py` classes and signs for all 11,520 indices against a brute-force enumeration of $\mathrm{Sp}(4,\mathbb F_2)$ |
-| Proposition 11 (mask law) | `test_masks_are_independent_bernoulli_p_at_every_site`, `test_the_extreme_rates_measure_nothing_or_everything` | z-tests per site and for the total (8,000 layers $\times$ 12 sites); a wrong rate is rejected; $p = 0, 1$ exact |
+| Proposition 11 (mask law) | `test_masks_are_independent_bernoulli_p_at_every_site`, `test_the_extreme_rates_measure_nothing_or_everything` | the largest of the 12 per-site z-scores as a Bonferroni-corrected $p$-value, the χ² of their squares, and a z-test of the total (8,000 layers $\times$ 12 sites); a wrong rate is rejected; $p = 0, 1$ exact |
 | masks uncorrelated (v1.4 §7.4) | `test_masks_have_no_site_or_layer_correlation_beyond_chance`, `test_the_correlation_tests_have_the_power_to_see_planted_dependence` | six correlation families, χ² each; planted site and layer dependence rejected |
-| masks independent of gates | `test_masks_are_independent_of_the_gate_draws` | three layer offsets of "site touched by a gate", four correlations of the layer count with the gate classes and edges |
+| masks independent of gates | `test_masks_are_independent_of_the_gate_draws` | three layer offsets of "site touched by a gate" (χ²); four z-tests of the layer count against the mean gate class and edge of the same and of the next layer, standardized with the exact Binomial and uniform moments (§5.4) |
 | Proposition 12 (nesting; requirement 11) | `test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent` | exact: 9 rates, 5 aligned $(g,c,u)$: one run seed (five words) for all rates, the same gates, mask $=$ `uniform < float64(p)`, nested chain; independent mode: three seven-word seeds, other gates, not nested |
 | Proposition 14 (independent conditions) | `test_graph_collections_of_different_sizes_are_independent_samples`, `test_graph_collections_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_sizes_are_independent_samples`; `tests/test_study_identity.py::test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds` | z-tests with exact null laws, each with the shared seed of the first draft as negative control. Sizes 12 and 16, $\beta = 1/2$, 3,000 graphs: first rewiring attempt equal for 1,021 (null $q = 1/3$, $z = 0.81$; shared: 3,000). $\beta = 0.3$ and $0.5$ at $n = 16$: attempt at $0.5$ not after that at $0.3$ for 2,311 of 3,000 (null $10/13$, $z = 0.14$; shared: 3,000). Edge indices at $\beta = 0.1$ and $0.3$, $n = 12$: equal at 372 of 9,600 gate draws (null $1/24$, $z = -1.43$; shared: all). First gate of $n = 12$ and $16$: cells overlapping for 67 of 1,000 trajectories (null $1/16$, $z = 0.59$; shared: all) |
 | Proposition 13 (requirement 6) | `test_a_longer_horizon_extends_the_circuit_prefix`, `test_unrelated_choices_leave_the_circuit_unchanged`, `test_the_simulated_code_dimension_has_a_horizon_independent_prefix` | exact: prefixes for three horizon pairs; probes, checkpoints and appended graphs leave the export unchanged; $k_t$ for $t \le 6$ equal at $T = 6$ and $14$ and under sparse checkpoints |
@@ -1005,6 +1069,10 @@ generic draws), `tests/test_invariance.py` (chunks, threads, replay), `tests/tes
 
 ## 9. Limitations and departures
 
+* **Float thresholds.** A rate $p$ and a rewiring probability $\beta$ reach the generator as doubles compared with uniforms
+  on the multiples of $2^{-53}$, so the realized probabilities are $P_{\mathrm{real}}(\mathrm{fl}(p))$ and
+  $\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, exact for dyadic values and within $2^{-52}$ otherwise (Propositions 7(b') and
+  11; v1.4 §7.2). Statements "Bernoulli($p$)" and "$\mu_{n,\beta}$" in this document are exact for those realized values.
 * **Ideal versus pseudorandom.** Everything in §4 is exact for independent uniform draws. The xoshiro256**
   generator is a deterministic sequence; the tests show no deviation at the stated sensitivity and prove
   nothing about independence (v1.4 §7.1, §7.4). The streams of trajectories and of graphs come from

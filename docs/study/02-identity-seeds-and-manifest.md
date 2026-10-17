@@ -3,7 +3,7 @@
 How the Watts–Strogatz study names things so that every graph, circuit and trajectory can be
 rebuilt from one frozen description: exact rate tokens, trajectory keys, the seeds of graphs and
 of circuits (domain-tagged word tuples that name the condition, so that only the rates of one
-condition are coupled), the trajectory index $u = g\,s + c$ and why extending the study never renumbers it, the
+condition are coupled), the trajectory index $u = g\,\bar C + c$ and why extending the study never renumbers it, the
 graph record with its edge digest, canonical JSON and digests, the experiment manifest field by
 field, the checkpoint rule of v1.4 §9 stated exactly with its rounding (and its list and table
 forms), the rules under which a later manifest may extend an earlier one, and the schedule that
@@ -54,7 +54,7 @@ It implements
 
 It changes no probability law and no random stream (the sampling it names is documented in
 [01-ensemble-and-sampling.md](01-ensemble-and-sampling.md)). Departures from v1.4 and the design are listed in §9
-(D1, D2, D4 and D6 of the design and the new rules N1–N7 introduced here).
+(D1, D2, D4 and D6 of the design and the new rules N1–N8 introduced here).
 
 ## 2. Notation
 
@@ -65,9 +65,9 @@ It changes no probability law and no random stream (the sampling it names is doc
 | $\operatorname{fl}(x)$ | the double nearest to $x$ | float64 | `Token.float64`, `Token.hex` |
 | $n$, $\beta$, $p$ | system size, rewiring probability, measurement rate | int, tokens | `n`, `beta`, `p` |
 | $g$, $c$, $r$ | graph, circuit and measurement-replica labels ($r = 0$ only) | integers $\ge 0$ | `g`, `c`, `r` |
-| $G_*$, $C$ | graphs per condition, circuits per graph | integers $\ge 1$ | `trials.graphs`, `trials.circuits_per_graph` |
-| $s$ | the circuit index stride, $s \ge C$, frozen | integer | `trials.circuit_index_stride`, `manifest.stride` |
-| $u$ | the trajectory index $u = g s + c$ | integer | `stream_index(g, c, stride)` |
+| $N_{\mathrm{graphs}}$, $C$ | graphs per condition, circuits per graph (v1.4 §2.2, §7.2; earlier drafts of v1.4 wrote $G_*$) | integers $\ge 1$ | `trials.graphs`, `trials.circuits_per_graph` |
+| $\bar C$ | the circuit index stride, $\bar C \ge C$, frozen (design D2; $\bar C = C$ gives v1.4's $u = gC + c$) | integer | `trials.circuit_index_stride`, `manifest.stride` |
+| $u$ | the trajectory index $u = g \bar C + c$ | integer | `stream_index(g, c, stride)` |
 | $M_g$, $M_c$ | the master graph seed and the master circuit seed (they may be equal) | integers in $[0, 2^{32})$ | `seeds.master_graph_seed`, `seeds.master_circuit_seed` |
 | $h(x)$ | the token hash: first 8 bytes of BLAKE2b ($\texttt{digest\_size}=8$) of $\operatorname{tok}(x)$, little-endian | $[0, 2^{64})$ | `rate_hash` |
 | $\lambda_x$, $\eta_x$ | the low and high 32-bit words of $h(x)$: $\lambda_x = h(x) \bmod 2^{32}$, $\eta_x = \lfloor h(x)/2^{32}\rfloor$ | integers in $[0, 2^{32})$ | `token_words(x)` |
@@ -77,8 +77,8 @@ It changes no probability law and no random stream (the sampling it names is doc
 | $T_{\max}(n)$ | the horizon in layers | integer $\ge 1$ | `manifest.layers(n, beta)` |
 | $N_T$ | the requested geometric checkpoint count | integer in $[1, 1000]$ | `depth.checkpoints.count` |
 | $a_j$ | $T_{\max}^{\,j/(N_T - 1)}$, $j = 0, \dots, N_T - 1$ | real | |
-| $S_r(n,\beta)$, also $\mathcal T(n,\beta)$ | the sparse checkpoints of revision $r$ from its own rule and horizon: a sorted set of integers containing $0, 1, T_{\max,r}$ | set | `manifest.checkpoints(n, beta)` |
-| $E_r(n,\beta)$ | the effective schedule used for work under revision $r$: $(S_1 \cup \dots \cup S_r) \cap [0, T_{\max,r}]$ (ruling R-CK) | set | `manifest.effective_checkpoints(revisions, n, beta)` |
+| $S_r(n,\beta)$ | the own schedule of revision $r$, from its own rule and horizon: a sorted set of integers containing $0, 1, T_{\max,r}$ | set | `manifest.checkpoints(n, beta)` |
+| $E_r(n,\beta)$, v1.4's $\mathcal T(n,\beta)$ | the effective schedule used for work under revision $r$, where the snapshots and the other expensive probes run: $(S_1 \cup \dots \cup S_r) \cap [0, T_{\max,r}]$ (ruling R-CK); $E_1 = S_1$ | set | `manifest.effective_checkpoints(revisions, n, beta)` |
 | $\mathcal P(n,\beta)$ | the rates run at $(n, \beta)$ | set of tokens | `manifest.rates(n, beta)` |
 | $\operatorname{dig}$ | SHA-256, written as 64 lowercase hexadecimal digits | string | `sha256_hex` |
 
@@ -131,10 +131,10 @@ for its low and high 32-bit words (`token_words`).
 
 ### 3.4 The stream index (v1.4 §7.2; design D2)
 
-$u(g, c) = g\,s + c$ with the stride $s$ of the manifest and $0 \le c < s$ (`identity.stream_index`; the inverse is
-`split_stream_index`). The engine runs a condition with `circuits_per_graph = s` and `indices = [u(g, c) for the wanted pairs]`, so trajectory $u$
-runs on graph $\lfloor u/s\rfloor = g$ and draws its circuit from stream $u$ of the run seed. The design's default stride is $C$; a
-larger frozen $s$ lets circuits $C, \dots, s-1$ be added later without renumbering. The engine looks the graph up by position in the list of
+$u(g, c) = g\,\bar C + c$ with the stride $\bar C$ of the manifest and $0 \le c < \bar C$ (`identity.stream_index`; the inverse is
+`split_stream_index`). The engine runs a condition with `circuits_per_graph =` $\bar C$ and `indices = [u(g, c) for the wanted pairs]`, so trajectory $u$
+runs on graph $\lfloor u/\bar C\rfloor = g$ and draws its circuit from stream $u$ of the run seed. The design's default stride is $C$ (then $u = gC + c$ as in v1.4 §7.2); a
+larger frozen $\bar C$ lets circuits $C, \dots, \bar C-1$ be added later without renumbering. The engine looks the graph up by position in the list of
 graphs it is given (`MonitoredCircuit.run(indices=...)`: each index must be below `len(edges) * circuits_per_graph`), so a run of the
 trajectories of the graph labels $g_0, \dots, g_1 - 1$ must be given the graphs $0, \dots, g_1 - 1$ in that order; the earlier ones are not simulated.
 
@@ -163,41 +163,49 @@ NaN, infinities, fractions, bytes and non-string keys are refused. `json_digest(
 `ExperimentManifest.from_json(dict | str | Path)` reads a manifest strictly: unknown keys are refused with the allowed ones listed, duplicate
 JSON keys and the constants NaN and Infinity are refused, types are checked (an integer field refuses `16.0` and `true`), ranges are checked, and every
 message names the field (`manifest.trials.graphs: must be at least 1, got 0`). A string is JSON text and must start with `{`; a
-`pathlib.Path` is read as a file. The sections:
+`pathlib.Path` is read as a UTF-8 file, with or without a byte-order mark (Windows PowerShell 5.1 writes one), and a file that does not hold a JSON object
+is refused as such. A manifest built in code, directly or with `dataclasses.replace`, obeys the same rules: the constructor reads every section back
+through its `from_dict` (`manifest._check_sections`), refuses what reading would refuse and requires the canonical form reading gives, so its canonical
+JSON reads back as the same manifest. The sections:
 
 | key | type, default | constraints and meaning |
 |---|---|---|
 | `schema` | string, optional | must equal `"sparsegf2.study.manifest/1"` |
 | `experiment_id` | string, required | §3.2 |
-| `label` | `"exploratory"` (default) or `"confirmatory"` | keeps exploratory and confirmatory runs apart (v1.4 §9) |
+| `label` | `"exploratory"` (default) or `"confirmatory"` | keeps exploratory and confirmatory runs apart (v1.4 §9); a confirmatory manifest freezes its conditions and its `analysis` section (§3.11, item 8) |
 | `conditions` | list of blocks, required | each block `{"n": [...], "beta": [...], "p": [...]}`: the product of its lists; $n \ge 5$ integers; $\beta$, $p$ tokens; no list repeats a value |
 | `depth.layers` | exactly one of `{"per_n": a}`, `{"fixed": T}`, `{"table": {"16": 128, ...}}` | $T_{\max} = a n$, $T$, or the table (keys are the sizes in use, exactly); every value an integer $\ge 1$ |
 | `depth.checkpoints` | exactly one of `{"count": N}`, `{"list": [...]}`, `{"table": {"16": [...], ...}}` | $1 \le N \le 1000$ (§3.9); a list: one non-empty list of integers $\ge 0$ for every size, the entries above a size's $T_{\max}$ dropped for that size; a table: one list (possibly empty) of integers $\ge 0$ per size, the keys exactly the sizes in use, every entry $\le T_{\max}(n)$ |
-| `trials.graphs`, `trials.circuits_per_graph` | integers $\ge 1$, required | $G_*$, $C$ |
-| `trials.circuit_index_stride` | integer $\ge C$, default $C$ | the frozen stride $s$ |
+| `trials.graphs`, `trials.circuits_per_graph` | integers $\ge 1$, required | $N_{\mathrm{graphs}}$, $C$ |
+| `trials.circuit_index_stride` | integer $\ge C$, default $C$ | the frozen stride $\bar C$ |
 | `trials.measurement_replicas` | must be 1 | design D1: the native engine draws gates and masks from one stream |
 | `seeds.master_graph_seed`, `seeds.master_circuit_seed` | integers in $[0, 2^{32})$, required | may be equal (the tags of §3.3 separate the domains, Proposition 4) |
 | `seeds.gate_mode` | `"shared"` (default) or `"independent"` | §3.3 |
 | `dynamics.stop_when_purified` | bool, default false | passed to the engine |
-| `observables.tableau_snapshots` | bool, default true | `tableau_snapshot` probe at $\mathcal T(n,\beta)$ |
-| `observables.contiguous_distance` | bool, default true | `contiguous_distance` probe at $\mathcal T(n,\beta)$ |
+| `observables.tableau_snapshots` | bool, default true | `tableau_snapshot` probe at the effective schedule $E_r(n,\beta)$ (§3.9; $S_1$ while there is one revision) |
+| `observables.contiguous_distance` | bool, default true | `contiguous_distance` probe at $E_r(n,\beta)$ |
 | `observables.uniform_erasure` | `null`, or `{"samples": 200, "exact_budget": 5000}` (the default) | `erasure_first_failure(samples)`; `uncorrectable_region_counts(budget=exact_budget)`, with `exact_budget` $= 0$ (no exact counts) or at least the largest $n$ |
-| `observables.correlated_erasure` | list, default empty | each entry: `couplings` (required), `sizes` (`null` = every $m = 1..n-1$, a list, or a range string `"a:b[:step]"`; all within $[1, n-1]$ for every $n$), `samples` (100), `thin` (1), `geometry` (`"interaction"`), `method` (`"auto"`), `burn_in` (`null`), `tempering` (true), `ladder` (`"auto"`), `max_step` (`null`), `name` (`null`); validated by building the engine probe |
+| `observables.correlated_erasure` | list, default empty | each entry: `couplings` (required; each $J \ge 0$, the domain of $Q_{G,J}$ in v1.4 §5.7), `sizes` (`null` = every $m = 1..n-1$, a list kept in its order, or a range string `"a:b[:step]"` stored as its expansion; all within $[1, n-1]$ for every $n$), `samples` (100), `thin` (1), `geometry` (`"interaction"`), `method` (`"auto"`), `burn_in` (`null`), `tempering` (true), `ladder` (`"auto"`), `max_step` (`null`), `name` (`null`, or a name outside `RESERVED_PROBE_NAMES`, the names of the runner's own probes); validated by building the engine probe. The probe of entry $i$ is named `name`, else `correlated_erasure` for $i = 0$ and `correlated_erasure_`$i$ after (`Observables.probe_names`), so appending entries renames nothing; `Observables.correlated_probes` builds them under these names |
 | `storage` | `{"graphs_per_unit": 8, "compression_level": 6}` | compression level $0..9$ |
 | `resources` | `{"num_threads": null, "max_unit_trajectories": 4096}` | threads $\ge 1$ or `null` |
 | `analysis` | `{"peak": {"rule": "plateau", "z": 1.0, "sensitivity_z": [0, 1, 2], "bootstrap": 200}, "bootstrap": 1000, "censoring": "survival"}` | the predeclared peak and censoring rules (v1.4 §5.8, §6); `peak.rule` must be `"plateau"` and `censoring` `"survival"` (`peak.z` and every `sensitivity_z` entry $\ge 0$, bootstraps $\ge 0$) |
 
 `to_json()` writes **every** key, defaults included, in canonical JSON; `digest()` is its SHA-256. Reading also refuses what no key
 alone can show: a duplicate condition, a layer table or a checkpoint table that does not cover exactly the sizes in use, a checkpoint-table entry beyond its size's
-$T_{\max}$, correlated sizes outside $[1, n-1]$, two correlated-erasure probes with the same name, and two different $\beta$ tokens (in `gate_mode="independent"` also two rates) whose 64-bit seed hashes
-coincide, which would give two conditions one seed (probability $2^{-64}$ per pair; Proposition 4). `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
+$T_{\max}$, correlated sizes outside $[1, n-1]$, two correlated-erasure probes with the same resolved name, and two different $\beta$ tokens, or two different rate tokens, whose 64-bit seed hashes
+coincide, which would give two conditions one seed (probability $2^{-64}$ per pair; Proposition 4). The words of $\beta$ enter every graph and run seed; those of $p$ enter the run seeds of
+`gate_mode="independent"` and, in both modes, the region seeds of the sampled observables (`study/observables.py::region_seed`), so rates are checked in both modes. `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
 snapshots with `stop_when_purified`, a work unit larger than `max_unit_trajectories`, and checkpoint-list entries above $T_{\max}$ for every size (they are dropped everywhere and have no effect).
 
 ### 3.8 Conditions and their canonical factorization
 
 `conditions()` resolves the blocks into `Condition(n, beta, rates)` triples sorted by $n$, then $\beta$, with the rates of each pair sorted and
-merged over the blocks. A repeated $(n, \beta, p)$ is refused, and so are two different tokens with the same float64 (they would build identical
-graphs or run identical trajectories under two names). The stored blocks are the **canonical factorization** of the resolved set: group the
+merged over the blocks. A repeated $(n, \beta, p)$ is refused, and so are two different tokens with the same float64. The reason is the float, not the
+seeds: the generator and the engine receive only the double (the rewiring threshold, the mask threshold), so the two tokens would be one simulated
+parameter under two names, recorded as two conditions. Their seeds differ (they hash the token string, §3.3), so two such $\beta$ tokens would even build
+different graphs; two such rates would run different trajectories in `gate_mode="independent"` and, in `"shared"`, the very same trajectories.
+The resolution is computed once per manifest and indexed by $(n, \beta)$ (`ExperimentManifest._resolved`), so every later question about a condition
+is a look-up. The stored blocks are the **canonical factorization** of the resolved set: group the
 pairs $(n,\beta)$ by their rate set $P$; within one $P$, group the sizes $n$ by their set of $\beta$ values; each group is one block
 $\lbrace n\rbrace_{\text{group}} \times B \times P$. The factorization is a function of the set of triples alone (Proposition 9), so equivalent manifests have one
 canonical text and one digest.
@@ -205,8 +213,9 @@ canonical text and one digest.
 ### 3.9 Depth: $T_{\max}$, the checkpoint rule and the effective schedule (v1.4 §9; design §3, ruling R-CK)
 
 $T_{\max}(n)$ is $a n$, the fixed $T$, or the table entry; it is the same for every rate (v1.4 §1). The global checkpoints of the engine are every layer
-(`checkpoints="every_layer"`, so $k_t$ and the exact first-passage depths are observed everywhere); the **sparse checkpoints** $S(n, \beta)$ of a revision
-(written $\mathcal T(n,\beta)$ in v1.4) are where the expensive probes run. The rule of a revision has three forms. In each, $T = T_{\max}(n)$ and $S$ is sorted, without repeats, contained in $[0, T]$ and contains $0, 1, T$.
+(`checkpoints="every_layer"`, so $k_t$ and the exact first-passage depths are observed everywhere). Each revision has its **own schedule** $S(n, \beta)$
+from its own checkpoint rule and horizon; the expensive probes (snapshots, distances, erasure estimates) run at the **effective schedule** $E_r(n,\beta)$
+defined below, the union of the own schedules of all revisions so far, which is v1.4's $\mathcal T(n,\beta)$ and equals $S$ while there is one revision. The rule of a revision has three forms. In each, $T = T_{\max}(n)$ and $S$ is sorted, without repeats, contained in $[0, T]$ and contains $0, 1, T$.
 
 * **`{"count": N_T}`, the geometric rule.** With $q = N_T - 1$:
   1. if $N_T \ge 2$, for $j = 0, \dots, q$ let $a_j = \exp(j \ln T / q) = T^{j/q}$ and $k_j = \lfloor a_j + \tfrac12\rfloor$ (nearest integer, **ties upward**), clamped to $[0, T]$;
@@ -225,7 +234,7 @@ where $S_i$ is the own schedule of revision $i$ at $(n,\beta)$ and a revision th
 ### 3.10 The engine keywords (v1.4 §8.1)
 
 `monitored_circuit_kwargs(n, beta, p)` returns, for a condition of the manifest, the `MonitoredCircuit` keywords
-`num_system=n`, `circuits_per_graph=s`, `layers=`$T_{\max}(n)$, `measurement_rate=`$\operatorname{fl}(p)$, `reference="purification"`,
+`num_system=n`, `circuits_per_graph=`$\bar C$, `layers=`$T_{\max}(n)$, `measurement_rate=`$\operatorname{fl}(p)$, `reference="purification"`,
 `schedule="random_edges"`, `gates_per_layer=n // 2`, `random_orientation=False`, `scramble_gates=0`, `scramble_matchings=0`,
 `scramble_layers=0`, `periodic=True`, `checkpoints="every_layer"` and `stop_when_purified` from `dynamics`. The caller adds `edges` (the graph records of the unit,
 `[record.edges, ...]`) and `probes`.
@@ -236,14 +245,15 @@ A store keeps every revision. `check_extension(old, new)` returns `None` when `n
 
 1. `schema`, `experiment_id`, `label` unchanged;
 2. the seeds and `gate_mode` unchanged (the seed tuples of §3.3 fix every recorded graph and trajectory);
-3. the stride unchanged (it fixes every $u$); `dynamics` and `measurement_replicas` unchanged;
+3. the stride unchanged (it fixes every $u$); `dynamics` and `measurement_replicas` unchanged; no protocol of the old manifest dropped (design §12);
 4. `trials.graphs` and `trials.circuits_per_graph` not smaller;
 5. every old $(n, \beta, p)$ still present;
 6. $T_{\max}$ not smaller, for every old $(n, \beta)$ (a larger one is allowed, size by size, whatever the checkpoint rule becomes);
-7. every observable switched on stays on with its settings (a `correlated_erasure` entry is identified by its full settings; adding entries is allowed).
+7. every observable switched on stays on with its settings; a `correlated_erasure` entry is identified by its **resolved name** (`Observables.probe_names`) **together with** its full settings, because the name keys the probe's random stream (the engine hashes it) and its stored values (v1.4 §7.3: "preserve probe names and versioned settings"; design §3: "a changed setting is a new observable version or name"). Adding entries is allowed: an unnamed entry is named by its position alone, so appending renames nothing. Reordering unnamed entries, inserting one in front of a recorded one, or naming a recorded entry by another name is refused, and the message says whether the new manifest gives the recorded name other settings, names the recorded settings otherwise, or has neither. Naming a recorded entry by its own resolved name is no change;
+8. if the old manifest is labeled `"confirmatory"`: no new $(n, \beta, p)$ and the same `analysis` section. v1.4 §9 freezes the rate grid $\mathcal P(n,\beta)$ before confirmatory runs ("controls graph-size crossover window selection") and §5.8 predeclares the peak rule; to change either, start a new experiment. (Removals are already refused by item 5.)
 
 The checkpoint rule is **not** checked: `count`, `list` and `table` may replace one another and a count may fall as well as rise, because the schedule used for work is the union of the schedules of all revisions (§3.9, Proposition 12), which never drops a depth that an earlier revision scheduled.
-Changes of `storage`, `resources` and `analysis` are allowed: they touch no recorded value.
+Changes of `storage`, `resources` and, in an exploratory manifest, `analysis` are allowed: they touch no recorded value.
 
 `effective_checkpoints(revisions, n, beta)` first requires a valid chain: at least one revision, every entry a manifest, and `check_extension(revisions[k-1], revisions[k])` equal to `None` for every consecutive pair. Otherwise it raises `ValueError("revision k does not extend revision k-1: <message>")` naming the first pair that fails and its first forbidden change (so a list whose horizon decreases is refused with the lowered $T_{\max}$ in the message). Pairwise validity suffices because extensions compose (Proposition 11).
 
@@ -263,13 +273,16 @@ shorter decimal string represents $x$. A decimal string and a rational string ne
 `"a/d"` in lowest terms with a prime factor of $d$ other than 2, 5 is not the value of any decimal string. Injectivity: equal strings parse to equal values, and the value
 determines the string. ∎
 
-**Proposition 2 (JSON numbers).** If a JSON author types a decimal with at most 15 significant digits and a parser turns it into a double, then reading that double through
-$\texttt{repr}$ returns the typed decimal, so `Token.parse(float(s)) = Token.parse(s)`.
+**Proposition 2 (JSON numbers).** If a JSON author types a decimal $d$ with at most 15 significant digits whose value is $0$ or at least $2^{-1022} \approx 2.2\times10^{-308}$ in
+magnitude (the range of the *normal* doubles), and a parser turns it into a double, then reading that double through $\texttt{repr}$ returns the typed decimal, so
+`Token.parse(float(d)) = Token.parse(d)`.
 
-*Proof.* `repr(x)` of a double is the shortest decimal string that converts back to $x$. A decimal $s$ with at most 15 significant digits converts to a double $x$ and back to a 15-digit decimal as $s$
-again (a double carries 15.95 decimal digits: $\mathrm{DBL\_DIG} = 15$). If some shorter decimal $s'$ also mapped to $x$, then $s'$, having at most 15 digits, would round-trip to itself as well, so
-$s' = s$ as numbers. The shortest string is therefore $s$ (up to the form of the exponent and trailing zeros, which `Token.parse` normalizes). ∎ (For 16 or 17 digits the shortest round-trip decimal
-may differ from the typed one; the manifest example and the tests use at most 15, and exact rational strings avoid the question.)
+*Proof.* `repr(x)` of a double is the shortest decimal string that converts back to $x$. A decimal $d$ with at most 15 significant digits in the normal range converts to a double $x$ and back to a 15-digit decimal as $d$
+again: a normal double carries 53 significant bits, at least 15.95 decimal digits, and $\mathrm{DBL\_DIG} = 15$ is exactly this guarantee for normal doubles. If some shorter decimal $d'$ also mapped to $x$, then $d'$, having at most 15 digits, would round-trip to itself as well, so
+$d' = d$ as numbers. The shortest string is therefore $d$ (up to the form of the exponent and trailing zeros, which `Token.parse` normalizes). ∎ The hypotheses are needed. Below $2^{-1022}$ a
+*subnormal* double has fewer than 53 significant bits, so two 15-digit decimals can share one: `float("1.23456789012345e-320")` is printed `1.2347e-320`, another token; below about
+$2.5\times10^{-324}$ a decimal underflows to `0.0`. For 16 or 17 digits the shortest round-trip decimal may also differ from the typed one. Rates and rewiring probabilities of the study are
+far from these regions; the manifest example and the tests use at most 15 digits, and exact decimal or rational *strings* avoid the question entirely.
 
 **Proposition 3 (the float).** For a token $x = a/d$, `Token.float64` is `float(Fraction(a, d))`, the true quotient $a/d$ correctly rounded to the nearest double (ties to even): CPython's
 `int.__truediv__` is correctly rounded. Hence $\lvert\operatorname{fl}(x) - x\rvert \le 2^{-54}$ for $x \in [0,1]$, `float.fromhex(Token.hex) == Token.float64`, and the token (not the float) is the identifier:
@@ -290,7 +303,7 @@ $\sigma(n,\beta,p)$ (seven words, independent mode) of §3.3, all words below $2
   generate the same state only through a collision of the mixing hash inside `SeedSequence`, never because one of them is the other extended by zero words.
 
 *Proof.* (a) The words $M_g$ (or $M_c$), $n$ and, for a graph, $g$ are read off the tuple. The pair $(\lambda_x, \eta_x)$ determines $h(x) = \lambda_x + 2^{32}\eta_x$, and the tokens of a manifest have pairwise different
-hashes: the constructor refuses two $\beta$ tokens, and in independent mode two rates, with equal hashes (`manifest._distinct_seed_words`; for a given pair the probability is $2^{-64}$). So the tuple determines $\beta$ (and $p$).
+hashes: the constructor refuses two $\beta$ tokens, and two rate tokens (in both gate modes), with equal hashes (`manifest._distinct_seed_words`; for a given pair the probability is $2^{-64}$). So the tuple determines $\beta$ (and $p$).
 (b) The first word of a graph seed is $\tau_G$ and the first word of a run seed is $\tau_C \ne \tau_G$; they differ in the first position (and in the length). (c) `SeedSequence` reads an entropy that is a list of integers below
 $2^{32}$ as that list of 32-bit words $w_0, w_1, \dots$. It fills a pool of four words, `pool[i] = hashmix(w_i)` for $i < 4$ and `hashmix(0)` when the entropy has no word $i$, mixes every pool word into every other, and then mixes each
 further word $w_i$ ($i \ge 4$) into all four pool words, with a hash constant that advances at every step. For at most four words, therefore, appending zero words changes nothing: `[s]`, `[s, 0]` and `[s, 0, 0, 0]` generate
@@ -300,13 +313,13 @@ That different entropy arrays generate different states is a property of the has
 (`test_graph_seeds_differ_across_masters_sizes_betas_and_labels`, `test_run_seeds_differ_across_masters_sizes_and_betas_in_both_modes`, and for numpy's padding rule
 `test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words`).
 
-**Proposition 5 (the stream index).** For a stride $s \ge 1$ the map $(g, c) \mapsto g\,s + c$ is a bijection from $\mathbb N \times \lbrace 0, \dots, s-1\rbrace$ onto $\mathbb N$ with inverse
-$u \mapsto (\lfloor u/s\rfloor, u \bmod s)$. An engine run with `circuits_per_graph = s` gives trajectory $u$ the graph $\lfloor u/s\rfloor$ and the circuit stream $u$. Therefore the graph and
-the circuit of the pair $(g,c)$ depend on $(g, c, s)$, the seeds and the protocol only: enlarging $G_*$, or $C$ up to $s$, never changes the index, the graph or the circuit of an existing pair. Changing
-$s$ changes $u$ for every pair with $g \ge 1$, which is why $s$ is frozen.
+**Proposition 5 (the stream index).** For a stride $\bar C \ge 1$ the map $(g, c) \mapsto g\,\bar C + c$ is a bijection from $\mathbb N \times \lbrace 0, \dots, \bar C-1\rbrace$ onto $\mathbb N$ with inverse
+$u \mapsto (\lfloor u/\bar C\rfloor, u \bmod \bar C)$. An engine run with `circuits_per_graph =` $\bar C$ gives trajectory $u$ the graph $\lfloor u/\bar C\rfloor$ and the circuit stream $u$. Therefore the graph and
+the circuit of the pair $(g,c)$ depend on $(g, c, \bar C)$, the seeds and the protocol only: enlarging $N_{\mathrm{graphs}}$, or $C$ up to $\bar C$, never changes the index, the graph or the circuit of an existing pair. Changing
+$\bar C$ changes $u$ for every pair with $g \ge 1$, which is why $\bar C$ is frozen.
 
 *Proof.* Division with remainder. For the engine statement see `_kernel/ensemble.py` (module docstring: trajectory $t$ runs on graph $t$ // `circuits_per_graph`; `stream_state(key, index)`). If
-$s' \ne s$ and $g \ge 1$ then $g s' + c \ne g s + c$. ∎ The test `test_the_engine_runs_trajectory_u_on_graph_u_over_stride` checks the graph assignment, and
+$\bar C' \ne \bar C$ and $g \ge 1$ then $g \bar C' + c \ne g \bar C + c$. ∎ The test `test_the_engine_runs_trajectory_u_on_graph_u_over_stride` checks the graph assignment, and
 `tests/test_study_sampling.py::test_unrelated_choices_leave_the_circuit_unchanged` checks that appended graphs leave trajectory $u$ unchanged.
 
 **Proposition 6 (the two gate modes, and the conditions).** In `shared` mode all rates of a condition $(n,\beta)$ use the one run seed $\sigma(n,\beta)$, which contains no $p$; by document 01 (Proposition 12) trajectory $u$ then has the same graph,
@@ -324,16 +337,22 @@ imply equal $n$ and equal edge arrays, and for canonical edge lists equal graphs
 *Proof.* The header has fixed width, so $n$ and the number of rows $m$ are read from the payload without ambiguity, and each row is two 4-byte signed integers. The edge list is canonical (each edge as $a<b$, rows
 strictly increasing, enforced by `edge_digest`), so it is a function of the edge set. ∎
 
-**Proposition 8 (canonical JSON).** For data built from `None`, booleans, integers, finite floats, strings, lists and dictionaries with string keys, $\operatorname{json.loads}(\texttt{canonical\_json}(x)) = x$ (tuples
-read back as lists). Hence `canonical_json` is injective on such data, and equal data give equal text whatever the key order of the source and the white space of the file.
+**Proposition 8 (canonical JSON).** Call two JSON values *equal* when they have the same JSON type at every node (`null`, boolean, integer, float, string, list, object; integer and
+float are different types, and a boolean is not an integer) and equal contents. For data built from `None`, booleans, integers, finite floats, strings, lists and dictionaries with string keys,
+$\operatorname{json.loads}(\texttt{canonical\_json}(x))$ equals $x$ in this sense (tuples read back as lists, and $-0.0$ as $0.0$). Hence `canonical_json` is injective on such data up to the sign of zero, and equal data give equal
+text whatever the key order of the source and the white space of the file.
 
-*Proof.* Floats are written with Python's shortest round-trip $\texttt{repr}$, integers exactly, strings with ASCII escapes; the separators and the sorted keys are deterministic. The parse inverts each token. ∎
-`-0.0` is normalized to `0.0`, the one value where equal numbers have different text.
+*Proof.* Floats are written with Python's shortest round-trip $\texttt{repr}$, which always has a point or an exponent (`1.0`, `1e-05`), integers exactly as digits, booleans as `true` and `false`,
+strings with ASCII escapes; the separators and the sorted keys are deterministic. The parse inverts each token and returns an `int` for digits, a `float` for a number with a point or an exponent and
+a `bool` for `true`/`false`, so the types come back as they went in. ∎ Equality is of *typed* values: `1`, `1.0` and `True` compare equal in Python but are three texts, `1`, `1.0` and `true`,
+and three digests. A record whose numeric field is an integer on one code path and a float on another would therefore get two digests for one value, so a writer fixes the type of each field
+(the manifest reads every real field as a float and refuses `16.0` and `true` in an integer field). Among floats, `-0.0` and `0.0` are the one pair of equal values with different `repr`;
+`-0.0` is normalized to `0.0`.
 
 **Proposition 9 (the manifest digest).** `digest()` is a function of the *content* of the manifest: it is invariant under the order of keys, white space, the spelling of tokens (`"0.1"`, `0.1`, `"1/10"`), the order of the entries of the lists `n`, `beta`, `p`,
-explicit defaults versus omitted ones, repeated entries of a checkpoint list, and the way the conditions are factored into blocks; it changes with every change of a value.
+explicit defaults versus omitted ones, repeated entries of a checkpoint list, the spelling of correlated-erasure sizes (`"1:31:2"`, `" 1 : 31 : 2 "`, `"1:30:2"` and the list $[1, 3, \dots, 29]$), and the way the conditions are factored into blocks; it changes with every change of a value.
 
-*Proof.* Reading produces a manifest object in which tokens are exact, defaults are filled in, the lists of a block are sorted, the checkpoint list is sorted and deduplicated, and the blocks are replaced by the canonical
+*Proof.* Reading produces a manifest object in which tokens are exact, defaults are filled in, the lists of a block are sorted, the checkpoint list is sorted and deduplicated, a range string of sizes is replaced by its expansion (a range does not depend on $n$), and the blocks are replaced by the canonical
 factorization of §3.8; `to_dict` is a function of that object and `digest` of its canonical text (Proposition 8). The canonical factorization depends on the set of triples only: it is built from `conditions()`, which is defined by the set. It
 represents the same set: each pair $(n,\beta)$ has exactly one rate set $P$, so lies in exactly one group; within the group of that $P$, each $n$ has exactly one $\beta$-set $B$; the blocks $\lbrace n \text{'s with } B\rbrace \times B \times P$ are therefore pairwise
 disjoint and their union is the set. A changed value changes the object and so, by injectivity (Proposition 8), the text; the hash distinguishes them except for a SHA-256 collision. ∎
@@ -358,14 +377,16 @@ number rounded by the same rule. ∎ The computation in `study/manifest.py::_hal
 
 ### 4.5 Revisions
 
-**Proposition 11 (what an accepted revision guarantees).** (a) If `check_extension(old, new)` is `None`, then for every trajectory $(n, \beta, p, g, c)$ of `old` (with $g < G_*^{\mathrm{old}}$, $c < C^{\mathrm{old}}$):
+**Proposition 11 (what an accepted revision guarantees).** (a) If `check_extension(old, new)` is `None`, then for every trajectory $(n, \beta, p, g, c)$ of `old` (with $g < N_{\mathrm{graphs}}^{\mathrm{old}}$, $c < C^{\mathrm{old}}$):
 the graph record (same $n$, $\beta$, seed tuple, generator), the stream index $u$, the run seed and the float $\operatorname{fl}(p)$ are the same in `new`; the condition still exists in `new` with $T_{\max}^{\mathrm{new}} \ge T_{\max}^{\mathrm{old}}$ and the old
-trajectory is the prefix of its extension (document 01, Proposition 13); every observable recorded under `old` has the same settings in `new`. (b) Extension is reflexive and transitive: `check_extension(a, a)` is `None`, and if `check_extension(a, b)` and `check_extension(b, c)` are `None` then so is `check_extension(a, c)`.
+trajectory is the prefix of its extension (document 01, Proposition 13); every observable recorded under `old` has the same settings in `new`, and every `correlated_erasure` probe of `old` has the same resolved name in `new`, so the engine builds the same probe and draws its regions from the same stream (the stream of a sampled probe is keyed by the hash of its name).
+(b) If `old` is labeled confirmatory, `new` has exactly its conditions and its `analysis` section. (c) Extension is reflexive and transitive: `check_extension(a, a)` is `None`, and if `check_extension(a, b)` and `check_extension(b, c)` are `None` then so is `check_extension(a, c)`.
 The checkpoint rule is not part of the guarantee: it may change freely (Proposition 12 says what survives).
 
 *Proof.* (a) Each statement is one of the checks of §3.11 in contrapositive: seeds and mode equal, stride equal (Proposition 5), `dynamics` equal (the engine keywords are those of `old`), conditions a superset, horizons not smaller,
-observables unchanged. (b) Each check is reflexive and transitive: equality of fields, $\ge$ between integers, inclusion of sets of conditions, "if on then on", "if recorded then equal" and "every old entry is among the new ones"
-are preorders; the horizon check compares one condition across the manifests and that condition is present in all three by the inclusion of conditions. ∎ Not guaranteed: that the new trajectories have been run, and that `storage`, `resources` or `analysis` are unchanged (they are free to change).
+observables unchanged: item 7 compares, for each old correlated entry, the pair (resolved name, settings) with the pairs of `new`, so the name and the settings both survive, and `Observables.correlated_probes` builds the probe from exactly these. (b) is item 8, with item 5 for the removals.
+(c) Each check is reflexive and transitive: equality of fields, $\ge$ between integers, inclusion of sets of conditions, "if on then on", "if recorded then equal", "every old (name, settings) pair is among the new ones" and, for a confirmatory manifest, equality of the condition sets and of `analysis`
+are preorders (the label is equal along a chain, by item 1); the horizon check compares one condition across the manifests and that condition is present in all three by the inclusion of conditions. ∎ Not guaranteed: that the new trajectories have been run, and that `storage`, `resources` or (in an exploratory manifest) `analysis` are unchanged (they are free to change).
 
 **Proposition 12 (the effective schedule).** Let $m_1, \dots, m_r$ be revisions with `check_extension(`$m_{i-1}, m_i$`)` equal to `None` for $i = 2, \dots, r$, and let $(n, \beta)$ be a condition of $m_r$; write $S_i$ for the own schedule of $m_i$ at $(n,\beta)$ (`m_i.checkpoints(n, beta)`) and $T_i$ for its horizon,
 and let $m_a$ be the first revision that contains $(n,\beta)$. Then
@@ -395,10 +416,12 @@ Cost: negligible. Exactness: exact.
 
 ### 5.2 Reading a manifest
 
-1. Text: `json.loads` with a hook that refuses duplicate keys and the constants NaN and Infinity; a file is read as UTF-8.
+1. Text: `json.loads` with a hook that refuses duplicate keys and the constants NaN and Infinity; a file is read as UTF-8 (`utf-8-sig`: a leading byte-order mark is dropped) and must hold a JSON object.
 2. Each object is checked against its allowed and required keys; each value against its type and range (`_object`, `_int`, `_real`, `_flag`, `_choice`, `_list`, `_token`); the message carries the path of the field.
-3. Sections are built (frozen dataclasses); the engine validates each correlated-erasure entry by constructing its probe.
-4. The constructor resolves the conditions (duplicates refused), replaces the blocks by the canonical factorization and checks the cross-field rules of §3.7.
+3. Sections are built (frozen dataclasses); a range string of correlated sizes is expanded; the engine validates each correlated-erasure entry by constructing its probe.
+4. The constructor first reads every section back through its `from_dict` (`_check_sections`, `_reparsed`: the same rules for a manifest built in code, and the canonical form required), then resolves the conditions once (duplicates and two tokens of one float64 refused; `_resolve_conditions`, kept with an index by $(n, \beta)$), replaces the blocks by the canonical factorization and checks the cross-field rules of §3.7.
+
+Cost: a few passes over the conditions and the correlated entries (sorting included), plus one engine probe built per correlated entry, twice (at reading and in the constructor's check).
 
 ### 5.3 The exact checkpoints
 
@@ -408,7 +431,7 @@ For the list form (`CheckpointRule.resolve`) take the entries not above $T$ and 
 
 ### 5.4 `check_extension`
 
-The checks of §3.11, in order, return the message of the first failure; the condition checks compare sets of $(n, \beta, p)$, cost linear in the number of conditions. No checkpoint set is compared.
+The checks of §3.11, in order, return the message of the first failure; the condition checks compare sets of $(n, \beta, p)$ and the horizon check looks each old $(n, \beta)$ up in the new manifest's index, so the cost is linear in the number of conditions (the resolved conditions of each manifest are computed once, §3.8). Item 7 compares the canonical JSON of each old correlated entry, with its resolved name written in, against those of the new entries. No checkpoint set is compared.
 
 ### 5.5 `effective_checkpoints`
 
@@ -437,17 +460,18 @@ Cost: one BLAKE2b of a few bytes per token. Exactness: exact integer arithmetic;
 | experiment id (§3.2) | `study/identity.py::check_experiment_id` |
 | trajectory key (§3.2) | `study/identity.py::TrajectoryKey` (`parse`, `stream_index`) |
 | graph seed $\gamma_g(n,\beta)$, run seed $\sigma$, tags $\tau_G, \tau_C$ (§3.3) | `study/identity.py::graph_seed`, `run_seed`, `GRAPH_SEED_TAG`, `CIRCUIT_SEED_TAG`; `ExperimentManifest.graph_seed(n, beta, g)`, `run_seed(n, beta, p)`; the refusal of equal seed hashes `study/manifest.py::_distinct_seed_words` |
-| $u = g s + c$ and inverse (§3.4) | `study/identity.py::stream_index`, `split_stream_index`; `ExperimentManifest.stream_index` |
+| $u = g \bar C + c$ and inverse (§3.4) | `study/identity.py::stream_index`, `split_stream_index`; `ExperimentManifest.stream_index` |
 | $C(n,2)$, $L_n$ (document 01) | `study/identity.py::circulant_edges`, `original_edge_list` |
 | graph record (§3.5) | `study/identity.py::GraphRecord`, `build_graph`, `validate_graph`, `edge_digest` |
 | versions (§3.5) | `study/identity.py::GRAPH_GENERATOR_VERSION`, `CLIFFORD_ENUMERATION_VERSION`, `DYNAMICS_VERSION`, `ROWSPACE_FORMAT_VERSION`, `STORE_SCHEMA_VERSION`, `version_record` |
 | canonical JSON, digests (§3.6) | `study/identity.py::canonical_json`, `sha256_hex`, `json_digest` |
-| the manifest (§3.7) | `study/manifest.py::ExperimentManifest` and its sections `ConditionBlock`, `Layers`, `CheckpointRule`, `Depth`, `Trials`, `Seeds`, `Dynamics`, `UniformErasure`, `CorrelatedErasure`, `Observables`, `Storage`, `Resources`, `Peak`, `Analysis` |
-| conditions, canonical factorization (§3.8) | `ExperimentManifest.conditions`, `rates`, `study/manifest.py::_canonical_blocks` |
+| the manifest (§3.7) | `study/manifest.py::ExperimentManifest` and its sections `ConditionBlock`, `Layers`, `CheckpointRule`, `Depth`, `Trials`, `Seeds`, `Dynamics`, `UniformErasure`, `CorrelatedErasure`, `Observables`, `Storage`, `Resources`, `Peak`, `Analysis`; the constructor's re-reading of the sections `study/manifest.py::_check_sections`, `_reparsed` |
+| correlated probes and their names (§3.7, §3.11 item 7) | `Observables.probe_names`, `Observables.default_probe_name`, `Observables.correlated_probes`, `CorrelatedErasure.probe`; `study/manifest.py::RESERVED_PROBE_NAMES` |
+| conditions, canonical factorization (§3.8) | `ExperimentManifest.conditions`, `rates`, `_resolved`; `study/manifest.py::_resolve_conditions`, `_canonical_blocks` |
 | $T_{\max}$, own schedule $S$ (§3.9) | `ExperimentManifest.layers`, `checkpoints`, `study/manifest.py::CheckpointRule.resolve`; `study/manifest.py::geometric_checkpoints`, `round_half_up_power`, `_half_up_root` |
 | effective schedule $E_r$ (§3.9, §5.5) | `study/manifest.py::effective_checkpoints`, `ExperimentManifest.has_condition` |
 | engine keywords (§3.10) | `ExperimentManifest.monitored_circuit_kwargs` |
-| probes of the observables | `CorrelatedErasure.probe`; the other probes are built by the runner from `Observables` |
+| probes of the observables | `Observables.correlated_probes` (each entry under its resolved name); the other probes are built by the runner from `Observables`, under the names of `RESERVED_PROBE_NAMES` |
 | revisions (§3.11) | `study/manifest.py::check_extension` |
 
 ## 7. Worked examples
@@ -621,6 +645,31 @@ spelled = {**MANIFEST, "conditions": [
     {"n": [16], "beta": ["0.0", "1/10"], "p": ["0.10", "0.15", "2/10"]},
 ]}
 assert mf.ExperimentManifest.from_json(spelled).digest() == m.digest()
+# nor on how the correlated sizes are spelled: a range is stored as its expansion
+listed = {"couplings": [0, 1, 2], "sizes": list(range(1, 15, 2)), "samples": 100, "thin": 20}
+assert m.observables.correlated_erasure[0].sizes == (1, 3, 5, 7, 9, 11, 13)
+assert mf.ExperimentManifest.from_json({**MANIFEST, "observables": {"correlated_erasure": [listed]}}).digest() == m.digest()
+
+# two tokens of one float64 are one engine value under two names: refused, although their seeds differ
+twin = "0.1000000000000000055511151231257827"
+assert Token.parse(twin).float64 == Token.parse("0.1").float64
+assert ident.graph_seed(17, 16, twin, 0) != ident.graph_seed(17, 16, "0.1", 0)
+try:
+    mf.ExperimentManifest.from_json({**MANIFEST, "conditions": [{"n": [16], "beta": ["0.1", twin], "p": ["0.1"]}]})
+except ValueError as error:
+    print("refused:", str(error)[:110])
+else:
+    raise AssertionError("two tokens of one float64 were accepted")
+
+# a manifest built in code obeys the rules of reading
+import dataclasses
+
+try:
+    dataclasses.replace(m, trials=dataclasses.replace(m.trials, circuits_per_graph=9))  # stride 8
+except ValueError as error:
+    print("refused:", str(error)[:110])
+else:
+    raise AssertionError("a circuit count above the stride was accepted")
 ```
 
 ### (f) The checkpoint rule, exactly
@@ -688,6 +737,30 @@ assert mf.check_extension(m, revised(**{"depth.layers": {"per_n": 16}})) is None
 assert mf.check_extension(m, revised(**{"resources.num_threads": 4})) is None  # free to change
 for changes in ({"seeds.master_graph_seed": 18}, {"trials.graphs": 10}, {"depth.layers": {"per_n": 4}}):
     print(mf.check_extension(m, revised(**changes)))
+# the horizon is compared size by size: n = 24 may not fall while n = 16 keeps its 128
+assert "T_max for n = 24 changed from 192 to 100" in mf.check_extension(
+    m, revised(**{"depth.layers": {"table": {"16": 128, "24": 100}}})
+)
+
+# a recorded correlated probe keeps its resolved name: appending renames nothing, inserting in front does
+entry = MANIFEST["observables"]["correlated_erasure"][0]
+appended = revised(**{"observables.correlated_erasure": [entry, {"couplings": [3]}]})
+inserted = revised(**{"observables.correlated_erasure": [{"couplings": [3]}, entry]})
+print(m.observables.probe_names(), appended.observables.probe_names(), inserted.observables.probe_names())
+assert appended.observables.probe_names() == ("correlated_erasure", "correlated_erasure_1")
+assert mf.check_extension(m, appended) is None
+assert "names these settings 'correlated_erasure_1'" in mf.check_extension(m, inserted)
+assert [p.name for p in appended.observables.correlated_probes()] == list(appended.observables.probe_names())
+
+# a confirmatory manifest freezes its rate grid and its analysis rules (v1.4 sections 5.8 and 9)
+confirmed = revised(label="confirmatory")
+more_rates = [{"n": [16, 24], "beta": ["0", "0.1"], "p": ["0.1", "0.15", "0.2", "0.25"]}]
+print(mf.check_extension(confirmed, revised(label="confirmatory", conditions=more_rates))[:100])
+assert mf.check_extension(m, revised(conditions=more_rates)) is None  # exploratory: allowed
+assert "freezes its analysis rules" in mf.check_extension(
+    confirmed, revised(label="confirmatory", **{"analysis.peak.z": 2.0})
+)
+assert mf.check_extension(confirmed, revised(label="confirmatory", **{"trials.graphs": 40})) is None
 ```
 
 ### (h) The schedule across revisions (ruling R-CK)
@@ -726,44 +799,47 @@ Files: `tests/test_study_identity.py` (identity), `tests/test_study_manifest.py`
 | claim | test | what is checked |
 |---|---|---|
 | Proposition 1 (canonical strings) | `test_canonical_token_strings`, `test_equivalent_spellings_give_one_token`, `test_every_token_string_parses_back_to_itself_in_lowest_terms` (property) | exact: 27 listed spellings; parse inverts the string for all fractions with denominators up to 2000; the decimal expansion equals `Decimal`'s |
-| Proposition 2 (JSON numbers) | `test_a_json_number_is_read_through_its_shortest_decimal`, `test_a_decimal_of_up_to_15_digits_survives_the_trip_through_a_json_number` (property) | exact for 8 floats; property over decimals of 1–15 digits at several scales |
+| Proposition 2 (JSON numbers) | `test_a_json_number_is_read_through_its_shortest_decimal`, `test_a_decimal_of_up_to_15_digits_survives_the_trip_through_a_json_number` (property), `test_the_json_number_proposition_needs_the_normal_range` | exact for 8 floats; property over decimals of 1–15 digits at several scales; the counterexamples below $2^{-1022}$ (a subnormal, an underflow to 0) and the 15-digit decimals just above it that do survive |
 | Proposition 3 (float) | `test_float64_is_the_nearest_double_and_hex_round_trips` (property), `test_a_third_stays_rational_and_records_float_and_hex` | the neighboring doubles are no closer; `fromhex(hex)` returns the float |
 | malformed tokens | `test_malformed_tokens_are_refused_with_a_message_naming_the_field`, `test_token_constructor_guards_its_value` | 18 bad inputs, message starts with the field name |
 | trajectory key (§3.2) | `test_trajectory_key_*` (5 tests, one a property) | canonical string, parse round trip, frozen and hashable, bad fields refused |
-| Proposition 4 (seed tuples) | `test_the_seed_tags_spell_their_domains`, `test_token_words_are_the_low_and_high_halves_of_the_blake2b_hash` (4 tokens), `test_token_words_name_the_token_and_not_its_spelling`, `test_graph_seed_is_the_tagged_tuple_of_master_size_beta_and_graph`, `test_graph_seed_refuses_what_is_not_a_seed_word_or_a_token` (12 cases), `test_graph_seeds_differ_across_masters_sizes_betas_and_labels`, `test_graph_seed_is_injective_in_the_condition_and_the_graph` (property), `test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds`, `test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words`, `test_seed_tuples_have_one_fixed_length_per_domain_and_it_exceeds_the_pool`, `test_graph_seed_gives_the_stream_the_graph_generator_uses`; `tests/test_study_manifest.py::test_equal_master_seeds_are_accepted_because_the_seed_domains_are_disjoint`, `test_two_tokens_with_one_seed_hash_are_refused`, `test_seeds_depend_on_the_condition_and_only_the_run_seed_on_the_gate_mode` | the words recomputed in the test with `hashlib` and `struct` and by the independent `tests/_ws_reference.py::graph_seed`, `run_seed`, `token_words`; pinned golden words and tuples; 192 graph seeds (3 masters, 4 sizes, 4 betas, 4 labels) pairwise different as tuples and as `SeedSequence` states; equal seeds iff equal arguments (300 random examples); 48 graph seeds and 36 run seeds with equal master seeds never meet, as tuples or as states, and none is the state of the plain master seed; the numpy padding rule (up to four words a trailing zero changes nothing, from the fifth it does); lengths 6, 5 and 7; a forced hash collision between two $\beta$ tokens, or two rates in independent mode, is refused |
+| Proposition 4 (seed tuples) | `test_the_seed_tags_spell_their_domains`, `test_token_words_are_the_low_and_high_halves_of_the_blake2b_hash` (4 tokens), `test_token_words_name_the_token_and_not_its_spelling`, `test_graph_seed_is_the_tagged_tuple_of_master_size_beta_and_graph`, `test_graph_seed_refuses_what_is_not_a_seed_word_or_a_token` (12 cases), `test_graph_seeds_differ_across_masters_sizes_betas_and_labels`, `test_graph_seed_is_injective_in_the_condition_and_the_graph` (property), `test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds`, `test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words`, `test_seed_tuples_have_one_fixed_length_per_domain_and_it_exceeds_the_pool`, `test_graph_seed_gives_the_stream_the_graph_generator_uses`; `tests/test_study_manifest.py::test_equal_master_seeds_are_accepted_because_the_seed_domains_are_disjoint`, `test_two_tokens_with_one_seed_hash_are_refused`, `test_seeds_depend_on_the_condition_and_only_the_run_seed_on_the_gate_mode` | the words recomputed in the test with `hashlib` and `struct` and by the independent `tests/_ws_reference.py::graph_seed`, `run_seed`, `token_words`; pinned golden words and tuples; 192 graph seeds (3 masters, 4 sizes, 4 betas, 4 labels) pairwise different as tuples and as `SeedSequence` states; equal seeds iff equal arguments (300 random examples); 48 graph seeds and 36 run seeds with equal master seeds never meet, as tuples or as states, and none is the state of the plain master seed; the numpy padding rule (up to four words a trailing zero changes nothing, from the fifth it does); lengths 6, 5 and 7, each above numpy's `SeedSequence.pool_size` (read from numpy, 4); the native `_kernel.rng.seed_state` of the study's seeds equals the reference's `seed_words`, and `graphs.watts_strogatz` is watched deriving its state through it while `build_graph` runs; a forced hash collision between two $\beta$ tokens, or two rates in either gate mode, is refused |
 | Proposition 5 (stream index) | `test_stream_index_values_and_inverse`, `test_stream_index_is_one_to_one_and_ignores_the_totals` (property), `test_the_engine_runs_trajectory_u_on_graph_u_over_stride`; `tests/test_study_sampling.py::test_unrelated_choices_leave_the_circuit_unchanged` | exact; bijection and independence of the totals; the engine assignment; appended graphs leave $u$ unchanged |
 | Proposition 6 (modes, conditions) | `test_run_seed_shared_is_one_tuple_per_condition_for_every_rate`, `test_run_seed_independent_appends_the_words_of_the_rate`, `test_run_seeds_differ_across_masters_sizes_and_betas_in_both_modes` (96 seeds), `test_run_seed_refuses_unknown_modes_and_bad_arguments`; `tests/test_study_sampling.py::test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent`, and for the independence of conditions `test_graph_collections_of_different_sizes_are_independent_samples`, `test_graph_collections_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_sizes_are_independent_samples` | exact: one five-word seed for every rate in shared mode, a seven-word seed per rate in independent mode; the conditions' seeds all differ; the four statistical tests of document 01 (Proposition 14, §8), each with the shared seed of the first draft as negative control |
 | Proposition 7, graph record (§3.5) | `test_build_graph_returns_the_validated_record_of_the_native_graph`, `test_the_digest_is_pinned_and_agrees_with_the_independent_reference`, `test_graph_record_identity_comes_from_the_digest_and_the_provenance`, `test_verify_detects_a_tampered_graph`, `test_edge_digest_is_strict_about_canonical_form`, `test_validate_graph_*` | the digest against `struct` and `hashlib` computed in the test and against the reference rewiring of `tests/_ws_reference.py` seeded with the reference's own seed tuple; six pinned digests; tampering detected, including every altered word of the seed tuple, the other domain's tag, a five-word tuple and the old pair |
-| Proposition 8 (canonical JSON) | `test_canonical_json_*`, `test_sha256_hex_matches_the_published_vectors` | sorted keys, tokens as strings, numpy and tuples, refusals with the path of the value, published SHA-256 vectors |
-| Proposition 9 (manifest digest) | `test_digest_is_stable_across_key_order_whitespace_and_spelling`, `test_the_canonical_blocks_group_sizes_that_share_rates_and_betas`, `test_digest_changes_with_every_scientific_setting`, `test_the_canonical_text_of_a_minimal_manifest_is_the_documented_form`, `test_the_digest_of_the_design_example_is_pinned` | 10 shuffled spellings and 4 factorizations give one digest; 13 changes give 13 new digests; a literal canonical text and a `hashlib` digest |
-| strict reading (§3.7) | `test_malformed_manifests_are_refused_naming_the_field` (130 cases), `test_bad_json_text_is_refused`, `test_duplicate_conditions_across_blocks_and_equal_floats_are_refused`, `test_from_json_reads_text_dicts_and_files` | each case refused with a message that names the field |
-| conditions, depth (§3.8, §3.9) | `test_conditions_are_resolved_in_a_stable_order`, `test_blocks_with_the_same_size_and_beta_merge_their_rates`, `test_layers_rules`, `test_unknown_conditions_are_refused` | exact |
+| Proposition 8 (canonical JSON) | `test_canonical_json_*` (among them `test_canonical_json_keeps_the_json_type_of_equal_numbers`), `test_sha256_hex_matches_the_published_vectors` | sorted keys, tokens as strings, numpy and tuples, refusals with the path of the value; `1`, `1.0` and `True` give three texts and three digests and read back with their types, `-0.0` the text of `0.0`; published SHA-256 vectors |
+| Proposition 9 (manifest digest) | `test_digest_is_stable_across_key_order_whitespace_and_spelling`, `test_the_canonical_blocks_group_sizes_that_share_rates_and_betas`, `test_digest_changes_with_every_scientific_setting`, `test_the_canonical_text_of_a_minimal_manifest_is_the_documented_form`, `test_the_digest_of_the_design_example_is_pinned`, `test_equivalent_spellings_of_correlated_sizes_are_one_setting` | 10 shuffled spellings and 4 factorizations give one digest; 13 changes give 13 new digests; a literal canonical text and a `hashlib` digest; five spellings of one set of correlated sizes give one digest, one entry, one engine probe and no change for `check_extension`, while the order of a list counts |
+| strict reading (§3.7) | `test_malformed_manifests_are_refused_naming_the_field` (142 cases), `test_bad_json_text_is_refused`, `test_duplicate_conditions_across_blocks_and_equal_floats_are_refused`, `test_from_json_reads_text_dicts_and_files`, `test_a_file_with_a_utf8_byte_order_mark_is_read` | each case refused with a message that names the field (among them negative couplings, empty or zero-step size ranges and the six reserved probe names); two tokens of one float64 refused with the reason of §3.8, and their seeds and graphs shown to differ; a file with a byte-order mark read, a file holding a JSON list named as such, a file that is not UTF-8 refused |
+| construction in code (§3.7) | `test_direct_construction_and_replace_obey_the_rules_of_reading` | 22 manifests built with `dataclasses.replace` or by hand, each refused with the message reading gives (a circuit count above the stride, no graphs, replicas, seed ranges, gate mode, $n = 4$, a field of the wrong type, no blocks, a horizon of 0, non-canonical layers and lists, a checkpoint count of 0, observables, a negative coupling, a reserved name, storage, resources, analysis, a section of the wrong class, the label, a protocol's checkpoint rule, a protocol entry that is not a `ProtocolSettings`); an accepted one reads back as itself |
+| conditions, depth (§3.8, §3.9) | `test_conditions_are_resolved_in_a_stable_order`, `test_blocks_with_the_same_size_and_beta_merge_their_rates`, `test_layers_rules`, `test_unknown_conditions_are_refused`, `test_the_conditions_are_resolved_once_per_manifest` | exact; the resolution runs once per manifest (counted) through 400 questions, `check_extension` and `effective_checkpoints`, and the cache is not part of equality, hashing or `repr` |
 | Proposition 10 (checkpoints) | `test_geometric_checkpoints_hand_computed` (23 schedules), `test_geometric_checkpoints_equal_high_precision_arithmetic` (140 cases against 120-digit `Decimal`), `test_checkpoint_invariants`, `test_refining_the_count_keeps_every_old_checkpoint`, `test_round_half_up_power_is_the_nearest_integer` (properties), `test_ties_round_upward_and_never_arise_for_integer_horizons` | exact equality with hand-computed and high-precision values; sorted, unique, contains $0,1,T$, size bound, within $\tfrac12$ of $a_j$; refinement; ties |
-| list and table forms (§3.9) | `test_explicit_checkpoint_lists_always_include_zero_one_and_horizon`, `test_a_checkpoint_list_serves_every_size_and_drops_what_is_above_its_horizon`, `test_a_checkpoint_table_gives_one_list_per_size`, `test_the_list_form_is_the_list_below_the_horizon_with_zero_one_and_the_horizon` (property), `test_the_table_form_is_the_size_entry_with_zero_one_and_the_horizon` (property); the refusals are among the 130 malformed cases | exact schedules at several sizes and horizons; the list form equals the entries not above $T$ plus $0, 1, T$ for random lists and horizons; the table form equals the entries of the size plus $0, 1, T$; a missing or an extra size and an entry above $T_{\max}(n)$ are refused |
+| list and table forms (§3.9) | `test_explicit_checkpoint_lists_always_include_zero_one_and_horizon`, `test_a_checkpoint_list_serves_every_size_and_drops_what_is_above_its_horizon`, `test_a_checkpoint_table_gives_one_list_per_size`, `test_the_list_form_is_the_list_below_the_horizon_with_zero_one_and_the_horizon` (property), `test_the_table_form_is_the_size_entry_with_zero_one_and_the_horizon` (property); the refusals are among the 142 malformed cases | exact schedules at several sizes and horizons; the list form equals the entries not above $T$ plus $0, 1, T$ for random lists and horizons; the table form equals the entries of the size plus $0, 1, T$; a missing or an extra size and an entry above $T_{\max}(n)$ are refused |
 | engine keywords (§3.10) | `test_monitored_circuit_kwargs_are_the_v14_protocol`, `test_the_kwargs_build_the_study_protocol_for_even_and_odd_sizes` | the exact dictionary; a `MonitoredCircuit` built for $n = 5, \dots, 25$ has $\lfloor n/2\rfloor$ gates per layer and every field of v1.4 §8.1 |
-| correlated-erasure entries | `test_correlated_erasure_settings_build_the_engine_probe`, `test_correlated_erasure_sizes_forms`, `test_several_correlated_erasure_probes_need_distinct_names` | the probe equals the direct `mipt.correlated_erasure` call; sizes forms; unique names |
-| Proposition 11 (revisions) | `test_allowed_revisions` (18 changes), `test_forbidden_revisions_name_the_first_forbidden_change` (19 changes), `test_the_first_forbidden_change_in_the_documented_order_is_reported`, `test_adding_observables_and_a_larger_horizon_are_extensions`, `test_a_chain_of_revisions_is_checked_pairwise`, `test_check_extension_requires_manifests` | each allowed change (among them a larger $T_{\max}$ under the geometric rule and every change of the rule) returns `None`; each forbidden one (among them a lower $T_{\max}$) returns a message with the named field; the order of the checks; composition |
-| Proposition 12 (effective schedule) | `test_the_effective_schedule_is_the_union_of_the_schedules_of_the_revisions`, `test_a_size_or_beta_absent_from_an_earlier_revision_contributes_nothing_from_it`, `test_effective_checkpoints_refuses_what_is_not_an_extension_chain`, `test_any_change_of_the_checkpoint_rule_is_an_extension` (16 pairs of rule kinds), `test_effective_checkpoints_properties` and `test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension` (properties over random valid chains) | exact unions at three horizons; a new size or beta contributes nothing from the revisions that lack it; refusals name the pair and the first forbidden change; over random chains of 1 to 4 revisions (horizons that rise, sizes that are added, every rule kind): the effective schedule is sorted, equals the union of the own schedules, never exceeds the latest $T_{\max}$, contains $0, 1, T_{\max}$, contains every own schedule and every earlier effective schedule, equals the own schedule for one revision, and every pair of the chain is an extension |
+| correlated-erasure entries | `test_correlated_erasure_settings_build_the_engine_probe`, `test_correlated_erasure_sizes_forms`, `test_several_correlated_erasure_probes_need_distinct_names`, `test_the_correlated_probes_carry_the_resolved_names_and_fit_beside_the_runners_probes` | the probe equals the direct `mipt.correlated_erasure` call; sizes forms, a range stored as its expansion; resolved names by position (`correlated_erasure`, `correlated_erasure_1`, ...), clashes refused; `correlated_probes` carries the resolved names, while `entry.probe()` alone would give two unnamed entries one name; a `MonitoredCircuit` accepts the runner's five fixed probes beside three correlated ones, and each reserved name is refused for a correlated entry |
+| Proposition 11 (revisions) | `test_allowed_revisions` (20 changes), `test_forbidden_revisions_name_the_first_forbidden_change` (22 changes), `test_the_first_forbidden_change_in_the_documented_order_is_reported`, `test_adding_observables_and_a_larger_horizon_are_extensions`, `test_a_chain_of_revisions_is_checked_pairwise`, `test_check_extension_requires_manifests`, `test_a_recorded_correlated_probe_keeps_its_resolved_name`, `test_a_confirmatory_manifest_freezes_its_conditions_and_analysis` | each allowed change (among them a larger $T_{\max}$ under the geometric rule, every change of the rule, appended correlated entries, named or not, and a recorded entry named by its own name) returns `None`; each forbidden one (among them a lower $T_{\max}$, for every size and for $n = 24$ alone, a correlated entry inserted in front of the recorded one and a recorded entry renamed) returns a message with the named field; swaps, insertions, renamings and removals of correlated entries, and a move made possible by naming; in a confirmatory manifest new rates, sizes and betas and changes of `analysis` are refused while every other allowed change stays allowed; the order of the checks; composition. Mutants of the per-size horizon loop (first size only), of item 7 (settings without the name) and of item 8 (no confirmatory check) each fail these tests |
+| Proposition 12 (effective schedule) | `test_the_effective_schedule_is_the_union_of_the_schedules_of_the_revisions`, `test_a_size_or_beta_absent_from_an_earlier_revision_contributes_nothing_from_it`, `test_effective_checkpoints_refuses_what_is_not_an_extension_chain`, `test_any_change_of_the_checkpoint_rule_is_an_extension` (16 pairs of rule kinds), `test_effective_checkpoints_properties` and `test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension` (properties over random valid chains) | exact unions at three horizons; a new size or beta contributes nothing from the revisions that lack it; refusals name the pair and the first forbidden change; over random chains of 1 to 4 revisions (horizons that rise independently per size, sizes that are added, every rule kind): the effective schedule is sorted, equals the union of the own schedules, never exceeds the latest $T_{\max}$, contains $0, 1, T_{\max}$, contains every own schedule and every earlier effective schedule, equals the own schedule for one revision, and every pair of the chain is an extension; read backward, a pair is refused exactly when an oracle computed from the drawn sizes and horizons (not from `check_extension`) says so, with the smallest missing size or lowered horizon in the message, and `effective_checkpoints` agrees at every size of the last revision |
 
 ## 9. Limitations and departures
 
-Departures from v1.4 and the design (D1, D2, D4 and D6 are the design's; N1–N7 are introduced here, each with its reason):
+Departures from v1.4 and the design (D1, D2, D4 and D6 are the design's; N1–N8 are introduced here, each with its reason):
 
 * **D1.** `measurement_replicas` must be 1: the native engine draws gates and masks from one stream, so independent mask replicates on the same gates do not exist (v1.4 §7.2, §8.1). The key keeps $r$.
-* **D2.** The frozen stride $s \ge C$ (§3.4, Proposition 5).
+* **D2.** The frozen stride $\bar C \ge C$ (§3.4, Proposition 5).
 * **D4.** `gate_mode="independent"` appends the two words of the hash of the rate token to the run seed (§3.3).
-* **D6 (ruling R-SEED).** Graph seeds and run seeds are domain-tagged fixed-length tuples that depend on $(n, \beta)$ (§3.3), not the native collection convention `[seed, i]` shared by every condition: v1.4 couples conditions across $p$ only, and finite-size fits need sizes and rewiring probabilities to be independent samples (document 01, §3.8, Proposition 14). The graphs are still generated by the native `graphs.watts_strogatz`, and within one $(n, \beta)$ the native collection mapping $u = g s + c$ holds. A consequence of the change from the first draft: every graph and trajectory differs from what the pair convention gave (nothing had been stored).
+* **D6 (ruling R-SEED).** Graph seeds and run seeds are domain-tagged fixed-length tuples that depend on $(n, \beta)$ (§3.3), not the native collection convention `[seed, i]` shared by every condition: v1.4 couples conditions across $p$ only, and finite-size fits need sizes and rewiring probabilities to be independent samples (document 01, §3.8, Proposition 14). The graphs are still generated by the native `graphs.watts_strogatz`, and within one $(n, \beta)$ the native collection mapping $u = g \bar C + c$ holds. A consequence of the change from the first draft: every graph and trajectory differs from what the pair convention gave (nothing had been stored).
 * **N1 (superseded by ruling R-SEED).** The first version refused equal master seeds, because graph 0 had the seed $(M, 0)$, which `SeedSequence` pads to the plain seed $M$, the key of the circuit streams when $M_c = M$. With the domain tags and the fixed lengths of §3.3 the hazard is gone (Proposition 4) and equal master seeds are accepted.
 * **N2.** Master seeds, sizes and graph labels are below $2^{32}$ (§3.3): each is one word of a seed tuple. Larger values are refused rather than reduced.
-* **N3.** The digest is computed from the canonical factorization of the conditions, not from the blocks as written (§3.8, Proposition 9). Two manifests that describe the same conditions have one digest; the design's example, which is a single product block, is unchanged.
-* **N4.** `label` is restricted to `exploratory` and `confirmatory` (v1.4 §9), and a revision may not change it. The manifest does not enforce v1.4's rule that the rate grid is frozen before confirmatory runs: a confirmatory manifest may still gain conditions, as for an exploratory one.
+* **N3.** The digest is computed from the canonical factorization of the conditions, not from the blocks as written (§3.8, Proposition 9), and from the expansion of a range string of correlated sizes, not from its spelling. Two manifests that describe the same conditions and the same probes have one digest; the design's example, which is a single product block with `sizes` null, is unchanged.
+* **N4.** `label` is restricted to `exploratory` and `confirmatory` (v1.4 §9), and a revision may not change it. A confirmatory manifest freezes its conditions and its `analysis` section (§3.11, item 8). Reason: v1.4 §9 makes "$\mathcal P(n,\beta)$ frozen before confirmatory runs" and the predeclared plateau rule binding, and the design's list of allowed revisions ("may add conditions, rates") does not address the label. `check_extension` compares two manifests and cannot know whether confirmatory units have run, so the rule applies from the first revision labeled confirmatory: a study whose grid or analysis must change before any confirmatory run starts a new experiment (a new store), which loses nothing.
 * **N5 (superseded by ruling R-CK).** The first version of this part let a revision only *add* checkpoints, which made a larger $T_{\max}$ under the geometric rule impossible without an explicit list. Ruling R-CK replaced that: a revision may raise $T_{\max}$ and change the checkpoint rule in any way, and the schedule used for work is the union of the schedules of all revisions (§3.9, Proposition 12). The costs: the union of a long chain is as large as the sum of its own schedules (the points of the geometric rule of every horizon that was ever used), and a trajectory run under an earlier revision holds only that revision's depths until the runner reruns it to the longer horizon.
-* **N6.** `monitored_circuit_kwargs` leaves out `edges` and `probes`: the graph records of a work unit and the probes are the runner's. Two tokens with the same float64 are refused as a duplicate condition (§3.8).
-* **N7.** The manifest refuses two different $\beta$ tokens (in `gate_mode="independent"` also two rates) whose 64-bit seed hashes coincide (§3.7, Proposition 4(a)). It makes "different conditions have different seeds" a fact about every accepted manifest, at the price of refusing a manifest with probability $2^{-64}$ per pair of tokens.
+* **N6.** `monitored_circuit_kwargs` leaves out `edges` and `probes`: the graph records of a work unit and the probes are the runner's. Two tokens with the same float64 are refused as one engine value under two names (§3.8); the reason is the shared double, not the seeds, which differ.
+* **N7.** The manifest refuses two different $\beta$ tokens, and two different rate tokens in either gate mode, whose 64-bit seed hashes coincide (§3.7, Proposition 4(a)): the rate's words enter the run seeds of independent mode and, in both modes, the region seeds of the sampled observables. It makes "different conditions have different seeds" a fact about every accepted manifest, at the price of refusing a manifest with probability $2^{-64}$ per pair of tokens.
+* **N8.** The name of a `correlated_erasure` probe is part of its identity across revisions (§3.11, item 7; v1.4 §7.3, design §3), an unnamed entry is named by its position alone (`correlated_erasure`, then `correlated_erasure_1`, ...; a first version named several unnamed entries `correlated_erasure_0`, `_1`, ..., which renamed the first when a second was appended), and no entry may take the name of a probe the runner adds (`RESERVED_PROBE_NAMES`), which the engine would refuse only when a unit runs. Reason: the engine keys a sampled probe's stream by the hash of its name, so a renamed probe draws other regions and its stored values no longer replay.
 
 Other limitations:
 
-* **Hash-based claims.** That distinct seeds give distinct streams, that two different graphs have different digests, and that two different tokens of different manifests have different token hashes are claims about SHA-256, BLAKE2b and the `SeedSequence` mixing; they are checked on grids and not proved (within one manifest the token hashes are checked, N7).
-* **JSON numbers.** A float is read through its shortest round-trip decimal, which is the typed decimal only for at most 15 significant digits (Proposition 2); the exact forms (decimal or rational strings) have no such limit.
-* **Analysis settings can change in a revision.** They touch no stored value; values derived under them record the settings used. The `peak` rule is "predeclared" (v1.4 §5.8) only if the label is confirmatory and the manifest is not revised, which the code does not enforce (N4).
+* **Hash-based claims.** That distinct seeds give distinct streams, that two different graphs have different digests, and that two different tokens of different manifests have different token hashes are claims about SHA-256, BLAKE2b and the `SeedSequence` mixing; they are checked on grids and not proved (within one manifest the hashes of the $\beta$ tokens and of the rate tokens are checked, N7; the region seeds also hash identifiers that the manifest does not check, `study/observables.py::region_seed`).
+* **JSON numbers.** A float is read through its shortest round-trip decimal, which is the typed decimal only for at most 15 significant digits and a value in the normal range of doubles ($0$, or at least $2^{-1022}$ in magnitude; Proposition 2); the exact forms (decimal or rational strings) have no such limit.
+* **Analysis settings can change in an exploratory revision.** They touch no stored value; values derived under them record the settings used. In a confirmatory manifest they are frozen (N4).
+* **The protocol dimension.** The `protocols` section of design §12 (and `resources.max_unit_bytes`) were added by the store's part of the pipeline (design §12) and are not described here; this document covers them only where `check_extension` and the constructor touch them (§3.11 item 3; a protocol's own checkpoint rule is read back like `depth.checkpoints`).
 * **No store.** Nothing here persists a manifest, a record or a key; document 05 describes the store that does.
