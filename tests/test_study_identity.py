@@ -210,6 +210,21 @@ def test_float64_is_the_nearest_double_and_hex_round_trips(num, den):
     assert float.fromhex(token.hex) == x
 
 
+@PROPERTY
+@given(st.integers(1, 15), st.data())
+def test_a_decimal_of_up_to_15_digits_survives_the_trip_through_a_json_number(digits, data):
+    # repr(float) is the shortest decimal that round-trips, and no two decimals of at most 15
+    # significant digits share a double (DBL_DIG = 15): reading a JSON number gives the decimal
+    # the author typed
+    body = data.draw(st.text("0123456789", min_size=digits, max_size=digits))
+    text = f"0.{body}"
+    assert Token.parse(float(text)) == Token.parse(text)
+    assert Token.parse(float(text)).token == Token.parse(text).token
+    exponent = data.draw(st.integers(-8, 0))
+    scaled = f"{body}e{exponent - digits}"  # the same digits at another scale
+    assert Token.parse(float(scaled)) == Token.parse(scaled)
+
+
 # ---------------------------------------------------------------------------
 # the trajectory key
 # ---------------------------------------------------------------------------
@@ -323,6 +338,15 @@ def test_graph_seed_gives_the_stream_the_graph_generator_uses():
     pairs = [(m, g) for m in (0, 1, 17, 2**32 - 1) for g in (0, 1, 2, 2**32 - 1)]
     states = {tuple(np.random.SeedSequence(p).generate_state(4).tolist()) for p in pairs}
     assert len(states) == len(pairs)
+
+
+def test_graph_zero_shares_its_seed_with_the_plain_master_seed():
+    # numpy pads the entropy with zero words: (s, 0) is the SeedSequence of s itself. If the master
+    # circuit seed were the master graph seed, graph 0 would be built from the very words that
+    # key the circuit streams, which is why the manifest refuses equal master seeds.
+    plain = np.random.SeedSequence(17).generate_state(4)
+    assert np.array_equal(np.random.SeedSequence(graph_seed(17, 0)).generate_state(4), plain)
+    assert not np.array_equal(np.random.SeedSequence(graph_seed(17, 1)).generate_state(4), plain)
 
 
 def test_run_seed_shared_is_the_master_seed_for_every_rate():

@@ -667,7 +667,8 @@ def test_checkpoint_invariants(t_max, count):
     assert list(cps) == sorted(set(cps))  # sorted and unique
     assert cps[0] == 0 and cps[-1] == t_max and 1 in cps  # always 0, 1 and T_max
     assert all(0 <= c <= t_max for c in cps)
-    assert len(cps) <= min(count + 3, t_max + 1)
+    # a_0 = 1 and a_(N-1) = T_max are checkpoints already: at most N_T + 1 points with 0
+    assert len(cps) <= min(count + 1 if count >= 2 else 3, t_max + 1)
     if count <= 2:
         assert cps == tuple(sorted({0, 1, t_max}))
     # every geometric point is within 1/2 of a_j = T^(j/(N-1)): the schedule is the rounded curve
