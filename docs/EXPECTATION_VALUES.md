@@ -271,7 +271,7 @@ trajectory. Its sampling variance $\operatorname{Var}(M_\pi)/S$ joins $\sigma_w^
 means, but it matters for T* (§7.5). Bounds when $k_t>0$: $1\le D_t\le(n+1)/2$ (v1.4 §5.8).
 
 **6.5 Graph-correlated robustness** $D_t(J)$, $J>0$ (v1.4 §5.7). This is the
-"graph-correlated" analogue as implemented: regions drawn with probability
+"graph-correlated" analog as implemented: regions drawn with probability
 $\propto e^{-Jb_G(A)}$, so they favor few boundary edges on the trajectory's own graph.
 $D_t(J)=\sum_{m=0}^{n-1}(1-P_{t,G,J}(m))$ with $P(0)=0$, and $0$ when $k_t=0$. The probe
 `correlated_erasure` stores $\widehat P(m)$ = failures/$S$ per size and **records 0 when
