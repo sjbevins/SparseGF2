@@ -84,6 +84,8 @@ and no random stream: it reads what the engine produced.
 | $A_{a,m}$ | the cyclic interval $\lbrace a, a+1, \dots, a+m-1\rbrace \bmod n$ | set | windows of `contiguous_distance` |
 | $d_{\mathrm{cyc}}$, $d^0_{\mathrm{cyc}}$ | the shortest failing interval; its zero extension | integers (raw: NaN at $k = 0$) | `CyclicDistance.raw`, `.zero_extended` |
 | $G = (V, E)$ | the trajectory's interaction graph | graph | `edges` |
+| $\Omega_{n,m}$ | the $m$-subsets of $V$, $\lbrace A \subseteq V : \lvert A\rvert = m\rbrace$ | family of sets | |
+| $\Gamma_G(A)$ | the neighborhood of $A$ in $G$: vertices adjacent to some vertex of $A$ | set | `reach` in `connected_distance` |
 | $\mathcal C_m(G)$ | the $m$-subsets $A$ with $G[A]$ connected | family of sets | `connected_distance` levels |
 | $d_{\mathrm{conn}}$ | the smallest connected failing region | integer, $0$ or $\infty$ | `connected_distance` |
 | $b_G(A)$ | $\lvert\partial_G A\rvert$, the edges with exactly one end in $A$ | integer | `erasures.boundary` |
@@ -102,6 +104,8 @@ and no random stream: it reads what the engine produced.
 | $d(t)$, $\mathrm{se}(t)$ | a depth trace at the checkpoints and its standard error | reals | `d`, `se` of `peak` |
 | $d^*$, $\mathcal A$, $T^*$ | the maximum over $\mathcal T_+$, the maximizing set, its log midpoint | real, set, real | `Peak.d_star`, `.maximizing_set`, `.t_star` |
 | $z$ | the plateau width in standard errors | real $\ge 0$ | `z` |
+| $\Phi_{\mathcal N}$ | the standard normal distribution function (not the channel failure $\Phi$) | function | |
+| $\tau_{\mathrm{int}}$ | the integrated autocorrelation time of a chain's records | real $\ge 1$ | `erasures.chain_diagnostics` |
 | $\xi$ | the trajectory key $(\text{experiment}, n, \beta, p, g, c, r)$ | identity | `identity.TrajectoryKey` |
 | $w(x)$ | the 32-bit words (low, high) of `blake2b(x, digest_size=8)` read little-endian | two integers | `observables._text_words` |
 
@@ -251,16 +255,22 @@ with the maximizing set $\mathcal A$ of the rule fixed in advance:
 
 * **exact** (integer or exact traces, such as $d^0_{\mathrm{cyc}}$):
   $\mathcal A = \lbrace t \in \mathcal T_+ : d(t) = d^*\rbrace$;
-* **plateau** (Monte Carlo traces, such as $D(J)$ estimated from samples, with errors
-  $\mathrm{se}(t)$ and a width $z \ge 0$):
+* **plateau** (Monte Carlo traces, such as $D(0)$ estimated from orderings or $D(J)$ estimated
+  from sampled regions, with errors $\mathrm{se}(t)$ and a width $z \ge 0$):
   $\mathcal A = \lbrace t \in \mathcal T_+ : d(t) \ge d^* - z\sqrt{\mathrm{se}(t)^2 + \mathrm{se}(t^\circ)^2}\rbrace$,
-  $t^\circ$ the first (smallest) maximizer.
+  $t^\circ$ the first (smallest) maximizer. The width means $z$ standard deviations only when
+  $\mathrm{se}$ are the true standard errors: $D(0)$ from the orderings, and $D(J)$ from exact
+  samples (one cycle or one path). For $D(J)$ from the swap chain (every Watts–Strogatz
+  interaction graph, at every $J$) the probe's binomial errors are lower bounds and the plateau
+  is narrower than it says (§4.6, §9).
 
 $T^*$ is **missing** when $d^* = 0$ or the trace is invalid: no positive checkpoint, a value in
 $\mathcal T_+$ that is NaN, infinite or negative, or (plateau) a missing or invalid error.
 `at_horizon` says whether $T_{\max}$ is in $\mathcal A$ (False when missing); `k_on_set` lists $k_t$
 for $t \in \mathcal A$; `first_argmax` is $t^\circ$, the checkpoint peak; `t_star_is_checkpoint`
-says whether the interpolated summary $T^*$ is itself a checkpoint.
+says whether the interpolated summary $T^*$ is itself a checkpoint; `se_exact` records whether the
+plateau's errors were the true ones (True), known lower bounds (False: a chain-sampled $D(J)$,
+`CorrelatedProfile.se_exact`) or not stated (None; always None for the exact rule).
 
 **Conventions.** (i) The plateau uses the first maximizer $t^\circ$ when several estimates tie
 exactly (the design leaves it open; ties between Monte Carlo estimates are rare, and the first is
@@ -270,15 +280,34 @@ $t = 0$ is ignored (v1.4: $\mathcal T_+$).
 
 ### 3.10 The registry, versions and keys (design §5)
 
-An entry `ObservableDef(id, version, level, inputs, params, definition, function, compute)` names an
-observable, the version of its implementation, where it lives (`snapshot`, `trajectory`,
+An entry `ObservableDef(id, version, level, inputs, params, definition, function, compute, kinds)`
+names an observable, the version of its implementation, where it lives (`snapshot`, `trajectory`,
 `aggregate`, `scaling`), what it reads (`k_trace`, `joint_tableau`, `physical_code`, `graph`,
 `probe:<kind>`, `trace:<id>`), its parameters with their defaults (`REQUIRED` when there is none),
-its formula, the function that computes it and, for an observable computed later from a stored
-snapshot, `compute(snapshot, params)`. A stored value is keyed by `(id, version, params_key)` with
-`params_key` the canonical JSON of the resolved parameters (sorted keys, no spaces, defaults filled
-in): a changed implementation needs a new version, and `register` refuses a different entry under
-an existing `(id, version)`. The 19 built-in entries are listed in §7(h).
+its formula, the function that computes it, for an observable computed later from a stored
+snapshot `compute(snapshot, params, entry)`, and the kind of each parameter. A stored value is
+keyed by `(id, version, params_key)` with `params_key` the canonical JSON of the resolved
+parameters (sorted keys, no spaces, defaults filled in): a changed implementation needs a new
+version, and `register` refuses a different entry under an existing `(id, version)`. The 19
+built-in entries are listed in §7(h).
+
+**Convention (canonical parameters).** A key must be one text per parameter set, so every
+parameter has a kind (`KINDS`; the built-in names in `PARAM_KINDS`) with one canonical form:
+`int` (an int or numpy integer; a bool, a float such as `3.0` or a string is refused), `real` (an
+int, float or numpy number, finite, stored as a float with $-0.0$ written as $0.0$), `reals` (a
+real or a 1-D list of them, stored as a tuple of floats), `bool`, `text`, `sizes` (a range string,
+or ints) and `ladder` (a string, or reals); a trailing `?` also allows None. `resolve_params` puts
+every given value in that form (and the defaults are stored in it), so $J = 1$, $1.0$ and
+`numpy.float64(1)` give one key, couplings `[0, 1, 2]` and `[0.0, 1.0, 2.0]` give one key, and the
+design manifest's `analysis.peak` (`sensitivity_z: [0, 1, 2]`) keys as the default. A string where
+a number belongs is refused, also by `region_seed`.
+
+**Convention (an entry computes under its own key).** `compute(id, snapshot, params, version=None)`
+resolves the entry (the one registered last when `version` is None) and hands it to the entry's
+`compute`, so a sampled observable seeds itself with that entry's `id` and `version`
+(Proposition 18), never with another version's; the returned `ObservableValue` carries
+`observable_id`, `version` and `params_key`, the key the store keeps it under. Code that computes
+or stores values names the version: "registered last" changes when a new version is registered.
 
 ## 4. Propositions and proofs
 
@@ -432,8 +461,8 @@ The zero extension $d^0_{\mathrm{cyc}}$ is an analysis convention (v1.4 §5.5): 
 no code, so a purified trajectory has no robustness and its peak is missing (§3.9).
 
 **Proposition 11 ($d_{\mathrm{conn}}$).** (a) For $m \ge 1$,
-$\mathcal C_{m+1}(G) = \lbrace A \cup \lbrace v\rbrace : A \in \mathcal C_m(G),\ v \in N_G(A) \setminus A\rbrace$,
-with $\mathcal C_1(G)$ the singletons. (b) If $G$ is connected and $k > 0$, then
+$\mathcal C_{m+1}(G) = \lbrace A \cup \lbrace v\rbrace : A \in \mathcal C_m(G),\ v \in \Gamma_G(A) \setminus A\rbrace$,
+with $\mathcal C_1(G)$ the singletons and $\Gamma_G(A)$ the neighborhood of $A$. (b) If $G$ is connected and $k > 0$, then
 $1 \le d_{\mathrm{conn}} \le n$. (c) On $C(n,2)$, $d_{\mathrm{conn}} \le d_{\mathrm{cyc}}$. (d)
 Neither bounds the other in general: there are codes with $d_{\mathrm{conn}}(C(8,2)) = 2 \lt d_{\mathrm{cyc}} = 3$
 and, on a rewired graph, $d_{\mathrm{conn}} = 3 \gt d_{\mathrm{cyc}} = 2$. (e) $d_{\mathrm{conn}} = \infty$
@@ -441,7 +470,7 @@ is possible only for a disconnected $G$.
 
 *Proof (derived here).* (a) "$\supseteq$": adding a neighbor keeps a set connected. "$\subseteq$":
 a connected graph on $m+1 \ge 2$ vertices has a spanning tree, whose leaf $v$ can be removed
-leaving a connected set $A$ with $v \in N_G(A)$. (b) $V \in \mathcal C_n(G)$ and $f(V) = 1$
+leaving a connected set $A$ with $v \in \Gamma_G(A)$. (b) $V \in \mathcal C_n(G)$ and $f(V) = 1$
 (Proposition 9). (c) On $C(n,2)$ consecutive vertices are adjacent (the offset-1 edges), so every
 interval is connected and the minimum is over a larger family. (d) §7(d) runs both codes: the
 $[[4,2,2]]$ code on qubits $0, 2, 4, 6$ of 8 (with $Z$ on the odd qubits), where $\lbrace 0, 2\rbrace$
@@ -578,9 +607,18 @@ fixed end values make the curve affine; a sum of independent terms has the sum o
 
 `correlated_failure` computes the weights $a_j$ by applying the interpolation to the unit vectors
 (`analysis.correlated_failure_curve` with the end values set to 0) and uses the binomial variances
-$\hat P(1-\hat P)/S$. For the chain those understate the variance by the integrated autocorrelation
-time of the records, which the probe does not store; the spread over trajectories, whose chains
-are independent, is the valid error of an ensemble mean (correlated-erasure.md §5.2).
+$\hat P(1-\hat P)/S$. These are the true variances given the code only for exact samples
+(`CorrelatedProfile.se_exact` is True only when the sampler's method is `"exact"`). For the chain
+they understate the variance by about the integrated autocorrelation time $\tau_{\mathrm{int}}$
+of the records, which the probe does not store, and which grows with $J$ and $n$ and falls with
+the chain's `thin` (§9 gives measured factors). An ensemble mean is a different matter: the chains
+of different trajectories are independent, so the error of a mean of per-trajectory estimates
+computed over independent units contains the chain's variance. In the study those units are the
+graphs (v1.4 §6.4): trajectories that share a graph share its disorder, so the valid error is the
+graph-cluster error (`stats.graph_cluster_se` of the per-graph means; correlated-erasure.md §5.2:
+"average per graph first"), and the plain spread over trajectories is valid only with one circuit
+per graph. Neither error contains the bias of an incompletely equilibrated chain (Proposition
+16(a)), which every trajectory run with one sampler setting shares.
 `complete` is False when a size in $1, \dots, n-1$ was interpolated, and
 `ChannelFailure.interpolated_mass` is $\sum_{m \text{ interpolated}} b_m(\varepsilon)$, the share of
 $\Phi_J$ that leans on interpolation. §7(f) shows the bias of an interpolated $D(J)$.
@@ -619,7 +657,11 @@ of $J$'s IEEE-754 binary64 pattern with $-0.0$ written as $0.0$, and every other
 strings of one field share a 64-bit blake2b digest. (b) No region seed equals a graph seed or a run
 seed of the study, as a `SeedSequence` entropy, whatever the master seeds. (c) The regions depend
 on every field of $\xi$: the same $(g, c)$ at two rates draws independent regions; a new version
-draws new ones.
+draws new ones. (d) The seed of the peak bootstrap of trajectory $\xi$ for observable `id` at
+`version` is the 15-word tuple
+$\big(\mathtt{WSRB},\ w(\text{experiment\_id}),\ n,\ w(\beta),\ w(p),\ g,\ c,\ r,\ w(\text{id}),\ w(\text{version})\big)$
+with $\mathtt{WSRB} = \mathtt{0x57535242}$; (a) and (b) hold for it too, and no bootstrap seed
+equals a region seed.
 
 *Proof (derived here).* (a) The fields sit at fixed positions of a tuple of fixed length; the
 integer fields and $\mathrm{bits}(J)$ are one to one; only $w$ can collide. (b) The graph and run
@@ -627,15 +669,23 @@ seeds start with $\mathtt{0x57534731}$ (`"WSG1"`) and $\mathtt{0x57534331}$ (`"W
 region seeds with $\mathtt{0x5753524F}$: the first words differ. Every one of these tuples has at
 least 4 words, so `SeedSequence` pads none of them (it pads only entropy shorter than its 4-word
 pool), and each field is one word, so no field spills into the next. The generated streams then
-coincide only through a collision of `SeedSequence`'s hash. (c) Every field enters the tuple. ∎
+coincide only through a collision of `SeedSequence`'s hash. (c) Every field enters the tuple.
+(d) The same argument, with the first word $\mathtt{0x57535242}$, distinct from the other three. ∎
 
 `observables.py::region_seed` builds the tuple; `mean_leakage` passes it to
-`erasures.sample_regions(..., seed=list(seed))`. **Departure note.** The design table (§5) first
-keyed these seeds by the native stream index $u$; ruling R-SEED (design §3) makes graph and run
-seeds depend on $(n, \beta)$, so $u$ alone no longer identifies a trajectory, and the controller
-asked for the full key. The words of $\beta$ and $p$ come from `identity.token_words`, the helper the
-graph and run seeds use; that helper parses its input as a probability token, so the experiment id,
-the observable id and the version go through `observables.py::_text_words`, the same convention for
+`erasures.sample_regions(..., seed=list(seed))`. Through the registry, `compute` hands the entry
+being computed to its `compute` (§3.10), so `id` and `version` are that entry's own: registering a
+version 2 beside version 1 leaves every version-1 seed and value unchanged, and the two versions
+(or a renamed copy) draw independent regions. `observables.py::bootstrap_seed` builds the tuple of
+(d) for `bootstrap_peak`. It has neither $z$ nor the replicate count $B$: the bootstraps at the
+widths of `sensitivity_z` resample the same orderings (paired replicates), and $B$ replicates are
+the first $B$ of any larger count (the draws run replicate by replicate). **Departure note.** The
+T4 task brief first keyed these seeds by the native stream index $u$ (the design table, §5, names
+only a "keyed region sampler"); ruling R-SEED (design §3) makes graph and run seeds depend on
+$(n, \beta)$, so $u$ alone no longer identifies a trajectory, and the controller asked for the full
+key. The words of $\beta$ and $p$ come from `identity.token_words`, the helper the graph and run
+seeds use; that helper parses its input as a probability token, so the experiment id, the
+observable id and the version go through `observables.py::_text_words`, the same convention for
 any string (a test checks that the two agree on tokens).
 
 ### 4.6 Peaks
@@ -650,33 +700,57 @@ an interpolated $k(T^*)$.
 (b) With $z = 0$ the condition is $d(t) \ge d^*$, i.e. $d(t) = d^*$; the threshold
 $d^* - z\sqrt{\cdot}$ decreases in $z$. (c) Proposition 2(a) with $\ell = 1$. ∎
 
-**The plateau rule's statistical meaning (derived here).** Conditional on the trajectory (its
-codes), the estimates at different checkpoints come from different probe streams (keyed by the
-layer, `RANDOMNESS_CONTRACT = 2`), so they are independent and
-$\hat d(t^\circ) - \hat d(t)$ has variance $\mathrm{se}(t)^2 + \mathrm{se}(t^\circ)^2$. A checkpoint
-stays in $\mathcal A$ unless its shortfall from the maximum exceeds $z$ of these standard
-deviations: $\mathcal A$ is the set of checkpoints not significantly below the maximum, one-sided,
-at about $\Phi(-z)$ per comparison. Because $t^\circ$ is chosen as the largest estimate, the
-shortfalls of true maximizers are biased upward; a union bound controls it: if the true trace has
-a plateau of $q$ checkpoints with equal errors $\sigma$ (Gaussian), and every other checkpoint is far
-below, a plateau checkpoint $j$ is left out only if some plateau checkpoint $i \ne j$ has
-$\hat d_i - \hat d_j \gt z\sqrt2\sigma$, an event of probability $\Phi(-z)$, so
+**The plateau rule's statistical meaning (derived here; it assumes true standard errors).**
+Conditional on the trajectory (its codes), the estimates at different checkpoints come from
+different probe streams (keyed by the layer, `RANDOMNESS_CONTRACT = 2`), so they are independent
+and $\hat d(t^\circ) - \hat d(t)$ has variance $\mathrm{Var}\,\hat d(t) + \mathrm{Var}\,\hat d(t^\circ)$.
+When $\mathrm{se}$ are the true standard errors, this is $\mathrm{se}(t)^2 + \mathrm{se}(t^\circ)^2$
+and a checkpoint stays in $\mathcal A$ unless its shortfall from the maximum exceeds $z$ of these
+standard deviations: $\mathcal A$ is the set of checkpoints not significantly below the maximum,
+one-sided, at about $\Phi_{\mathcal N}(-z)$ per comparison ($\Phi_{\mathcal N}$ the standard normal
+distribution function). Because $t^\circ$ is chosen as the largest estimate, the shortfalls of true
+maximizers are biased upward; a union bound controls it: if the true trace has a plateau of $q$
+checkpoints with equal errors $\sigma$ (Gaussian), and every other checkpoint is far below, a
+plateau checkpoint $j$ is left out only if some plateau checkpoint $i \ne j$ has
+$\hat d_i - \hat d_j \gt z\sqrt2\sigma$, an event of probability $\Phi_{\mathcal N}(-z)$, so
 
 $$
-\Pr[\text{some plateau checkpoint is left out}] \le q(q-1)\,\Phi(-z),
+\Pr[\text{some plateau checkpoint is left out}] \le q(q-1)\,\Phi_{\mathcal N}(-z),
 $$
 
-$6\Phi(-2) = 0.1365$ for $q = 3$, $z = 2$ (the test checks this rate). The rule is fixed in the
-manifest before the data are seen (`analysis.peak.rule`, `z`); `peak_sensitivity` reports it at
-every `sensitivity_z`, as v1.4 §5.8 asks.
+$6\Phi_{\mathcal N}(-2) = 0.1365$ for $q = 3$, $z = 2$ (the test checks this rate). The rule is
+fixed in the manifest before the data are seen (`analysis.peak.rule`, `z`); `peak_sensitivity`
+reports it at every `sensitivity_z`, as v1.4 §5.8 asks.
 
-**Proposition 20 (the bootstrap of $T^*$).** `bootstrap_peak` resamples, for each replicate and
-independently at each checkpoint, $S$ of that checkpoint's $S$ orderings with replacement, keeps
-the exact counts, recomputes $\hat D(0)$ and its error, and takes the plateau peak. This is the
-nonparametric bootstrap of $\hat T^*$ given the codes: the orderings at one checkpoint are i.i.d.,
-and those of different checkpoints are independent (different streams), so resampling them
-independently reproduces their joint law. It measures the Monte Carlo uncertainty of $T^*$ for
-one trajectory, not the ensemble's (graphs are resampled by `stats.graph_bootstrap`). ∎
+**When the errors are not the true ones.** The statements above hold for $\hat D(0)$ from the
+orderings (Proposition 13: $s_Y/\sqrt S$ estimates the true error) and for $\hat D(J)$ from exact
+samples. For $\hat D(J)$ from the swap chain, which is every Watts–Strogatz interaction graph at
+every $J$ (a degree-4 graph is never one cycle or one path), the binomial `robustness_se` is a
+lower bound: if the true standard deviation is $\rho\,\mathrm{se}$ with $\rho \approx
+\sqrt{\tau_{\mathrm{int}}} \gt 1$ at every checkpoint, the plateau spans only $z/\rho$ true
+standard deviations, each comparison leaves out a true maximizer with probability about
+$\Phi_{\mathcal N}(-z/\rho)$, the bound becomes $q(q-1)\Phi_{\mathcal N}(-z/\rho)$, and since $\rho$
+changes with $J$, $n$, $\beta$ and `thin`, the effective width of the predeclared rule differs
+between conditions (so does that of every `sensitivity_z`). Measured factors are in §9. The
+record says which case applies (`Peak.se_exact`, from `CorrelatedProfile.se_exact`); a `thin` near
+the chain's $\tau_{\mathrm{int}}$, measured on the graph with `erasures.sample_regions` at the
+probe's settings, brings $\rho$ near 1.
+
+**Proposition 20 (the bootstrap of $T^*$ of $D(0)$).** `bootstrap_peak` resamples, for each
+replicate and independently at each checkpoint, $S$ of that checkpoint's $S$ orderings with
+replacement, keeps the exact counts, recomputes $\hat D(0)$ and its error, and takes the plateau
+peak. This is the nonparametric bootstrap of $\hat T^*$ given the codes: the orderings at one
+checkpoint are i.i.d., and those of different checkpoints are independent (different streams), so
+resampling them independently reproduces their joint law. It measures the Monte Carlo uncertainty
+of $T^*$ for one trajectory, not the ensemble's (graphs are resampled by `stats.graph_bootstrap`).
+Its seed is given (`None`, fresh entropy, is refused); the study's is `bootstrap_seed` of the
+trajectory key and the observable's id and version (Proposition 18(d)), so a stored bootstrap is a
+function of the stored data and its key. ∎
+
+There is no such bootstrap for $D(J)$: the correlated probe stores failing fractions, not the
+regions, so there is nothing to resample, and a parametric (binomial) bootstrap of the fractions
+would inherit the understated chain errors above. `peak_D_J` therefore lists no `bootstrap`
+parameter (§9).
 
 ## 5. Algorithms
 
@@ -715,9 +789,12 @@ $\le n$), the counts and $k$ against them (Proposition 12(d)). (2) The hybrid cu
 $\hat D$: the curve summed over $m \lt n$; error from the $Y_j$ (Proposition 13). (4)
 $\hat\Phi$: `analysis.erasure_failure_probability`; the tails $T_\varepsilon(d)$ for all $d$ from
 the step curves $\mathbf 1\lbrace m \ge d\rbrace$ through `analysis.failure_probability_from_curve`
-(binomial weights in log space); error from the $Z_j$ (Proposition 14). $O(S + n)$ per code plus
-$O(n^2)$ per $\varepsilon$ once. Float64; unbiased; errors are plug-in estimates (NaN with one
-ordering).
+(binomial weights in log space); error from the $Z_j$ (Proposition 14), formed one rate at a time
+(a $(\dots, S)$ array per rate, never the $(\dots, S, q)$ array of all of them, so the memory is a
+few copies of the input whatever the number $q$ of rates). Time $O(S + n)$ per code for $\hat D$,
+$O(Sq + n)$ per code for $\hat\Phi$ and its error, plus $O(n^2)$ per $\varepsilon$ once. Float64;
+unbiased; errors are plug-in estimates (NaN with one ordering, at every rate; `se` always has the
+shape of `value`). The rates are copied: the caller's array is neither shared nor made read-only.
 
 **5.6 Correlated statistics** (`correlated_failure`, `correlated_channel_failure`). (1) Validate
 shapes, distinct couplings and sizes, fractions in $[0, 1]$ that are multiples of $1/S$ (to
@@ -738,18 +815,27 @@ above `budget` regions (default two million); $O(\binom nm(\lvert E\rvert + \tex
 **5.8 Peaks** (`peak`, `peak_sensitivity`, `bootstrap_peak`). (1) Validate the checkpoints
 (strictly increasing), values, errors, $k$. (2) Restrict to $t \gt 0$; missing with a reason if
 invalid. (3) $d^*$, $t^\circ$, the set of the rule, $T^*$ ($e^{\overline{\ln t}}$, a singleton
-exactly), the flags. $O(\lvert\mathcal T\rvert)$. The bootstrap draws $B\cdot\lvert\mathcal T\rvert\cdot S$
-indices from `PCG64(SeedSequence(seed)).random_raw` (NumPy's policy, NEP 19, keeps a bit generator's
-raw stream unchanged across versions)
-in the order replicate, checkpoint, sample, as $\lfloor uS\rfloor$ with $u$ the top 53 bits
-(bias below $S\cdot 2^{-53}$ per draw), then evaluates all replicates at once.
-$O(B\,\lvert\mathcal T\rvert\,S)$.
+exactly), the flags (with `se_exact` as given). $O(\lvert\mathcal T\rvert)$. The bootstrap checks
+its seed (a non-negative integer or a sequence of them; `None`, floats, strings and `SeedSequence`
+objects are refused), draws $B\cdot\lvert\mathcal T\rvert\cdot S$ indices from
+`PCG64(SeedSequence(seed)).random_raw` (NumPy's policy, NEP 19, keeps a bit generator's raw stream
+unchanged across versions) in the order replicate, checkpoint, sample, as $\lfloor uS\rfloor$ with
+$u$ the top 53 bits (bias below $S\cdot 2^{-53}$ per draw), then evaluates all replicates at once.
+$O(B\,\lvert\mathcal T\rvert\,S)$. `bootstrap_seed` builds the tuple of Proposition 18(d).
 
 **5.9 The registry** (`register`, `get`, `resolve_params`, `params_key`, `compute`). Entries are
-held in a dictionary keyed by `(id, version)`; `get` without a version returns the latest
-registered. `resolve_params` refuses unknown names (listing the allowed ones) and missing required
-ones; `params_key` is `identity.canonical_json` of the result. `compute` validates the
-`SnapshotInput` (its key must have the snapshot's $n$) and calls the entry's `compute`.
+held in a dictionary keyed by `(id, version)`; `get` without a version returns the one registered
+last. Building an entry gives every parameter a kind (its own `kinds`, else `PARAM_KINDS`; a
+parameter with neither is refused) and stores the defaults in canonical form. `resolve_params`
+refuses unknown names (listing the allowed ones) and missing required ones, and puts every given
+value in the canonical form of its kind (§3.10), refusing what does not fit; `params_key` is
+`identity.canonical_json` of the result. `SnapshotInput` checks its stored data against $n$: the
+key's $n$, the code's qubits ($n$) and the joint tableau's ($n$, $n + 1$ or $2n$: no reference, one
+reference, purification), so a snapshot paired with another condition's $n$ is refused, not
+computed into plausible wrong values. `compute` resolves the entry and the parameters, calls
+`entry.compute(snapshot, params, entry)` and returns the value with its key (`observable_id`,
+`version`, `params_key`). `catalog_markdown` escapes `|` in every cell (`\|`), so every row has
+the header's six cells.
 
 ## 6. From the mathematics to the code
 
@@ -765,14 +851,14 @@ ones; `params_key` is `identity.canonical_json` of the result. `compute` validat
 | $P_{\mathcal C}(m)$ hybrid (Proposition 12) | `uniform_failure`, `FailureProfile`; `analysis.hybrid_failure_by_size` |
 | $D(0)$ and its error (Proposition 13) | `integrated_robustness`, `Robustness` |
 | $\Phi_{\mathcal C}(\varepsilon)$ and its error (Proposition 14) | `uniform_channel_failure`, `ChannelFailure`; `analysis.erasure_failure_probability` |
-| $P_{\mathcal C,G,J}(m)$, $D(J)$, errors, completeness (Proposition 16) | `correlated_failure`, `CorrelatedProfile`; `analysis.correlated_failure_curve` |
+| $P_{\mathcal C,G,J}(m)$, $D(J)$, errors, completeness (Proposition 16) | `correlated_failure`, `CorrelatedProfile` (`se_exact`: are the errors the true ones); `analysis.correlated_failure_curve` |
 | $\Phi_J(\varepsilon)$, interpolated mass (Proposition 16) | `correlated_channel_failure`; `analysis.failure_probability_from_curve` |
 | $\bar\ell(m, J)$ sampled (Proposition 17) | `mean_leakage`, `Leakage`; `erasures.sample_regions`, `erasures.chain_diagnostics` |
 | $\bar\ell(m, J)$ exact | `mean_leakage_exact` |
-| seeds (Proposition 18) | `region_seed`, `REGION_SEED_TAG`, `REGION_SEED_WORDS`, `_text_words` |
-| $d^*$, $\mathcal A$, $T^*$, flags (§3.9, Proposition 19) | `peak`, `Peak` |
+| seeds (Proposition 18) | `region_seed`, `REGION_SEED_TAG`, `REGION_SEED_WORDS`, `bootstrap_seed`, `BOOTSTRAP_SEED_TAG`, `BOOTSTRAP_SEED_WORDS`, `_key_words`, `_text_words` |
+| $d^*$, $\mathcal A$, $T^*$, flags (§3.9, Proposition 19), the plateau's errors (§4.6) | `peak` (`se_exact`), `Peak` |
 | sensitivity, bootstrap (Proposition 20) | `peak_sensitivity`, `bootstrap_peak`, `PeakBootstrap` |
-| the registry (§3.10) | `ObservableDef`, `register`, `get`, `catalog`, `catalog_markdown`, `resolve_params`, `params_key`, `compute`, `SnapshotInput`, `ObservableValue`, `LEVELS`, `INPUTS`, `REQUIRED` |
+| the registry (§3.10) | `ObservableDef`, `register`, `get`, `catalog`, `catalog_markdown`, `resolve_params`, `params_key`, `compute`, `SnapshotInput`, `ObservableValue`, `LEVELS`, `INPUTS`, `REQUIRED`, `KINDS`, `PARAM_KINDS` |
 
 Stored fields (the design §4 `observations` columns are `value`, `se`, `data`, `method`):
 
@@ -786,8 +872,10 @@ Stored fields (the design §4 `observations` columns are `value`, `se`, `data`, 
 | `ChannelFailure.value`, `.se`, `.interpolated_mass` | $\hat\Phi(\varepsilon)$; $s_Z/\sqrt S$ or $\sqrt{\sum_j a_j(\varepsilon)^2\hat P_j(1-\hat P_j)/S}$; $\sum_{m \text{ interp.}}b_m(\varepsilon)$ |
 | `CorrelatedProfile.robustness`, `.robustness_se`, `.complete` | $\hat D(J)$; $\sqrt{\sum_j a_j^2\hat P_j(1-\hat P_j)/S}$; no size in $1..n-1$ interpolated |
 | `Leakage.value`, `.se`, `.ess`, `.seed` | $\hat\ell$; $s/\sqrt{\mathrm{ESS}}$; $S$ or $\min(S/\tau_{\mathrm{int}}, S)$; Proposition 18 |
-| `Peak.t_star`, `.maximizing_set`, `.at_horizon`, `.k_on_set`, `.first_argmax`, `.t_star_is_checkpoint` | §3.9 |
+| `Peak.t_star`, `.maximizing_set`, `.at_horizon`, `.k_on_set`, `.first_argmax`, `.t_star_is_checkpoint`, `.se_exact` | §3.9 |
+| `PeakBootstrap.t_star`, `.seed` | $T^*$ per replicate (Proposition 20); the seed used (`bootstrap_seed`) |
 | `ObservableValue` of `d_cyc` / `d_conn` / `half_cut_entropy` / `k` | the value; `se` 0 (exact); `data` has `has_code`, `zero_extended`, `k` where relevant |
+| `ObservableValue.observable_id`, `.version`, `.params_key` | the key `compute` computed it under (§3.10) |
 
 ## 7. Worked examples
 
@@ -931,8 +1019,10 @@ Trajectory 4 goes from $k = 14$ to $k = 1$; $\tau_1 = 10$ while its checkpoint b
 $\tau_0$ is censored. Its zero-extended $d_{\mathrm{cyc}}$ is $1, 1, 1, 1, 1, 3, 1, 2$: the exact
 peak is $\mathcal A = \lbrace 16\rbrace$, $T^* = 16$, with $k_{16} = 1$, so the peak lies after
 $\tau_1$ (Proposition 19(c)) and is not at the horizon. $\hat D(0)$ peaks at the same checkpoint
-($6.33 \pm 0.11$; the next largest, $5.70 \pm 0.12$ at the horizon, is 4 combined errors below), so
-the plateau at $z = 0, 1, 2$ is $\lbrace 16\rbrace$ and every bootstrap replicate agrees.
+($6.33 \pm 0.10$; the next largest, $5.70 \pm 0.11$ at the horizon, is 4.0 combined errors below), so
+the plateau at $z = 0, 1, 2$ is $\lbrace 16\rbrace$ (with true errors: `se_exact`), and every
+replicate of the bootstrap, seeded by `bootstrap_seed` of the trajectory's key (Proposition
+18(d)), agrees.
 
 ```python
 n, layers = 14, 56
@@ -972,11 +1062,14 @@ D = ob.integrated_robustness(first, n, exact_counts=counts, k=k_at)
 by_rule = ob.peak(cps, dcyc.zero_extended, rule="exact", k_at=k_at)
 assert by_rule.maximizing_set.tolist() == [16] and by_rule.t_star == 16.0
 assert by_rule.k_on_set.tolist() == [1] and not by_rule.at_horizon and by_rule.t_star_is_checkpoint
-plateau = ob.peak(cps, D.value, D.se, rule="plateau", z=1.0, k_at=k_at)
-assert plateau.maximizing_set.tolist() == [16] and plateau.first_argmax == 16
+assert [round(float(x), 2) for x in (D.value[5], D.se[5], D.value[7], D.se[7])] == [6.33, 0.10, 5.70, 0.11]
+plateau = ob.peak(cps, D.value, D.se, rule="plateau", z=1.0, k_at=k_at, se_exact=True)
+assert plateau.maximizing_set.tolist() == [16] and plateau.first_argmax == 16 and plateau.se_exact
 assert [p.maximizing_set.tolist() for p in ob.peak_sensitivity(cps, D.value, D.se, [0, 1, 2])] == [[16]] * 3
-boot = ob.bootstrap_peak(cps, first, n, z=1.0, replicates=200, seed=[2026, 10, 17], exact_counts=counts)
-assert boot.interval(0.9) == (16.0, 16.0) and boot.missing_fraction == 0.0
+key = TrajectoryKey("ws-demo", n, "0.1", "0.1", 0, 4)
+boot_seed = ob.bootstrap_seed(key, "peak_D", "1")
+boot = ob.bootstrap_peak(cps, first, n, z=1.0, replicates=200, seed=boot_seed, exact_counts=counts)
+assert boot.interval(0.9) == (16.0, 16.0) and boot.missing_fraction == 0.0 and boot.seed == boot_seed
 phi = ob.uniform_channel_failure(first, n, [0.05, 0.1], exact_counts=counts, k=k_at)
 assert np.all(phi.value[5] < 0.02)  # at the peak depth: Phi(0.05) = 0.0033, Phi(0.1) = 0.017
 ```
@@ -1020,6 +1113,7 @@ for name in ("every", "odd"):
     sampler = spec_f.correlated_sampler(name)
     profiles[name] = ob.correlated_failure(values, js, sizes, n, k_f, samples=400, sampler=sampler)
 assert profiles["every"].complete and profiles["every"].sampler["method"] == "exact"
+assert profiles["every"].se_exact  # exact samples: the binomial errors are the true ones
 assert not profiles["odd"].complete and profiles["odd"].interpolated_sizes.tolist() == [2, 4, 6, 8]
 for rr in range(3):
     for e in range(2):
@@ -1038,7 +1132,8 @@ The joint tableau of trajectory 4 of (e) at depth 56 ($k = 1$), with its graph a
 `compute` gives $k$, the half-cut entropy, $d_{\mathrm{conn}}$ and $d_{\mathrm{cyc}}$, and the mean
 leakage by both routes. At $m = 7 = n/2$ the exact route gives $\bar\ell = k = 1$
 (Proposition 15(d)); the sampled route (the chain on the Watts–Strogatz graph) gives
-$1.095 \pm 0.041$. The seed is the tuple of Proposition 18, rebuilt here by hand.
+$1.095 \pm 0.041$. The value carries its key (the entry's id and version and the canonical
+parameters, §3.10), and the seed is the tuple of Proposition 18, rebuilt here by hand.
 
 ```python
 n, t = 14, 56
@@ -1051,6 +1146,10 @@ sampled = ob.compute("mean_leakage", snap, {"m": 7, "J": 1.0, "samples": 200})
 exact = ob.compute("mean_leakage", snap, {"m": 7, "J": 1.0, "route": "enumerate"})
 assert abs(exact.value - 1.0) < 1e-12 and sampled.method == "chain"
 assert abs(sampled.value - exact.value) <= 4 * sampled.se
+# the key the value is stored under: the entry's id and version, and canonical parameters (J = 1
+# and J = 1.0 are one key)
+assert (sampled.observable_id, sampled.version) == ("mean_leakage", "1")
+assert sampled.params_key == ob.params_key("mean_leakage", {"m": 7, "J": 1, "samples": 200})
 
 
 def w(text):
@@ -1088,7 +1187,8 @@ print(ob.params_key("mean_leakage", {"m": 7, "J": 1.0}))
 | `d_conn` | snapshot (retrospective) | `physical_code`, `graph` | §5.6 |
 | `half_cut_entropy` | snapshot (retrospective) | `joint_tableau` | $S$ of $\lfloor n/2\rfloor$ qubits |
 | `peak_d_cyc`, `peak_d_conn` | trajectory | `trace:...`, `k_trace` | §5.8, exact rule |
-| `peak_D`, `peak_D_J` | trajectory | `trace:...`, `k_trace` | §5.8, plateau rule |
+| `peak_D` | trajectory | `trace:D`, `k_trace`, the uniform probes | §5.8, plateau rule, bootstrap of $T^*$ |
+| `peak_D_J` | trajectory | `trace:D_J`, `k_trace` | §5.8, plateau rule (no bootstrap; chain errors are lower bounds, `se_exact`) |
 
 ## 8. Validation map
 
@@ -1100,10 +1200,13 @@ states come from Stim. All tests are in `tests/test_study_observables.py`.
 
 | property | test | what is compared |
 |---|---|---|
-| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table |
+| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table (six cells in every row, pipes escaped, the definitions recovered) |
 | versions: a changed entry needs a new version | `test_register_get_and_versions` | refusal, a second version, `get` by version, refusals of bad entries |
-| canonical parameter keys | `test_parameters_are_resolved_and_keyed_canonically` | defaults, unknown and missing names, key equality, `json.dumps` reference |
+| canonical parameter keys | `test_parameters_are_resolved_and_keyed_canonically`, `test_numerically_equal_parameters_have_one_key`, `test_entries_declare_the_kind_of_every_parameter` | defaults, unknown and missing names, key equality, `json.dumps` reference; one key for $J$ = 1, 1.0, numpy scalars, $\pm 0$, int and float coupling lists, a scalar or one-element $\varepsilon$, the design manifest's `analysis.peak`; strings, bools, fractional ints and NaN refused; kinds required and defaults canonical |
+| parameters a function consumes | `test_peak_parameters_are_only_those_a_function_consumes` | `peak_D` keeps `bootstrap`, `peak_D_J` has none |
 | `compute` refusals | `test_compute_refuses_what_it_cannot_compute` | missing inputs, no key, wrong $n$, bad route |
+| `compute` passes the entry and keys the value | `test_compute_hands_the_entry_to_its_compute_and_keys_the_value` | the entry and canonical parameters reach `compute`; `observable_id`, `version`, `params_key`; a non-`ObservableValue` refused |
+| a snapshot checked against $n$ | `test_a_snapshot_is_checked_against_its_n` | a 12-qubit joint tableau refused at $n$ = 4, 5, 7, 8 and accepted at 6, 11, 12; a 6-qubit code refused at $n$ = 5, 8; types |
 | change points (§3.2) | `test_change_points_round_trip_and_are_canonical`, `test_change_points_refuse_what_is_not_a_trace` | hand cases; 300 random traces against a loop; every refusal |
 | Propositions 2, 3 | `test_first_passage_matches_its_definition` | 300 random traces: $\tau$, $\widehat\tau^{\mathrm{chk}}$ against $\min$ over layers and checkpoints; $\tau \le \widehat\tau^{\mathrm{chk}}$; $k_t = \min\lbrace\ell : \tau_\ell \le t\rbrace$ (exact) |
 | hand-made first passages, censoring, zero fill | `test_first_passage_on_hand_made_traces` | multi-drop, plateaus, censoring, `survival_data`, `to_dict`, change-point input |
@@ -1118,24 +1221,36 @@ states come from Stim. All tests are in `tests/test_study_observables.py`.
 | Proposition 13(a), 12(b) | `test_D0_is_the_expected_first_failure_size_exactly` | all $n!$ orderings ($n \le 6$), Fractions: $\Pr[M \le m] = P(m)$, $\mathbb E M = D(0)$, $D \le (n+1)/2$ |
 | Proposition 13(b) | `test_integrated_robustness_formulas` | 50 random sample sets: value and error against loops; contradicting counts and $k$ refused |
 | $\hat D(0)$ unbiased | `test_D0_estimates_match_the_exact_value`, `test_D0_from_the_engine_probes_matches_the_exact_value` | within 4.5 exact standard deviations; false alarm below $2\cdot10^{-4}$ and $10^{-4}$ (normal approximation); engine counts = oracle counts (exact) |
-| Proposition 14 | `test_uniform_channel_failure_formulas`, `test_uniform_channel_failure_matches_the_exact_value` | value and error against loops (exact); 48 comparisons within 4.5 exact sd, false alarm below $3.3\cdot10^{-4}$ |
-| Proposition 16 | `test_correlated_profile_bookkeeping` | hand curves, $D(J)$ and $\Phi_J$ with the interpolation weights written out, refusals |
-| exact correlated samples | `test_correlated_probe_matches_the_exact_law` ($n$ = 6, 7, 8) | every $\hat P_J(m)$: exact binomial $p$-value above $10^{-4}$/comparisons (Bonferroni); $D(J)$, $\Phi_J$ within 4.5 sd; below $9.6\cdot10^{-4}$ in all |
-| the chain, across trajectories | `test_correlated_probe_on_interaction_graphs_is_unbiased_across_trajectories` | mean of $\hat D(J) - D(J)$ over $\ge 40$ trajectories, Student $\lvert t\rvert \le 4$ (false alarm $5.6\cdot10^{-4}$) |
-| Proposition 18 | `test_region_seed_derivation` | the tuple rebuilt in the test (blake2b, struct); 192 distinct seeds over every field; tags; refusals |
-| Proposition 17 | `test_mean_leakage_is_keyed_and_reproducible`, `test_mean_leakage_matches_the_exact_law_with_exact_samples`, `test_mean_leakage_with_the_chain_is_unbiased` | reproducibility and the regions of the seed; ESS = capped `chain_diagnostics` (a correlated case); exact samples within 4.5 exact sd (12 comparisons, $10^{-4}$); the chain, $\lvert t\rvert \le 4$ over 48 seeds ($5\cdot10^{-4}$) |
+| Proposition 14 | `test_uniform_channel_failure_formulas`, `test_uniform_channel_failure_matches_the_exact_value` | value and error against loops (exact), `se` of the shape of `value` (also with one ordering and several rates); 48 comparisons within 4.5 exact sd, false alarm below $3.3\cdot10^{-4}$ |
+| rates copied; memory bounded in $q$ | `test_channel_failure_never_shares_or_freezes_the_callers_rates`, `test_uniform_channel_failure_memory_does_not_grow_with_the_rate_count` | the caller's array (and the base of a view) stays writable and unchanged in the result; peak traced memory at 40 rates $\le 12\times$ the input (measured 5.1; the former dense array, 82) |
+| Proposition 16 | `test_correlated_profile_bookkeeping` | hand curves, $D(J)$ and $\Phi_J$ with the interpolation weights written out, refusals; `se_exact` only for an exact sampler |
+| exact correlated samples | `test_correlated_probe_matches_the_exact_law` ($n$ = 6, 7, 8) | every $\hat P_J(m)$: exact binomial $p$-value above $10^{-4}$/comparisons (Bonferroni); $D(J)$, $\Phi_J$ within 4.5 sd; below $9.6\cdot10^{-4}$ in all; `se_exact` |
+| the chain, across trajectories | `test_correlated_probe_on_interaction_graphs_is_unbiased_across_trajectories` | mean of $\hat D(J) - D(J)$ over $\ge 40$ trajectories, Student $\lvert t\rvert \le 4$ (false alarm $5.6\cdot10^{-4}$); not `se_exact` |
+| Proposition 18(a)–(c) | `test_region_seed_derivation` | the tuple rebuilt in the test (blake2b, struct); 192 distinct seeds over every field; tags; refusals |
+| Proposition 18(d), Proposition 20's seed | `test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy` | the tuple rebuilt in the test; 32 distinct seeds over every field; the tag apart from WSRO, WSG1, WSC1; a recorded seed reproduces the bootstrap; `None`, floats, strings, bools, negatives, empty and `SeedSequence` refused |
+| versions keep their own seeds | `test_a_registered_version_keeps_its_own_region_seeds` | with a version 2 and a renamed copy registered, version 1's seed and value are unchanged; the three seeds are distinct and each the tuple of its own id and version |
+| Proposition 17 | `test_mean_leakage_is_keyed_and_reproducible`, `test_mean_leakage_matches_the_exact_law_with_exact_samples`, `test_mean_leakage_with_the_chain_is_unbiased`, `test_mean_leakage_caps_the_chain_ess_at_the_sample_count` | reproducibility and the regions of the seed; ESS = capped `chain_diagnostics` (a correlated case, and a tempered case whose Sokal ESS is 106.7 > S = 60: ESS = S, error $s/\sqrt S$); exact samples within 4.5 exact sd (12 comparisons, $10^{-4}$); the chain, $\lvert t\rvert \le 4$ over 48 seeds ($5\cdot10^{-4}$) |
 | Proposition 11 | `test_connected_distance_against_the_oracle`, `test_connected_and_cyclic_distances_can_differ`, `test_connected_distance_is_at_most_cyclic_on_the_unrewired_graph` | 30+ random codes and graphs (cycles, paths, WS, disconnected) = oracle (with $\infty$); the two examples; $d_{\mathrm{conn}} \le d_{\mathrm{cyc}}$ on $C(n,2)$; refusal above `max_n` |
 | half-cut entropy | `test_half_cut_entropy_matches_the_engine_probe_and_the_oracle` | engine probe = stored tableau = oracle ($n \le 7$) |
 | retrospective `compute` | `test_compute_from_stored_snapshots_matches_the_engine_probes` | $k$, rate, rank, $d_{\mathrm{cyc}}$, $d_{\mathrm{conn}}$ against the engine probes |
 | peaks: exact rule, flags | `test_exact_peaks_ties_log_midpoint_and_horizon`, `test_peaks_missing_and_invalid` | ties, log midpoint, horizon, $k$ on $\mathcal A$, `t_star_is_checkpoint`; every invalid case and refusal |
 | Proposition 19(b) | `test_plateau_rule_hand_cases_and_nesting` | hand thresholds; nesting in $z$ and $z = 0$ = exact on 200 random traces |
+| the plateau rule as defined, unequal errors | `test_plateau_rule_uses_the_first_maximizers_error`, `test_plateau_rule_matches_its_definition_on_random_traces` | hand cases whose sets depend on $\mathrm{se}(t^\circ)$ (a checkpoint at 0; a first maximizer that is not the smallest depth; a last error unlike $\mathrm{se}(t^\circ)$); 400 random traces (with $t = 0$, ties, several $z$) against the rule written out in the test |
 | the plateau's error rate | `test_plateau_rule_keeps_a_true_plateau_with_the_stated_probability` | 4000 trials, a 3-point plateau, $z = 2$: exclusion rate $\le 0.1365 + 4$ sd (false alarm $4\cdot10^{-5}$) |
-| Proposition 20 | `test_bootstrap_peak_reproduces_its_documented_draws`, `test_bootstrap_peak_of_noiseless_samples_is_the_estimate` | the draws rebuilt from the documented stream; noiseless samples; $k = 0$ |
+| the plateau's record of its errors | `test_peaks_record_whether_their_errors_are_true` | `se_exact` as given (None for the exact rule), in `to_dict`, in missing peaks and the sensitivity sweep; True for the $D(0)$ bootstrap |
+| Proposition 20 | `test_bootstrap_peak_reproduces_its_documented_draws`, `test_bootstrap_peak_keeps_the_exact_counts_in_every_replicate`, `test_bootstrap_peak_of_noiseless_samples_is_the_estimate` | the draws rebuilt from the documented stream, peaked by the rule written out; noisy samples with counts up to $w = 2$, each replicate's hybrid $\hat D(0)$ and $s_Y/\sqrt S$ rebuilt (the plain estimator changes $T^*$ in 34 of the 60 replicates, and the test requires at least 5, so it tells them apart); noiseless samples; $k = 0$ |
 | the module's examples | `src/sparsegf2/study/observables.py` doctests | `--doctest-modules` |
 
 A mutation check (a script outside the repository) planted 35 single-line faults in
 `observables.py`, one at a time; the tests killed 34. The survivor sums $D(0)$ to $m = n$ instead
-of $n - 1$, which is equivalent: validated inputs force $\tilde P(n) = 1$ when $k > 0$.
+of $n - 1$, which is equivalent: validated inputs force $\tilde P(n) = 1$ when $k > 0$. After the
+review, 18 more faults, one per fix (the latest version's seed in a computed value, unnormalized
+parameters, string couplings, a bootstrap listed for `peak_D_J`, an unchecked bootstrap seed, a
+one-column error with one ordering, shared rates, the dense $(\dots, S, q)$ array, unchecked
+snapshot widths (two), no Markdown escaping, four wrong plateau widths ($\mathrm{se}$ indexed
+before restricting to $t > 0$, $\sqrt2\,\mathrm{se}(t)$, the last checkpoint's error,
+$\mathrm{se}(t)$ twice), replicates without the counts, no ESS cap, no `se_exact` record), were all
+killed.
 
 ## 9. Limitations and departures
 
@@ -1144,26 +1259,54 @@ of $n - 1$, which is equivalent: validated inputs force $\tilde P(n) = 1$ when $
   in v1.4 §5.2–§5.8 was found to be mathematically wrong. One remark: v1.4 §5.6 says
   $\lbrace 0, 2, 4\rbrace$ is connected but not contiguous "for $n \ge 7$"; it is so for every $n \ge 5$.
 * **Chain errors.** The engine's correlated probe stores failing fractions only, so its binomial
-  errors understate the error of chain estimates by $\sqrt{\tau_{\mathrm{int}}}$, and nothing in the
-  run can reveal incomplete mixing; the sampler's configuration is carried, and mixing is checked
-  on the graph side with `erasures.sample_regions` (correlated-erasure.md §8.3). Across
-  trajectories the chains are independent, so ensemble errors from the spread are valid.
+  errors understate the error of chain estimates by about $\sqrt{\tau_{\mathrm{int}}}$, and nothing
+  in the run can reveal incomplete mixing; the sampler's configuration is carried
+  (`CorrelatedProfile.se_exact` is False for it), and mixing is checked on the graph side with
+  `erasures.sample_regions` (correlated-erasure.md §8.3). Measured (a script outside the
+  repository: one engine code on a WS($n$, 4, 0.1) graph, the probe's defaults, 100 regions per
+  size, every size, 40 independent chain seeds), the spread of $\hat D(J)$ over the seeds divided by
+  the mean `robustness_se` was 1.02, 1.28, 2.29 at $J = 0, 1, 2$ for $n = 32$ and 0.88, 1.44, 3.64
+  for $n = 64$ with `thin` = 1 (the default), and 1.22, 0.94, 0.81 and 0.99, 0.94, 0.98 with
+  `thin` = 20 (each ratio itself uncertain by about 11% with 40 seeds). Across trajectories the
+  chains are independent, so the graph-cluster error of an ensemble mean of per-trajectory
+  estimates (`stats.graph_cluster_se`, v1.4 §6.4) contains the chain variance and is valid; the
+  plain spread over trajectories is valid only with one circuit per graph. Neither contains a
+  shared equilibration bias.
 * **Interpolated sizes.** $D(J)$ and $\Phi_J$ computed with interpolated sizes are biased by the
   interpolation (§7(f)); they are flagged (`complete`, `interpolated_mass`), not corrected.
-* **The plateau rule** is a fixed, conservative tie rule, not a calibrated test: its exclusion
-  rate for true maximizers depends on the plateau size (Proposition 19's bound), and it is
-  conditional on the trajectory's codes.
+* **The plateau rule** is a fixed tie rule, not a calibrated test: its exclusion rate for true
+  maximizers depends on the plateau size (§4.6's bound), and it is conditional on the
+  trajectory's codes. Its stated meaning needs the true standard errors. For `peak_D_J` on the
+  study's interaction graphs (the chain at every $J$) the errors are the binomial lower bounds, so
+  with the default `thin` = 1 the plateau at the manifest's $z = 1$ spans about $1/2.3$ to
+  $1/3.6$ of a true standard deviation at $J = 2$ (the factors above), true plateau checkpoints are
+  left out more often than $q(q-1)\Phi_{\mathcal N}(-z)$, $T^*_J$ moves toward single, noisy maxima,
+  `sensitivity_z` understates the rule's fragility, and the effective width differs between
+  conditions, which matters when $T^*_J$ enters a finite-size-scaling comparison. The record says
+  so (`Peak.se_exact` False); the remedy is a `thin` near the chain's $\tau_{\mathrm{int}}$
+  (measured with `erasures.sample_regions` at the probe's settings), as `thin` = 20 achieved above.
+* **No bootstrap of $T^*_J$** (a partial departure from v1.4 §5.8, which asks for a
+  bootstrap-supported plateau rule for Monte Carlo estimates of $D$). The correlated probe keeps
+  failing fractions, not regions, so there is nothing to resample nonparametrically, and a
+  parametric binomial bootstrap would inherit the understated chain errors and give false
+  confidence on the interaction graphs. `peak_D_J` therefore lists no `bootstrap` (its key would
+  otherwise claim replicates that never ran); the uncertainty of $T^*_J$ comes from the
+  sensitivity over $z$ and, for ensemble statistics, from the graph-cluster bootstrap
+  (`stats.graph_bootstrap`). $T^*$ of $D(0)$ keeps its bootstrap (Proposition 20).
 * **$d_{\mathrm{conn}}$** is exponential in the worst case: refused above `max_n` (default 20).
 * **`mean_leakage_exact`** evaluates $\binom nm$ regions in Python (refused above two million);
   it is for validation and small systems.
 * **Conventions chosen here** (v1.4 left them open): the change-point form with the horizon row;
   the $-1$ marker of censored thresholds; the first maximizer $t^\circ$ in the plateau; the exact
   singleton $T^*$; `t_star_is_checkpoint` to a relative $10^{-12}$; the half-cut region; $\infty$ for
-  no connected failing region; the seed tuple of Proposition 18.
+  no connected failing region; the seed tuples of Proposition 18; the canonical parameter forms of
+  §3.10.
 * **Additions beyond the design table (§5)**, none of which changes a definition: `Phi` and `Phi_J`
   (v1.4 §5.7 and §9, "Geometry-sensitive follow-up"), the exact route of `mean_leakage`
   (`route="enumerate"`), the optional `k` cross-check of the uniform estimators,
-  `t_star_is_checkpoint` (validation requirement 13), and `catalog_markdown`.
+  `t_star_is_checkpoint` (validation requirement 13), `se_exact`, `bootstrap_seed`, the key carried
+  by `ObservableValue`, and `catalog_markdown`.
 * **Seeds (ruling R-SEED).** The retrospective seeds use the full trajectory key, not the stream
-  index $u$ of the design table. The token words come from `identity.token_words`; the other
-  strings use a private helper with the same convention (Proposition 18).
+  index $u$ the T4 task brief first named (the design table says only "keyed region sampler"). The
+  token words come from `identity.token_words`; the other strings use a private helper with the
+  same convention (Proposition 18).
