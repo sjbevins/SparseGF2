@@ -56,25 +56,43 @@ is [07-finite-size-scaling.md](07-finite-size-scaling.md).
 | symbol | meaning | type | in the code |
 |---|---|---|---|
 | $g, c, r$ | graph, gate-sequence and replica labels of a trajectory | integers $\ge 0$ | `g`, `c`, `r` |
-| $G$ | number of graphs (v1.4's $G_\ast$) | integer | `GraphMean.num_graphs` |
+| $G$ | number of graphs (v1.4's $N_{\mathrm{graphs}}$) | integer | `GraphMean.num_graphs` |
+| $G_g$, $\mathbf G$ | the $g$-th graph (random, drawn from $\mu_{n,\beta}$); all of them | random graphs | (the graph records) |
+| $\Gamma_{gc}$, $\phi$ | gate sequence $c$ of graph $g$ (random); $\phi(G_g, \Gamma_{gc})$, a trajectory's mean given both (Proposition 1) | | |
 | $C_g$ | gate sequences on graph $g$ | integer | `NestedMean.circuits_per_graph` |
 | $R_{gc}$ | replicas of gate sequence $(g, c)$ | integer | `NestedMean.replicas_per_circuit` |
-| $F_{gcr}$ | the observable of one trajectory (one checkpoint, or a vector of them) | real or NaN | rows of `values` |
+| $N$, $n_g$ | rows (trajectories) in all, and of graph $g$: $n_g = \sum_c R_{gc}$ | integers | `NestedMean.num_trajectories`, `.trajectories_per_graph` |
+| $F_{gcr}$, $F_i$ | the observable of one trajectory (one checkpoint, or a vector of them) | real or NaN | rows of `values` |
 | $\hat f_{gc}$, $\hat f_g$ | gate-sequence and graph means | real | `NestedMean.graph_means` ($\hat f_g$) |
+| $\bar F_g$, $\hat\mu_{\mathrm{pool}}$ | the plain average of graph $g$'s rows; the pooled mean of all rows (§3.3) | reals | (not computed) |
 | $\hat\mu$ | the nested estimate | real | `GraphMean.mean` |
 | $\widehat{\mathrm{SE}}$ | the graph-cluster standard error | real | `GraphMean.se` |
+| $G'$ | graphs that contribute a defined value | integer | `GraphMean.contributing_graphs` |
 | $m(g)$ | $\mathbb{E}[F \mid G = g]$, the mean over gates, masks and outcomes on graph $g$ | real | (target) |
 | $\mu$ | $\mathbb{E}_{G}[m(G)]$, the ensemble mean (v1.4 §6.2) | real | (target) |
-| $D_g$ | per-graph difference between two rates | real | `paired_difference(...).graph_means` |
-| $\tau$, $T_{\max}$ | a first-passage depth and the horizon (censoring depth) | integers | `times`, `observed`; `SurvivalCurve.horizon` |
-| $w_i$ | weight of trajectory $i$ | positive | `graph_equal_weights` |
-| $t_j$; $Y_j$, $D_j$ | event depths; weighted numbers at risk and of events | reals | `SurvivalCurve.times`; `at_risk`, `events` (as shares of $W = \sum_i w_i$) |
-| $\hat S(t)$ | Kaplan–Meier estimate of $S(t) = \Pr(\tau > t)$ | in $[0, 1]$ | `SurvivalCurve.survival` |
-| $U_g(t)$ | influence of cluster $g$ on $\hat S(t)$ | real | `stats.py::_km_influence_chunks` |
-| $\mathrm{RM}(h)$ | restricted mean $\int_0^h \hat S(t)\,dt$ | real | `SurvivalCurve.restricted_mean` |
-| $d(t)$, $\mathcal A$, $T^\ast$ | a robustness trace, its maximizing set, the peak depth (v1.4 §5.8) | | `traces`, `peak_times`, `at_horizon` |
-| $B$ | bootstrap replicates | integer | `replicates` |
+| $n(G)$ | rows allocated to a graph, as a function of the graph (Proposition 2) | integer | |
+| $v_g$ | $\operatorname{Var}\hat f_g$ | real | |
+| $a_g$, $b_{gc}$, $e_{gcr}$; $\sigma_a^2$, $\sigma_b^2$, $\sigma_e^2$ | graph, gate-sequence and leaf effects of the variance-components model (§4.1), and their variances | reals | (the tests' generators) |
+| $\mathcal D$ | the event that a value is defined (§3.4) | event | `nan_policy="omit"` |
+| $\theta$, $A(\theta)$; $a_k$, $b_k$ | the angle $\arctan(t/\sqrt\nu)$ and the two-sided probability $\Pr(\lvert T\rvert \le t)$ of §4.2; the coefficients of its finite sums | reals | (inside `_t_two_sided`) |
 | $t_{q,\nu}$ | the $q$-quantile of Student's $t$ with $\nu$ degrees of freedom | real | `student_t_quantile(q, nu)` |
+| $\Delta_g$, $\bar\Delta$ | per-graph difference between two rates, and its mean | reals | `paired_difference(...).graph_means`, `.mean` |
+| $k_t$, $\ell$ | the code dimension at depth $t$ and a threshold (v1.4 §5.2) | integers | (the store's traces) |
+| $\tau$, $T_{\max}$ | a first-passage depth $\tau_\ell$ and the horizon (censoring depth) | integers | `times`, `observed`; `SurvivalCurve.horizon` |
+| $T_i$ | the recorded depth of trajectory $i$ (its $\tau$, or its censoring depth) | integer | `times` |
+| $w_i$; $W$, $W_g$ | weight of trajectory $i$; the total weight, and graph $g$'s | positive | `graph_equal_weights` |
+| $L$ | $\operatorname{lcm}_{g,c}(C_g R_{gc})$, the integer weights' total per graph | integer | (inside `graph_equal_weights`) |
+| $t_j$, $J$; $Y_j$, $D_j$ | the $J$ distinct event depths; weighted numbers at risk and of events | reals | `SurvivalCurve.times`; `at_risk`, `events` (as shares of $W$) |
+| $Y_{gj}$, $D_{gj}$ | cluster $g$'s at-risk and event weights at $t_j$ | reals | (inside `_km_influence_chunks`) |
+| $\hat S(t)$, $\hat S_g(t)$ | Kaplan–Meier estimate of $S(t) = \Pr(\tau > t)$; graph $g$'s nested fraction with $\tau > t$ (Proposition 7) | in $[0, 1]$ | `SurvivalCurve.survival` |
+| $u$, $\hat S_{\mathrm{float}}$ | the unit roundoff $2^{-53}$; the curve as a float64 product (§6.4) | reals | (inside `_snap_half`) |
+| $U_g(t)$, $\varepsilon$ | influence of cluster $g$ on $\hat S(t)$; the scaling of its weights by $1 + \varepsilon$ | reals | `stats.py::_km_influence_chunks` |
+| $\mathrm{RM}(h)$, $h$, $\lambda_j$ | restricted mean $\int_0^h \hat S(t)\,dt$ to the horizon $h$; the length of the step at $t_j$ inside $[0, h]$ | reals | `SurvivalCurve.restricted_mean`, `.restricted_horizon` |
+| $d(t)$, $\mathcal T_+$, $d^\ast$, $\mathcal A$, $T^\ast$ | a robustness trace, the positive checkpoints, its maximum and maximizing set, the peak depth (v1.4 §5.8) | | `traces`, `checkpoints`, `peak_times`, `at_horizon` |
+| $x_i$ | positive values in Proposition 11 (the $T^\ast$) | reals | |
+| $B$, $b$ | bootstrap replicates, and a replicate's index | integers | `replicates` |
+| $V$, $x$ | $2^{64} - (2^{64} \bmod G)$, the rejection bound of the bootstrap draws; a raw 64-bit word (§7.1) | integers | (inside `graph_bootstrap`) |
+| $\hat\sigma^2$ | the variance of the empirical law of the $\hat f_g$ (Proposition 10) | real | |
 
 ## 3. The nested estimator
 
@@ -105,9 +123,10 @@ $(C_g, R_{gc})$ be *nonadaptive*: fixed in advance, or a function of the graphs 
 observed values. Then $\mathbb{E}\hat\mu = \mu$.
 
 *Proof.* Condition on all graphs $\mathbf G$ (the allocation is then fixed). Given $G_g$ and
-its gate sequence $U_{gc}$, the replicas are identically distributed, so
-$\mathbb{E}[F_{gcr} \mid \mathbf G, U_{gc}] = h(G_g, U_{gc})$, and the gate sequences of a graph
-are identically distributed given it, so $\mathbb{E}[h(G_g, U_{gc}) \mid \mathbf G] = m(G_g)$.
+its gate sequence $\Gamma_{gc}$, the replicas are identically distributed, so
+$\mathbb{E}[F_{gcr} \mid \mathbf G, \Gamma_{gc}] = \phi(G_g, \Gamma_{gc})$, and the gate sequences
+of a graph are identically distributed given it, so
+$\mathbb{E}[\phi(G_g, \Gamma_{gc}) \mid \mathbf G] = m(G_g)$.
 Averages of quantities with conditional mean $m(G_g)$ have conditional mean $m(G_g)$:
 $\mathbb{E}[\hat f_{gc} \mid \mathbf G] = \mathbb{E}[\hat f_{g} \mid \mathbf G] = m(G_g)$. Hence
 $\mathbb{E}[\hat\mu \mid \mathbf G] = \frac1G\sum_g m(G_g)$ and
@@ -227,18 +246,18 @@ with a numerical integral of the density.
 The rates of one $(n, \beta)$ are measured on the same graphs, and under the shared gate mode the
 same gate sequences and mask uniforms (v1.4 §7.3, §9): estimates at two rates are positively
 correlated. v1.4 §6.4: form the differences within each graph first,
-$D_g = \hat f_g(p_2) - \hat f_g(p_1)$, and take their mean and cluster error
-(`stats.py::paired_difference`, which returns a `GraphMean` of the $D_g$).
+$\Delta_g = \hat f_g(p_2) - \hat f_g(p_1)$, and take their mean $\bar\Delta$ and cluster error
+(`stats.py::paired_difference`, which returns a `GraphMean` of the $\Delta_g$).
 
-**Proposition 4 (derived here).** The $D_g$ are independent across graphs with mean
+**Proposition 4 (derived here).** The $\Delta_g$ are independent across graphs with mean
 $\mu(p_2) - \mu(p_1)$ and variance
-$\operatorname{Var}D_g = v_g(p_1) + v_g(p_2) - 2\operatorname{Cov}\big(\hat f_g(p_1), \hat f_g(p_2)\big)$,
-so Proposition 3 applies to them: $\widehat{\mathrm{SE}}(\bar D)^2$ is unbiased for
-$\operatorname{Var}\bar D$. Combining the two errors as if independent,
+$\operatorname{Var}\Delta_g = v_g(p_1) + v_g(p_2) - 2\operatorname{Cov}\big(\hat f_g(p_1), \hat f_g(p_2)\big)$,
+so Proposition 3 applies to them: $\widehat{\mathrm{SE}}(\bar\Delta)^2$ is unbiased for
+$\operatorname{Var}\bar\Delta$. Combining the two errors as if independent,
 $\sqrt{\widehat{\mathrm{SE}}_1^2 + \widehat{\mathrm{SE}}_2^2}$, estimates the variance without the
 covariance term and overstates it when the covariance is positive.
 
-*Proof.* $D_g$ depends only on graph $g$'s trajectories at the two rates, which are independent of
+*Proof.* $\Delta_g$ depends only on graph $g$'s trajectories at the two rates, which are independent of
 other graphs'; linearity of expectation and the variance of a difference give the rest. ∎
 
 The function requires the same graph labels at both rates (`graphs="same"`) or uses those both
@@ -273,7 +292,13 @@ For the study the weights are graph-equal (`stats.py::graph_equal_weights`):
 $w_{gcr} = L/(C_g R_{gc})$ with $L = \operatorname{lcm}_{g,c}(C_g R_{gc})$, integers whose total
 is $L$ for every graph. They are proportional to the nested weights of §3.1, and $\hat S$ only
 uses their ratios. `stats.py::nested_kaplan_meier(g, c, r, times, observed)` uses them with the
-graphs as clusters (§6.3).
+graphs as clusters (§6.3). Integer sums stay exact only while $L N < 2^{62}$ ($N$ rows); an
+allocation with many different, large $C_g R_{gc}$ (for example $C_g = 1 + g \bmod 43$ over 60
+graphs, where $\operatorname{lcm}(1, \dots, 43) \approx 9.4\times10^{18}$) cannot have them, so
+`graph_equal_weights` refuses it, and `nested_kaplan_meier` then uses the float weights
+$1/(C_g R_{gc})$, which have the same ratios: the same curve to rounding, with `exact_weights`
+False (the decision at $1/2$ is then the float one, §6.4). v1.4 §6.3 asks for equal graph weight
+whatever the allocation, so the nested curve takes every allocation.
 
 **Proposition 5 (one horizon; derived here).** Suppose every censored trajectory has
 $T_i = h$ and every observed depth is $\le h$. Then for every $t \in [0, h]$,
@@ -389,7 +414,7 @@ $\mathrm{RM}(T_{\max})$ *is* the nested mean of $\min(\tau, T_{\max})$, the dept
 horizon, an unbiased estimate of $\mathbb{E}[\min(\tau, T_{\max})]$ with no assumption about the
 censored trajectories. It is a lower bound on $\mathbb{E}[\tau]$, equal to it exactly when
 $\Pr(\tau > T_{\max}) = 0$. Its error is the cluster delta method with influence
-$\sum_j \ell_j U_g(t_j)$ ($\ell_j$ the length of the step at $t_j$ inside $[0, h]$), which under one
+$\sum_j \lambda_j U_g(t_j)$ ($\lambda_j$ the length of the step at $t_j$ inside $[0, h]$), which under one
 horizon is the §6.4 error of the nested mean of $\min(\tau, T_{\max})$ (same telescoping as
 Proposition 7).
 
@@ -418,8 +443,8 @@ $b$ draws $G$ labels uniformly with replacement. The draws come from the raw out
 PCG64 bit generator seeded by `SeedSequence(seed)`; numpy keeps the raw bit streams and
 `SeedSequence` stable across versions (unlike `Generator` methods), so a seed gives the same
 draws. A raw word $x$ is mapped to $x \bmod G$ after rejecting the $2^{64} \bmod G$ largest words:
-the accepted words are uniform on $[0, L)$ with $L = 2^{64} - (2^{64} \bmod G)$ a multiple of $G$,
-so every residue has $L/G$ preimages and is equally likely.
+the accepted words are uniform on $[0, V)$ with $V = 2^{64} - (2^{64} \bmod G)$ a multiple of $G$,
+so every residue has $V/G$ preimages and is equally likely.
 
 ### 7.2 Applying the draws, and pairing
 
@@ -430,7 +455,7 @@ cluster error from the drawn graph means (drawn copies count as separate graphs)
 
 **Proposition 9 (pairing survives; derived here).** If the same draws are applied to two
 estimates on the same graphs, the replicate differences are the replicates of the paired
-difference: $\hat\mu_2^{\ast b} - \hat\mu_1^{\ast b} = \bar D^{\ast b}$.
+difference: $\hat\mu_2^{\ast b} - \hat\mu_1^{\ast b} = \bar\Delta^{\ast b}$.
 
 *Proof.* Each replicate is the mean of the drawn graphs' values, a linear function of the graph
 values with the same coefficients for both estimates. ∎
@@ -473,11 +498,11 @@ apart (all with graph-equal weights):
   exact maximizer of the averaged values and `argmax_at_horizon` says whether $T_{\max}$ is one).
 
 **Proposition 11 (derived here).** For positive values and any positive weights summing to 1,
-$\exp\big(\sum_i w_i \ln T_i\big) \le \sum_i w_i T_i$, with equality only when all $T_i$ with
+$\exp\big(\sum_i w_i \ln x_i\big) \le \sum_i w_i x_i$, with equality only when all $x_i$ with
 $w_i > 0$ are equal. Hence `geometric` $\le$ `arithmetic` on the same trajectories.
 
 *Proof.* Jensen's inequality for the concave $\ln$:
-$\sum_i w_i\ln T_i \le \ln\sum_i w_i T_i$, strict unless the $T_i$ are equal; exponentiate. The
+$\sum_i w_i\ln x_i \le \ln\sum_i w_i x_i$, strict unless the $x_i$ are equal; exponentiate. The
 nested mean is such a weighted average (§3.1). ∎
 
 **Proposition 12 (derived here).** $\operatorname{argmax}_t\mathbb{E}[d(t)]$ is not a function of
@@ -536,9 +561,15 @@ float64 product elsewhere.
 ### 9.3 Bootstrap (`graph_bootstrap`, `GraphMean.bootstrap`)
 
 1. `SeedSequence(seed)` → PCG64 raw words → residues with rejection (§7.1) → labels.
-2. A replicate's estimate is the mean of the drawn graph values (NaN left out).
+2. A replicate's estimate is the mean of the drawn graph values (NaN left out). The drawn values
+   are gathered a block of replicates at a time, at most about $2^{20}$ values per block
+   (`stats.py::_replicate`, `_REPLICATE_CHUNK`), so a value of $K$ entries per graph (a trace
+   over checkpoints) needs memory for a block and the $(B, K)$ result, not $B G K$ doubles;
+   each replicate's sums run over its own row in the same order whatever the blocks, so the
+   result does not depend on the block size. `GraphMean.bootstrap` computes the means only; the
+   finite-size-scaling bootstrap also asks for each replicate's cluster error.
 
-Cost $O(BG)$ per estimate.
+Cost $O(BGK)$ time per estimate, $O(2^{20} + BK)$ memory.
 
 ## 10. From the mathematics to the code
 
@@ -547,16 +578,16 @@ Cost $O(BG)$ per estimate.
 | nested estimator §3.1, counts per level, NaN policy §3.4 | `stats.py::nested_mean` → `NestedMean` |
 | mean and error from per-graph values | `stats.py::mean_over_graphs` → `GraphMean` |
 | graph-cluster error §4.1 | `stats.py::graph_cluster_se`, `GraphMean.se` |
-| Student-$t$ interval §4.2 | `GraphMean.interval`, `stats.py::student_t_quantile` |
+| Student-$t$ interval §4.2 | `GraphMean.interval`, `stats.py::student_t_quantile` (checks, then the cached `_t_quantile`) |
 | paired difference §5 | `stats.py::paired_difference` |
-| graph-equal integer weights §6.2 | `stats.py::graph_equal_weights` |
+| graph-equal integer weights §6.2 (and their float fallback) | `stats.py::graph_equal_weights`, `stats.py::_equal_weights` |
 | weighted Kaplan–Meier §6.2, variance §6.3 | `stats.py::weighted_kaplan_meier`, `stats.py::_km_influence_chunks` → `SurvivalCurve` |
 | the study's curve (graph-equal weights, clusters = graphs) | `stats.py::nested_kaplan_meier` |
 | median, upper median, exact 1/2 §6.4 | `SurvivalCurve.median`, `.median_upper`, `stats.py::_snap_half` |
 | restricted mean §6.5, mean without censoring | `SurvivalCurve.restricted_mean`, `.restricted_mean_se`, `.mean`, `.mean_se` |
 | censoring summary §6.6 | `stats.py::censoring_summary` → `CensoringSummary` |
 | bootstrap draws §7.1 | `stats.py::graph_bootstrap` (`_bounded_integers`) |
-| replicates §7.2, percentile interval §7.3 | `GraphMean.bootstrap`, `stats.py::percentile_interval` |
+| replicates §7.2 (in blocks, §9.3), percentile interval §7.3 | `GraphMean.bootstrap`, `stats.py::_replicate`, `stats.py::percentile_interval` |
 | peak-time statistics §8 | `stats.py::peak_time_summaries` → `PeakTimeSummary` (`argmax_replicates`) |
 
 | field | formula |
@@ -802,8 +833,9 @@ All in `tests/test_study_stats.py`.
 | `test_graph_bootstrap_*`, `test_the_bounded_sampler_rejects_the_top_words` | §7.1 | determinism, pinned raw stream, Pearson test (p-value $> 10^{-6}$), the rejection branch |
 | `test_bootstrap_replicates_equal_the_estimator_on_resampled_rows`, `test_the_same_draws_keep_rates_paired` | §7.2, Proposition 9 | exact to rounding |
 | `test_the_bootstrap_variance_matches_the_cluster_error` | Proposition 10 | 4000 replicates, ratio within 0.1 (4.5 standard deviations) |
+| `test_bootstrap_replicates_do_not_depend_on_the_block_size`, `test_bootstrap_memory_does_not_grow_with_replicates_times_graphs_times_values` | §9.3 blocks | bitwise equal replicates and errors for block sizes 1 to $2^{20}$, with NaN values, and equal to a direct computation; a 200-graph, 500-checkpoint trace with 200 replicates peaks below 64 MB (`tracemalloc`; about 500 MB gathered at once) |
 | `test_percentile_interval_is_numpys_linear_quantile_without_nan` | §7.3 | against `np.quantile(method="linear")` |
-| `test_student_t_quantile_*` | §4.2 | closed forms ($\nu = 1, 2$), tables, Simpson integral of the density |
+| `test_student_t_quantile_*` | §4.2 | closed forms ($\nu = 1, 2$), tables, Simpson integral of the density; a float or bool `dof` refused whatever was computed before (the cache keys the computation, not the check) |
 | `test_kaplan_meier_on_a_hand_computed_example`, `test_weighted_kaplan_meier_against_exact_fractions` | §6.2 | hand values; exact Fractions |
 | `test_a_survival_of_exactly_one_half_decides_the_median_exactly`, `test_near_half_values_are_decided_by_the_exact_products` | §6.4 | exact |
 | `test_equal_weights_reproduce_the_unweighted_estimator` | §6.2 | against `analysis.kaplan_meier` |
@@ -811,6 +843,7 @@ All in `tests/test_study_stats.py`.
 | `test_cluster_influences_are_the_derivatives_of_the_estimate` | Proposition 6 | central differences, relative $10^{-5}$; chunking invariance |
 | `test_censored_geometric_times_give_the_known_median_and_restricted_mean`, `test_exponential_times_give_the_known_median` | §6.4, §6.5 on known laws | median exact (false alarm below $10^{-9}$); restricted mean within 4.5 errors; median within 4.4 standard deviations |
 | `test_kaplan_meier_errors_cover_under_graph_clustering` | §6.3 under clustering and mixed censoring | 2000 replicates of 60 graphs: coverage 0.946 ($\hat S(5)$) and 0.953 (restricted mean) in $[0.93, 0.97]$ (false alarm about $10^{-3}$) |
+| `test_graph_equal_weights_are_integers_with_equal_graph_totals`, `test_graph_equal_weights_refuse_an_overflowing_allocation`, `test_nested_kaplan_meier_takes_any_allocation` | §6.2 weights | integer weights with equal totals; an allocation with $\operatorname{lcm}(1, \dots, 43)$ refused by `graph_equal_weights` and taken by `nested_kaplan_meier` with float weights: its curve, errors and restricted mean equal the nested means and errors of $\mathbf 1[\tau > t]$ and $\min(\tau, T_{\max})$ (relative $10^{-12}$, $10^{-9}$) |
 | `test_censoring_summary_uses_graph_equal_weights` | §6.6 | exact |
 | `test_the_three_peak_statistics_are_different_numbers`, `test_horizon_peaks_follow_the_declared_policy`, `test_missing_peaks_are_left_out_and_counted`, `test_argmax_replicates_follow_the_graph_draws` | §8, Propositions 11 and 12 | exact |
 
@@ -824,7 +857,11 @@ All in `tests/test_study_stats.py`.
   intervals of either kind are unreliable, and the percentile bootstrap too.
 * **Undefined values** (`nan_policy="omit"`) change the target (§3.4); peak means leave out
   missing peaks (a conditional target, §8).
-* **Exactness at 1/2** holds for integer weights only (§6.4).
+* **Exactness at 1/2** holds for integer weights only (§6.4); a nested curve whose allocation is
+  too irregular for integer weights uses float weights and decides $1/2$ in float64 (§6.2).
+* **The median has no standard error here** (§6.4): it cannot carry the graph-cluster bootstrap
+  of the finite-size-scaling tools, which need a nested mean
+  ([07-finite-size-scaling.md](07-finite-size-scaling.md) §3); the restricted mean can.
 * **The median convention** is the lower median $\min\lbrace t : \hat S(t) \le 1/2\rbrace$ with
   `median_upper` for the tie interval; v1.4 leaves the convention open (§6.4 relates it to the
   JSON service's `tau_median_all`).
