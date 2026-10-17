@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+* **Watts–Strogatz sweeps** (`sparsegf2.study`, [`docs/SWEEPS.md`](docs/SWEEPS.md)). A
+  `SweepSpec` names a grid of conditions `(n, beta, p)` (exact rate tokens), the graphs and
+  circuits per graph, the depth, the checkpoints (the geometric rule of v1.4 §9 or a list) and
+  the probes; `sweep.run` generates it into a directory (one graph file per `(n, beta)`, the
+  `EnsembleResult` parts of each condition saved as they finish, an index `sweep.json`), resumes
+  it, and grows it (sizes, rates, graphs, circuits per graph) without changing a saved
+  trajectory; a change that would alter saved data is refused naming the field. Seeds: graph
+  `g` of `(n, beta)` from `(WSG1, master, n, beta, g)`, one run seed per `(n, beta)` shared by
+  all rates (shared gates, nested masks), trajectory `u = g * stride + c`, and an outcome-seed
+  domain (`WSO1`) for later signed runs (`study.identity`). `load`, `parts`, `rows`, `replay`,
+  `verify`; `sparsegf2 sweep run|status|replay`.
+* **The joint phase-free state as data.** The probe `tableau_snapshot` saves every generator of
+  the joint state (system and reference qubits); `EnsembleResult.tableau(t, c)` and
+  `tableaux(c)` (in parallel) return `sparsegf2.tableau.PhaseFreeTableau`, a phase-free
+  stabilizer group in canonical form (reduced row echelon form; `to_bytes`, `digest`,
+  `entropy`, `mutual_information`, `physical_code`), with batch functions
+  `physical_tableaux` and `to_bytes_batch`. `estimate_ensemble` prices the snapshot and its
+  storage.
+* **`MonitoredCircuit.run(indices=...)`** runs exactly the listed trajectory indices; row `i`
+  is trajectory `indices[i]`, identical to what a range run gives it.
+* **Parallel launches from several Python threads** take turns under Numba's `workqueue`
+  threading layer instead of terminating the process (`sparsegf2._parallel.threads`).
 * **American spelling everywhere** (code, comments, docstrings, messages, private names and
   documents): neighbor, color, normalized, favors, behavior, analyze, centered, labeled and
   the rest. `tests/test_spelling.py` (Clank's word list plus the forms this repository had
