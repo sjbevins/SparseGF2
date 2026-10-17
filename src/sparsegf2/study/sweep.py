@@ -681,6 +681,26 @@ def _record_part(folder: Path, name: str, compression: str) -> None:
         api._atomic_write_text(path, json.dumps(record, indent=2))
 
 
+def _record_indices(folder: Path, sweep: SweepSpec, n: int, beta: Token, p: Token) -> None:
+    """Add to ``spec.json`` which trajectories its ``trajectories`` counts: the API reruns
+    ``0 .. trajectories - 1``, the sweep's indices only when ``circuits_per_graph == stride``."""
+    path = folder / "spec.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["sweep"] = {
+        "n": n,
+        "beta": beta.token,
+        "p": p.token,
+        "graphs": sweep.graphs[n],
+        "circuits_per_graph": sweep.circuits_per_graph[n],
+        "stride": sweep.stride,
+        "indices": "u = g * stride + c for g < graphs and c < circuits_per_graph",
+        "note": "trajectories counts these indices; running spec through the API runs "
+        "trajectories 0 .. trajectories - 1, which are these only when circuits_per_graph "
+        "equals stride: replay them with sparsegf2.study.sweep (load, replay, verify)",
+    }
+    api._atomic_write_text(path, json.dumps(record, indent=2))
+
+
 def _save_part(result: mipt.EnsembleResult, folder: Path, name: str, compression: str) -> None:
     """Save a part to a temporary file of this writer's own, then rename it (atomic)."""
     path = folder / name
@@ -724,6 +744,7 @@ def _run_condition(
         resumed_from=int(done.size) if (folder / "spec.json").exists() else None,
         graph_file=api._graph_file_record(engine),
     )
+    _record_indices(folder, sweep, n, beta, p)
     mc = sweep.monitored_circuit(n, beta, p, _collection(root, sweep, n, beta))
     threads_, chosen = options["num_threads"], options["chunk_size"]
     cap = max(1, PART_BYTES // max(1, api._result_bytes(mc, 1)))

@@ -345,7 +345,8 @@ DIR/
   n8_beta0.2_p0.3/           one folder per condition ('/' of a rational token -> '-')
     result-000000000000.npz  saved parts: each an EnsembleResult file (mipt.py:EnsembleResult.save),
     result-000000000016.npz  named by its first stream index u, rows in increasing u
-    spec.json                the condition's engine spec in the API's JSON form, its seed
+    spec.json                the condition's engine spec in the API's JSON form, its seed,
+                             and under sweep the graphs, circuits per graph and stride
     provenance.json          versions, platform, git commit, command; one entry per resume;
                              parts: each saved part with the package version and compression
 ```
@@ -527,9 +528,14 @@ result. Chunk sizes never change a result.
 * One snapshot probe per spec (`mipt.py:MonitoredCircuit.__post_init__`). A tableau snapshot
   costs `N * 2 ceil(N/64) * 8` bytes per evaluation and trajectory (64 KiB at `N = 512`): give
   it few checkpoints. `load` holds a whole condition in memory; `parts` holds one part.
-* `spec.json` of a condition with one graph does not rebuild through the API (a graph file
-  with one graph is a single graph there, which refuses `circuits_per_graph`); the sweep itself
-  never reads `spec.json`.
+* A condition's `spec.json` is a record, not a way to rerun it: its `trajectories` counts the
+  indices `u = g * stride + c` (`g < graphs`, `c < circuits_per_graph`, written under `sweep`),
+  but running its `spec` through the API (`run_ensemble`, `start_ensemble_job`) runs
+  `0 .. trajectories - 1`, which are the sweep's trajectories only when `circuits_per_graph`
+  equals `stride` (2 graphs of 2 circuits at stride 4 are `u = 0, 1, 4, 5`; the API would run
+  `0, 1, 2, 3`). With one graph it does not even rebuild there (a graph file with one graph is
+  a single graph, which refuses `circuits_per_graph`). Rerun trajectories with `sweep.replay`
+  and `sweep.verify`; the sweep itself never reads `spec.json`.
 * The realized rates and rewiring probabilities are `x' = ceil(2^53 fl(x)) / 2^53`
   (section 3).
 

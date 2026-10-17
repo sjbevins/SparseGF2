@@ -574,3 +574,18 @@ def test_a_damaged_part_is_named_with_what_to_do(tmp_path):
             call()
     path.unlink()  # as the message says: delete it, and the next run recomputes it
     assert sweep.run(small, directory)["ran"] == 2
+
+
+def test_spec_json_says_which_trajectories_it_counts(reference):
+    directory, results = reference
+    record = json.loads((directory / "n6_beta0_p0.1" / "spec.json").read_text())
+    assert record["trajectories"] == 4 and record["spec"]["circuits_per_graph"] == 4
+    sweep_record = record["sweep"]
+    assert (sweep_record["graphs"], sweep_record["circuits_per_graph"], sweep_record["stride"]) == (
+        2,
+        2,
+        4,
+    )
+    g, c = np.meshgrid(range(2), range(2), indexing="ij")
+    expected = (g * sweep_record["stride"] + c).ravel().tolist()
+    assert expected == results[(6, "0", "0.1")].trajectories.tolist() == [0, 1, 4, 5]
