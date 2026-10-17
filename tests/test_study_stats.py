@@ -173,7 +173,7 @@ def test_the_estimator_is_unbiased_and_its_cluster_error_estimates_the_exact_var
     # 5 standard deviations (sqrt(2/(reps-1)) relative), false alarm about 1e-6
     ratio = est.var(ddof=1) / var_exact
     assert abs(ratio - 1) <= 5 * math.sqrt(2 / (reps - 1)), ratio
-    # (iii) E[SE^2] = Var(mu_hat) exactly for independent graphs (06-statistics.md §3); the mean
+    # (iii) E[SE^2] = Var(mu_hat) exactly for independent graphs (06-statistics.md §4.1); the mean
     # of reps values within 4.5 of its standard errors (CLT), false alarm about 7e-6
     se2 = se**2
     z = (se2.mean() - var_exact) / (se2.std(ddof=1) / math.sqrt(reps))
@@ -498,6 +498,52 @@ def test_the_bootstrap_variance_matches_the_cluster_error():
     assert abs(ratio - 1) < 0.1, ratio
 
 
+def test_bootstrap_replicates_do_not_depend_on_the_block_size(monkeypatch):
+    # replicates are computed a block of replicates at a time; every replicate's sums run over
+    # its own row in the same order, so any block size gives the same bits, with NaN values
+    rng = np.random.default_rng(35)
+    gm = rng.normal(size=(30, 4, 3))
+    gm[rng.random(gm.shape) < 0.1] = np.nan
+    res = st.mean_over_graphs(np.arange(30), gm)
+    draws = st.graph_bootstrap(30, 50, seed=6)
+    whole = res.bootstrap(draws)
+    pos = np.searchsorted(res.graphs, draws)
+    m_whole, se_whole = st._replicate(gm, pos)
+    for chunk in (1, 7, 360, 361, 1 << 20):
+        monkeypatch.setattr(st, "_REPLICATE_CHUNK", chunk)
+        assert np.array_equal(res.bootstrap(draws), whole, equal_nan=True)
+        m, se = st._replicate(gm, pos)
+        assert np.array_equal(m, m_whole, equal_nan=True)
+        assert np.array_equal(se, se_whole, equal_nan=True)
+    # against a direct computation: the NaN-omitting mean and cluster error of the drawn values
+    vals = gm[pos]
+    ok = ~np.isnan(vals)
+    count = ok.sum(axis=1)
+    ref = np.where(ok, vals, 0.0).sum(axis=1) / count
+    assert np.allclose(m_whole, ref, rtol=1e-14, atol=0)
+    dev = np.where(ok, vals - ref[:, None], 0.0)
+    assert np.allclose(se_whole, np.sqrt((dev**2).sum(axis=1) / (count * (count - 1))), rtol=1e-12)
+
+
+def test_bootstrap_memory_does_not_grow_with_replicates_times_graphs_times_values():
+    # a trace of 500 checkpoints over 200 graphs, 200 replicates: gathering every replicate at
+    # once held B x G x K = 2e7 doubles several times (about 500 MB); the blocks keep the peak
+    # near a few blocks of 2^20 doubles (8 MB each) plus the (B, K) result
+    import tracemalloc
+
+    rng = np.random.default_rng(36)
+    res = st.mean_over_graphs(np.arange(200), rng.normal(size=(200, 500)))
+    draws = st.graph_bootstrap(200, 200, seed=7)
+    tracemalloc.start()
+    try:
+        reps = res.bootstrap(draws)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert reps.shape == (200, 500)
+    assert peak < 64 * 2**20, peak / 2**20
+
+
 def test_bootstrap_draws_must_come_from_the_estimate_graphs():
     res = st.mean_over_graphs([0, 1, 2], [1.0, 2.0, 3.0])
     with pytest.raises(ValueError, match=r"labels \[5\] are not among"):
@@ -573,6 +619,19 @@ def test_student_t_quantile_integrates_the_density():
 def test_student_t_quantile_refuses_bad_input(q, dof):
     with pytest.raises(ValueError):
         st.student_t_quantile(q, dof)
+
+
+def test_student_t_quantile_refuses_bad_dof_whatever_ran_before():
+    # the cache keys the computation, not the check: 2 == 2.0 and 1 == True as cache keys, so a
+    # check behind the cache would let a float or bool through after the integer was computed
+    assert st.student_t_quantile(0.975, 2) == pytest.approx(
+        0.95 * math.sqrt(2 / (1 - 0.95**2)), rel=1e-12
+    )
+    assert st.student_t_quantile(0.6, 1) > 0
+    for q, dof in [(0.975, 2.0), (0.975, np.float64(2.0)), (0.6, True)]:
+        with pytest.raises(ValueError, match="dof must be an integer"):
+            st.student_t_quantile(q, dof)
+    assert st.student_t_quantile(0.975, np.int64(2)) == st.student_t_quantile(0.975, 2)
 
 
 def test_interval_level_is_checked():
@@ -703,7 +762,7 @@ def _single_horizon_sample(rng, graphs=25, horizon=12):
 
 
 def test_with_one_horizon_the_curve_is_the_nested_mean_of_indicators():
-    # censoring only at T_max: the product telescopes (06-statistics.md §5.2), so S(t) and its
+    # censoring only at T_max: the product telescopes (06-statistics.md §6.2), so S(t) and its
     # error are the nested mean and v1.4 §6.4 error of 1[tau > t], and the restricted mean to
     # T_max those of min(tau, T_max)
     rng = np.random.default_rng(43)
@@ -913,6 +972,35 @@ def test_graph_equal_weights_refuse_an_overflowing_allocation(monkeypatch):
     monkeypatch.setattr(st, "_EXACT_WEIGHT_LIMIT", 10)
     with pytest.raises(ValueError, match="least common multiple"):
         st.graph_equal_weights([0, 0, 1, 1, 1], [0, 1, 0, 1, 2], [0, 0, 0, 0, 0])
+
+
+def test_nested_kaplan_meier_takes_any_allocation():
+    # 60 graphs with C_g = 1 + g % 43 circuits: lcm(1..43) * 1099 rows is far above 2^62, so
+    # integer weights are impossible (graph_equal_weights refuses) and the curve uses the float
+    # weights 1/C_g; with censoring only at T_max it is still the nested mean of 1[tau > t]
+    # with its v1.4 §6.4 error, computed here by nested_mean (no weights at all)
+    rng = np.random.default_rng(47)
+    g = np.repeat(np.arange(60), 1 + np.arange(60) % 43)
+    c = np.concatenate([np.arange(1 + k % 43) for k in range(60)])
+    r = np.zeros(g.size, dtype=int)
+    assert g.size == 1099
+    hazard = 0.1 * np.exp(rng.normal(0, 0.5, 60))[g]
+    tau = rng.geometric(np.clip(hazard, 1e-6, 1))
+    observed = tau <= 15
+    times = np.where(observed, tau, 15).astype(float)
+    with pytest.raises(ValueError, match="least common multiple"):
+        st.graph_equal_weights(g, c, r)
+    km = st.nested_kaplan_meier(g, c, r, times, observed)
+    assert not km.exact_weights and km.clusters == 60 and km.censored > 0
+    for j, tj in enumerate(km.times):
+        ind = st.nested_mean(g, c, r, (tau > tj).astype(float))
+        assert km.survival[j] == pytest.approx(float(ind.mean), rel=1e-12, abs=1e-15)
+        assert km.se[j] == pytest.approx(float(ind.se), rel=1e-9, abs=1e-15)
+    capped = st.nested_mean(g, c, r, np.minimum(tau, 15).astype(float))
+    assert km.restricted_mean == pytest.approx(float(capped.mean), rel=1e-12)
+    # an allocation whose least common multiple is small keeps exact integer weights
+    few = g < 5
+    assert st.nested_kaplan_meier(g[few], c[few], r[few], times[few], observed[few]).exact_weights
 
 
 # ---------------------------------------------------------------------------------------------

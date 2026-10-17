@@ -277,7 +277,6 @@ def _t_two_sided(theta: float, dof: int) -> float:
     return s * total
 
 
-@functools.lru_cache(maxsize=256)
 def student_t_quantile(probability: float, dof: int) -> float:
     """The quantile ``t_q`` of Student's t distribution with ``dof`` (an integer >= 1) degrees of freedom.
 
@@ -293,17 +292,25 @@ def student_t_quantile(probability: float, dof: int) -> float:
     ``A`` increases from 0 to 1 on ``theta in [0, pi/2)``; the quantile for ``q > 1/2`` is
     ``sqrt(nu) tan(theta*)`` with ``A(theta*) = 2q - 1``, found by bisection to the last bit, and
     ``t_q = -t_{1-q}``. Used for the intervals ``mean +- t_{(1+level)/2, G-1} SE`` of
-    :meth:`GraphMean.interval`.
+    :meth:`GraphMean.interval`. The arguments are checked on every call; only the computation
+    is cached (by ``(q, int(dof))``), so a refused ``dof`` such as ``2.0`` or ``True`` is refused
+    whatever was computed before.
     """
     if isinstance(dof, bool) or not isinstance(dof, (int, np.integer)) or dof < 1:
         raise ValueError(f"dof must be an integer >= 1, not {dof!r}")
     q = float(probability)
     if not 0 < q < 1:
         raise ValueError(f"probability must be strictly between 0 and 1, not {probability!r}")
+    return _t_quantile(q, int(dof))
+
+
+@functools.lru_cache(maxsize=256)
+def _t_quantile(q: float, dof: int) -> float:
+    """:func:`student_t_quantile` for a checked ``0 < q < 1`` and an ``int`` ``dof >= 1``."""
     if q == 0.5:
         return 0.0
     if q < 0.5:
-        return -student_t_quantile(1.0 - q, dof)
+        return -_t_quantile(1.0 - q, dof)
     target = 2.0 * q - 1.0
     lo, hi = 0.0, math.pi / 2
     while True:  # halves [lo, hi] until no double lies strictly inside (at most ~60 steps)
@@ -397,7 +404,7 @@ def graph_cluster_se(graph_means: ArrayLike) -> np.ndarray:
     ``SE = sqrt( sum_g (f_g - mu)^2 / (G (G - 1)) )`` with ``mu`` the mean of the ``G`` defined
     (non-NaN) graph means; NaN where fewer than two graphs are defined. For independent graphs
     ``E[SE^2] = Var(mu)`` exactly, whatever the variances of the individual ``f_g``
-    (``docs/study/06-statistics.md`` §3).
+    (``docs/study/06-statistics.md`` §4.1, Proposition 3).
     """
     gm = np.asarray(graph_means, dtype=np.float64)
     if gm.ndim == 0:
@@ -466,7 +473,7 @@ class GraphMean:
         twice), so the same draws applied to two rates give replicate differences that are the
         differences of the replicates: the pairing survives.
         """
-        return _replicate(self.graph_means, self._positions(draws))[0]
+        return _replicate(self.graph_means, self._positions(draws), with_se=False)[0]
 
     def to_dict(self) -> dict[str, Any]:
         """The result as plain Python (lists and numbers; NaN as None)."""
@@ -666,14 +673,36 @@ def graph_bootstrap(graphs: int | ArrayLike, replicates: int, seed: Any) -> np.n
     return labels[positions].reshape(int(replicates), labels.size)
 
 
-def _replicate(graph_means: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Replicate means and graph-cluster SEs of the graphs at ``positions`` ``(B, G')``."""
-    vals = graph_means[positions]  # (B, G', *shape)
-    defined = ~np.isnan(vals)
-    count = defined.sum(axis=1)
-    mean = _divide(np.where(defined, vals, 0.0).sum(axis=1), count)
-    dev = np.where(defined, vals - np.expand_dims(mean, 1), 0.0)
-    se = np.sqrt(_divide((dev * dev).sum(axis=1), count * (count - 1)))
+_REPLICATE_CHUNK = 1 << 20  # gathered values per block of replicates (8 MB of float64)
+
+
+def _replicate(
+    graph_means: np.ndarray, positions: np.ndarray, *, with_se: bool = True
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Replicate means (and, with ``with_se``, graph-cluster SEs) of the graphs at ``positions``.
+
+    ``positions`` is ``(B, G')``; the results are ``(B, *shape)``. The gathered values
+    ``(rows, G', *shape)`` are built for a block of replicates at a time, at most about
+    ``_REPLICATE_CHUNK`` values per block, so memory does not grow as ``B G' K`` (``K`` the size
+    of one value). Each replicate's sums run over its own row in the same order whatever the
+    blocks, so the result does not depend on the block size.
+    """
+    reps, width = positions.shape
+    shape = graph_means.shape[1:]
+    per_rep = max(1, width * int(np.prod(shape, dtype=np.int64)))
+    step = max(1, _REPLICATE_CHUNK // per_rep)
+    mean = np.empty((reps, *shape))
+    se = np.empty((reps, *shape)) if with_se else None
+    for first in range(0, reps, step):
+        block = slice(first, min(reps, first + step))
+        vals = graph_means[positions[block]]  # (rows, G', *shape)
+        defined = ~np.isnan(vals)
+        count = defined.sum(axis=1)
+        m = _divide(np.where(defined, vals, 0.0).sum(axis=1), count)
+        mean[block] = m
+        if se is not None:
+            dev = np.where(defined, vals - np.expand_dims(m, 1), 0.0)
+            se[block] = np.sqrt(_divide((dev * dev).sum(axis=1), count * (count - 1)))
     return mean, se
 
 
@@ -714,6 +743,27 @@ def percentile_interval(
 # ---------------------------------------------------------------------------------------------
 
 
+def _equal_weights(
+    gg: np.ndarray, cc: np.ndarray, rr: np.ndarray, *, exact: bool
+) -> np.ndarray | None:
+    """Trajectory weights ``L / (C_g R_gc)`` as integers (``exact``; None when ``L N`` would
+    reach :data:`_EXACT_WEIGHT_LIMIT`) or ``1 / (C_g R_gc)`` as floats (``exact=False``)."""
+    h = _hierarchy(gg, cc, rr)
+    circuit_graph = np.repeat(np.arange(h.graphs.size), h.circuits_per_graph)
+    denom = h.circuits_per_graph[circuit_graph] * h.replicas  # (M,) C_g R_gc
+    if exact:
+        lcm = math.lcm(*(int(x) for x in np.unique(denom)))
+        if lcm * gg.size >= _EXACT_WEIGHT_LIMIT:
+            return None
+        per_circuit: np.ndarray = lcm // denom
+        weights = np.empty(gg.size, dtype=np.int64)
+    else:
+        per_circuit = 1.0 / denom
+        weights = np.empty(gg.size, dtype=np.float64)
+    weights[h.order] = np.repeat(per_circuit, h.replicas)
+    return weights
+
+
 def graph_equal_weights(g: ArrayLike, c: ArrayLike, r: ArrayLike) -> np.ndarray:
     """Integer trajectory weights proportional to ``1 / (C_g R_gc)``, equal in total per graph.
 
@@ -723,22 +773,19 @@ def graph_equal_weights(g: ArrayLike, c: ArrayLike, r: ArrayLike) -> np.ndarray:
     v1.4 §6.3's nested estimator). A weighted statistic that only uses ratios of weights (the
     Kaplan-Meier estimate, a weighted mean) is unchanged by the common factor; divide by
     ``weights.sum()`` for probabilities. Integers keep sums of weights exact, which lets
-    :func:`weighted_kaplan_meier` decide a survival of exactly 1/2 exactly.
+    :func:`weighted_kaplan_meier` decide a survival of exactly 1/2 exactly. Raises when ``L``
+    times the number of trajectories reaches ``2^62`` (many different, large ``C_g R_gc``);
+    :func:`nested_kaplan_meier` then uses float weights ``1 / (C_g R_gc)`` instead.
     """
     gg, cc, rr = _rows(g, c, r)
-    h = _hierarchy(gg, cc, rr)
-    circuit_graph = np.repeat(np.arange(h.graphs.size), h.circuits_per_graph)
-    denom = h.circuits_per_graph[circuit_graph] * h.replicas  # (M,) C_g R_gc
-    lcm = math.lcm(*(int(x) for x in np.unique(denom)))
-    if lcm * gg.size >= _EXACT_WEIGHT_LIMIT:
+    weights = _equal_weights(gg, cc, rr, exact=True)
+    if weights is None:
         raise ValueError(
             "the allocation's numbers of circuits and replicas have a least common multiple too "
             "large for exact integer weights; pass float weights 1/(C_g R_gc) to "
-            "weighted_kaplan_meier instead"
+            "weighted_kaplan_meier instead (with clusters=g), or call nested_kaplan_meier, "
+            "which does"
         )
-    per_circuit = lcm // denom
-    weights = np.empty(gg.size, dtype=np.int64)
-    weights[h.order] = np.repeat(per_circuit, h.replicas)
     return weights
 
 
@@ -860,8 +907,8 @@ def _km_influence_chunks(
 ) -> Iterator[tuple[int, np.ndarray]]:
     """Yield ``(first_cluster, U)``: each cluster's influence ``U (k, J)`` on ``S(t_j)``.
 
-    Derived in ``docs/study/06-statistics.md`` §5.3: for cluster ``g`` with at-risk and event
-    weights ``Y_gj`` and ``D_gj`` (shares of the total weight),
+    Derived in ``docs/study/06-statistics.md`` §6.3 (Proposition 6): for cluster ``g`` with
+    at-risk and event weights ``Y_gj`` and ``D_gj`` (shares of the total weight),
 
         U_g(t_j) = S(t_j) sum_{i <= j} (Y_gi D_i - D_gi Y_i) / (Y_i (Y_i - D_i)),
 
@@ -1062,13 +1109,23 @@ def nested_kaplan_meier(
     analog of :func:`nested_mean`. With censoring only at ``T_max`` the curve, its error and the
     restricted mean to ``T_max`` equal the nested means (and v1.4 §6.4 errors) of ``1[tau > t]``
     and ``min(tau, T_max)``.
+
+    Any allocation is accepted (v1.4 §6.3). The weights are integers when their least common
+    multiple allows (``exact_weights`` True: a survival of exactly 1/2 is decided exactly);
+    otherwise, for allocations with many different large ``C_g R_gc``, they are the floats
+    ``1 / (C_g R_gc)`` (``exact_weights`` False: the same curve to rounding, with the median
+    decided in float64).
     """
     gg, cc, rr = _rows(g, c, r)
     t = _times(times)
     if t.size != gg.size:
         raise ValueError(f"times must have one entry per trajectory ({gg.size})")
     e = _flags(observed, gg.size, "observed")
-    return _kaplan_meier(t, e, graph_equal_weights(gg, cc, rr), gg, horizon)
+    weights = _equal_weights(gg, cc, rr, exact=True)
+    if weights is None:
+        weights = _equal_weights(gg, cc, rr, exact=False)
+    assert weights is not None
+    return _kaplan_meier(t, e, weights, gg, horizon)
 
 
 @dataclass(frozen=True, eq=False)
