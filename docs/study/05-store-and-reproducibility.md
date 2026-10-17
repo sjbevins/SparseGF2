@@ -148,7 +148,9 @@ writer, `query_only = ON` for a reader. Tokens are canonical strings (`identity.
 `study/store.py::store_versions()`: `identity.version_record()` with the graph generator, Clifford
 numbering, dynamics, row-space format, store schema, the graph and run seed tags,
 `RANDOMNESS_CONTRACT` and the package version, and in addition the region seed's tag and length
-(`0x5753524F`, 19 words), the outcome seed tag (`0x57534F31`, WSO1), the diagnostics seed tag
+(`0x5753524F`, 19 words), the peak-bootstrap seed's (`0x57535242`, WSRB, 15 words; the seed of
+every stored `peak_D` bootstrap, so a store whose bootstraps were seeded otherwise is not
+continued), the outcome seed tag (`0x57534F31`, WSO1), the diagnostics seed tag
 (`0x57535344`, WSSD), the token format, the qubit order, the graph-measures version, the
 signed-group format and the aggregate estimator), `graph_measures_version`, `qubit_order`
 (`store.QUBIT_ORDER`: system $0..n-1$, then reference $n..2n-1$, reference $n+i$ Bell-paired with
@@ -323,8 +325,8 @@ For protocol F, from the engine's arrays of row $i$ (all functions of `study/obs
 |---|---|---|---|
 | `first_passage` | `{}` | $\tau_0$ (status `censored` and NaN if not reached) | `FirstPassage.to_dict()` with the checkpoint bounds $\widehat\tau^{\mathrm{chk}}_\ell$ over the domain $S_r$, the domain and its digest |
 | `peak_d_cyc` | `rule = "exact"` | $T^*$ of the zero-extended $d_{\mathrm{cyc}}$ over the domain (status `missing` when $d^* = 0$) | `Peak.to_dict()` (maximizing set, $k_t$ on it, horizon flag), the domain and its digest |
-| `peak_D` | `analysis.peak` | $T^*$ of $D(0)$ by the plateau rule | the peak, one peak per `sensitivity_z`, the bootstrap of $T^*$ (`bootstrap` replicates; seed `observables.region_seed(key, T, 0, 0, "peak_D", version)`) |
-| `peak_D_J` | `analysis.peak` and `J` | $T^*$ of $D(J)$ | the peak, the sensitivity, the probe name |
+| `peak_D` | `analysis.peak` | $T^*$ of $D(0)$ by the plateau rule | the peak, one peak per `sensitivity_z` (each with `se_exact` True: the orderings give the true errors), the bootstrap of $T^*$ (`bootstrap` replicates; seed `observables.bootstrap_seed(key, "peak_D", version)`, the catalog's: neither the horizon nor the checkpoints enter it) |
+| `peak_D_J` | `analysis.peak` and `J` | $T^*$ of $D(J)$ | the peak, the sensitivity (each with `se_exact` from the probe's sampler: False for the chain, whose binomial errors are lower bounds, True for exact samples; doc 04 §4.6), the probe name |
 
 For protocol P: the trace row (no $k$, status `no_reference`, final layer $T$) and the snapshot
 of the pure $n$-qubit state at every $t \in E_r$ of P. A retrospective value
@@ -584,15 +586,16 @@ exactly in that case instead of using the floating-point eigenvalue, which is on
 
 **Proposition 14 (the outcome seed).** (a) Distinct trajectory keys have distinct outcome
 seeds unless two texts of one field share a 64-bit BLAKE2b digest. (b) No outcome seed equals a
-graph, run or region seed as a `SeedSequence` entropy. (c) The same seed gives the same outcomes
-and signed groups.
+graph, run, region or peak-bootstrap seed as a `SeedSequence` entropy. (c) The same seed gives
+the same outcomes and signed groups.
 
 *Proof (derived here).* (a) Every field of the key sits at a fixed position of a fixed-length
 tuple, the integers one word each (refused at $2^{32}$) and the texts two words each, so the map
 is injective up to a collision of the text hashes. (b) The first word is `0x57534F31`; graph,
-run and region seeds start with `0x57534731`, `0x57534331` and `0x5753524F`, and every tuple has
-more than four words, so `SeedSequence`'s zero padding never applies. (c) The simulator's
-random outcomes are drawn from its stream in circuit order, and the circuit is a function of
+run, region and peak-bootstrap seeds start with `0x57534731`, `0x57534331`, `0x5753524F` and
+`0x57535242`, and every tuple has more than four words, so `SeedSequence`'s zero padding never
+applies. (c) The simulator's random outcomes are drawn from its stream in circuit order, and the
+circuit is a function of
 the stored identity (Proposition 2). ∎
 
 **Proposition 15 (peaks do not depend on the revision history).** The peaks and checkpoint
@@ -932,7 +935,8 @@ store.close()
 ## 8. Validation map
 
 `tests/test_study_store.py` (S), `tests/test_study_runner.py` (R),
-`tests/test_study_reproducibility.py` (P), `tests/test_study_records.py` (G); every check is
+`tests/test_study_reproducibility.py` (P), `tests/test_study_records.py` (G),
+`tests/test_study_runner_peaks.py` (K); every check is
 exact (equality of bytes, digests, arrays or decoded records) unless it says otherwise.
 
 | Property | Test | What is checked |
@@ -977,6 +981,7 @@ exact (equality of bytes, digests, arrays or decoded records) unless it says oth
 | one schedule, reruns first (G-RUN-2) | G::test_reruns_come_first_and_every_trajectory_holds_one_schedule | a rate and depths added: reruns planned first, identical depth sets and schedules for old and new rates |
 | provenance (G-RUN-3) | G::test_units_record_their_provenance, G::test_a_confirmatory_study_keeps_its_environment | contract, environment and its digest per unit; a changed numpy refused under `confirmatory`, recorded under `exploratory` |
 | peak domain (G-OBS-2; Prop. 15) | G::test_peaks_do_not_depend_on_the_revision_history | peaks and first passages equal in a revised and a fresh store |
+| peaks as the catalog says (doc 04 §4.6, Props. 18(d), 20) | K::test_stored_peaks_record_their_errors_and_the_catalog_bootstrap_seed, K::test_the_version_record_carries_the_bootstrap_seed | `peak_D` and its sensitivity `se_exact` True, its bootstrap seed `bootstrap_seed(key, "peak_D", version)`, and the bootstrap rebuilt from the stored orderings, counts and $k$ with it equals the stored one (the earlier `region_seed` derivation does not: all 12 trajectories differ, the test asks for 6); `peak_D_J` `se_exact` False for the chain on the interaction graph, True for exact samples on a cycle; the bootstrap seed's tag and length recorded, a store without them read but not continued |
 | aggregates (G-STO-4) | G::test_aggregates_are_recorded_with_their_sample_set | the record against a direct computation; recompared; more graphs give a new record; refusal and `omit` on undefined values |
 | sampler diagnostics (G-OBS-4) | G::test_the_correlated_samplers_diagnostics_are_archived | one row per graph, size and coupling; idempotent; equal to the graph-side tool with the recorded seed |
 | probe streams across rates (G-ID-2) | G::test_probe_streams_are_shared_across_rates_unlike_the_retrospective_regions | the oracle's transcription of the probe stream reproduces both rates' first-failure samples from their stored codes; region seeds differ |

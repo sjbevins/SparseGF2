@@ -464,12 +464,15 @@ def store_versions() -> dict[str, Any]:
     """Every version a stored record depends on (G-ID-1): ``identity.version_record()`` (the
     graph generator, the Clifford numbering, the dynamics, the row-space format, the store
     schema, the graph and run seed tags, ``RANDOMNESS_CONTRACT``, the package) and the region
-    seed's tag and length, the outcome and diagnostics seed tags, the token format, the qubit
-    order, the graph measurements, the signed-group format and the estimator of aggregates."""
+    and peak-bootstrap seeds' tags and lengths, the outcome and diagnostics seed tags, the token
+    format, the qubit order, the graph measurements, the signed-group format and the estimator
+    of aggregates."""
     out = dict(version_record())
     out.update(
         region_seed_tag=ob.REGION_SEED_TAG,
         region_seed_words=ob.REGION_SEED_WORDS,
+        bootstrap_seed_tag=ob.BOOTSTRAP_SEED_TAG,
+        bootstrap_seed_words=ob.BOOTSTRAP_SEED_WORDS,
         outcome_seed_tag=OUTCOME_SEED_TAG,
         diagnostics_seed_tag=DIAGNOSTICS_SEED_TAG,
         token_format=TOKEN_FORMAT,

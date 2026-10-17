@@ -788,8 +788,9 @@ def _ingest(
                 "max_exact": robust.max_exact,
             })  # fmt: skip
         plateau = _peak_params("peak_D", peak_rule)
+        # D(0) from the orderings: its se are the true standard errors (se_exact True)
         pk = ob.peak(domain, robust.value[on], robust.se[on], rule="plateau", z=peak_rule["z"],
-                     k_at=dom_k, horizon=layers)  # fmt: skip
+                     k_at=dom_k, horizon=layers, se_exact=True)  # fmt: skip
         data = {**pk.to_dict(), **dom_info}
         data["sensitivity"] = [
             s.to_dict()
@@ -800,12 +801,14 @@ def _ingest(
                 peak_rule["sensitivity_z"],
                 k_at=dom_k,
                 horizon=layers,
+                se_exact=True,
             )  # fmt: skip
         ]
         data["bootstrap"] = None
         if peak_rule["bootstrap"] > 0:
             entry = ob.get("peak_D")
-            seed = ob.region_seed(key, layers, 0, 0.0, "peak_D", entry.version)
+            # the catalog's seed (Proposition 18(d) of study/04): the key, id and version only
+            seed = ob.bootstrap_seed(key, "peak_D", entry.version)
             boot = ob.bootstrap_peak(
                 domain, ff[on], n, z=peak_rule["z"], replicates=peak_rule["bootstrap"],
                 seed=list(seed), exact_counts=None if exact is None else exact[on], k_at=dom_k,
@@ -843,13 +846,20 @@ def _ingest(
         for i, coupling in enumerate(couplings.tolist()):
             params = _peak_params("peak_D_J", peak_rule, J=float(coupling))
             rob, rob_se = prof.robustness[on, i], prof.robustness_se[on, i]
+            # the chain's binomial se are lower bounds: the record says so (se_exact False)
             pk = ob.peak(domain, rob, rob_se, rule="plateau", z=peak_rule["z"], k_at=dom_k,
-                         horizon=layers)  # fmt: skip
+                         horizon=layers, se_exact=prof.se_exact)  # fmt: skip
             data = {**pk.to_dict(), **dom_info}
             data["sensitivity"] = [
                 s.to_dict()
                 for s in ob.peak_sensitivity(
-                    domain, rob, rob_se, peak_rule["sensitivity_z"], k_at=dom_k, horizon=layers
+                    domain,
+                    rob,
+                    rob_se,
+                    peak_rule["sensitivity_z"],
+                    k_at=dom_k,
+                    horizon=layers,
+                    se_exact=prof.se_exact,
                 )  # fmt: skip
             ]
             data["probe"] = name
