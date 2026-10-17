@@ -77,6 +77,7 @@ It changes no probability law and no random stream (the sampling it names is doc
 | $T_{\max}(n)$ | the horizon in layers | integer $\ge 1$ | `manifest.layers(n, beta)` |
 | $N_T$ | the requested geometric checkpoint count | integer in $[1, 1000]$ | `depth.checkpoints.count` |
 | $a_j$ | $T_{\max}^{\,j/(N_T - 1)}$, $j = 0, \dots, N_T - 1$ | real | |
+| $W$, $\rho$ | the exact rounding of $a_j$ (Proposition 10, §5.3): $W = 2^q T_{\max}^{\,j}$ with $q = N_T - 1$, and $\rho = \lfloor W^{1/q}\rfloor$ | integers | `s`, `r` in `_half_up_root` |
 | $S_r(n,\beta)$ | the own schedule of revision $r$, from its own rule and horizon: a sorted set of integers containing $0, 1, T_{\max,r}$ | set | `manifest.checkpoints(n, beta)` |
 | $E_r(n,\beta)$, v1.4's $\mathcal T(n,\beta)$ | the effective schedule used for work under revision $r$, where the snapshots and the other expensive probes run: $(S_1 \cup \dots \cup S_r) \cap [0, T_{\max,r}]$ (ruling R-CK); $E_1 = S_1$ | set | `manifest.effective_checkpoints(revisions, n, beta)` |
 | $\mathcal P(n,\beta)$ | the rates run at $(n, \beta)$ | set of tokens | `manifest.rates(n, beta)` |
@@ -149,7 +150,7 @@ then the edge rows $a_1, b_1, a_2, b_2, \dots$ as signed 32-bit little-endian in
 `GraphRecord.verify` re-checks the digest and the graph; `regenerate` rebuilds the graph from the record (the master graph seed is the second word of the seed tuple, everything else is recomputed from $(n, \beta, g)$)
 and requires the same record, so a record whose seed tuple has an altered word, another length or the other domain's tag does not reproduce.
 
-The other version constants of `study/identity.py`: `CLIFFORD_ENUMERATION_VERSION` (the numbering $j = 16 s + b$), `DYNAMICS_VERSION`,
+The other version constants of `study/identity.py`: `CLIFFORD_ENUMERATION_VERSION` (the numbering `j = 16 s + b` of `clifford.py`, written $Q = 16 s + \varepsilon$ in document 01, §3.5), `DYNAMICS_VERSION`,
 `ROWSPACE_FORMAT_VERSION` (`"SGF2RS1"`), `STORE_SCHEMA_VERSION`, and the two seed tags; `version_record()` collects them with `mipt.RANDOMNESS_CONTRACT` and the package version.
 
 ### 3.6 Canonical JSON and digests
@@ -263,14 +264,14 @@ Changes of `storage`, `resources` and, in an exploratory manifest, `analysis` ar
 
 ### 4.1 Tokens
 
-**Proposition 1 (canonical strings).** Let $x \in [0,1]$ be rational, $x = a/d$ in lowest terms. If $d = 2^\alpha 5^\gamma$ put $k = \max(\alpha,\gamma)$. Then
+**Proposition 1 (canonical strings).** Let $x \in [0,1]$ be rational, $x = a/d$ in lowest terms. If $d = 2^{e_2} 5^{e_5}$ put $k = \max(e_2, e_5)$. Then
 $10^k x$ is an integer, not divisible by 10 when $k \ge 1$, so the decimal expansion of $x$ has exactly $k$ fractional digits and its last digit is nonzero. Hence the canonical
 string is the unique decimal string without trailing zeros, the canonical string of a rational with a prime factor of $d$ outside $\lbrace2,5\rbrace$ is `"a/d"`,
 the two kinds never coincide, `Token.parse(tok(x)) = x`, and $x \mapsto \operatorname{tok}(x)$ is injective.
 
-*Proof.* $10^k x = a\,2^{k-\alpha}5^{k-\gamma}$ is an integer because $k \ge \alpha, \gamma$. Suppose $k \ge 1$. If $\alpha \ge \gamma$ then $k = \alpha \ge 1$, so $d$ is even and
-$a$, coprime to $d$, is odd; $10^kx = a\,5^{k-\gamma}$ is odd, so not divisible by 10. If $\gamma > \alpha$ then $k = \gamma \ge 1$ and $5 \mid d$, so $5 \nmid a$ and
-$10^kx = a\,2^{k-\alpha}$ (the power of 5 is $5^{k-\gamma} = 1$) is not divisible by 5. In both cases the last digit of $10^kx$ is not 0, so no
+*Proof.* $10^k x = a\,2^{k-e_2}5^{k-e_5}$ is an integer because $k \ge e_2, e_5$. Suppose $k \ge 1$. If $e_2 \ge e_5$ then $k = e_2 \ge 1$, so $d$ is even and
+$a$, coprime to $d$, is odd; $10^kx = a\,5^{k-e_5}$ is odd, so not divisible by 10. If $e_5 > e_2$ then $k = e_5 \ge 1$ and $5 \mid d$, so $5 \nmid a$ and
+$10^kx = a\,2^{k-e_2}$ (the power of 5 is $5^{k-e_5} = 1$) is not divisible by 5. In both cases the last digit of $10^kx$ is not 0, so no
 shorter decimal string represents $x$. A decimal string and a rational string never denote the same string; a decimal string is parsed exactly by `Fraction`, and a rational string
 `"a/d"` in lowest terms with a prime factor of $d$ other than 2, 5 is not the value of any decimal string. Injectivity: equal strings parse to equal values, and the value
 determines the string. ∎
@@ -361,21 +362,21 @@ disjoint and their union is the set. A changed value changes the object and so, 
 
 ### 4.4 The checkpoint rule
 
-**Proposition 10 (exact rounding).** For integers $T \ge 1$, $q \ge 1$ and $0 \le j \le q$ let $a = T^{j/q}$, $S = 2^q T^j$ and $r = \lfloor S^{1/q}\rfloor$ (the largest integer with $r^q \le S$). Then
+**Proposition 10 (exact rounding).** For integers $T \ge 1$, $q \ge 1$ and $0 \le j \le q$ let $a = T^{j/q}$, $W = 2^q T^j$ and $\rho = \lfloor W^{1/q}\rfloor$ (the largest integer with $\rho^q \le W$). Then
 $$
-\lfloor a + \tfrac12\rfloor = \Big\lfloor \frac{r + 1}{2} \Big\rfloor .
+\lfloor a + \tfrac12\rfloor = \Big\lfloor \frac{\rho + 1}{2} \Big\rfloor .
 $$
-Moreover $a$ is never a half-integer (so a tie never occurs for an integer horizon), $a_0 = 1$ and $a_q = T$ exactly, $a_j < a_{j+1}$ for $T \ge 2$, and the schedule satisfies:
+Moreover $a$ is never a half-integer (so a tie never occurs for an integer horizon), $a_0 = 1$ and $a_q = T$ exactly, $a_j < a_{j+1}$ for $T \ge 2$, and the own schedule $S$ of the geometric rule (§3.9; one revision's, not the union $E_r$) satisfies:
 
-* (a) $\mathcal T$ is sorted, without repeats, contained in $[0, T]$, contains $0, 1, T$, and has at most $\min(N_T + 1, T + 1)$ elements for $N_T \ge 2$ (3 for $N_T = 1$);
-* (b) every $a_j$ is within $\tfrac12$ of an element of $\mathcal T$;
+* (a) $S$ is sorted, without repeats, contained in $[0, T]$, contains $0, 1, T$, and has at most $\min(N_T + 1, T + 1)$ elements for $N_T \ge 2$ (3 for $N_T = 1$);
+* (b) every $a_j$ is within $\tfrac12$ of an element of $S$;
 * (c) (refinement) for an integer $k \ge 1$ the count $N_T' = k(N_T - 1) + 1$ gives a schedule that contains the one of $N_T$.
 
-*Proof.* $S^{1/q} = 2a$, so $r = \lfloor 2a\rfloor$. Write $2a = r + f$, $0 \le f < 1$. Then $a + \tfrac12 = (r + 1 + f)/2$. If $r + 1$ is even this is $(r+1)/2 + f/2$ with $f/2 < \tfrac12$, so the floor is $(r+1)/2$.
-If $r + 1$ is odd, $r + 1 = 2i + 1$, it is $i + (1 + f)/2$ with $(1+f)/2 \in [\tfrac12, 1)$, so the floor is $i = \lfloor (r+1)/2\rfloor$. No tie: $a = k + \tfrac12$ would give $2^q T^j = (2k+1)^q$,
+*Proof.* $W^{1/q} = 2a$, so $\rho = \lfloor 2a\rfloor$. Write $2a = \rho + f$, $0 \le f < 1$. Then $a + \tfrac12 = (\rho + 1 + f)/2$. If $\rho + 1$ is even this is $(\rho+1)/2 + f/2$ with $f/2 < \tfrac12$, so the floor is $(\rho+1)/2$.
+If $\rho + 1$ is odd, $\rho + 1 = 2i + 1$, it is $i + (1 + f)/2$ with $(1+f)/2 \in [\tfrac12, 1)$, so the floor is $i = \lfloor (\rho+1)/2\rfloor$. No tie: $a = \ell + \tfrac12$ would give $2^q T^j = (2\ell+1)^q$,
 an even number equal to an odd one (for $q \ge 1$). $a_0 = T^0 = 1$ and $a_q = T^{q/q} = T$ exactly, and $T^{j/q}$ is increasing in $j$ for $T \ge 2$, so the rounded values are non-decreasing. (a) follows
 from the definition: the set is $\lbrace0\rbrace \cup \lbrace k_j\rbrace \cup \lbrace 1, T\rbrace$ with $k_0 = 1$ and $k_q = T$ already among the $k_j$. (b): $\lvert k_j - a_j\rvert \le \tfrac12$. (c): $a'_{kj} = T^{kj/(kq)} = T^{j/q} = a_j$, the same real
-number rounded by the same rule. ∎ The computation in `study/manifest.py::_half_up_root` uses a floating-point estimate of $r$ and then corrects it exactly with integer powers, so no value can cross a rounding boundary by floating-point error.
+number rounded by the same rule. ∎ The computation in `study/manifest.py::_half_up_root` uses a floating-point estimate of $\rho$ and then corrects it exactly with integer powers, so no value can cross a rounding boundary by floating-point error.
 
 ### 4.5 Revisions
 
@@ -427,7 +428,7 @@ Cost: a few passes over the conditions and the correlated entries (sorting inclu
 
 ### 5.3 The exact checkpoints
 
-For $j = 0, \dots, q$: $S = 2^q T^j$; estimate $r \approx \lfloor 2 e^{j \ln T / q}\rfloor$ in floating point; decrease $r$ while $r^q > S$ and increase it while $(r+1)^q \le S$ (exact big-integer powers, usually zero steps); the checkpoint is $\lfloor (r+1)/2\rfloor$,
+For $j = 0, \dots, q$: $W = 2^q T^j$; estimate $\rho \approx \lfloor 2 e^{j \ln T / q}\rfloor$ in floating point; decrease $\rho$ while $\rho^q > W$ and increase it while $(\rho+1)^q \le W$ (exact big-integer powers, usually zero steps); the checkpoint is $\lfloor (\rho+1)/2\rfloor$,
 clamped to $[0, T]$. Cost $O(N_T)$ big-integer powers of $O(q + j\log_2 T)$ bits; $N_T \le 1000$.
 For the list form (`CheckpointRule.resolve`) take the entries not above $T$ and add $0, 1, T$; for the table form look up the list of the size $n$ (refusing a size without an entry and an entry above $T$) and add $0, 1, T$; sort and remove repeats.
 

@@ -70,7 +70,7 @@ mathematics, the independent reference implementations and conformance tests
 | $C(n,2)$, $E_0(n)$ | the circulant graph and its edge set | graph, set of pairs | `identity.circulant_edges` |
 | $L_n$ | the oriented original edges $((a_1,b_1), \dots, (a_m,b_m))$, offset-major | list of $m = 2n$ pairs | `identity.original_edge_list`, `graphs._ring_lattice(n, 4)` |
 | $\beta$ | rewiring probability | $[0,1]$ | `beta` |
-| $\beta'$ | the realized rewiring probability $P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself for dyadic $\beta$, within $2^{-52}$ of it otherwise | $[0,1]$ | the double `Token.float64` compared with `next_double` |
+| $\beta'$ | the realized rewiring probability $P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself when $\beta$ is a multiple of $2^{-53}$ (dyadic with at most 53 binary digits after the point), within $2^{-52}$ of it otherwise | $[0,1]$ | the double `Token.float64` compared with `next_double` |
 | $B_j$ | the rewiring decision at visit $j$ | $\lbrace 0,1\rbrace$ | `next_double(rng) < beta` (the float64 of the token) |
 | $G^{(j)}$ | the graph after visit $j$ | simple graph | `adj` |
 | $N_G(a)$ | the neighbors of $a$ in $G$ | subset of $V$ | `adj[a]` |
@@ -82,12 +82,13 @@ mathematics, the independent reference implementations and conformance tests
 | $h(n)$ | gates per layer, $\lfloor n/2\rfloor$ | integer | `gates_per_layer` |
 | $e_{t,a}$, $Q_{t,a}$ | the edge and the Clifford of gate $a$ of layer $t$ | $E_g$, $\lbrace 0, \dots, 11519\rbrace$ | `next_below(rng, len(edges))`, `next_below(rng, 11520)` |
 | $\Gamma$ | the gate schedule $((e_{t,a}, Q_{t,a}))_{t,a}$ (v1.4 writes $u$; here $u$ is the trajectory index) | element of $(E_g \times \mathcal K)^{T h(n)}$ | |
-| $\mathcal K$, $j$ | the native two-qubit Clifford indices $\lbrace 0, \dots, 11519\rbrace$ | integers | `Clifford.from_index(2, j)` |
-| $s$, $b$ | $j = 16 s + b$: symplectic class $s \in \lbrace 0, \dots, 719\rbrace$, sign bits $b \in \lbrace 0, \dots, 15\rbrace$ | integers | `j >> 4`, `j & 15` |
+| $\mathcal K$, $Q$ | the native two-qubit Clifford indices $\lbrace 0, \dots, 11519\rbrace$, and one of them (gate $a$ of layer $t$ has $Q_{t,a}$) | integers | `j` in `Clifford.from_index(2, j)` |
+| $s$, $\varepsilon$ | $Q = 16 s + \varepsilon$: symplectic class $s \in \lbrace 0, \dots, 719\rbrace$, sign bits $\varepsilon \in \lbrace 0, \dots, 15\rbrace$ (`clifford.py` writes `j = 16 s + b`) | integers | `j >> 4`, `j & 15` |
 | $p$ | the measurement rate | $[0,1]$ | `measurement_rate` |
 | $q_p$ | the float64 nearest to $p$ | double | `Token.float64` |
 | $U_{t,i}$ | the mask uniform $k\,2^{-53}$ of site $i$ at layer $t$ | double in $[0,1)$ | `next_double(rng)` |
 | $M_{t,i}$ | the measurement indicator, $\mathbf 1\lbrace U_{t,i} < q_p\rbrace$ | $\lbrace 0,1\rbrace$ | the list after `M` in an exported circuit |
+| $W_t$ | the ordered product of the gates of layer $t$ on the system qubits (v1.4 writes $V_t$) | unitary | |
 | $O$ | the Born outcomes of the measured sites | $\pm 1$ at each measured site | not sampled in phase-free mode |
 | $\pi_{g,\gamma,m}(o)$ | the Born probability of the outcomes $o$ | $[0,1]$ | |
 | $T$ | the horizon (layers) | integer | `layers` |
@@ -95,6 +96,8 @@ mathematics, the independent reference implementations and conformance tests
 | $\mathrm{rng}$ | an xoshiro256** state | four `uint64` | `_kernel/rng.py` |
 | $u$ | the trajectory index; trajectory $u$ runs on graph $\lfloor u/\bar C\rfloor$ for the circuit index stride $\bar C$ (document 02) | integer | `first_trajectory + t` |
 | $\lvert A\rvert$ | the size of an eligible set $A$ (in §5.4, of the set of one rewiring event) | integer | `len(v.eligible)` |
+| $\xi$, $\xi_j$ | an auxiliary uniform variable on $[0,1)$, not drawn from the study's streams (the coupling of Proposition 7(b'), the PIT of §5.4) | real | `rng.random()` in `target_pit_p` |
+| $N_{\mathrm{sample}}$, $\alpha$ | the number of independent terms of a test statistic, and the level $10^{-6}$ of one $p$-value test (§5.4) | integer, real | `total`, `ALPHA` in the tests |
 
 ## 3. Definitions
 
@@ -114,17 +117,19 @@ Fix $(n, \beta, p, T)$. The ideal ensemble has four levels.
    $$
    \nu_{p,T}(m) = p^{\lvert m\rvert}(1-p)^{nT - \lvert m\rvert}.
    $$
-4. **Born outcomes.** With $V_t(g,\gamma)$ the ordered product of the gates of layer $t$ (on the
-   system qubits only), $S_t = \lbrace i : m_{t,i} = 1\rbrace$ and, for $o_t \in \lbrace \pm 1\rbrace^{S_t}$,
+4. **Born outcomes.** With $W_t(g,\gamma)$ the ordered product of the gates of layer $t$ (v1.4 writes $V_t$;
+   here $V$ is the vertex set), acting on the system qubits $0, \dots, n-1$ only, $S_t = \lbrace i : m_{t,i} = 1\rbrace$ and,
+   for $o_t \in \lbrace \pm 1\rbrace^{S_t}$,
    $$
-   \Pi_{o_t} = \prod_{i \in S_t} \frac{I + o_{t,i} Z_{Q_i}}{2}
+   \Pi_{o_t} = \prod_{i \in S_t} \frac{I + o_{t,i} Z_i}{2}
    \quad(\Pi = I \text{ if } S_t = \varnothing),
    $$
-   the Born probability of the outcomes $o = (o_1, \dots, o_T)$ is
+   with $Z_i$ the Pauli $Z$ of system qubit $i$ (v1.4's $Z_{Q_i}$), the Born probability of the outcomes $o = (o_1, \dots, o_T)$ is
    $$
-   \pi_{g,\gamma,m}(o) = \big\lVert \big(\Pi_{o_T} V_T \cdots \Pi_{o_1} V_1 \otimes I_R\big)\,\lvert\Psi_0\rangle \big\rVert^2,
-   \qquad \lvert\Psi_0\rangle = \bigotimes_{i=0}^{n-1} \lvert\Phi^+\rangle_{Q_i R_i}.
+   \pi_{g,\gamma,m}(o) = \big\lVert \big(\Pi_{o_T} W_T \cdots \Pi_{o_1} W_1 \otimes I_{\mathrm{ref}}\big)\,\lvert\Psi_0\rangle \big\rVert^2,
+   \qquad \lvert\Psi_0\rangle = \bigotimes_{i=0}^{n-1} \lvert\Phi^+\rangle_{i,\,n+i},
    $$
+   where qubit $n + i$ is the reference of system qubit $i$ (v1.4's $R_i$) and $I_{\mathrm{ref}}$ is the identity on the references.
 
 The **joint law** (v1.4 §6.1) is the product
 $$
@@ -181,8 +186,8 @@ all-zero state would become $(1,0,0,0)$) and two draws:
 
 * `next_double(rng)` $= k\,2^{-53}$ with $k$ the top 53 bits of `next_u64`, so $B_j = [\texttt{next\_double} < \mathrm{fl}(\beta)]$,
   where $\mathrm{fl}(\beta)$ is the double the study passes (`Token.float64` of the token, document 02, §3.1). Hence
-  $\Pr(B_j = 1) = \beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself when $\beta$ is dyadic with at most 53
-  binary digits ($0$, $1/4$, $1/2$, $1$, ...), and within $2^{-52}$ of $\beta$ otherwise ($\beta' - \beta = 8.9\times10^{-17}$ at $\beta = 0.1$);
+  $\Pr(B_j = 1) = \beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11): $\beta$ itself when $\beta$ is a multiple of $2^{-53}$
+  (dyadic with at most 53 binary digits after the point: $0$, $1/4$, $1/2$, $1$, ...), and within $2^{-52}$ of $\beta$ otherwise ($\beta' - \beta = 8.9\times10^{-17}$ at $\beta = 0.1$);
 * `next_below(rng, bound)` (Lemire's method on the top 32 bits of `next_u64`, Proposition 5): a uniform
   integer in $[0, \text{bound})$.
 
@@ -203,10 +208,10 @@ on `(a, b) = edges[e]` with $a < b$ (low endpoint first), and the gates of a lay
 the order they were drawn. A pair of draws is made for every gate, so a repeated edge or two gates
 with a common qubit are possible.
 
-The native Clifford index is $j = 16 s + b$ (`clifford.py`, module docstring): $s$ is the position of the
+The native Clifford index is $Q = 16 s + \varepsilon$ (`clifford.py`, module docstring, writes `j = 16 s + b`): $s$ is the position of the
 gate's $4 \times 4$ symplectic matrix in the list of all 720 elements of $\mathrm{Sp}(4,\mathbb F_2)$ sorted by the
 integer whose binary digits are the matrix entries row by row (first entry most significant), and
-$b = b_{X_0} + 2 b_{X_1} + 4 b_{Z_0} + 8 b_{Z_1}$ holds the sign bits of the images of $X_0, X_1, Z_0, Z_1$
+$\varepsilon = \varepsilon_{X_0} + 2 \varepsilon_{X_1} + 4 \varepsilon_{Z_0} + 8 \varepsilon_{Z_1}$ holds the sign bits of the images of $X_0, X_1, Z_0, Z_1$
 (`Clifford.from_index`, `Clifford.sign_bits`).
 
 ### 3.6 The mask law (v1.4 §4, §7.3, §9)
@@ -264,23 +269,23 @@ approximates it (§9).
 *Proof.* $\mu_{n,\beta}$ is the law of a random graph, $\kappa_{g,T}$ is a product of uniform pmfs and
 $\nu_{p,T}$ a product of Bernoulli pmfs, so each sums to 1 over its own set. It remains to show
 $\sum_o \pi_{g,\gamma,m}(o) = 1$ for fixed $g, \gamma, m$. Write $\psi_0 = \lvert\Psi_0\rangle$ and let every
-operator act as itself tensored with $I_R$.
+operator act as itself tensored with $I_{\mathrm{ref}}$.
 
 For one layer, the operators $\Pi_{o}$, $o \in \lbrace\pm1\rbrace^{S_t}$, are orthogonal projectors that sum to $I$:
 two different outcome vectors differ at a site $i$, where $\frac{I+Z_i}{2}\frac{I-Z_i}{2} = 0$, and
 expanding $\prod_{i \in S_t}\big(\frac{I+Z_i}{2} + \frac{I-Z_i}{2}\big) = I$ gives the sum. Hence
 $\sum_{o}\lVert \Pi_o \phi\rVert^2 = \lVert\phi\rVert^2$ for every vector $\phi$ (Pythagoras).
 
-Now sum $\lVert \Pi_{o_T} V_T \phi_{T-1}\rVert^2$ over $o_T$, where
-$\phi_{T-1} = \Pi_{o_{T-1}} V_{T-1} \cdots \Pi_{o_1} V_1 \psi_0$ does not depend on $o_T$: the result is
-$\lVert V_T\phi_{T-1}\rVert^2 = \lVert\phi_{T-1}\rVert^2$ by unitarity. Repeating from layer $T$ down to
+Now sum $\lVert \Pi_{o_T} W_T \phi_{T-1}\rVert^2$ over $o_T$, where
+$\phi_{T-1} = \Pi_{o_{T-1}} W_{T-1} \cdots \Pi_{o_1} W_1 \psi_0$ does not depend on $o_T$: the result is
+$\lVert W_T\phi_{T-1}\rVert^2 = \lVert\phi_{T-1}\rVert^2$ by unitarity. Repeating from layer $T$ down to
 layer 1 gives $\lVert\psi_0\rVert^2 = 1$. ∎
 
 *Remark (the chain rule).* The projectors of one layer are applied one site at a time in ascending
 order, each followed by renormalization. For any projectors, $\lVert\Pi_k \cdots \Pi_1\psi\rVert^2 =
 \prod_k \lVert\Pi_k\psi_{k-1}\rVert^2$ with $\psi_k = \Pi_k\psi_{k-1}/\lVert\Pi_k\psi_{k-1}\rVert$, because the
 product telescopes. So $\pi$ is the product of the sequential conditional probabilities
-$\langle\varphi\vert\frac{I + zZ_{Q_i}}{2}\vert\varphi\rangle$ of v1.4 §4, where each is $0$, $\frac12$ or $1$ for a
+$\langle\varphi\vert\frac{I + o_{t,i}Z_i}{2}\vert\varphi\rangle$ of v1.4 §4 (which writes $z$ for the outcome $o_{t,i}$), where each is $0$, $\frac12$ or $1$ for a
 stabilizer state.
 
 **Proposition 2 (interchange of the gate and mask averages; v1.4 §6.2).** For any real function
@@ -381,13 +386,13 @@ enumerating $2^{32}$ values (§7, example (c)). For $b = 11520$ the rejection pr
 $(N \bmod 11520)/N = 256/2^{32} \approx 6\times10^{-8}$.
 
 **Proposition 6 (rejection sampling gives the uniform eligible target).** Let $A \subseteq V$ with
-$\lvert A\rvert = \alpha \ge 1$, and $X_1, X_2, \dots$ i.i.d. uniform on $V$ (Proposition 5, bound $n$). Let
-$\tau = \min\lbrace k : X_k \in A\rbrace$. Then $\tau$ is geometric with success probability $\alpha/n$ (finite
-almost surely, $\mathbb E\tau = n/\alpha$, $\operatorname{Var}\tau = (1 - \alpha/n)(n/\alpha)^2$), and $X_\tau$ is uniform on $A$
-and independent of $\tau$.
+$\lvert A\rvert \ge 1$, and let the proposals $w_1, w_2, \dots$ (the values `w` of §3.4) be i.i.d. uniform on $V$ (Proposition 5,
+bound $n$). Let $\theta = \min\lbrace k : w_k \in A\rbrace$. Then $\theta$ is geometric with success probability $\lvert A\rvert/n$ (finite
+almost surely, $\mathbb E\theta = n/\lvert A\rvert$, $\operatorname{Var}\theta = (1 - \lvert A\rvert/n)(n/\lvert A\rvert)^2$), and $w_\theta$ is
+uniform on $A$ and independent of $\theta$.
 
-*Proof.* For $w \in A$ and $k \ge 1$, $\Pr(\tau = k, X_\tau = w) = (1 - \alpha/n)^{k-1}\cdot\frac1n$. This factors as
-$\big[(1 - \alpha/n)^{k-1}\frac{\alpha}{n}\big]\cdot\frac1\alpha$: a geometric law in $k$ times the uniform law on $A$. ∎
+*Proof.* For $v \in A$ and $k \ge 1$, $\Pr(\theta = k, w_\theta = v) = (1 - \lvert A\rvert/n)^{k-1}\cdot\frac1n$. This factors as
+$\big[(1 - \lvert A\rvert/n)^{k-1}\frac{\lvert A\rvert}{n}\big]\cdot\frac1{\lvert A\rvert}$: a geometric law in $k$ times the uniform law on $A$. ∎
 So step 4 of §3.3 is realized exactly, and the expected number of `next_below` calls for a rewiring with
 eligible set $A$ is $n/\lvert A\rvert$ (the test `test_rejection_sampling_uses_n_over_the_eligible_size_draws_on_average`).
 
@@ -402,7 +407,7 @@ eligible set $A$ is $n/\lvert A\rvert$ (the test `test_rejection_sampling_uses_n
   $2n\beta(1-\beta)$. (Some attempts do nothing: when $A_j = \varnothing$.)
 * (b') The native generator compares the uniform with the double $\mathrm{fl}(\beta)$ (§3.4), so in the ideal model its
   decisions are i.i.d. Bernoulli($\beta'$) with $\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$ (Proposition 11), and its graphs have the
-  law $\mu_{n,\beta'}$ of (a) at $\beta'$. For dyadic $\beta$ with at most 53 binary digits $\beta' = \beta$; otherwise
+  law $\mu_{n,\beta'}$ of (a) at $\beta'$. For $\beta$ a multiple of $2^{-53}$ (dyadic with at most 53 binary digits after the point) $\beta' = \beta$; otherwise
   $0 < \lvert\beta' - \beta\rvert < 2^{-52}$ and the total variation distance between $\mu_{n,\beta'}$ and $\mu_{n,\beta}$ is at most
   $2n\lvert\beta' - \beta\rvert < 2n\cdot 2^{-52}$.
 * (c) $\mu_{n,\beta}$ is in general not uniform on the simple graphs with $2n$ edges (§7, example (a)).
@@ -410,8 +415,8 @@ eligible set $A$ is $n/\lvert A\rvert$ (the test `test_rejection_sampling_uses_n
 *Proof.* (a) is the definition of §3.3 read as a chain. (b): $B_j$ is drawn without reference to the state.
 (b'): $B_j = [U_j < \mathrm{fl}(\beta)]$ with $U_j$ uniform on the multiples of $2^{-53}$, whose probability is
 Proposition 11 with $q = \mathrm{fl}(\beta)$, and the bound $\lvert\beta' - \beta\rvert < 2^{-52}$ is the one proved there. For the
-distance, couple the two processes on the same uniforms: draw $V_j$ uniform on $[0,1)$ and set $B_j = [V_j < \beta]$ and
-$B'_j = [V_j < \beta']$, with the same target draws. The two graphs can differ only if some $B_j \ne B'_j$, which has
+distance, couple the two processes on the same uniforms: draw $\xi_j$ uniform on $[0,1)$ and set $B_j = [\xi_j < \beta]$ and
+$B'_j = [\xi_j < \beta']$, with the same target draws. The two graphs can differ only if some $B_j \ne B'_j$, which has
 probability $\lvert\beta' - \beta\rvert$ at each of the $m = 2n$ visits, so by the union bound the graphs differ with probability at
 most $2n\lvert\beta' - \beta\rvert$, which bounds the total variation distance. (c) is shown by exhibiting the exact law: at
 $n = 6$ and $\beta = 1/2$ the most likely graph has probability $0.0228$, ten times the uniform value $1/455$. ∎
@@ -451,9 +456,9 @@ disjoint parts of the stream. (b) is the classical occupancy distribution for $h
 $\lvert E_g\rvert$ cells; the recursion $P_{k+1}(d) = P_k(d)\,d/\lvert E_g\rvert + P_k(d-1)(\lvert E_g\rvert - d + 1)/\lvert E_g\rvert$ computes it
 (`tests/test_study_sampling.py::occupancy_pmf`). ∎
 
-**Proposition 10 (the 16-to-1 map).** The map $j \mapsto (s, b) = (\lfloor j/16\rfloor, j \bmod 16)$ is a bijection from
-$\lbrace 0, \dots, 11519\rbrace$ onto $\lbrace 0, \dots, 719\rbrace \times \lbrace 0, \dots, 15\rbrace$. Hence for $j$ uniform on 11,520 values, $s$ is uniform
-on 720 values, $b$ is uniform on 16 values, they are independent, and every symplectic class has exactly 16
+**Proposition 10 (the 16-to-1 map).** The map $Q \mapsto (s, \varepsilon) = (\lfloor Q/16\rfloor, Q \bmod 16)$ is a bijection from
+$\lbrace 0, \dots, 11519\rbrace$ onto $\lbrace 0, \dots, 719\rbrace \times \lbrace 0, \dots, 15\rbrace$. Hence for $Q$ uniform on 11,520 values, $s$ is uniform
+on 720 values, $\varepsilon$ is uniform on 16 values, they are independent, and every symplectic class has exactly 16
 preimages. In the phase-free engine a gate acts through its class $s$ only.
 
 *Proof.* The bijection is the division with remainder. A uniform variable on a product set under a
@@ -464,7 +469,7 @@ Eqs. (1)–(4), for $\lvert\mathrm{Sp}(4,\mathbb F_2)\rvert = 720$ and the 16 si
 from `lin2[sym]` with `sym = g >> 4` (`_kernel/tableau.py::apply_2q`); the sign polynomial, which
 depends on `g & 15`, is used only when phases are tracked, and the ensemble engine is phase-free. ∎
 
-*Consequence.* Because the integer draw $j$ is itself exactly uniform (Proposition 5 with
+*Consequence.* Because the integer draw $Q$ is itself exactly uniform (Proposition 5 with
 $b = 11520$), $\Pr(s) = 16/11520 = 1/720$ exactly under the ideal input: sampling the 11,520 projective
 Cliffords and sampling the 720 symplectic classes give the same phase-free ensemble (v1.4 §3), but only
 the first reproduces the seeds of the native contract (v1.4 §9.1).
@@ -477,8 +482,8 @@ $$
 P_{\mathrm{real}}(q) := \Pr(U < q) = \frac{\lceil 2^{53} q\rceil}{2^{53}}, \qquad 0 \le P_{\mathrm{real}}(q) - q < 2^{-53}.
 $$
 For $q = q_p = \mathrm{fl}(p)$ (the double nearest to $p$), $\lvert P_{\mathrm{real}}(q_p) - p\rvert < 2^{-52}$. The
-endpoints are exact: $p = 0$ never measures and $p = 1$ always does, and so is every dyadic $p$ with at
-most 53 binary digits. For fixed $p$ the masks $M_{t,i} = [U_{t,i} < q_p]$ are independent
+endpoints are exact: $p = 0$ never measures and $p = 1$ always does, and so is every $p$ that is
+a multiple of $2^{-53}$ (dyadic with at most 53 binary digits after the point). For fixed $p$ the masks $M_{t,i} = [U_{t,i} < q_p]$ are independent
 Bernoulli($P_{\mathrm{real}}(q_p)$) variables.
 
 *Proof.* $k\,2^{-53} < q \iff k < 2^{53}q \iff k \le \lceil 2^{53}q\rceil - 1$, and there are $\lceil 2^{53}q\rceil$ such $k \ge 0$.
@@ -565,8 +570,7 @@ Input $n \ge 5$, $\beta$, a seed. Output the sorted edge array $(2n, 2)$.
 Cost: $2n$ doubles plus, per rewiring, an expected $n/\lvert A\rvert$ bounded draws (Proposition 6), $O(n\bar d)$ for
 the neighbor tests; 60 to 100 microseconds per graph at $n$ between 7 and 24 in this implementation
 (measured). Exactness: in the ideal model the output has exactly the law $\mu_{n,\beta'}$ of the realized probability
-$\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, which is $\mu_{n,\beta}$ for dyadic $\beta$ and within total variation $2n\cdot2^{-52}$ of it
-otherwise (Proposition 7(b')); the pseudorandom generator only approximates the ideal model (§9). The result is validated by
+$\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, which is $\mu_{n,\beta}$ when $\beta$ is a multiple of $2^{-53}$ (dyadic with at most 53 binary digits after the point) and within total variation $2n\cdot2^{-52}$ of it otherwise (Proposition 7(b')); the pseudorandom generator only approximates the ideal model (§9). The result is validated by
 `identity.validate_graph` (Proposition 4).
 
 ### 5.2 The exact law by dynamic programming
@@ -584,40 +588,48 @@ by the tests, and 24,359,329 for $n = 8$ (measured once, 87 seconds; not in the 
 ### 5.3 One layer of the engine
 
 `_kernel/ensemble.py::gen_layer`, for the study protocol: for $a = 1, \dots, h(n)$: $e$ = `next_below(rng, |E|)`,
-$(x, y)$ = `edges[e]`, $j$ = `pool[next_below(rng, 11520)]`; then for $i = 0, \dots, n-1$: `next_double(rng) < p`
+$(x, y)$ = `edges[e]`, $Q$ = `pool[next_below(rng, 11520)]`; then for $i = 0, \dots, n-1$: `next_double(rng) < p`
 marks site $i$. Cost $O(h(n) + n)$ draws per layer. The export `MonitoredCircuit.circuit(u, seed=...)`
-records exactly these draws (the generator functions are shared with the run), as `CLIFFORD_2Q(j, ...) x y ...`
-lines and an `M` line of the measured sites before each `TICK`.
+records exactly these draws (the generator functions are shared with the run), as `CLIFFORD_2Q(...) x y ...`
+lines (the indices $Q$ of the layer's gates in the parentheses) and an `M` line of the measured sites before each `TICK`.
 
 ### 5.4 The conformance statistics
 
-* **Pearson's chi-square.** For counts $O_c$ with expected counts $E_c$, $X^2 = \sum_c (O_c - E_c)^2/E_c$ over cells
-  with $E_c \ge 5$ (smaller cells are pooled), degrees of freedom the number of cells minus 1, and
-  $p$-value $Q(\nu/2, X^2/2)$ (the regularized upper incomplete gamma function;
-  `tests/_ws_reference.py::chi2_sf`, checked against the closed forms for even $\nu$, $\nu = 1, 3$ and published
-  critical values). A test passes when $p > 10^{-6}$.
+* **Pearson's chi-square.** For observed cell counts $f$ with expected counts $\bar f$ under the null,
+  $\chi^2 = \sum (f - \bar f)^2/\bar f$ over the cells with $\bar f \ge 5$ (smaller cells are pooled), with $\mathrm{df}$ degrees of
+  freedom (the number of cells minus 1) and the $p$-value $\operatorname{igamc}(\mathrm{df}/2, \chi^2/2)$, where $\operatorname{igamc}$ is the
+  regularized upper incomplete gamma function (`tests/_ws_reference.py::chi2_sf`, checked against the closed forms for
+  even $\mathrm{df}$, $\mathrm{df} = 1, 3$ and published critical values). A test passes when its $p$-value exceeds $\alpha = 10^{-6}$.
 * **z-tests.** A sum of independent terms with known mean and variance, standardized; passes when $\lvert z\rvert < 4.5$
   (two-sided false-alarm 6.8e-6 under the normal approximation). Means and variances are computed from the exact
-  law, never from the sample. This includes the spread at $n = 7$: with $\mu$, $\sigma^2$ and $\mu_4$ the exact mean,
-  variance and fourth central moment of a statistic, $V = \frac1N\sum_i (x_i - \mu)^2$ has $\mathbb E V = \sigma^2$ and
-  $\operatorname{Var} V = (\mu_4 - \sigma^4)/N$ exactly for independent draws, and $z = (V - \sigma^2)/\sqrt{(\mu_4 - \sigma^4)/N}$.
-* **Randomized probability integral transform (PIT).** For a rewiring with eligible set $A$ and target at
-  position $r$ of the sorted set, $u = (r + V)/\lvert A\rvert$ with $V$ uniform from an independent generator. Given the past
-  the target is uniform on $A$, so $u$ is uniform on $(0,1)$ and independent of the past; the sequence of $u$ over all
-  rewirings, whatever the sizes $\lvert A\rvert$, is exactly i.i.d. uniform. A 20-bin chi-square tests it
+  law, never from the sample. This includes the spread at $n = 7$: for a statistic $H$ of one graph (the degree variance
+  or the new-edge count) with $N_{\mathrm{sample}}$ independent copies $H_1, \dots, H_{N_{\mathrm{sample}}}$, the spread about the exact mean,
+  $\widehat{\operatorname{Var}}\,H = \frac{1}{N_{\mathrm{sample}}}\sum_k (H_k - \mathbb E H)^2$, has $\mathbb E\,\widehat{\operatorname{Var}}\,H = \operatorname{Var} H$ and
+  $\operatorname{Var}\widehat{\operatorname{Var}}\,H = \big(\mathbb E(H - \mathbb E H)^4 - (\operatorname{Var} H)^2\big)/N_{\mathrm{sample}}$ exactly (the mean of the
+  independent terms $(H_k - \mathbb E H)^2$), with every moment from the exact law, and
+  $z = (\widehat{\operatorname{Var}}\,H - \operatorname{Var} H)\big/\sqrt{\operatorname{Var}\widehat{\operatorname{Var}}\,H}$.
+* **Randomized probability integral transform (PIT).** For a rewiring with eligible set $A$ and the target at
+  position $\rho$ of the sorted set ($0 \le \rho < \lvert A\rvert$), $\zeta = (\rho + \xi)/\lvert A\rvert$ with $\xi$ uniform on $[0,1)$ from an
+  independent generator. Given the past the target is uniform on $A$, so $\rho$ is uniform on $\lbrace 0, \dots, \lvert A\rvert - 1\rbrace$,
+  $\zeta$ is uniform on $[0,1)$ and independent of the past; the sequence of $\zeta$ over all rewirings, whatever the sizes
+  $\lvert A\rvert$, is exactly i.i.d. uniform. A 20-bin chi-square tests it
   (`tests/test_study_sampling.py::target_pit_p`).
-* **Correlation families.** With $Y = M - p$, a product $Y_a Y_b$ of two different positions has mean 0 and variance
-  $(p(1-p))^2$, and products of different pairs are uncorrelated. Over $N$ independent terms
-  $z = \sum Y_aY_b/(\sqrt N\,p(1-p))$ is standard normal, and the squares of a family add up to a chi-square. The
-  families are two sites of one layer, one site at lags 1–3, two sites in consecutive layers and neighboring
-  trajectories (`correlation_pvalues`). Given the gates the masks are independent Bernoulli($p$), so for any weights
-  $c$ that depend on the gates only $z_i = \sum Y c/\sqrt{p(1-p)\sum c^2}$ is standard normal, and the $z_i$ of different sites
-  are independent (`gate_dependence_pvalues`). At the level of layers, the measured count $X$ of a layer is
-  Binomial($n$, $p$) and the mean $Y$ of the classes (or edge indices) of its $h$ gates has the mean and variance of one
-  uniform draw on 720 values (or $\lvert E\rvert$), the variance divided by $h$; under independence the products
-  $(X - \mathbb EX)(Y - \mathbb EY)$ of different layers are uncorrelated with variance $\operatorname{Var}X\operatorname{Var}Y$, so
-  $z = \sum (X - \mathbb EX)(Y - \mathbb EY)/\sqrt{N\operatorname{Var}X\operatorname{Var}Y}$ has mean 0 and variance 1 exactly
-  (`test_masks_are_independent_of_the_gate_draws`; the "next layer" pairs take $Y$ from the following layer).
+* **Correlation families.** For a mask entry $M_{t,i}$ put $Y_{t,i} = M_{t,i} - p$. A product $Y_{t,i}Y_{t',i'}$ of two different
+  entries (of one trajectory or of two) has mean 0 and variance $(p(1-p))^2$, and products of different pairs are
+  uncorrelated. Over $N_{\mathrm{sample}}$ such terms $z = \sum Y_{t,i}Y_{t',i'}/(\sqrt{N_{\mathrm{sample}}}\,p(1-p))$ is standard normal, and the
+  squares of a family add up to a chi-square. The families are two sites of one layer, one site at lags 1–3, two sites in
+  consecutive layers and neighboring trajectories (`correlation_pvalues`). Given the gates the masks are independent
+  Bernoulli($p$), so for any weights $\omega_{t,i}$ that depend on the gates only (the tests use whether a gate of layer
+  $t - 1$, $t$ or $t + 1$ touches site $i$, centered) $z_i = \sum Y_{t,i}\,\omega_{t,i}/\sqrt{p(1-p)\sum \omega_{t,i}^2}$, both sums over the
+  layers of every trajectory, is standard normal, and the $z_i$ of different sites are independent
+  (`gate_dependence_pvalues`). At the level of layers, the measured count $\lvert M_t\rvert = \sum_i M_{t,i}$ of a layer is
+  Binomial($n$, $p$), and the mean class $\bar s_t$ of its $h(n)$ gates (or their mean edge index $\bar e_t$) has the mean and
+  the variance of one uniform draw on 720 values (or on the $\lvert E_g\rvert$ edge indices), the variance divided by $h(n)$. Under
+  independence the products $(\lvert M_t\rvert - np)(\bar s_t - \mathbb E\bar s_t)$ of different layers are uncorrelated with variance
+  $\operatorname{Var}\lvert M_t\rvert\operatorname{Var}\bar s_t$, so over $N_{\mathrm{sample}}$ layers
+  $z = \sum (\lvert M_t\rvert - np)(\bar s_t - \mathbb E\bar s_t)/\sqrt{N_{\mathrm{sample}}\operatorname{Var}\lvert M_t\rvert\operatorname{Var}\bar s_t}$ has mean 0
+  and variance 1 exactly, and likewise with $\bar e_t$ (`test_masks_are_independent_of_the_gate_draws`; the "next layer"
+  pairs take $\bar s_{t+1}$ and $\bar e_{t+1}$ from the following layer).
 * **False-alarm accounting.** Every component test is counted: a maximum over 48 positions is 48 z-tests, the
   minimum of six $p$-values is six tests, a Bonferroni-corrected maximum ($k$ times the tail of the largest of $k$
   scores, `frequency_pvalues`) is one $p$-value test. With $\alpha = 10^{-6}$ per $p$-value test and $6.8\times10^{-6}$ per
@@ -651,16 +663,16 @@ lines and an `M` line of the measured sites before each `TICK`.
   | **total** | **46** | **149** |
 
   Two further assertions are statistical in principle, with false-alarm probabilities below $10^{-190}$ by the Chernoff
-  bound $e^{-N\,\mathrm{KL}}$ for independent Bernoulli trials: that more than 70% of the 28,800 layers of
+  bound $e^{-N_{\mathrm{sample}}\mathrm{KL}}$ for $N_{\mathrm{sample}}$ independent Bernoulli trials: that more than 70% of the 28,800 layers of
   `test_edges_are_drawn_with_replacement_in_sampled_order` repeat an edge (expected 77.7%, standard error 0.25%), and
   that more than 19,000 of the 20,000 graphs at $\beta = 0.1$ rewire at least once (expected 19,872). They are not
   counted. The test of Proposition 8 allows 2 coincidences among 200 graphs; it is about the two mappings, not a
   sampling test, and it is not counted either.
 * **Sensitivity.** For a relative deviation $\delta$ in every cell, the noncentrality of the chi-square is
-  $\lambda = N\delta^2$. The class test ($N = 345{,}600$ draws, 719 degrees of freedom, null standard deviation
-  $\sqrt{2\cdot719} = 37.9$) rejects a $\pm5\%$ bias ($\lambda = 864$) at once and cannot see a 1% bias
-  ($\lambda = 35$); the test of the 11,520 indices, with 30 expected draws per index and 16 times the degrees
-  of freedom, is less sensitive per unit of $\lambda$. Negative controls in the tests show each family
+  $\Lambda = N_{\mathrm{sample}}\delta^2$. The class test ($N_{\mathrm{sample}} = 345{,}600$ draws, 719 degrees of freedom, null standard
+  deviation $\sqrt{2\cdot719} = 37.9$) rejects a $\pm5\%$ bias ($\Lambda = 864$) at once and cannot see a 1% bias
+  ($\Lambda = 35$); the test of the 11,520 indices, with 30 expected draws per index and 16 times the degrees
+  of freedom, is less sensitive per unit of $\Lambda$. Negative controls in the tests show each family
   rejecting a planted deviation (a wrong $\beta$, a biased target, a biased Clifford sample, a wrong rate,
   correlated masks, masks that depend on the gates).
 
@@ -676,7 +688,7 @@ lines and an `M` line of the measured sites before each `TICK`.
 | exact law (§5.2) | `tests/_ws_reference.py::exact_law`, `graph_mask`, `mask_edges`, `law_p` |
 | `next_double`, `next_below` (§3.4) | `_kernel/rng.py::next_double`, `next_below`; reference `tests/_reference_rng.py::Xoshiro` |
 | $h(n)$, edge draw, Clifford draw (§3.5) | `_kernel/ensemble.py::gen_layer`; `mipt.py::MonitoredCircuit` (`gates_per_layer` default $n//2$) |
-| $j = 16s + b$ (§3.5) | `clifford.py::Clifford.from_index`, `symplectic_group`; kernel `_kernel/tableau.py::apply_2q` |
+| $Q = 16s + \varepsilon$ (§3.5) | `clifford.py::Clifford.from_index`, `symplectic_group`; kernel `_kernel/tableau.py::apply_2q` |
 | mask $[U < q_p]$ (§3.6) | `_kernel/ensemble.py::gen_layer` (`next_double(rng) < p`); $q_p$ = `identity.Token.float64` |
 | streams (§3.7) | `_kernel/rng.py::stream_state`, `mipt.py::_keys`; the export `MonitoredCircuit.circuit` |
 | seeds of graphs and runs (§3.8) | `study/identity.py::graph_seed`, `run_seed`, `token_words`; `ExperimentManifest.graph_seed`, `run_seed`; test side `tests/_ws_reference.py::graph_seed`, `run_seed`, `token_words` |
@@ -1038,12 +1050,13 @@ for name, seed_of in conventions.items():
 
 ## 8. Validation map
 
-All tests are in `tests/test_study_sampling.py` unless marked. "z-test" means $\lvert z\rvert < 4.5$; "χ²" means $p > 10^{-6}$.
+All tests are in `tests/test_study_sampling.py` unless marked. "z-test" means $\lvert z\rvert < 4.5$; "χ²" means a chi-square $p$-value
+above $\alpha = 10^{-6}$.
 The sample sizes are the ones in the tests.
 
 | claim | test | what is checked |
 |---|---|---|
-| chi-square tail (§5.4) | `test_chi_square_tail_matches_closed_forms`, `test_chi_square_helper_pools_small_cells_and_detects_bias` | closed forms ($\nu$ even up to 40, 1, 3), published critical values (relative error $10^{-5}$); a 10% bias is rejected |
+| chi-square tail (§5.4) | `test_chi_square_tail_matches_closed_forms`, `test_chi_square_helper_pools_small_cells_and_detects_bias` | closed forms ($\mathrm{df}$ even up to 40, $\mathrm{df} = 1, 3$), published critical values (relative error $10^{-5}$); a 10% bias is rejected |
 | native generator = independent rewiring (v1.4 §7.4, requirement 1) | `test_the_reference_rewiring_equals_the_native_generator_trace_for_trace`, `test_equality_holds_for_every_seed_form`, `test_equality_and_validity_for_arbitrary_seeds` | exact equality of edge arrays: 8,640 graphs ($n = 5, \dots, 40$, $\beta \in \lbrace 0, .05, .3, 1\rbrace$, 60 graph labels, each seeded with the study's graph seed), ten seed forms (integers, lists, pairs, and the five-, six- and seven-word tuples of §3.8), and a hypothesis property over $n \le 60$ and 32-bit master seeds that also compares the seed with the reference's independent derivation |
 | Proposition 8 (mapping) | `test_the_mapping_from_random_numbers_to_targets_matters_not_only_the_law` | at most 2 of 200 graphs equal under the index mapping; it passes the uniformity test |
 | Proposition 3, 4(b), (e), (f) | `test_graph_properties_hold_at_every_size_and_rewiring_probability`, `test_c_n_2_is_the_complete_graph_up_to_five_vertices_and_a_ring_after`; `tests/test_study_identity.py::test_circulant_edges_follow_the_definition`, `test_original_edge_list_is_offset_major_and_matches_the_native_ring`, `test_validate_graph_*` | exact, $n = 5, \dots, 40$ (odd and even), simple, $2n$ edges, degree $\ge 2$, $\beta = 0$ is $C(n,2)$, $n = 5$ is $K_5$ |
@@ -1052,6 +1065,7 @@ The sample sizes are the ones in the tests.
 | exact law, moments | `test_the_native_generator_has_the_exact_moments_at_n_7` | z-tests of the mean and of the spread (the second moment about the exact mean, with the exact fourth central moment, §5.4) of the degree variance and the new-edge count at $\beta = 1/4, 1/2, 1$, 25,000 graphs; every moment from the exact law; the twelve $\lvert z\rvert$ are below 1.9 |
 | three misreadings (§3.3) | `test_each_plausible_misreading_of_the_rewiring_rule_is_rejected` | eligible set after the deletion, vertex-major order, retained endpoint $b$: each rejected at $n = 6$ with 30,000 graphs; the correct reading passes on the same seeds |
 | Proposition 7(b) (decisions) | `test_rewiring_decisions_are_bernoulli_beta` | $n = 24$, 20,000 graphs each at $\beta = 0.1, 0.5$: z-test of the attempt total; χ² of the attempt histogram against Binomial(48, $\beta$); χ² and max-z over the 48 positions; z-test of lag-1 products; a wrong $\beta$ is rejected |
+| Proposition 7(b') (realized $\beta'$), Proposition 11 | `test_the_realized_rewiring_probability_is_beta_only_for_multiples_of_two_to_the_minus_53` | exact: `build_graph` hands the generator `Token.float64`; 2,000 draws of `next_double` are multiples of $2^{-53}$; $\beta' = \lceil 2^{53}\mathrm{fl}(\beta)\rceil/2^{53}$ equals $\beta$ for the six multiples of $2^{-53}$ tested ($0$, $2^{-53}$, $3 \cdot 2^{-53}$, $1/4$, $1/2$, $1$) and differs by less than $2^{-52}$ but not 0 for $0.1$, $0.3$, $1/3$, $2^{-60}$ (dyadic, held exactly by a double, $\beta' = 2^{-53}$) and $1 - 2^{-60}$ (dyadic, not held) |
 | Propositions 5, 6 (targets) | `test_targets_are_uniform_on_the_eligible_set_computed_before_the_deletion`, `test_rejection_sampling_uses_n_over_the_eligible_size_draws_on_average`, `test_a_biased_target_sampler_fails_the_uniformity_test` | χ² of the position among the 19 eligible vertices of each graph's first rewiring; χ² of the randomized PIT over all events; z-test of the number of draws against $\sum n/\lvert A\rvert$; "smallest eligible vertex" rejected |
 | study protocol exact (v1.4 §7.3, requirement 10) | `test_the_exported_circuit_is_the_oracle_and_the_direct_transcription`, `test_each_layer_has_floor_n_over_two_gates_on_edges_with_the_low_endpoint_first` | exact: text equals `tests/_protocol_oracle.py` and a transcription of the draws for $n \in \lbrace 5, 6, 9, 16, 17\rbrace$, both gate modes; $\lfloor n/2\rfloor$ gates, $a < b$, on graph edges, for $n = 5, \dots, 11, 16, 17, 24, 25$ |
 | Proposition 9 (a)–(b) | `test_edge_draws_are_uniform_over_the_graphs_edges`, `test_edges_are_drawn_with_replacement_in_sampled_order`, `test_disjoint_pairs_of_edge_draws_are_independent_and_uniform` | 345,600 draws over 48 edges: χ² pooled and by position; z-tests of the vertex incidences ($\propto$ degree, 24 tests); occupancy law χ²; collision rates 1/48 within and across layers; 256-cell χ² of disjoint pairs |
@@ -1071,7 +1085,8 @@ generic draws), `tests/test_invariance.py` (chunks, threads, replay), `tests/tes
 
 * **Float thresholds.** A rate $p$ and a rewiring probability $\beta$ reach the generator as doubles compared with uniforms
   on the multiples of $2^{-53}$, so the realized probabilities are $P_{\mathrm{real}}(\mathrm{fl}(p))$ and
-  $\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, exact for dyadic values and within $2^{-52}$ otherwise (Propositions 7(b') and
+  $\beta' = P_{\mathrm{real}}(\mathrm{fl}(\beta))$, exact for the multiples of $2^{-53}$ (dyadic values with at most 53 binary digits after
+  the point) and within $2^{-52}$ otherwise (Propositions 7(b') and
   11; v1.4 §7.2). Statements "Bernoulli($p$)" and "$\mu_{n,\beta}$" in this document are exact for those realized values.
 * **Ideal versus pseudorandom.** Everything in §4 is exact for independent uniform draws. The xoshiro256**
   generator is a deterministic sequence; the tests show no deviation at the stated sensitivity and prove

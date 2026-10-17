@@ -417,8 +417,9 @@ def test_the_native_generator_has_the_exact_moments_at_n_7(beta):
         got = np.array([stat(e, n) for e in sample], dtype=float)
         z = (got.mean() - mean) / math.sqrt(var / total)
         assert abs(z) < SIGMAS, (stat.__name__, mean, got.mean(), z)
-        # the spread too: V = mean of (x - mean)^2 about the exact mean has E V = var and, for
-        # independent draws, Var V = (mu_4 - var^2) / N exactly (mu_4 the exact fourth central
+        # the spread too (document 01, section 5.4): for the statistic H, the mean of
+        # (H_k - E H)^2 about the exact mean has expectation Var H and, for independent draws,
+        # variance (E (H - E H)^4 - (Var H)^2) / N_sample exactly (the exact fourth central
         # moment), so it is a z-test with the variance of the exact law, like the mean
         spread = float(np.mean((got - mean) ** 2))
         z_spread = (spread - var) / math.sqrt((fourth - var**2) / total)
@@ -433,10 +434,11 @@ def test_the_native_generator_has_the_exact_moments_at_n_7(beta):
 def target_pit_p(visits: list[wsref.Visit], seed: int = 123) -> float:
     """p-value of the uniformity of the targets, by the randomized probability integral transform.
 
-    For an event with eligible set of size s and the target at position r of the sorted set,
-    u = (r + V) / s with V uniform from an independent generator. Given the past, the target is
-    uniform on the eligible set, so u is uniform on (0, 1) and independent of the past: the
-    sequence of u is exactly i.i.d. uniform, however the sizes s vary. 20 bins, chi-square.
+    For an event with eligible set A and the target at position rho of the sorted set,
+    zeta = (rho + xi) / |A| with xi uniform on [0, 1) from an independent generator (document 01,
+    section 5.4). Given the past, the target is uniform on A, so zeta is uniform on [0, 1) and
+    independent of the past: the sequence of zeta is exactly i.i.d. uniform, however the sizes
+    |A| vary. 20 bins, chi-square.
     """
     rng = np.random.default_rng(seed)
     u = [
@@ -491,6 +493,50 @@ def test_rewiring_decisions_are_bernoulli_beta(rewiring_trace):
         np.bincount(attempts, minlength=m + 1), total * wsref.binomial_pmf(m, beta + 0.02)
     )
     assert wrong[2] < ALPHA
+
+
+def test_the_realized_rewiring_probability_is_beta_only_for_multiples_of_two_to_the_minus_53(
+    monkeypatch,
+):
+    # Document 01, section 3.4 and Proposition 7(b'): a rewiring decision is
+    # [next_double < fl(beta)], with next_double on the multiples of 2^-53 and fl(beta) the
+    # token's float64, so its probability is beta' = ceil(2^53 fl(beta)) / 2^53 (Proposition 11).
+    # beta' = beta exactly for the multiples of 2^-53, and otherwise 0 < |beta' - beta| < 2^-52;
+    # being dyadic is not enough (2^-60 is held exactly by a double, yet beta' = 2^-53).
+    seen: list[float] = []
+    native = graphs.watts_strogatz
+
+    def spy(n, k, beta, seed=None):
+        seen.append(beta)
+        return native(n, k, beta, seed=seed)
+
+    monkeypatch.setattr(graphs, "watts_strogatz", spy)
+    for beta in ("0.1", "1/3", "0.25"):
+        build_graph(12, beta, 0, MASTER_GRAPH)
+    assert seen == [Token.parse(b).float64 for b in ("0.1", "1/3", "0.25")]
+    assert all(type(b) is float for b in seen)  # the threshold is the double fl(beta)
+
+    rng = ref.Xoshiro(wsref.seed_words(graph_seed(12, "0.1", 0)))
+    assert all((rng.next_double() * 2**53).is_integer() for _ in range(2000))
+
+    def realized(token: Token) -> Fraction:
+        return Fraction(math.ceil(Fraction(token.float64) * 2**53), 2**53)
+
+    exact = ["0", f"1/{2**53}", f"3/{2**53}", "0.25", "0.5", "1"]
+    for text in exact:
+        token = Token.parse(text)
+        assert (token.value * 2**53).denominator == 1 and realized(token) == token.value, text
+    inexact = ["0.1", "0.3", "1/3", f"1/{2**60}", f"{2**60 - 1}/{2**60}"]
+    for text in inexact:
+        token = Token.parse(text)
+        gap = abs(realized(token) - token.value)
+        assert 0 < gap < Fraction(1, 2**52), text
+    fine, below_one = Token.parse(f"1/{2**60}"), Token.parse(f"{2**60 - 1}/{2**60}")
+    assert fine.is_exact and realized(fine) == Fraction(1, 2**53)  # dyadic, exact, still not beta
+    assert not below_one.is_exact and realized(below_one) == 1  # dyadic, not held by a double
+    assert float(realized(Token.parse("0.1")) - Fraction(1, 10)) == pytest.approx(
+        8.88e-17, rel=1e-3
+    )
 
 
 def test_targets_are_uniform_on_the_eligible_set_computed_before_the_deletion(rewiring_trace):
@@ -812,10 +858,10 @@ def correlation_pvalues(mask: np.ndarray, p: float) -> dict[str, float]:
 def gate_dependence_pvalues(mask: np.ndarray, touch: np.ndarray, p: float) -> dict[str, float]:
     """p-values of the dependence of the mask on the gates drawn in the layers t - 1, t and t + 1.
 
-    Given the gates, the masks are independent Bernoulli(p), so for any weights ``c`` that are a
-    function of the gates (here: whether the site is touched by a gate, centered)
-    ``z_i = sum Y c / sqrt(p (1 - p) sum c^2)`` is standard normal, and the ``z_i`` of different
-    sites are independent: the sum of squares is chi-square with n degrees of freedom.
+    Given the gates, the masks are independent Bernoulli(p), so for any weights ``omega`` that
+    are a function of the gates (here: whether the site is touched by a gate, centered)
+    ``z_i = sum Y omega / sqrt(p (1 - p) sum omega^2)`` is standard normal, and the ``z_i`` of
+    different sites are independent: the sum of squares is chi-square with n degrees of freedom.
     """
     y = mask.astype(float) - p
     k, layers, n = y.shape
@@ -865,12 +911,14 @@ def test_masks_are_independent_of_the_gate_draws(masks):
     # the measured count of a layer against the mean Clifford class and the mean edge of its
     # gates, and the gates of the next layer against this layer's mask (the stream reads the
     # mask uniforms just before them). Every moment comes from the exact laws, none from the
-    # sample: the count X of a layer is Binomial(n, p); the class of a gate is uniform on 720
-    # values and its edge on |E|, so the mean Y of the h gates of a layer has the variance of
-    # one uniform draw over h. Under independence the products (X - EX)(Y - EY) of different
-    # layers are uncorrelated with variance Var X Var Y (the two layers of a "next" pair are
-    # different draws too), so z = sum (X - EX)(Y - EY) / sqrt(N Var X Var Y) has mean 0 and
-    # variance 1 exactly, and is N(0, 1) up to the central limit approximation (N = 8000).
+    # sample (document 01, section 5.4): the count |M_t| of a layer is Binomial(n, p); the class
+    # of a gate is uniform on 720 values and its edge index on |E|, so the mean class s_t (or
+    # mean edge index e_t) of the h gates of a layer has the variance of one uniform draw over h.
+    # Under independence the products (|M_t| - np)(s_t - E s_t) of different layers are
+    # uncorrelated with variance Var |M_t| Var s_t (the two layers of a "next" pair are different
+    # draws too), so z = sum (|M_t| - np)(s_t - E s_t) / sqrt(N_sample Var |M_t| Var s_t) has
+    # mean 0 and variance 1 exactly, and is N(0, 1) up to the central limit approximation
+    # (N_sample = 8000 layers).
     n, h = sample.n, sample.h
     num_edges = 2 * n  # every graph of the study has 2n edges (n >= 5)
     assert sample.edge.min() == 0 and sample.edge.max() == num_edges - 1

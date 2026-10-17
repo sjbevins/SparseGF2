@@ -21,8 +21,8 @@ collections. The run seed is ``(CIRCUIT_SEED_TAG, master_circuit_seed, n,
 gates and mask uniforms are common to all rates, masks are nested), and that tuple followed
 by ``token_words(p)`` in ``"independent"``. The two tags make graph seeds and run seeds
 disjoint whatever the master seeds are. Trajectory $(g, c)$ has the native stream index
-$u = g \\cdot s + c$, with the stride $s$ frozen in the manifest, so adding graphs or
-circuits never renumbers an existing trajectory.
+$u = g \\bar C + c$, with the circuit index stride $\\bar C$ frozen in the manifest, so adding
+graphs or circuits never renumbers an existing trajectory.
 
 **Graph records** (:class:`GraphRecord`, :func:`build_graph`). A record holds the
 Watts–Strogatz graph $G_g \\sim \\mu_{n,\\beta}$ of v1.4 §2 with the seed and generator version
@@ -252,7 +252,11 @@ class Token:
     * ``float64``: ``float(x)``, the correctly rounded IEEE-754 double (``numerator /
       denominator`` in Python is correctly rounded). This is the number the simulator receives.
     * ``hex``: ``float.hex()`` of ``float64``, the bit-exact record of what ran.
-    * ``is_exact``: whether ``float64`` equals $x$ (true for dyadic rationals such as ``"0.5"``).
+    * ``is_exact``: whether ``float64`` equals $x$ (true for the dyadic rationals a double holds,
+      such as ``"0.5"`` or $2^{-60}$; false for ``"0.1"`` and for the dyadic $1 - 2^{-60}$). The
+      generator compares draws on the multiples of $2^{-53}$ with ``float64``, so the realized
+      probability equals $x$ only for a multiple of $2^{-53}$, which ``is_exact`` does not test
+      ($2^{-60}$ is exact here and is realized as $2^{-53}$; document 01, Proposition 11).
     """
 
     value: Fraction
@@ -463,7 +467,8 @@ class TrajectoryKey:
         return cls(parts[0], **fields)
 
     def stream_index(self, stride: int) -> int:
-        """The native trajectory index $u = g s + c$ of this key for the circuit index stride $s$."""
+        """The native trajectory index $u = g \\bar C + c$ of this key for the circuit index stride
+        $\\bar C$ = ``stride``."""
         return stream_index(self.g, self.c, stride)
 
 
@@ -530,12 +535,13 @@ _MAX_INDEX = 2**63 - 1  # the engine takes int64 trajectory indices
 
 
 def stream_index(g: int, c: int, stride: int) -> int:
-    """The native trajectory index $u = g\\, s + c$ of circuit $c$ on graph $g$ (v1.4 §7.2, design D2).
+    """The native trajectory index $u = g \\bar C + c$ of circuit $c$ on graph $g$ (v1.4 §7.2, design D2).
 
-    ``stride`` $s$ is frozen in the manifest and $c < s$. The engine runs with
-    ``circuits_per_graph = s``, so trajectory $u$ uses graph $u // s = g$ and the circuit
-    stream $u$. $u$ depends on $(g, c, s)$ only: adding graphs or circuits (up to $s$) never
-    changes the index, hence the circuit, of an existing trajectory.
+    ``stride``, the circuit index stride $\\bar C$, is frozen in the manifest and $c < \\bar C$.
+    The engine runs with ``circuits_per_graph =`` $\\bar C$, so trajectory $u$ uses graph
+    $\\lfloor u / \\bar C \\rfloor = g$ and the circuit stream $u$. $u$ depends on
+    $(g, c, \\bar C)$ only: adding graphs or circuits (up to $\\bar C$) never changes the index,
+    hence the circuit, of an existing trajectory.
     """
     g = _integer(g, "g", minimum=0)
     stride = _integer(stride, "circuit index stride", minimum=1)
@@ -553,7 +559,8 @@ def stream_index(g: int, c: int, stride: int) -> int:
 
 
 def split_stream_index(u: int, stride: int) -> tuple[int, int]:
-    """The inverse of :func:`stream_index`: $(g, c) = (u // s, u \\bmod s)$."""
+    """The inverse of :func:`stream_index`: $(g, c) = (\\lfloor u / \\bar C \\rfloor, u \\bmod \\bar C)$
+    for the circuit index stride $\\bar C$ = ``stride``."""
     u = _integer(u, "u", minimum=0)
     stride = _integer(stride, "circuit index stride", minimum=1)
     g, c = divmod(u, stride)
@@ -825,10 +832,14 @@ def build_graph(
 ) -> GraphRecord:
     """Graph $G_g \\sim \\mu_{n,\\beta}$ of $(n, \\beta, g)$ as a validated :class:`GraphRecord`.
 
-    The graph is ``graphs.watts_strogatz(n, 4, float(beta), seed=graph_seed(master_graph_seed,
+    The graph is ``graphs.watts_strogatz(n, 4, beta.float64, seed=graph_seed(master_graph_seed,
     n, beta, g))``: the sequential rewiring of $C(n, 2)$ of v1.4 §2.2, each of the $2n$ original
-    edges, in the offset-major order, rewired with probability $\\beta$ to a target drawn
-    uniformly from the vertices that are neither the retained endpoint nor its neighbors. The
+    edges, in the offset-major order, rewired to a target drawn uniformly from the vertices that
+    are neither the retained endpoint nor its neighbors when a draw on the multiples of
+    $2^{-53}$ falls below the double $\\mathrm{fl}(\\beta)$ = ``beta.float64``. That has probability
+    $\\beta' = \\lceil 2^{53} \\mathrm{fl}(\\beta) \\rceil / 2^{53}$, which is $\\beta$ when $\\beta$
+    is a multiple of $2^{-53}$ and within $2^{-52}$ of it otherwise, so the graph has the law
+    $\\mu_{n,\\beta'}$ (document 01, Proposition 7(b')). The
     result is then checked by :func:`validate_graph` (simple, $2n$ edges, $\\beta = 0$ gives
     $C(n, 2)$, $n = 5$ gives $K_5$) and recorded with the digest of its canonical edge list.
     $n \\ge 5$ (the native generator needs $k = 4 < n$). Nothing here depends on the rate $p$.

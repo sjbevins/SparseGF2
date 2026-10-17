@@ -232,12 +232,13 @@ def _token(value: Any, where: str) -> Token:
 
 
 def _half_up_root(s: int, q: int) -> int:
-    r"""$\lfloor x + 1/2 \rfloor$ for $x = s^{1/q} / 2$, exactly, for integers $s \ge 1$, $q \ge 1$.
+    r"""$\lfloor x + 1/2 \rfloor$ for $x = W^{1/q} / 2$, exactly, for integers $W \ge 1$ (``s``), $q \ge 1$.
 
-    With $r = \lfloor s^{1/q} \rfloor$ (the largest integer with $r^q \le s$) this is
-    $\lfloor (r + 1) / 2 \rfloor$: write $2x = r + f$ with $0 \le f < 1$; then $(2x + 1) / 2$
-    has the integer part $\lfloor (r + 1) / 2 \rfloor$ whatever the parity of $r$. A tie
-    ($x$ a half-integer, $r$ odd and $f = 0$) rounds up.
+    With $\rho = \lfloor W^{1/q} \rfloor$ (``r``; the largest integer with $\rho^q \le W$) this
+    is $\lfloor (\rho + 1) / 2 \rfloor$: write $2x = \rho + f$ with $0 \le f < 1$; then
+    $(2x + 1) / 2$ has the integer part $\lfloor (\rho + 1) / 2 \rfloor$ whatever the parity of
+    $\rho$. A tie ($x$ a half-integer, $\rho$ odd and $f = 0$) rounds up (document 02,
+    Proposition 10).
     """
     r = int(2.0 ** (math.log2(s) / q))  # a float estimate, corrected exactly below
     while r**q > s:
@@ -250,8 +251,8 @@ def _half_up_root(s: int, q: int) -> int:
 def round_half_up_power(t_max: int, j: int, q: int) -> int:
     r"""$\lfloor T^{j/q} + 1/2 \rfloor$ exactly: the nearest integer to $T_{\max}^{j/q}$, ties upward.
 
-    With $a = T^{j/q}$ and $S = 2^q T^j$ we have $a = S^{1/q} / 2$, so the value is
-    :func:`_half_up_root` of $S$ and $q$, in integer arithmetic: no floating-point error can
+    With $a = T^{j/q}$ and $W = 2^q T^j$ we have $a = W^{1/q} / 2$, so the value is
+    :func:`_half_up_root` of $W$ and $q$, in integer arithmetic: no floating-point error can
     move a value across a rounding boundary. (For integer $T \ge 1$ and $q \ge 1$ the number
     $a$ is never a half-integer, so ties do not actually arise; the rule is nevertheless
     exact.)
@@ -262,13 +263,14 @@ def round_half_up_power(t_max: int, j: int, q: int) -> int:
 
 
 def geometric_checkpoints(t_max: int, count: int) -> tuple[int, ...]:
-    """The sparse checkpoint schedule $\\mathcal T$ of v1.4 §9 for $T_{\\max}$ and $N_T$ = ``count``.
+    """The geometric rule of v1.4 §9: one revision's own schedule $S$ for $T_{\\max}$, $N_T$ = ``count``.
 
     For $N_T \\ge 2$: $a_j = \\exp(j \\ln T_{\\max} / (N_T - 1)) = T_{\\max}^{j/(N_T - 1)}$ for
     $j = 0, \\ldots, N_T - 1$, each rounded to the nearest integer with ties upward (computed
     exactly, :func:`round_half_up_power`), clamped to $[0, T_{\\max}]$; for $N_T = 1$ no
     geometric point. The result is the sorted union of these points and $\\{0, 1, T_{\\max}\\}$,
-    without repeats.
+    without repeats. Across revisions the schedule used for work (v1.4's $\\mathcal T$) is the
+    union :func:`effective_checkpoints` (ruling R-CK).
     """
     if isinstance(t_max, bool) or not isinstance(t_max, numbers.Integral) or t_max < 1:
         raise ValueError(f"T_max must be an integer of at least 1, got {t_max!r}")
