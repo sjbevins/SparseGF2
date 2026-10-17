@@ -123,3 +123,55 @@ def test_the_arrays_listed_are_bounded(tmp_path):
     assert storage["arrays"][-1]["name"] == "(other arrays)"
     assert storage["total_megabytes"] == pytest.approx(size / 1e6, rel=1e-5)
     assert len(json.dumps(storage)) < api.MAX_OUTPUT_CHARS // 4
+
+
+def test_rebuildable_arrays_are_not_stored_and_load_bitwise(tmp_path):
+    """A symbolic checkpoint rule ("every_layer", "final", a stride) and the default gate set are
+    rebuilt by load, so a file stores neither (every layer of T = 10^5 would be 800 kB per
+    file); the loaded result is the same, bitwise. Explicit lists and other gate sets are
+    stored, and a file that holds the arrays (written before) loads as before."""
+    from sparsegf2 import graphs, mipt
+
+    def spec(checkpoints, gate_set=None):
+        return mipt.MonitoredCircuit(
+            num_system=6, edges=graphs.cycle(6), layers=100_000, measurement_rate=1e-4,
+            reference="purification", checkpoints=checkpoints, gate_set=gate_set,
+            probes=[mipt.code_dimension(checkpoints=[0, 10, 100_000])],
+        )  # fmt: skip
+
+    def same(a: mipt.EnsembleResult, b: mipt.EnsembleResult) -> None:
+        assert mipt._protocol_difference(a.spec, b.spec) is None
+        for name in ("checkpoint_layers", "trajectories", "final_layer", "first_passage"):
+            x, y = getattr(a, name), getattr(b, name)
+            assert x.dtype == y.dtype and np.array_equal(x, y), name
+        assert np.array_equal(a.spec.gate_set, b.spec.gate_set)
+        assert np.array_equal(a.values["code_dimension"], b.values["code_dimension"])
+
+    for checkpoints, stored in (("every_layer", False), (1000, False), ("final", False),
+                                ([0, 5, 100_000], True)):  # fmt: skip
+        res = spec(checkpoints).run(3, seed=1)
+        path = tmp_path / f"{checkpoints}.npz"
+        res.save(path, compression="fast")
+        names = members(path)
+        assert "gate_set.npy" not in names and "gate_set" not in names
+        assert ("checkpoint_layers" in names) == stored
+        back = mipt.EnsembleResult.load(path)
+        same(back, res)
+        assert back.checkpoint_layers.flags.writeable  # as an array read from a file
+        if checkpoints == "every_layer":
+            assert path.stat().st_size < 50_000  # 100,001 layers are not in the file
+            # a file written before, with both arrays, loads to the same result
+            old = tmp_path / "old.npz"
+            with zipfile.ZipFile(path) as z, zipfile.ZipFile(old, "w") as w:
+                for info in z.infolist():
+                    w.writestr(info, z.read(info))
+                for name, value in (("gate_set", res.spec.gate_set),
+                                    ("checkpoint_layers", res.checkpoint_layers)):  # fmt: skip
+                    with w.open(f"{name}.npy", "w") as fh:
+                        np.lib.format.write_array(fh, np.asarray(value))
+            same(mipt.EnsembleResult.load(old), res)
+    # another gate set is stored and read back
+    res = spec("final", gate_set=[0, 17, 400]).run(2, seed=1)
+    res.save(tmp_path / "gates.npz")
+    assert "gate_set" in members(tmp_path / "gates.npz")
+    same(mipt.EnsembleResult.load(tmp_path / "gates.npz"), res)

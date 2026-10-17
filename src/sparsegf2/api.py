@@ -2177,13 +2177,16 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     rows = [
         _array_row("edges", (edges, 2), np.concatenate(mc.graphs).dtype),
         _array_row("graph_ptr", (len(mc.graphs) + 1,), np.int64),
-        _array_row("gate_set", gate_set.shape, gate_set.dtype),
         _array_row("system_order", order.shape, order.dtype),
         _array_row("trajectories", (trajectories,), np.int64),
-        _array_row("checkpoint_layers", (len(mc.checkpoint_layers),), np.int64),
         _array_row("final_layer", (trajectories,), np.int64),
         _array_row("num_measurements", (trajectories,), np.int64),
     ]
+    # save stores neither the default gate set nor the layers of a symbolic checkpoint rule
+    if not mipt._every_clifford(gate_set):
+        rows.append(_array_row("gate_set", gate_set.shape, gate_set.dtype))
+    if not isinstance(mc.checkpoints, (str, int)):
+        rows.append(_array_row("checkpoint_layers", (len(mc.checkpoint_layers),), np.int64))
     if mc.edge_weights is not None:
         rows.append(_array_row("edge_weights", (edges,), np.float64))
     snapshots = tableaux = False

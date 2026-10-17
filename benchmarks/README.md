@@ -16,6 +16,7 @@ them directly).
 | [`correlated_erasure_baseline.py`](correlated_erasure_baseline.py) | the geometry-correlated erasure baseline on nearest-neighbor brickwork ring codes (n = 32 to 256, p = 0.04 to 0.3; the contiguous lengths to n = 1024) against the literature: P_{C,J}(m) for J = 0, 0.5, 1, 2 and the exact J -> inf intervals, q+ and the code rate, the smallest failing interval, Gullans-Huse's ⟨l⟩ and Li-Fisher's \|A\|* with fitted exponents in n, distance bounds, Φ_J(ε) and ε_δ(J); Watts-Strogatz circuits (β = 0.1, 1) for contrast; physics, not timing | `results/correlated_erasure_baseline.json`, `results/correlated_erasure_baseline.md` |
 | [`sweep_throughput.py`](sweep_throughput.py) | trajectories per second, seconds per condition and disk bytes per trajectory of Watts–Strogatz sweeps through `sparsegf2.study.sweep.run` (n = 64 to 512, p = 0.05 and 0.2, T = 4n, `code_dimension` every layer, with and without tableau snapshots), all cores | `results/sweep_throughput.json`, `results/sweep_throughput.md` |
 | [`performance_x3d.py`](performance_x3d.py) | where the time of the sweep's workload goes (one thread: gates, measurements, `code_dimension`, snapshots), trajectories per second at 1 to 32 threads on every processor and one per physical core (n = 64 to 2048; the committed results also record placements on one CCD and pinned writers, which gave no gain and are not offered), the tableau padding on and off, the gate kernel's mask loads, Numba's chunk size, small batches, and `sweep.run` end to end with 2, 4 and 8 writers; with the CPU load of other processes before each measurement | `results/performance_x3d.json`, `results/performance_x3d.md` |
+| [`depth_scan.py`](depth_scan.py) | the owner's depth scan to T_max = 10^6 (n = 32 to 512, p = 0.02 to 0.5, beta = 0 and 0.1, all cores): layers per second by depth (measured to 10^6 where affordable, otherwise extrapolated and labeled), the effect of `stop_when_purified`, the cost and bytes per evaluation of every probe of the scan (d_cyc, D(0), D(J), snapshots), disk per trajectory on a 61-point grid, and trajectories per hour for three probe sets | `results/depth_scan.json`, `results/depth_scan.md` |
 | [`make_figures.py`](make_figures.py) | renders every figure, light and dark, into `docs/figures/`, and the exact numbers into `results/tables.md` (each input JSON is optional) | PNGs, `results/tables.md` |
 
 ```sh
@@ -29,13 +30,14 @@ python benchmarks/probe_cost.py        # about 6 minutes, one thread; idle machi
 python benchmarks/correlated_erasure_baseline.py  # about 20 minutes, all cores
 python benchmarks/sweep_throughput.py   # about 5 minutes, all cores; idle machine
 python benchmarks/performance_x3d.py    # about 6 minutes, all cores; idle machine
+python benchmarks/depth_scan.py         # about 18 minutes, all cores; idle machine
 python benchmarks/make_figures.py
 ```
 
 `thread_scaling.py --quick --out <dir>` is its smoke test (a few seconds once compiled), and so
 are `erasure_cost.py --quick --out <dir>`, `probe_cost.py --quick --out <dir>`,
-`correlated_erasure_baseline.py --quick --out <dir>`, `sweep_throughput.py --quick --out <dir>`
-and `performance_x3d.py --quick --out <dir>`.
+`correlated_erasure_baseline.py --quick --out <dir>`, `sweep_throughput.py --quick --out <dir>`,
+`performance_x3d.py --quick --out <dir>` and `depth_scan.py --quick --out <dir>`.
 
 `why_data.py --quick --out <file>` is a smoke test (tiny sizes, under a
 minute including compilation); pass that file to `make_figures.py --why <file>

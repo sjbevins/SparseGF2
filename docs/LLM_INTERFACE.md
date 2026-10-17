@@ -371,7 +371,9 @@ beyond the trajectory count stay idle. It always adds `layout`: `arrays` (`name`
 `dtype`, uncompressed `megabytes` of each array that `output_dir` will hold, as
 `EnsembleResult.save` writes them: `value::<probe>`, `snapshot::` and `snapshot_counts::`
 for a `code_snapshot`, the graph arrays and the run's own, among them, with a reference,
-`purification_layer` and `first_passage`), `files` (`result.npz`,
+`purification_layer` and `first_passage`; `gate_set` only when it is not all 11,520 Cliffords
+and `checkpoint_layers` only for an explicit list, since `load` rebuilds them otherwise),
+`files` (`result.npz`,
 `spec.json`, `provenance.json`) and a `note`. Disk use is lower, because the file is
 compressed, and a `snapshot::` array is an upper bound (each code fills only its first
 rows); `benchmark_ensemble` and `load_results` measure it. `run_ensemble`,

@@ -534,10 +534,8 @@ def test_a_result_without_the_probe_saves_as_before(tmp_path):
                 "__meta__",
                 "edges",
                 "graph_ptr",
-                "gate_set",
-                "system_order",
-                "trajectories",
-                "checkpoint_layers",
+                "system_order",  # no gate_set: the default, all 11,520, is not stored
+                "trajectories",  # no checkpoint_layers: "every_layer" is rebuilt by load
                 "final_layer",
                 "num_measurements",
                 "value::code_dimension",

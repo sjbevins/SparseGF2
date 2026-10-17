@@ -2243,6 +2243,11 @@ def _carried_plan(p: Probe, source: MonitoredCircuit) -> _CorrelatedPlan | None:
     return None
 
 
+def _every_clifford(gate_set: np.ndarray | None) -> bool:
+    """Whether ``gate_set`` is the default, every two-qubit Clifford index in order."""
+    return np.array_equal(gate_set, np.arange(num_cliffords(2)))
+
+
 def _json_default(obj):
     """``json.dumps`` fallback: numpy scalars and arrays become plain Python values."""
     if isinstance(obj, np.generic):
@@ -2682,13 +2687,21 @@ class EnsembleResult:
         arrays: dict[str, Any] = {
             "edges": np.concatenate(spec.graphs),
             "graph_ptr": np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64),
-            "gate_set": spec.gate_set,
             "system_order": spec.system_order,
             "trajectories": self.trajectories,
-            "checkpoint_layers": self.checkpoint_layers,
             "final_layer": self.final_layer,
             "num_measurements": self.num_measurements,
         }
+        # What load rebuilds exactly is not stored: the default gate set (all 11,520
+        # Cliffords, 31 kB compressed) and the layers of a symbolic checkpoint rule ("final",
+        # "every_layer" or a stride, in meta; every layer of T = 10^6 is 8 MB, 2.7 MB
+        # compressed, in every file).
+        if not _every_clifford(spec.gate_set):
+            arrays["gate_set"] = spec.gate_set
+        if meta["checkpoints"] is None or not np.array_equal(
+            self.checkpoint_layers, spec.checkpoint_layers
+        ):
+            arrays["checkpoint_layers"] = self.checkpoint_layers
         if spec.edge_weights is not None:
             w = spec.edge_weights
             arrays["edge_weights"] = np.concatenate(w) if isinstance(w, tuple) else w
@@ -2736,14 +2749,21 @@ class EnsembleResult:
                 cuts = z["graph_ptr"][1:-1]
                 edges = list(np.split(edges, cuts))
                 weights = None if weights is None else list(np.split(weights, cuts))
-            layers = z["checkpoint_layers"].astype(np.int64)
-            symbolic = meta.get("checkpoints")
+            # absent: the default gate set, and the layers of the symbolic rule (save)
+            layers = (
+                z["checkpoint_layers"].astype(np.int64) if "checkpoint_layers" in z.files else None
+            )
+            rule = meta.get("checkpoints")  # "final", "every_layer" or a stride; None: a list
+            if rule is None:
+                if layers is None:
+                    raise ValueError(f"{path}: neither checkpoint layers nor a checkpoint rule")
+                rule = layers
             spec = MonitoredCircuit(
                 edges=edges,
-                gate_set=z["gate_set"],
+                gate_set=z["gate_set"] if "gate_set" in z.files else None,
                 system_order=z["system_order"],
                 edge_weights=weights,
-                checkpoints=layers if symbolic is None else symbolic,
+                checkpoints=rule,
                 probes=probes,
                 **{
                     k: s[k]
@@ -2751,7 +2771,7 @@ class EnsembleResult:
                     if k in s and not (k == "gates_per_layer" and s["schedule"] != "random_edges")
                 },
             )
-            if not np.array_equal(spec.checkpoint_layers, layers):
+            if layers is not None and not np.array_equal(spec.checkpoint_layers, layers):
                 raise ValueError(f"{path}: the stored checkpoints do not match the stored layers")
             # The spec resolves a budget or mapping again; it must give the stored size and
             # name, under which the values are stored.
@@ -2768,7 +2788,7 @@ class EnsembleResult:
                 spec=spec,
                 seed_entropy=meta["seed_entropy"],
                 trajectories=z["trajectories"],
-                checkpoint_layers=z["checkpoint_layers"],
+                checkpoint_layers=spec.checkpoint_layers.copy() if layers is None else layers,
                 values={p.name: z[f"value::{p.name}"] for p in probes},
                 purification_layer=z["purification_layer"]
                 if "purification_layer" in z.files

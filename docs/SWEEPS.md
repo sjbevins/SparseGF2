@@ -435,7 +435,11 @@ folder, the run seed words and the target number of trajectories). A part file h
 spec with its graph collection, the seed (`seed_entropy` = the run seed words), `trajectories`
 (the stream indices `u`), `value::<probe>`, `snapshot::<probe>` and
 `snapshot_counts::<probe>`, `purification_layer`, `final_layer`, `num_measurements` and
-`first_passage` (section 7).
+`first_passage` (section 7). `EnsembleResult.save` leaves out what `load` rebuilds exactly: the
+gate set when it is all 11,520 Cliffords and the checkpoint layers when the rule is symbolic
+(`"every_layer"`, `"final"` or a stride, kept in the file's metadata), so a sweep's parts store
+neither (every layer of `T = 10^6` was 8 MB, 2.7 MB compressed, in every part; section 12,
+Depth scans). Files that hold them, written before, load as they did.
 
 `sweep.status(DIR)` counts the saved indices (it reads only the `trajectories` arrays).
 `sweep.load(DIR, n, beta, p)` concatenates a condition's parts (`EnsembleResult.concatenate`)
@@ -767,6 +771,55 @@ to 9.91 trajectories/s; whole rounds add 23% end to end with snapshots), n = 204
 From about n = 1800, `physical_cores=True` (`--physical-cores`) gives 9% more at n = 1792 and
 19 to 31% more at n = 2048. The V-Cache gives no measurable gain to this workload at any
 measured n.
+
+### Depth scans to 10^6
+
+`benchmarks/depth_scan.py` prices the owner's scan (results in
+`benchmarks/results/depth_scan.md`, 18 minutes on the 9950X3D, every thread, default settings):
+the sweep's protocol at fixed `(n, beta, p)`, `k` and its first passages at every layer, probes
+on the 61-point grid of `T_max = 10^6` (59 distinct layers). Seconds are thread-seconds per
+trajectory with every thread busy; trajectories per hour are the machine's (32 threads), with
+`stop_when_purified`. Measured: the engine to `10^6` at every `(n, beta, p)` for n <= 128 and at
+10 of 14 at n = 256; the others are extrapolated from `10^5` (n = 512 always). The per-layer rate
+does not fall with depth: from `10^5` to `10^6` it changed by -7% to +14% at n = 128 and 256, and
+at n = 512 the rates at `10^4` and `10^5` agree within 7%. The campaign adds
+to the engine (to `min(tau_0, 10^6)`, from the exact first passages) each probe's measured cost
+per evaluation times the expected checkpoints with `k > 0`. beta = 0.1:
+
+| n | p | s to 10^6, no stop | s with the stop | (a) k, first passages, d_cyc per hour | (b) + D(0) per hour | (c) + D(J) per hour |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 0.02 / 0.1 / 0.2 / 0.5 | 1.0 / 1.7 / 1.9 / 2.7 | 1.0 / 0.0051 / 1.1e-4 / 2.0e-5 | 110,000 / 1.8e7 / 1.7e8 / 4.5e8 | 110,000 / 8.4e6 / 2.8e7 / 6.5e7 | 17,000 / 37,000 / 77,000 / 180,000 |
+| 64 | 0.02 / 0.1 / 0.2 / 0.5 | 2.2 / 3.6 / 4.5 / 6.2 | 2.2 / 1.3 / 4.4e-4 / 5.6e-5 | 53,000 / 88,000 / 4.0e7 / 1.0e8 | 52,000 / 86,000 / 1.0e7 / 2.4e7 | 2,200 / 2,400 / 7,700 / 18,000 |
+| 128 | 0.02 / 0.1 / 0.2 / 0.5 | 5.6 / 9.9 / 12 / 16 | 5.6 / 9.9 / 0.0045 / 1.8e-4 | 21,000 / 12,000 / 7.5e6 / 2.7e7 | 20,000 / 12,000 / 2.9e6 / 8.5e6 | 220 / 220 / 570 / 1,500 |
+| 256 | 0.02 / 0.1 / 0.2 / 0.5 | 16 / 32 / 43 / 65 | 16 / 32 / 0.13 / 8.0e-4 | 7,300 / 3,600 / 590,000 / 6.4e6 | 7,200 / 3,600 / 410,000 / 2.7e6 | 22 / 22 / 40 / 140 |
+| 512 | 0.02 / 0.1 / 0.2 / 0.5 | 55 / 130 / 190 / 300 | <= 55 / <= 130 / <= 160 / 0.0041 | 2,100 / 870 / 710 / 1.3e6 | 2,100 / 870 / 710 / 650,000 | 2 / 2 / 2.1 / 12 (scaled) |
+
+* **The engine dominates (a) and (b) wherever codes live long.** Without the stop a trajectory
+  to `10^6` costs 1.0 to 2.7 s at n = 32 and 16 to 65 s at n = 256 (the rate falls with p: more
+  measurements per layer). With the stop, the pure phase costs milliseconds and the mixed phase
+  the whole horizon; rows of milliseconds are bounds the sweep's calls and saved parts do not
+  reach.
+* **Per evaluation** (p = 0.05, codes at layer 4n): d_cyc 0.036 / 0.14 / 0.47 / 1.9 / 9.0 ms at
+  n = 32 / 64 / 128 / 256 / 512; D(0) with 100 orderings 0.23 / 0.48 / 1.1 / 2.7 / 9.4 ms; D(J)
+  at J = 0.5 and 2, every size, 100 samples: the exact ring sampler (geometry `cycle`) 0.016 /
+  0.081 / 0.57 / 4.2 s and about 33 s at n = 512 (scaled from every 32nd size), the swap chain
+  on the Watts–Strogatz graph 0.097 / 0.86 / 8.7 / 90 s and about 980 s (16 minutes) at
+  n = 512 (scaled; the same scaling from every 16th size gave 88 against 90 s at n = 256). So
+  (c) at every checkpoint is dominated by D(J): restrict its sizes to the binomial window and
+  give it a few checkpoints of its own (AGENTS.md, Correlated erasures).
+* **The stop and load balance.** A call ends with its slowest thread. Where `tau_0` spreads over
+  the horizon (n = 32, p = 0.05), rounds run with the stop took 1.4 and 1.5 times the balanced
+  model the table uses.
+* **Disk per trajectory** (beta = 0.1, p = 0.05, every checkpoint evaluated, parts of 32
+  trajectories, `fast`): (a) 0.5 / 0.6 / 0.8 / 1.1 / 1.6 kB at n = 32 / 64 / 128 / 256 / 512
+  (first passages 0.1 to 0.25 kB of it), (b) 8.5 to 12.4 kB (D(0)'s 100 orderings per
+  checkpoint), (c) 12 to 48 kB, and (a) with the joint tableau at every checkpoint 39 kB,
+  133 kB, 452 kB, 1.7 MB and 5.8 MB.
+* **Storage of the checkpoint rule.** Before this measurement each part also held the sweep's
+  global checkpoint layers, `T + 1` int64: 2.68 MB per part at `T = 10^6` with `fast`, 84 kB per
+  trajectory in parts of 32, 98% of a part without snapshots and from 5% (n = 256) to 215%
+  (n = 32) of one with them; and the default gate set, 31 kB per part. `EnsembleResult.save` now
+  stores neither when `load` rebuilds it exactly (section 9).
 
 ## 13. Limits
 

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+* **Depth scans to 10^6, priced** (`benchmarks/depth_scan.py`, `results/depth_scan.{json,md}`,
+  SWEEPS.md section 12 "Depth scans to 10^6"): the owner's workload at n = 32 to 512, p = 0.02
+  to 0.5, beta = 0 and 0.1, on every thread: layers per second by depth (to 10^6 where
+  affordable, extrapolated and labeled otherwise), `stop_when_purified` from the exact first
+  passages, the cost and bytes per evaluation of d_cyc, D(0), D(J) and snapshots, disk per
+  trajectory on a 61-point grid, and trajectories per hour for k with d_cyc, + D(0) and
+  + D(J). `EnsembleResult.save` no longer stores what `load` rebuilds exactly: the gate set when
+  it is all 11,520 Cliffords (31 kB compressed per file) and the layers of a symbolic checkpoint
+  rule (`"every_layer"`, `"final"`, a stride; kept in the metadata), which in a sweep at
+  T = 10^6 was 2.7 MB in every part, 98% of a part without snapshots; `estimate_ensemble`'s
+  layout follows. Loaded results are bitwise the same, and files written before load as they
+  did.
 * **Exact first passages, online.** With a reference, the ensemble engine reads the code
   dimension k after every layer (a popcount, whatever the checkpoints) and records
   `EnsembleResult.first_passage`, int64 `(trajectories, n + 1)`: the first layer with
