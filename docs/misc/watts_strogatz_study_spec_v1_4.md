@@ -72,7 +72,7 @@ No loops or parallel edges are introduced, \(|E(G_g)|=|E_0(n)|\), and vertex deg
 
 **Tracking.** A graph record is indexed by \((n,\beta,g)\) and contains the graph-generation seed/key, rewiring-law version, ordered original-edge convention, canonical sorted edge list, and edge-list digest. The original graph and generated graph are both reproducible from this record and the algorithm versions.
 
-**Sampling.** For fixed \((n,\beta)\), graph trials \(G_0,\ldots,G_{G_*-1}\) are independent draws from \(\mu_{n,\beta}\) in the ideal ensemble. No graph is selected or rejected on the basis of its code properties. For any graph statistic \(H\), the target is \(\mathbb E_{G\sim\mu_{n,\beta}}[H(G)]\).
+**Sampling.** For fixed \((n,\beta)\), graph trials \(G_0,\ldots,G_{N_{\rm graphs}-1}\) are independent draws from \(\mu_{n,\beta}\) in the ideal ensemble. No graph is selected or rejected on the basis of its code properties. For any graph statistic \(H\), the target is \(\mathbb E_{G\sim\mu_{n,\beta}}[H(G)]\).
 
 ## 3. Level 2: Clifford gate sequences conditional on a graph
 
@@ -435,7 +435,7 @@ The *signed* stabilizer state and code projector generally **do** depend on the 
 
 ### 6.3 Sampling allocation and estimator
 
-Let \(G_*\ge1\) denote the number of graph trials. For graph \(g\), sample \(C_g\ge1\) gate-sequence trials. For each \((g,c,p)\), sample \(R_{g,c,p}\ge1\) measurement trajectories. Denote their observable values by \(F_{g,c,p,r}(t)\). Define
+Let \(N_{\rm graphs}\ge1\) denote the number of graph trials. For graph \(g\), sample \(C_g\ge1\) gate-sequence trials. For each \((g,c,p)\), sample \(R_{g,c,p}\ge1\) measurement trajectories. Denote their observable values by \(F_{g,c,p,r}(t)\). Define
 \[
  \widehat f_{g,c,p}(t)
  =\frac1{R_{g,c,p}}\sum_{r=0}^{R_{g,c,p}-1}F_{g,c,p,r}(t),
@@ -445,19 +445,19 @@ Let \(G_*\ge1\) denote the number of graph trials. For graph \(g\), sample \(C_g
  =\frac1{C_g}\sum_{c=0}^{C_g-1}\widehat f_{g,c,p}(t),
  \qquad
  \boxed{\widehat\mu_F(n,\beta,p,t)
- =\frac1{G_*}\sum_{g=0}^{G_*-1}\widehat f_{g,p}(t).}
+ =\frac1{N_{\rm graphs}}\sum_{g=0}^{N_{\rm graphs}-1}\widehat f_{g,p}(t).}
 \]
 With independent graph trials and a nonadaptive sampling allocation fixed independently of the sampled observable values, this estimator is unbiased for \(\mu_F\) under the stated ensemble distribution. In particular, **each graph receives equal total weight** even when its circuit or measurement-trajectory counts differ. Simply averaging all leaf trajectories instead weights graphs in proportion to the number of leaf observations assigned to them.
 
-If all \(C_g=C\) and all \(R_{g,c,p}=R\), the nested estimator reduces to the arithmetic mean over the \(G_*CR\) values, although those values remain correlated within graph clusters.
+If all \(C_g=C\) and all \(R_{g,c,p}=R\), the nested estimator reduces to the arithmetic mean over the \(N_{\rm graphs}CR\) values, although those values remain correlated within graph clusters.
 
 ### 6.4 Uncertainty and comparisons
 
-Independent graph trials are the outer statistical units. With \(G_*>1\), a graph-cluster standard error is
+Independent graph trials are the outer statistical units. With \(N_{\rm graphs}>1\), a graph-cluster standard error is
 \[
  \widehat{\operatorname{SE}}(\widehat\mu_F)
- =\sqrt{\frac1{G_*(G_*-1)}
- \sum_{g=0}^{G_*-1}\left(\widehat f_{g,p}(t)-\widehat\mu_F\right)^2}.
+ =\sqrt{\frac1{N_{\rm graphs}(N_{\rm graphs}-1)}
+ \sum_{g=0}^{N_{\rm graphs}-1}\left(\widehat f_{g,p}(t)-\widehat\mu_F\right)^2}.
 \]
 This captures variation of the entire graph-level estimator, including nested Monte Carlo noise. It is not estimated correctly by treating every circuit or checkpoint as an independent graph draw. For rate comparisons on shared graphs, form differences **within each graph** first and estimate uncertainty from the graph-level paired differences. If only one graph is sampled, the unconditional graph-ensemble uncertainty cannot be inferred from circuit repeats alone.
 
@@ -477,7 +477,7 @@ Use one immutable experiment manifest `experiment_id` with explicit `master_grap
 
 SparseGF2's graph-collection mode with `circuits_per_graph=C` maps its native global trajectory index to the pair `(g,c)` as
 \[
- u=gC+c,\qquad 0\le g<G_*,\quad 0\le c<C.
+ u=gC+c,\qquad 0\le g<N_{\rm graphs},\quad 0\le c<C.
 \]
 With the identical graph collection, circuit run seed, schedule, and global index `u`, changing the rate `p` reuses the gates and uniforms used for masks. Native `spec.run(trajectories=..., seed=..., first_trajectory=...)`, `result.replay`, and `spec.circuit(trajectory=u, seed=...)` define exact trajectory identities. The primary campaign uses **one measurement realization per `(g,c,p)`, so `r=0`**. Independent `r>0` measurement-mask replicates *on the same gates* are **not an existing native `mipt.MonitoredCircuit` operation** and must not be represented as such; adding them requires a separately versioned generator extension.
 
@@ -613,7 +613,7 @@ All parameters, allocations, seeds, checkpoint depths, exact software versions a
 | Initial state | \(n\) Bell pairs with \(n\) references; `reference="purification"`; no pre-scramble. | Exactly the full-reference protocol; not a single-reference or pure-state simulation. |
 | Measurements | After all gates, measure each system site in Z independently with rate \(p\); reference never measured. | Matches physical ensemble and engine. In phase-free mode outcome signs are marginalized analytically, not explicitly generated. |
 | Gate and mask coupling over \(p\) | Shared gate stream and sitewise threshold uniforms, with identical graph collection and native trajectory index. | Correct marginal laws; paired cross-rate comparisons and nested masks. |
-| Replication | Balanced graph count \(G_*\), circuits per graph \(C\), \(r=0\) in native engine. | Distinct graph trials provide outer independent units; native engine has no independent mask-only `r` option. |
+| Replication | Balanced graph count \(N_{\rm graphs}\), circuits per graph \(C\), \(r=0\) in native engine. | Distinct graph trials provide outer independent units; native engine has no independent mask-only `r` option. |
 | RNG | Native SparseGF2 `RANDOMNESS_CONTRACT=2`, pinned code revision, `xoshiro256**` PRNG and stored seed. | Avoids introducing a second incompatible stream design; deterministic replay from trajectory identity. |
 | Checkpoints | \(T_\max\ge1\), requested geometric count \(N_T\). Define \(a_j=\exp(j\ln T_\max/(N_T-1))\) for \(j=0,\ldots,N_T-1\) if \(N_T\ge2\), round to nearest integer with ties upward, clamp, deduplicate, sort and include \(0,1,T_\max\). For \(N_T=1\), include \(0,1,T_\max\). | Deterministic sparse schedule for expensive snapshots; a later change of schedule cannot alter circuit prefixes. |
 | First-passage observables | **Global** `checkpoints="every_layer"` and \(k_t\) at all layers, with lossless run-length/change-point compression after capture. | The native engine detects purification only at global checkpoints; exact \(\tau_\ell\) otherwise lost. |
