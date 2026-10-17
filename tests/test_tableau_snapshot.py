@@ -7,6 +7,7 @@ run on ``indices`` against the rows of a range run. Every comparison is exact.
 """
 
 import itertools
+import math
 
 import numba
 import numpy as np
@@ -80,6 +81,11 @@ CASES = [  # n, beta, measurement rate, layers: odd and even n, several rates an
     (9, 0.6, 0.2, 18),
     (12, 0.1, 0.15, 20),
     (16, 1.0, 0.1, 16),
+    # several 64-bit words per half row: N = 66, 80 and 140 (ceil(N / 64) = 2, 2, 3 while the
+    # system alone takes 1, 1, 2), the layout of every study run with n >= 33
+    (33, 0.2, 0.15, 6),
+    (40, 0.1, 0.1, 6),
+    (70, 0.3, 0.1, 4),
 ]
 
 
@@ -93,11 +99,13 @@ def test_every_snapshot_is_a_pure_state_whose_code_has_the_probed_dimension(n, b
         beta=beta,
         checkpoints="every_layer",
     )
-    res = spec.run(5, seed=n)
+    trajectories = 5 if n <= 16 else 3
+    res = spec.run(trajectories, seed=n)
     generators, counts = res.snapshots["tableau_snapshot"]
-    assert generators.shape == (5, layers + 1, 2 * n, 2 * ((2 * n + 63) // 64))
+    # every generator of the joint state over all N = 2n qubits: ceil(N / 64) words per half
+    assert generators.shape == (trajectories, layers + 1, 2 * n, 2 * ((2 * n + 63) // 64))
     seen = set()
-    for t in range(5):
+    for t in range(trajectories):
         for layer in range(layers + 1):
             assert counts[t, layer] == 2 * n
             written = unpack_raw(generators[t, layer], 2 * n)
@@ -126,9 +134,24 @@ def unpack_raw(raw: np.ndarray, num_qubits: int) -> np.ndarray:
     return out
 
 
-@pytest.mark.parametrize("reference", ["purification", "single", "none"])
-def test_the_physical_code_is_the_native_code_snapshot(reference):
-    n, layers, checkpoints = 10, 24, [0, 3, 8, 16, 24]
+@pytest.mark.parametrize(
+    ("n", "reference"),
+    [
+        (10, "purification"),
+        (10, "single"),
+        (10, "none"),
+        # several words per half row: the joint state on N = 66, 80, 140 or 65 qubits, its
+        # physical code on n, with fewer words per half (2 against 1 at n = 33, 40 and 64)
+        (33, "purification"),
+        (40, "purification"),
+        (70, "purification"),
+        (64, "single"),
+        (65, "single"),
+        (65, "none"),
+    ],
+)
+def test_the_physical_code_is_the_native_code_snapshot(n, reference):
+    layers, checkpoints = 24, [0, 3, 8, 16, 24]
     common = dict(beta=0.3, checkpoints="every_layer", reference=reference)
     first = [mipt.code_dimension()] if reference != "none" else []
     joint = ws_spec(
@@ -137,17 +160,26 @@ def test_the_physical_code_is_the_native_code_snapshot(reference):
     native = ws_spec(
         n, layers, 0.12, [*first, mipt.code_snapshot(checkpoints=checkpoints)], **common
     ).run(6, seed=3)
+    big = joint.spec.num_qubits
+    assert big == {"purification": 2 * n, "single": n + 1, "none": n}[reference]
+    generators = joint.snapshots["tableau_snapshot"][0]
+    assert generators.shape == (6, len(checkpoints), big, 2 * ((big + 63) // 64))
+    assert native.snapshots["code_snapshot"][0].shape[2:] == (n, 2 * ((n + 63) // 64))
     for name in joint.values.keys() - {"tableau_snapshot"}:
         np.testing.assert_array_equal(joint.values[name], native.values[name])
     np.testing.assert_array_equal(joint.final_layer, native.final_layer)
     for t in range(6):
-        for e in range(len(checkpoints)):
+        for e, layer in enumerate(checkpoints):
             ours, theirs = joint.code(t, e), native.code(t, e)
             assert ours.num_qubits == theirs.num_qubits == n
             np.testing.assert_array_equal(
                 canonical(ours.stabilizer_matrix()), canonical(theirs.stabilizer_matrix())
             )
             assert ours.num_logical == theirs.num_logical
+            if first:  # k_t = n - r_t = the code_dimension probe = S(R)
+                tab = joint.tableau(t, e)
+                k = int(joint.values["code_dimension"][t, layer])
+                assert ours.num_logical == k == tab.entropy(range(n, big))
 
 
 STIM_CASES = [  # n, beta, rate, layers, reference
@@ -159,6 +191,12 @@ STIM_CASES = [  # n, beta, rate, layers, reference
     (16, 1.0, 0.1, 8, "purification"),
     (11, 0.2, 0.1, 12, "single"),
     (8, 0.2, 0.2, 10, "none"),
+    # several words per half row (N = 66, 80, 140, 65, 70)
+    (33, 0.2, 0.15, 6, "purification"),
+    (40, 0.1, 0.1, 6, "purification"),
+    (70, 0.2, 0.1, 4, "purification"),
+    (64, 0.2, 0.1, 6, "single"),
+    (70, 0.2, 0.1, 6, "none"),
 ]
 
 
@@ -265,8 +303,10 @@ def test_the_kernel_writes_every_stabilizer_row_and_never_a_destabilizer(rng):
 
 
 def collection_spec(**changes):
-    """A collection of 4 graphs with 3 circuits each, and probes on every random stream: the
-    circuit, the sampled first-failure orderings and both correlated_erasure branches."""
+    """A collection of 4 graphs with 3 circuits each, and a probe of every kind that draws
+    from a stream of its own: the circuit stream, the sampled orderings of
+    erasure_lost_profile and erasure_first_failure, and both correlated_erasure branches
+    (the exact ring sampler and the chain)."""
     bank = [graphs.watts_strogatz(10, 4, 0.3, seed=(3, g)) for g in range(4)]
     settings = dict(
         num_system=10,
@@ -280,6 +320,7 @@ def collection_spec(**changes):
         probes=[
             mipt.code_dimension(),
             mipt.contiguous_distance(checkpoints=[6, 12]),
+            mipt.erasure_lost_profile(3, checkpoints=[5, 12]),
             mipt.erasure_first_failure(5, checkpoints=[4, 12]),
             mipt.correlated_erasure([0.0, 1.0], [2, 3], 4, "ring", geometry="cycle"),
             mipt.correlated_erasure([0.5], [3], 3, "chain", burn_in=5, checkpoints=[8]),
@@ -312,7 +353,9 @@ def test_a_run_on_indices_equals_those_rows_of_a_range_run():
     assert_rows_equal(part, whole, [5, 2, 9])
     # the streams keyed by the trajectory index are exercised: the samples vary
     assert np.unique(whole.values["erasure_first_failure"]).size > 3
+    assert np.unique(whole.values["erasure_lost_profile"]).size > 3
     assert np.unique(whole.values["ring"]).size > 1
+    assert np.unique(whole.values["chain"]).size > 1
     one = spec.run(seed=4, indices=np.array([11]))
     assert_rows_equal(one, whole, [11])
     empty = spec.run(seed=4, indices=[])
@@ -483,9 +526,13 @@ def test_one_snapshot_probe_per_spec():
 # -- the JSON service ----------------------------------------------------------------------------
 
 
-def test_the_json_probe_its_layout_summary_and_saved_file(tmp_path):
+@pytest.mark.parametrize(
+    ("n", "shape"),
+    [(6, [3, 2, 12, 2]), (40, [3, 2, 80, 4])],  # N = 80: two words per half row
+)
+def test_the_json_probe_its_layout_summary_and_saved_file(tmp_path, n, shape):
     spec = {
-        "num_system": 6,
+        "num_system": n,
         "graph": {"family": "watts_strogatz", "k": 4, "beta": 0.2, "seed": 1},
         "layers": 8,
         "measurement_rate": 0.2,
@@ -496,12 +543,12 @@ def test_the_json_probe_its_layout_summary_and_saved_file(tmp_path):
     }
     estimate = api.estimate_ensemble(spec, 3)
     rows = {row["name"]: row for row in estimate["layout"]["arrays"]}
-    assert rows["snapshot::tableau_snapshot"]["shape"] == [3, 2, 12, 2]
+    assert rows["snapshot::tableau_snapshot"]["shape"] == shape
     assert rows["snapshot_counts::tableau_snapshot"]["shape"] == [3, 2]
     assert "tableau_snapshot" in estimate["layout"]["note"]
-    assert estimate["result_megabytes"] * 1e6 >= 3 * 2 * 12 * 2 * 8
+    assert estimate["result_megabytes"] * 1e6 >= math.prod(shape) * 8
     out = api.run_ensemble(spec, 3, seed=1, output_dir=str(tmp_path / "run"))
-    assert out["probes"]["tableau_snapshot"]["mean"] == [12.0, 12.0]
+    assert out["probes"]["tableau_snapshot"]["mean"] == [2.0 * n, 2.0 * n]
     assert any("EnsembleResult.tableau" in note for note in out["notes"])
     with np.load(tmp_path / "run" / "result.npz") as z:
         for name, row in rows.items():
@@ -511,6 +558,13 @@ def test_the_json_probe_its_layout_summary_and_saved_file(tmp_path):
     for t, e in itertools.product(range(3), range(2)):
         assert saved.tableau(t, e) == direct.tableau(t, e)
     assert api._probe_us(api._build_spec(spec).probes[1], api._build_spec(spec)) > 0
+    # the saved run read back by load_results: the same probe summary and its storage rows
+    loaded = api.load_results(str(tmp_path / "run"))
+    assert loaded["probes"]["tableau_snapshot"] == out["probes"]["tableau_snapshot"]
+    assert loaded["probes"]["code_dimension"] == out["probes"]["code_dimension"]
+    stored = {row["name"]: row["megabytes"] for row in loaded["storage"]["arrays"]}
+    assert {"snapshot::tableau_snapshot", "snapshot_counts::tableau_snapshot"} <= set(stored)
+    assert 0 < stored["snapshot::tableau_snapshot"] * 1e6 <= math.prod(shape) * 8  # compressed
     with pytest.raises(ValueError, match="at most one snapshot probe"):
         api.run_ensemble(
             dict(spec, probes=[{"kind": "code_snapshot"}, {"kind": "tableau_snapshot"}]), 1, seed=1

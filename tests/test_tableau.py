@@ -23,6 +23,8 @@ from _rowspace_oracle import (
     log2_exact,
     pack,
     packed_position,
+    physical_rows,
+    rank,
     rref,
     rref_by_characterization,
     span,
@@ -325,6 +327,67 @@ def test_reference_information_of_joint_states(n, rng):
                 assert info == k + 2 * len(a) - n - r_of(a) + r_of(b)  # v1.4 §5.4
                 assert info + tab.mutual_information(b, reference) == 2 * k  # v1.4 §5.8
                 assert code.lost_information(a) == info
+
+
+@pytest.mark.parametrize(
+    ("n", "pairs"),
+    [
+        (33, None),  # N = 66: one word per system half, two per joint half
+        (40, None),  # N = 80
+        (70, None),  # N = 140: three words per joint half, two per system half
+        (64, [17]),  # one reference: N = 65, two joint words against one system word
+        (65, [0]),  # N = 66, two words for both
+    ],
+)
+def test_multiword_joint_states_against_integer_ranks(n, pairs, rng):
+    """The physical code, entropies and I(A:R) when a half row spans several 64-bit words
+    (every purification state with n >= 33), against the integer references: S_phys by the
+    reference-first reduction, ranks by another elimination. Without enumeration (2^N
+    elements), the identities are those of v1.4 §5.4 and §5.8 with ranks: S(X) = |X| - N +
+    rank(S|_Xbar) (Proposition 9 of docs/study/03), r(A) = r - rank(W_phys|_{V \\ A})."""
+    measured = list(rng.permutation(n)[: n // 3])
+    rows = stim_joint_state(n, rng, measured, pairs)
+    big = rows.shape[0]
+    tab = PhaseFreeTableau(rows)
+    assert tab.num_qubits == big and tab.is_pure()
+    np.testing.assert_array_equal(tab.words, pack(tab.canonical(), big))
+    ints = int_rows(rows)
+    system, reference = list(range(n)), list(range(n, big))
+
+    def s(region):  # Proposition 9 on the integer rows (any region of the N qubits)
+        rest = [q for q in range(big) if q not in set(region)]
+        mask = sum((1 << q) | (1 << (big + q)) for q in rest)
+        return len(region) - big + rank([g & mask for g in ints])
+
+    physical = physical_rows(ints, n, big)
+    r = len(physical)
+    ref_mask = sum((1 << q) | (1 << (big + q)) for q in reference)
+    assert r == big - rank([g & ref_mask for g in ints])  # dim U_V = N - rank(U|_R)
+    k = n - r
+    phys = tab.physical_tableau(n)
+    assert phys.num_qubits == n and phys.rank == r
+    np.testing.assert_array_equal(phys.canonical(), dense_rows(physical, 2 * n))
+    code = tab.physical_code(n)
+    assert code.num_stabilizers == r and code.num_logical == k
+    assert tab.entropy(reference) == k == s(reference)  # k = S(R)
+    assert 0 < k < len(reference) or len(reference) == 1, k  # an informative state
+
+    def r_of(region):  # dim of the physical elements supported in A: r - rank(W|_{V \ A})
+        outside = [q for q in system if q not in set(region)]
+        mask = sum((1 << q) | (1 << (n + q)) for q in outside)
+        return r - rank([w & mask for w in physical])
+
+    for size in [1, 2, n // 3, n // 2, n - 1, big // 2 + 3, big - 1]:  # both sides of N / 2
+        region = sorted(int(q) for q in rng.choice(big, size=size, replace=False))
+        assert tab.entropy(region) == s(region), region
+    for _ in range(20):
+        a = sorted(int(q) for q in rng.choice(n, size=int(rng.integers(n + 1)), replace=False))
+        b = [q for q in system if q not in set(a)]
+        info = tab.mutual_information(a, reference)
+        assert info == s(a) + s(reference) - s([*a, *reference])
+        assert info == k + 2 * len(a) - n - r_of(a) + r_of(b)  # v1.4 §5.4
+        assert info + tab.mutual_information(b, reference) == 2 * k  # v1.4 §5.8
+        assert code.lost_information(a) == info
 
 
 def test_physical_code_without_a_reference_is_every_row(rng):

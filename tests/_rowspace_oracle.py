@@ -51,6 +51,47 @@ def canonical(dense) -> np.ndarray:
     return dense_rows(rref(int_rows(dense), range(width)), width)
 
 
+def rank(rows: list[int]) -> int:
+    """GF(2) rank of int rows: each row is reduced by the kept rows keyed by their highest
+    bit, and kept if something is left (a different elimination order from ``rref``)."""
+    kept: dict[int, int] = {}
+    for v in rows:
+        while v:
+            top = v.bit_length() - 1
+            if top not in kept:
+                kept[top] = v
+                break
+            v ^= kept[top]
+    return len(kept)
+
+
+def restrict(g: int, qubits, n: int) -> int:
+    """The Pauli g on n qubits (x_q bit q, z_q bit n + q) restricted to ``qubits`` (in the
+    given order) as a Pauli on len(qubits) qubits."""
+    qubits = list(qubits)
+    m = len(qubits)
+    out = 0
+    for i, q in enumerate(qubits):
+        out |= ((g >> q) & 1) << i
+        out |= ((g >> (n + q)) & 1) << (m + i)
+    return out
+
+
+def physical_rows(rows: list[int], n: int, num_qubits: int) -> list[int]:
+    """The canonical rows of S_phys of a joint state (system 0..n-1, reference n..N-1).
+
+    Gauss-Jordan with the reference columns first (``rref`` with that order): the rows whose
+    lead is a system column are zero on the reference (they are the elements of the space with
+    no reference part); restricted to the system and brought to the canonical order.
+    """
+    big = num_qubits
+    reference = [q for q in range(n, big)] + [big + q for q in range(n, big)]
+    order = reference + list(range(n)) + [big + q for q in range(n)]
+    ref_mask = sum(1 << c for c in reference)
+    system_part = [r for r in rref(rows, order) if r & ref_mask == 0]
+    return rref([restrict(r, range(n), big) for r in system_part], range(2 * n))
+
+
 def span(rows: list[int]) -> set[int]:
     """Every element of the row space (2**rank of them)."""
     out = {0}
@@ -158,14 +199,16 @@ def stim_state(num_qubits: int, rng) -> np.ndarray:
     return np.array([bits(p) for p in sim.canonical_stabilizers()])
 
 
-def stim_joint_state(n: int, rng, measured) -> np.ndarray:
-    """n Bell pairs (system q with reference n + q), a random circuit on the system with Z
-    measurements of ``measured`` in the middle: the unsigned stabilizers over 2n qubits."""
+def stim_joint_state(n: int, rng, measured, pairs=None) -> np.ndarray:
+    """Bell pairs of the system qubits ``pairs`` (default all n; the i-th with reference
+    n + i), a random circuit on the system with Z measurements of ``measured`` in the middle:
+    the unsigned stabilizers over n + len(pairs) qubits."""
+    pairs = list(range(n)) if pairs is None else list(pairs)
     sim = stim.TableauSimulator(seed=int(rng.integers(2**31)))
-    sim.set_num_qubits(2 * n)
-    for q in range(n):
+    sim.set_num_qubits(n + len(pairs))
+    for i, q in enumerate(pairs):
         sim.h(q)
-        sim.cx(q, n + q)
+        sim.cx(q, n + i)
     scramble(sim, range(n), rng, 3 * n + 2)
     for q in measured:
         sim.measure(int(q))
