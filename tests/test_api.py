@@ -452,7 +452,7 @@ def test_estimate_ensemble():
     huge = api.estimate_ensemble(
         {"num_system": 1024, "graph": {"family": "cycle"}, "layers": 8192,
          "measurement_rate": 0.1, "reference": "single"},
-        1_000_000,
+        100_000,  # 0.8 GB of result: 1025 first passages per trajectory
     )  # fmt: skip
     assert not huge["fits_sync_limit"]
     assert huge["estimated_seconds"] > small["estimated_seconds"]
@@ -716,7 +716,8 @@ def test_erasure_probe_summaries_give_failure_by_size():
 def test_ensemble_result_memory_is_bounded():
     spec = dict(SMALL_SPEC, probes=[{"kind": "erasure_first_failure", "samples": 100000}])
     est = api.estimate_ensemble(spec, 10)
-    assert est["result_megabytes"] == pytest.approx(10 * 8 * (31 * 100000 + 4) / 1e6, rel=1e-4)
+    # 31 evaluations of 100000 samples, 4 numbers and n + 1 = 11 first passages per trajectory
+    assert est["result_megabytes"] == pytest.approx(10 * 8 * (31 * 100000 + 4 + 11) / 1e6)
     with pytest.raises(ValueError, match="GB of memory"):
         api.run_ensemble(spec, 5000, seed=1)
 
@@ -1023,7 +1024,8 @@ def test_estimate_includes_graph_generation_and_times_are_wall_clock():
     assert wall * 0.8 <= out["elapsed_seconds"] <= wall
     assert out["elapsed_seconds"] <= large["estimated_seconds"] * 1.1 + 0.5
     with pytest.raises(ValueError, match="start_ensemble_job"):
-        api.run_ensemble(dict(bank, circuits_per_graph=50_000), 10**8, seed=1, max_seconds=1.0)
+        # 5 * 10**7 trajectories: 6.8 GB of result (2 values, 4 numbers, 11 first passages each)
+        api.run_ensemble(dict(bank, circuits_per_graph=50_000), 5 * 10**7, seed=1, max_seconds=1.0)
 
 
 def test_phase_free_stabilizers_carry_no_signs():

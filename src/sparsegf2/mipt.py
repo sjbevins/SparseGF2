@@ -59,6 +59,10 @@ follow):
    ``stop_when_purified`` ends the trajectory there, and later evaluations
    record each probe's exact value for a pure reference (k = 0, nothing lost,
    first failure n + 1), or NaN for entanglement probes, which keep changing.
+5. **First passages.** With a reference, the code dimension k is also read
+   after every layer, whatever the checkpoints, and
+   ``result.first_passage[t, ell]`` records the exact first layer with
+   ``k <= ell`` (``ell = 0 .. n``; -1 if not reached by ``final_layer``).
 
 A "layer" is exactly one step 3, never rescaled. Everything runs phase-free:
 entanglement does not depend on measurement outcomes.
@@ -1667,6 +1671,8 @@ class MonitoredCircuit:
         tau = np.zeros(trajectories, dtype=np.int64)
         final = np.zeros(trajectories, dtype=np.int64)
         meas = np.zeros(trajectories, dtype=np.int64)
+        thresholds = n + 1 if self.reference != "none" else 0  # tau_ell for ell = 0 .. n
+        passages = np.full((trajectories, thresholds), -1, dtype=np.int64)
         if trajectories:
             with threads(num_threads):
                 _ens.run_ensemble(
@@ -1682,7 +1688,8 @@ class MonitoredCircuit:
                     key_probe, a["phash"], a["ce_param"], a["ce_int"], a["ce_float"],
                     a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
                     bool(a["ce_need_graph"]), index, out, snap, snap_rows, tau, final, meas,
-                    _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
+                    passages, _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2,
+                    IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
         values, snapshots = {}, {}
@@ -1707,6 +1714,7 @@ class MonitoredCircuit:
             elapsed_seconds=elapsed,
             snapshots=snapshots,
             randomness_contract=RANDOMNESS_CONTRACT,
+            first_passage=passages if self.reference != "none" else None,
         )
 
     def correlated_bytes_per_thread(self) -> int:
@@ -2252,6 +2260,17 @@ class EnsembleResult:
         First checkpoint layer at which the reference was pure, or -1 if it
         never was (right-censored at the last checkpoint). ``None`` without a
         reference.
+    first_passage
+        int64 ``(trajectories, n + 1)``: ``first_passage[t, ell]`` is the exact
+        first-passage depth ``tau_ell = min{L : k_L <= ell}`` of row ``t``, the
+        first layer (0 = after setup and scramble) after which the code
+        dimension ``k = S(R)`` was at most ``ell``, read after every layer
+        whatever the checkpoints; -1 where ``k`` stayed above ``ell`` through
+        :attr:`final_layer`, the censoring depth (:meth:`first_passage_times`).
+        ``tau_n = 0``, and ``tau_ell = 0`` for every ``ell >= k_0``.
+        ``first_passage[:, 0]`` is the exact purification time; it equals
+        :attr:`purification_layer` when every layer is a checkpoint. ``None``
+        without a reference, and for files saved before it was recorded.
     final_layer
         Last layer simulated for each trajectory.
     num_measurements
@@ -2284,6 +2303,7 @@ class EnsembleResult:
     version: str | None = __version__
     snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     randomness_contract: int = RANDOMNESS_CONTRACT
+    first_passage: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -2562,6 +2582,24 @@ class EnsembleResult:
         observed = tau >= 0
         return np.where(observed, tau, self.censoring_layer), observed
 
+    def first_passage_times(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(time, observed)``, each ``(trajectories, n + 1)``, from :attr:`first_passage`.
+
+        ``time[t, ell]`` is ``tau_ell`` where it was reached (``observed``) and otherwise
+        the censoring depth :attr:`final_layer` of row ``t``, the last layer through which
+        ``k`` was read; ``analysis.kaplan_meier(time[:, ell], observed[:, ell])`` is the
+        survival curve of ``tau_ell``. Raises ``ValueError`` without first passages (no
+        reference, or a file saved before they were recorded).
+        """
+        if self.first_passage is None:
+            raise ValueError(
+                "this result has no first passages: they need a reference (purification or "
+                "single), and files saved before they were recorded have none (replay a "
+                "trajectory, result.replay(u), to get its first passages)"
+            )
+        observed = self.first_passage >= 0
+        return np.where(observed, self.first_passage, self.final_layer[:, None]), observed
+
     def __repr__(self) -> str:
         return (
             f"EnsembleResult(trajectories={self.num_trajectories}, checkpoints={len(self.checkpoint_layers)}, "
@@ -2637,6 +2675,8 @@ class EnsembleResult:
             arrays[f"snapshot_counts::{name}"] = counts
         if self.purification_layer is not None:
             arrays["purification_layer"] = self.purification_layer
+        if self.first_passage is not None:
+            arrays["first_passage"] = self.first_passage
         text = json.dumps(meta, default=_json_default)
         if compression == "default":
             np.savez_compressed(path, __meta__=np.array(text), **arrays)
@@ -2721,6 +2761,7 @@ class EnsembleResult:
                     for p in probes
                     if f"snapshot::{p.name}" in z.files
                 },
+                first_passage=z["first_passage"] if "first_passage" in z.files else None,
             )
 
     @staticmethod
@@ -2777,7 +2818,7 @@ class EnsembleResult:
 
         def cat(get):
             parts = [get(r) for r in results]
-            return None if parts[0] is None else np.concatenate(parts)
+            return None if any(p is None for p in parts) else np.concatenate(parts)
 
         return EnsembleResult(
             spec=first.spec,
@@ -2800,4 +2841,6 @@ class EnsembleResult:
                 )
                 for name in first.snapshots
             },
+            # None as soon as one chunk lacks them (saved before they were recorded)
+            first_passage=cat(lambda r: r.first_passage),
         )

@@ -9,9 +9,9 @@ The science is specified in [`misc/watts_strogatz_study_spec_v1_4.md`](misc/watt
 that does it, as `file:function` under `src/sparsegf2/`.
 
 Contents: 1 a sweep in one minute · 2 the phase-free state · 3 the laws as generated ·
-4 seeds and stream indices · 5 what is shared across rates · 6 checkpoints · 7 probes ·
-8 snapshots and new observables · 9 files · 10 resume, grow, replay · 11 expectation values ·
-12 performance options · 13 limits · 14 signed runs for decoding.
+4 seeds and stream indices · 5 what is shared across rates · 6 checkpoints · 7 probes and
+first passages · 8 snapshots and new observables · 9 files · 10 resume, grow, replay ·
+11 expectation values · 12 performance options · 13 limits · 14 signed runs for decoding.
 
 ## 1. A sweep in one minute
 
@@ -39,8 +39,10 @@ spec = {
 out = sweep.run(spec, "demo")          # also: sparsegf2 sweep run spec.json demo
 assert out["complete"] and out["saved"] == 2 * 2 * 2 * 4 * 2 == 64
 res = sweep.load("demo", 8, "0.2", "0.3")    # an EnsembleResult, rows sorted by u
-assert res.values["code_dimension"].shape == (8, 17)   # k at layers 0..16
+assert res.layers("code_dimension").tolist() == [0, 1, 2, 4, 8, 16]   # the checkpoints
+assert res.values["code_dimension"].shape == (8, 6)    # k at those layers
 assert res.layers("tableau_snapshot").tolist() == [0, 1, 2, 4, 8, 16]
+assert res.first_passage.shape == (8, 9)   # tau_ell for ell = 0..8, read at every layer
 ```
 
 `SweepSpec.from_json` (`study/sweep.py:SweepSpec.from_json`) reads the spec strictly: unknown
@@ -50,8 +52,9 @@ outside `[0, 2^32)` and per-n tables that miss a size are refused with a message
 (`SweepSpec.monitored_circuit`), so the engine's own validation of the protocol and of every
 probe (`mipt.py:MonitoredCircuit.__post_init__`, `api.py:_build_probe`) runs before anything
 is written. Optional keys and their defaults: `stride` 1024, `checkpoints` `{"count": 12}`,
-`probes` `[{"kind": "code_dimension", "checkpoints": "every_layer"}, {"kind":
-"tableau_snapshot"}]`, `picture` `"purification"` (or `"single"`: one reference qubit
+`probes` `[{"kind": "code_dimension"}, {"kind": "tableau_snapshot"}]` (both on the sparse
+checkpoints; with a reference every result also holds the first passages of `k`, read at every
+layer: section 7), `picture` `"purification"` (or `"single"`: one reference qubit
 Bell-paired with a system qubit drawn per trajectory; or `"none"`: the system alone, from
 `|0...0>`, and then name the probes, since `code_dimension` needs a reference),
 `stop_when_purified` `false`. `SweepSpec.to_json` is the canonical form (defaults written out,
@@ -151,8 +154,11 @@ of dimension `r_t`, and `k_t = n - r_t` (`physical_code(n).num_logical`) equals 
 **Checked against Stim.** `tests/test_sweep.py::test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits`
 runs every saved trajectory of two sweeps (purification and single pictures, `n = 7, 8`,
 `beta = 0, 0.3`, two rates) in Stim from its exported circuit (section 14) and finds the same
-canonical joint state, signs dropped, at every saved checkpoint and the same `k` at every
-layer.
+canonical joint state, signs dropped, and the same `k` at every saved checkpoint, and the same
+first passages (section 7) as Stim's `k` read after every layer.
+`tests/test_sweep.py::test_stim_agrees_at_depth_ten_thousand_and_replays_match` does the same
+10^4 layers deep (`n = 6` to `9`, both pictures, rates 0.002 to 0.3, crossings thousands of
+layers deep and censored thresholds) and replays every saved trajectory from its seed.
 
 ## 3. The laws as generated
 
@@ -276,7 +282,9 @@ the data shows (section 11 compares the two errors).
 
 The engine's global checkpoints are `"every_layer"` (`engine_spec`), so purification is tested
 after every layer (a popcount, section 2) and `purification_layer` is the exact first layer
-with `k = 0` (`-1`: not by `T`). The **sparse schedule** `S(n)` comes from `checkpoints`:
+with `k = 0` (`-1`: not by `T`); it equals `first_passage[:, 0]` (section 7), which the engine
+records at every layer whatever the checkpoints. The **sparse schedule** `S(n)` comes from
+`checkpoints`:
 
 * `{"count": N}`: v1.4 §9, `a_j = T^(j/(N-1))` for `j = 0..N-1`, each rounded to the nearest
   integer with ties upward, plus `0, 1, T`, sorted and deduplicated
@@ -290,23 +298,89 @@ its own `"checkpoints"` is evaluated on `S(n)`; one with `"checkpoints"` (any en
 `"every_layer"`, a stride, a list) keeps it. Checkpoints draw nothing: they never change a
 trajectory.
 
-## 7. Probes
+## 7. Probes and first passages
 
 The probes are the engine's (`mipt.py`, the probe functions; AGENTS.md "Probes"), given as their
 JSON form and built by `api.py:_build_probe`. The defaults:
 
-* `code_dimension` at every layer: `k_t = S(R)`, the number of logical qubits the system still
+* `code_dimension` on `S(n)`: `k_t = S(R)`, the number of logical qubits the system still
   encodes (the reference's entropy), `values["code_dimension"]` of shape
-  `(trajectories, T + 1)` for layers `0..T`; `k_0 = n` and `k_t` never increases.
+  `(trajectories, |S(n)|)`; `k_0 = n` (1 in the single picture) and `k_t` never increases.
+  Between checkpoints `k` is known exactly from the first passages below.
 * `tableau_snapshot` on `S(n)`: the joint state itself, all `N` generators over all `N`
   qubits (system `0..n-1`, then reference `n + i` paired with system `i`), as words
   (section 8); its value is `N`. With `stop_when_purified`, evaluations after the stop save
   nothing (row count `-1`).
 
-Each result also holds `purification_layer`, `final_layer` (the last layer simulated) and
-`num_measurements` per trajectory. `stop_when_purified = true` ends a trajectory at its
-purification layer: code probes then hold their exact values for a pure reference
-(`k = 0`), entanglement probes `NaN`, and snapshots nothing (`mipt.py:EnsembleResult`).
+Each result also holds `purification_layer`, `final_layer` (the last layer simulated),
+`num_measurements` and, with a reference, `first_passage` per trajectory.
+`stop_when_purified = true` ends a trajectory at its purification layer: code probes then hold
+their exact values for a pure reference (`k = 0`), entanglement probes `NaN`, and snapshots
+nothing (`mipt.py:EnsembleResult`).
+
+**Changed default.** Sweeps made before first passages were recorded had `code_dimension` at
+every layer by default (`(trajectories, T + 1)`, 8 MB per trajectory at `T = 10^6`); the first
+passages carry the same information in `n + 1` numbers. A sweep written before keeps working:
+its `sweep.json` names its probes, and `status`, `load`, `replay`, `verify` and growth with its
+stored spec (`sweep.json`'s `"spec"`) read it as before (its parts have no `first_passage`, and
+`load` of a condition gives `None` when any part lacks it; replay a trajectory to get its
+first passages). A spec that names no probes now means the new defaults, so growing such a
+sweep with it is refused naming `probes`: give the stored spec, or its probes explicitly.
+
+### First passages
+
+**Definition** (v1.4 §5.2). For `ell = 0..n`, `tau_ell = min{t >= 0 : k_t <= ell}`: the first
+completed layer (layer 0 is the state after setup) after which at most `ell` logical qubits
+remain. `tau_0` is the purification time, `tau_n = 0`, and `tau_ell = 0` exactly for
+`ell >= k_0`. `tau_ell` is nonincreasing in `ell`.
+
+**Recording** (`_kernel/ensemble.py:run_ensemble`, module docstring "First passages"). After
+every layer, whatever the checkpoints, the engine reads `k = popcount(ref_rows) - n_ref`
+(section 2: `ceil(N/64)` popcounts, nothing beside a layer's gates). `k` only falls (a gate on
+the system leaves `S(R)` unchanged, a measurement never raises it), so when it falls from `a` to
+`b` at layer `t` the engine sets `tau_ell = t` for `ell = b .. a-1`. This reads the state and
+draws nothing: every random stream and every other output is bitwise what it was
+(`tests/test_first_passage.py::test_every_existing_output_is_unchanged` pins digests made by
+the code before). It is always on with a reference; there is no probe to request.
+
+**Output.** `EnsembleResult.first_passage`, int64 `(trajectories, n + 1)` (saved as the array
+`first_passage` of each part, loaded, concatenated, replayed; `sweep.load` keeps the rows of
+`sweep.rows`). Entry `-1` means `k_t > ell` through `final_layer`: the event was not observed
+(v1.4 `event_observed = false`) and `final_layer` is the censoring depth (`censor_depth`, `T`
+unless the trajectory stopped, and a stopped trajectory has reached every threshold). `-1` is a
+marker, never a time: `time, observed = res.first_passage_times()` puts each censored entry at
+its censoring depth, for `analysis.kaplan_meier(time[:, ell], observed[:, ell])` or the
+restricted mean of `docs/EXPECTATION_VALUES.md` section 5.
+
+**The whole trace.** `k_t > ell` exactly when `tau_ell > t` (or `tau_ell` is censored), for
+every `t <= final_layer`, so `k_t = #{ell < n : tau_ell > t or tau_ell = -1}`: the first
+passages are the lossless change-point form of the per-layer `k` trace (v1.4 §5.2, §5.3), 8
+bytes per threshold instead of 8 per layer.
+
+**Stopping.** `stop_when_purified` stops at the first purification test with `k = 0`. In a
+sweep every layer is a test, so the stop is at `tau_0` itself and `final_layer = tau_0`. In a
+`MonitoredCircuit` with sparse checkpoints the stop stays at the next checkpoint, as it was, so
+that every stored value, `final_layer` and `num_measurements` keep their meaning; the first
+passages are exact in both.
+
+**Checked.** `tests/test_first_passage.py` compares them with the minimum over a dense
+every-layer `code_dimension` trace of the same trajectories: `n = 6` to `9`, `beta = 0` to
+`0.3`, both pictures, 33 rates from 0 to 1, with and without stopping, `T = 10^4`, and
+`T = 10^5` for `n = 6`, censored entries exactly where the trace never reaches the threshold;
+`tests/test_sweep.py` compares them with Stim's `k` read after every layer, also `10^4` layers
+deep (section 2).
+
+```python
+fp = res.first_passage                             # (8, 9): tau_0 .. tau_8, -1 censored
+assert np.array_equal(fp[:, 0], res.purification_layer)   # every layer is a test here
+t = np.arange(res.final_layer.max() + 1)           # every layer 0..T
+above = (fp[:, :-1, None] < 0) | (fp[:, :-1, None] > t)   # k_t > ell, for ell < n
+k_every_layer = above.sum(axis=1)                  # (8, T + 1): the whole k trace
+at = res.layers("code_dimension")
+assert np.array_equal(k_every_layer[:, at], res.values["code_dimension"])
+time, observed = res.first_passage_times()         # censored entries at final_layer
+assert np.all(time[observed] == fp[observed]) and np.all(time[:, -1] == 0)
+```
 
 ## 8. Snapshots, and new observables from them
 
@@ -327,7 +401,7 @@ system, reference = range(n), range(n, 2 * n)
 e = int(np.flatnonzero(layers == 4)[0])            # the evaluation at layer 4
 for row, tab in enumerate(res.tableaux(e)):        # None where a stopped row saved nothing
     k = tab.entropy(reference)                     # S(R): the code dimension
-    assert k == res.values["code_dimension"][row, 4] == tab.physical_code(n).num_logical
+    assert k == res.values["code_dimension"][row, e] == tab.physical_code(n).num_logical
     half = tab.entropy(range(n // 2))              # half-cut entropy of the joint state
     lost = tab.mutual_information(range(2), reference)   # I(A:R) of erasing qubits 0, 1
     assert 0 <= lost <= 2 * k and tab.is_pure()
@@ -360,7 +434,8 @@ the doubles of `beta` and `p` in hex (`Token.hex`, v1.4 §7.2), the
 folder, the run seed words and the target number of trajectories). A part file holds the
 spec with its graph collection, the seed (`seed_entropy` = the run seed words), `trajectories`
 (the stream indices `u`), `value::<probe>`, `snapshot::<probe>` and
-`snapshot_counts::<probe>`, `purification_layer`, `final_layer`, `num_measurements`.
+`snapshot_counts::<probe>`, `purification_layer`, `final_layer`, `num_measurements` and
+`first_passage` (section 7).
 
 `sweep.status(DIR)` counts the saved indices (it reads only the `trajectories` arrays).
 `sweep.load(DIR, n, beta, p)` concatenates a condition's parts (`EnsembleResult.concatenate`)
@@ -432,19 +507,19 @@ either way. `res.graph_index` (or `rows(...)["g"]`) gives each row's graph.
 
 ```python
 res = sweep.load("demo", 8, "0.2", "0.3")
-k = res.values["code_dimension"]                       # (rows, T + 1)
+k = res.values["code_dimension"]                       # (rows, checkpoints)
 graph = res.graph_index
 labels = np.unique(graph)
-m = np.array([k[graph == x].mean(axis=0) for x in labels])   # graph means, (G, T + 1)
+m = np.array([k[graph == x].mean(axis=0) for x in labels])   # graph means, (G, checkpoints)
 mean, se = m.mean(axis=0), m.std(axis=0, ddof=1) / np.sqrt(len(labels))
 
-# purification time: -1 marks a censored trajectory (not purified by T); never average it
-tau = res.purification_layer
-assert np.all((tau == -1) | (tau >= 1))
-t = np.arange(k.shape[1])
-alive = (tau[:, None] < 0) | (tau[:, None] > t[None, :])     # tau > t, exact at every layer
+# first passages: -1 marks a censored entry (not reached by T); never average it
+fp, ell = res.first_passage, 1                         # tau_1: at most one logical qubit left
+t = np.arange(res.final_layer.max() + 1)               # every layer, not only the checkpoints
+alive = (fp[:, ell, None] < 0) | (fp[:, ell, None] > t[None, :])   # tau_ell > t
 survival = np.array([alive[graph == x].mean(axis=0) for x in labels]).mean(axis=0)
-assert np.allclose(survival, (k > 0).mean(axis=0))
+assert np.allclose(survival[res.layers("code_dimension")], (k > ell).mean(axis=0))
+restricted = np.where(fp[:, ell] < 0, res.final_layer, fp[:, ell])   # min(tau_ell, T)
 
 # a paired difference across rates: same rows (u), same graphs
 low = sweep.load("demo", 8, "0.2", "0.1")
@@ -454,11 +529,15 @@ dm = np.array([d[graph == x].mean(axis=0) for x in labels])
 paired_se = dm.std(axis=0, ddof=1) / np.sqrt(len(labels))
 ```
 
-`survival[t]` estimates `P(tau > t)`, which here equals the fraction with `k_t > 0` because
-`k` never increases. Censoring: `tau = -1` means "not purified by `T`", a lower bound, never a
-time; use the survival curve, the censored fraction or a Kaplan–Meier estimate
-(`analysis.kaplan_meier(*res.purification_times())`); raise `T` (a new directory) when too
-many are censored. `NaN` appears only after a `stop_when_purified` stop (entanglement probes,
+`survival[t]` estimates `P(tau_ell > t)` at every layer, which equals the fraction with
+`k_t > ell` because `k` never increases (at the checkpoints the assertion checks it). Censoring:
+`tau_ell = -1` means "not reached by `T`", a lower bound, never a time; use the survival curve,
+the censored fraction, the restricted mean `E min(tau_ell, T)` (the graph-weighted mean of
+`restricted`) or a Kaplan–Meier estimate
+(`analysis.kaplan_meier(time[:, ell], observed[:, ell])` with
+`time, observed = res.first_passage_times()`); raise `T` (a new directory) when too many are
+censored. `docs/EXPECTATION_VALUES.md` section 5 gives the estimators and why the plain mean of
+`tau_ell` is not identified under censoring. `NaN` appears only after a `stop_when_purified` stop (entanglement probes,
 undefined there) and in `contiguous_distance` without a code: average over the rows that hold
 a value and say so, or record without stopping. `paired_se` against
 `sqrt(se_low^2 + se_high^2)` measures what the coupling of section 5 gained.

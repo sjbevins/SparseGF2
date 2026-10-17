@@ -8,6 +8,8 @@ chunk sizes, interruptions, thread counts and growth of the sweep.
 from __future__ import annotations
 
 import copy
+import dataclasses
+import functools
 import itertools
 import json
 import zipfile
@@ -16,12 +18,14 @@ from decimal import Decimal, localcontext
 import numba
 import numpy as np
 import pytest
+import stim
 
 import _ws_reference as wsref
 import sparsegf2
-from _rowspace_oracle import canonical, int_rows, stim_tick_states
+from _rowspace_oracle import bits, canonical, int_rows, stim_tick_states
 from _rowspace_oracle import rank as oracle_rank
 from sparsegf2 import PhaseFreeTableau, api, cli, graphs, mipt
+from sparsegf2.clifford import Clifford
 from sparsegf2.study import identity as ident
 from sparsegf2.study import sweep
 from sparsegf2.study.identity import Token
@@ -403,6 +407,30 @@ def test_gates_are_shared_and_masks_nested_across_rates(reference):
         # the saved trajectories agree: as many or more measurements at the higher rate
         a, b = results[(n, str(beta), "0.1")], results[(n, str(beta), "0.3")]
         assert np.all(a.num_measurements <= b.num_measurements)
+    # a dense grid of 33 rates from 0 to 1 at fixed (n, beta, g, c), 500 layers deep: the same
+    # gates at every rate, and the masks nested for every pair of rates, layer by layer
+    grid = [f"{j}/32" for j in range(33)]  # increasing
+    n, beta = 8, Token.parse("0.2")
+    collection = sweep._collection(directory, spec, n, beta)
+    seed = list(spec.run_seed(n, beta))
+    for u in (1, 4):  # (g, c) = (0, 1) and (1, 0)
+        exports = [
+            wsref.parse_circuit(
+                str(
+                    dataclasses.replace(
+                        spec.monitored_circuit(n, beta, p, collection), layers=500
+                    ).circuit(u, seed=seed)
+                )
+            )
+            for p in grid
+        ]
+        assert all([x.gates for x in e] == [x.gates for x in exports[0]] for e in exports)
+        for low, high in itertools.combinations(exports, 2):
+            assert all(set(a.measured) <= set(b.measured) for a, b in zip(low, high, strict=True))
+        assert not any(x.measured for x in exports[0])
+        assert all(x.measured == list(range(n)) for x in exports[-1])
+        counts = [sum(len(x.measured) for x in e) for e in exports]
+        assert len(set(counts)) > 25  # the grid is not degenerate
 
 
 def test_graph_files_reproduce_from_their_seeds(reference):
@@ -493,12 +521,18 @@ def test_load_results_reads_a_sweep_and_its_conditions(reference, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def stim_first_passages(k: list[int], n: int) -> list[int]:
+    """``tau_ell = min{t : k[t] <= ell}`` for ``ell = 0 .. n`` (-1 if never), by definition."""
+    return [next((t for t, v in enumerate(k) if v <= ell), -1) for ell in range(n + 1)]
+
+
 @pytest.mark.parametrize("picture", ["purification", "single"])
 def test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits(picture, tmp_path):
     """Every saved trajectory of a sweep (odd and even n, beta 0 and 0.3, two rates), its
-    circuit exported and run in Stim: the canonical joint state (signs dropped) at every saved
-    checkpoint, and k = S(R) = rank of the reference columns - |R| at every layer, from Stim's
-    state by the independent elimination of tests/_rowspace_oracle.py."""
+    circuit exported and run in Stim: the canonical joint state (signs dropped) and k at every
+    saved checkpoint, and the first passages of k = S(R) = rank of the reference columns - |R|
+    read at every layer, from Stim's state by the independent elimination of
+    tests/_rowspace_oracle.py."""
     spec = spec_with(
         sizes=[7, 8], betas=["0", "0.3"], graphs=2, circuits_per_graph=1, picture=picture
     )
@@ -514,18 +548,108 @@ def test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits(pi
         reference = list(range(n, num_qubits))
         columns = reference + [num_qubits + q for q in reference]
         saved_layers = res.layers("tableau_snapshot").tolist()
+        assert res.layers("code_dimension").tolist() == saved_layers  # the sparse default
         for row, u in enumerate(res.trajectories.tolist()):
             circuit = mc.circuit(u, seed=list(sweep_spec.run_seed(n, beta))).to_stim()
             states = stim_tick_states(circuit, num_qubits, seed=u)
             assert len(states) == sweep_spec.layers[n] + 1
+            k = [oracle_rank(int_rows(state[:, columns])) - len(reference) for state in states]
             for e, layer in enumerate(saved_layers):
                 tab = res.tableau(row, e)
                 np.testing.assert_array_equal(tab.canonical(), canonical(states[layer]))
                 assert tab.digest() == PhaseFreeTableau(states[layer]).digest()
-            k = [oracle_rank(int_rows(state[:, columns])) - len(reference) for state in states]
-            assert res.values["code_dimension"][row].tolist() == k
+                assert res.values["code_dimension"][row, e] == k[layer]
+            assert res.first_passage[row].tolist() == stim_first_passages(k, n)
             checked += 1
     assert checked == 8 * 2
+
+
+@functools.cache
+def stim_clifford(index: int):
+    """Two-qubit Clifford ``index`` as a ``stim.Tableau`` (what ``Circuit.to_stim`` expands)."""
+    return Clifford.from_index(2, index).to_stim()
+
+
+def stim_long_run(circuit, num_qubits: int, n: int, keep: set[int], seed: int):
+    """Run an exported sweep circuit in Stim's TableauSimulator, gate by gate. Returns the
+    canonical unsigned stabilizers after each layer in ``keep`` and the first passages of
+    ``k = S(R)`` (rank of the reference columns - |R|, by tests/_rowspace_oracle.py), with ``k``
+    read after layer 0 and after every layer that measures until it is 0 (a layer without
+    measurements acts unitarily on the system, which leaves S(R) unchanged)."""
+    sim = stim.TableauSimulator(seed=seed)
+    sim.set_num_qubits(num_qubits)
+    reference = range(n, num_qubits)
+    columns = [*reference, *(num_qubits + q for q in reference)]
+    states: dict[int, np.ndarray] = {}
+    first = [-1] * (n + 1)
+    layer, measured, k = 0, True, -1
+    for ins in circuit:
+        if ins.name == "TICK":
+            if layer in keep or (measured and k != 0):
+                state = np.array([bits(p) for p in sim.canonical_stabilizers()])
+                k = oracle_rank(int_rows(state[:, columns])) - len(reference)
+                first = [layer if f < 0 and ell >= k else f for ell, f in enumerate(first)]
+                if layer in keep:
+                    states[layer] = state
+            layer, measured = layer + 1, False
+        elif ins.name == "CLIFFORD_2Q":
+            for j, index in enumerate(ins.args):
+                pair = [ins.targets[2 * j].value, ins.targets[2 * j + 1].value]
+                sim.do_tableau(stim_clifford(int(index)), pair)
+        elif ins.name == "M":
+            for t in ins.targets:
+                sim.measure(t.value)
+            measured = True
+        else:  # the Bell pairs of the setup: H, CX
+            sim.do(stim.Circuit(str(ins)))
+    return states, first
+
+
+STIM_DEPTH = 10_000
+
+
+@pytest.mark.parametrize(
+    ("picture", "sizes", "betas", "rates"),
+    [
+        ("purification", [6, 9], ["0", "0.3"], ["0.002", "0.3"]),
+        ("single", [7, 8], ["0.3"], ["0.002", "0.02", "0.3"]),
+    ],
+)
+def test_stim_agrees_at_depth_ten_thousand_and_replays_match(
+    picture, sizes, betas, rates, tmp_path
+):
+    """Sweeps 10^4 layers deep (n = 6 to 9, low and high rates): every saved trajectory's
+    exported circuit run in Stim gives the canonical joint digest and k at each of the 14
+    geometric checkpoints and the exact first passages; replaying each trajectory from its seed
+    (sweep.verify) reproduces every stored value, snapshot word and first passage."""
+    spec = spec_with(
+        sizes=sizes, betas=betas, rates=rates, graphs=1, circuits_per_graph=1, picture=picture,
+        layers={str(n): STIM_DEPTH for n in sizes}, checkpoints={"count": 13},
+    )  # fmt: skip
+    directory = tmp_path / picture
+    sweep.run(spec, directory)
+    sweep_spec = SweepSpec.from_json(spec)
+    deep = 0
+    for n, beta, p in sweep_spec.conditions():
+        res = sweep.load(directory, n, beta, p)
+        _, collection, _ = graphs.load(sweep._graph_file(directory, n, beta))
+        mc = sweep_spec.monitored_circuit(n, beta, p, collection)
+        layers = res.layers("tableau_snapshot").tolist()
+        assert layers == list(geometric_checkpoints(STIM_DEPTH, 13)) and len(layers) == 14
+        assert res.layers("code_dimension").tolist() == layers
+        for row, u in enumerate(res.trajectories.tolist()):
+            circuit = mc.circuit(u, seed=list(sweep_spec.run_seed(n, beta)))
+            states, first = stim_long_run(circuit, mc.num_qubits, n, set(layers), seed=u)
+            reference = list(range(n, mc.num_qubits))
+            columns = reference + [mc.num_qubits + q for q in reference]
+            for e, layer in enumerate(layers):
+                assert res.tableau(row, e).digest() == PhaseFreeTableau(states[layer]).digest()
+                k = oracle_rank(int_rows(states[layer][:, columns])) - len(reference)
+                assert res.values["code_dimension"][row, e] == k
+            assert res.first_passage[row].tolist() == first
+            deep += max(first) > 1000
+            assert sweep.verify(directory, n, beta, p, u)["identical"]
+    assert deep > 0  # some crossing happened deep in a run
 
 
 @pytest.mark.parametrize(("compression", "writers"), [("none", 1), ("default", 3)])
@@ -657,8 +781,11 @@ def test_a_sweep_that_stops_at_purification_grows_and_replays(tmp_path):
             assert sweep.verify(directory, 6, "0.2", p, u)["identical"]
             for e, layer in enumerate(layers.tolist()):
                 assert (digests[e] is None) == (0 <= tau < layer)  # nothing saved after the stop
+            # every layer is a purification test: the stop is at the exact first passage tau_0
+            assert tau == result.first_passage[row, 0] and result.final_layer[row] in (tau, 12)
             if 0 <= tau < layers[-1]:
                 stopped += 1
                 k = result.values["code_dimension"][row]
-                assert k[tau] == 0 and np.all(k[tau:] == 0)  # exact values after the stop
+                assert np.all(k[layers >= tau] == 0)  # exact values after the stop
+                assert np.all(k[layers < tau] > 0)
     assert stopped > 0  # the test saw trajectories stop before their last checkpoint

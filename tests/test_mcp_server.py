@@ -156,7 +156,7 @@ def test_run_ensemble_matches_api_and_guard():
     assert out["probes"] == expected["probes"]
 
     big = dict(SPEC, num_system=1024, layers=8192, checkpoints="final")
-    text = error_text(call("run_ensemble", {"spec": big, "trajectories": 1_000_000}))
+    text = error_text(call("run_ensemble", {"spec": big, "trajectories": 100_000}))
     assert "start_ensemble_job" in text
     text = error_text(call("run_ensemble", {"spec": dict(SPEC, layrs=3), "trajectories": 2}))
     assert "unknown key" in text and "layers" in text

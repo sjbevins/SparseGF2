@@ -46,6 +46,14 @@ dimension S(R) is then a popcount, and the lost information I(R:E) of an
 erasure costs two column ranks over E only (see the ``*_rows`` routines in
 :mod:`~sparsegf2._kernel.entropy`).
 
+First passages: the engine reads ``k = S(R)`` after every completed layer
+(and at layer 0, after setup and scramble), whatever the checkpoints, and
+records ``tau_ell = min{t : k_t <= ell}`` for ``ell = 0 .. n`` in
+``out_first`` (-1 where ``k`` stayed above ``ell`` through the last
+completed layer, ``out_final``). Only measurements change ``k``, and never
+upward, so a drop from ``a`` to ``b`` sets ``tau_ell = t`` for
+``ell = b .. a - 1``. This draws nothing and changes no other output.
+
 Probes
 ------
 Every probe writes ``plen[j]`` numbers each time it is evaluated, into its own
@@ -476,7 +484,7 @@ def run_ensemble(
     pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
     order, periodic, key_struct, key_probe, phash, ce_param, ce_int, ce_float, geo_indptr,
     geo_indices, geo_order, geo_kind, ce_need_graph, indices, out, snap, snap_rows, out_tau,
-    out_final, out_meas, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
+    out_final, out_meas, out_first, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
 ):  # fmt: skip
     """Simulate trajectory ``indices[t]`` into row ``t`` of the outputs, for every row ``t``.
 
@@ -500,6 +508,10 @@ def run_ensemble(
     evaluations, n, 2 wq) for a tableau snapshot (``n = n_sys + n_ref`` qubits,
     ``wq = ceil(n / 64)``); evaluations a trajectory never reaches are marked
     -1 in ``snap_rows``.
+
+    ``out_first`` (int64, ``(trajectories, n_sys + 1)`` filled with -1, or
+    ``(trajectories, 0)`` without a reference) receives the first passages
+    (module docstring).
     """
     num_traj = out.shape[0]
     num_gck = gck.shape[0]
@@ -586,6 +598,7 @@ def run_ensemble(
         num_meas = 0
         final = 0
         stopped = False
+        k_prev = n_sys + 1  # above every threshold: layer 0 sets tau_ell = 0 for ell >= k_0
         for layer in range(layers + 1):
             if layer > 0:
                 # the matching schedule's color cycle continues from the scramble layers
@@ -599,10 +612,14 @@ def run_ensemble(
                     measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
                 num_meas += nm
                 final = layer
+            s_ref = -n_ref  # k = S(R) after this layer (0 without a reference)
+            for w in range(ws):
+                s_ref += np.int64(popcount(ref_rows[w]))
+            if ref_mode != REF_NONE and s_ref < k_prev:  # k fell: these thresholds are crossed
+                for ell in range(s_ref, k_prev):
+                    out_first[t, ell] = layer
+                k_prev = s_ref
             if ci < num_gck and gck[ci] == layer:
-                s_ref = -n_ref
-                for w in range(ws):
-                    s_ref += np.int64(popcount(ref_rows[w]))
                 for j in range(num_probes):
                     c = next_eval[j]
                     if c < pck_ptr[j + 1] - pck_ptr[j] and pck[pck_ptr[j] + c] == layer:

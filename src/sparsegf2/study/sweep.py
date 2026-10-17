@@ -53,9 +53,12 @@ __all__ = [
 FORMAT = "sparsegf2.sweep/1"
 INDEX_FILE = "sweep.json"
 GRAPH_DIR = "graphs"
-#: The probes of a spec that names none: k at every layer, the joint tableau at the checkpoints.
+#: The probes of a spec that names none: k and the joint tableau at the sparse checkpoints.
+#: With a reference every result also holds the exact first passages ``tau_ell`` of k, read
+#: after every layer (``EnsembleResult.first_passage``). Sweeps written before this default
+#: changed recorded ``code_dimension`` at every layer; their ``sweep.json`` names it.
 DEFAULT_PROBES = (
-    {"kind": "code_dimension", "checkpoints": "every_layer"},
+    {"kind": "code_dimension"},
     {"kind": "tableau_snapshot"},
 )
 DEFAULT_STRIDE = 1024
@@ -887,6 +890,7 @@ def _take(result: mipt.EnsembleResult, rows_: np.ndarray) -> mipt.EnsembleResult
         final_layer=result.final_layer[rows_],
         num_measurements=result.num_measurements[rows_],
         snapshots={k: (g[rows_], c[rows_]) for k, (g, c) in result.snapshots.items()},
+        first_passage=None if result.first_passage is None else result.first_passage[rows_],
     )
 
 
@@ -933,8 +937,9 @@ def replay(
 
 def verify(directory: str | Path, n: int, beta: Any, p: Any, u: int) -> dict[str, Any]:
     """Rerun trajectory ``u`` (:func:`replay`) and compare it with its saved row: every probe
-    value, snapshot word, purification and final layer and measurement count. Returns
-    ``identical`` and the digests of the saved row's tableaux (``None`` after a stop)."""
+    value, snapshot word, purification and final layer, first passage (where saved) and
+    measurement count. Returns ``identical`` and the digests of the saved row's tableaux
+    (``None`` after a stop)."""
     replayed = replay(directory, n, beta, p, u)
     folder, read = _reader(directory, n, beta, p)
     for path in _part_paths(folder):
@@ -954,6 +959,9 @@ def verify(directory: str | Path, n: int, beta: Any, p: Any, u: int) -> dict[str
     arrays += [(part.num_measurements[row], replayed.num_measurements[0])]
     if part.purification_layer is not None and replayed.purification_layer is not None:
         arrays += [(part.purification_layer[row], replayed.purification_layer[0])]
+    # a part saved before first passages were recorded has none
+    if part.first_passage is not None and replayed.first_passage is not None:
+        arrays += [(part.first_passage[row], replayed.first_passage[0])]
     for k, (words, counts) in part.snapshots.items():
         arrays += [
             (words[row], replayed.snapshots[k][0][0]),
