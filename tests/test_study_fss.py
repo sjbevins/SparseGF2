@@ -313,9 +313,10 @@ def test_the_fit_recovers_the_parameters_of_exact_data():
 
 def test_the_fit_recovers_the_parameters_within_its_bootstrap_errors():
     # 20 graphs, a 5% graph effect shared by the rates of a size and 3% rate noise. A Monte
-    # Carlo over 40 such datasets (outside the suite) gave fit standard deviations 0.016,
-    # 0.043, 0.11 for (p_c, z, nu), no visible bias, and bootstrap errors 0.88-0.93 of them.
-    # Each parameter within 4 bootstrap errors (3.5 true ones): false alarm about 1e-3 overall.
+    # Carlo over 40 such datasets (07-finite-size-scaling.md §10, not run here) gave fit standard
+    # deviations 0.016, 0.043, 0.11 for (p_c, z, nu), no visible bias, and bootstrap errors
+    # 0.85-0.91 of them. Each parameter within 4 bootstrap errors (at least 3.4 true ones):
+    # false alarm about 2e-3 overall (more if these 40-replicate errors come out low).
     data = _hierarchical(seed=101)
     boot = fss.bootstrap_fit(data, bounds=BOX, replicates=40, seed=2, starts=4)
     assert boot.fit.status == "ok" and boot.failed == 0
