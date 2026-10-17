@@ -53,9 +53,13 @@ is [07-finite-size-scaling.md](07-finite-size-scaling.md).
 
 ## 2. Notation
 
-Each symbol has the one meaning given here throughout the document. The indices $i$, $j$, $k$
-number positions and the terms of sums, and the $d$ of a differential ($dt$, $d/d\varepsilon$)
-is not the trace $d(t)$.
+Each symbol has the one meaning given here throughout the document. A letter with a subscript
+that the table lists in a form of its own ($G_g$, $k_t$, $t_{q,\nu}$, $T_i$, $T_{\max}$,
+$\sigma_a$, for example) is a symbol of its own; any other subscript is an index ($i$, $j$, $k$
+number positions and the terms of sums, $g$, $c$, $r$ are the labels) and picks one of a family
+($w_i$ is trajectory $i$'s weight, $Y_{gj}$ cluster $g$'s $Y_j$). The $d$ of a differential
+($dt$, $d/d\varepsilon$) is not the trace $d(t)$, and in "Student's $t$" the letter is the name of
+the law, not a depth.
 
 | symbol | meaning | type | in the code |
 |---|---|---|---|
@@ -67,8 +71,8 @@ is not the trace $d(t)$.
 | $\mathcal G$ | a random graph drawn from $\mathrm{WS}(n, \beta)$ | random graph | |
 | $G_g$, $\mathbf G$ | the $g$-th graph (random, drawn from $\mathrm{WS}(n, \beta)$); all of them | random graphs | (the graph records) |
 | $\Gamma_{gc}$, $\phi$ | gate sequence $c$ of graph $g$ (random); $\phi(G_g, \Gamma_{gc})$, a trajectory's mean given both (Proposition 1) | random sequence; real | |
-| $C_g$ | gate sequences on graph $g$ | integer | `NestedMean.circuits_per_graph` |
-| $R_{gc}$ | replicas of gate sequence $(g, c)$ | integer | `NestedMean.replicas_per_circuit` |
+| $C_g$; $C$ | gate sequences on graph $g$; their common number in a balanced allocation (§3.3) | integers | `NestedMean.circuits_per_graph` |
+| $R_{gc}$; $R$ | replicas of gate sequence $(g, c)$; their common number in a balanced allocation (§3.3) | integers | `NestedMean.replicas_per_circuit` |
 | $N$, $N_g$ | rows (trajectories) in all, and of graph $g$: $N_g = \sum_c R_{gc}$ | integers | `NestedMean.num_trajectories`, `.trajectories_per_graph` |
 | $N(\mathcal G)$ | rows allocated to a graph, as a function of the graph, so $N_g = N(G_g)$ (Proposition 2) | integer | |
 | $K$ | values per row: the checkpoints of a trace, 1 for a scalar | integer | trailing size of `values` |
@@ -101,7 +105,7 @@ is not the trace $d(t)$.
 | $S(t)$; $\hat S(t)$, $\hat S_g(t)$ | the survival function $\Pr(\tau > t)$; its Kaplan–Meier estimate; graph $g$'s nested fraction with $\tau > t$ (Proposition 7) | in $[0, 1]$ | `SurvivalCurve.survival` ($\hat S$) |
 | $u$, $\hat S_{\mathrm{float}}$ | the unit roundoff $2^{-53}$; the curve as a float64 product (§6.4) | reals | (inside `_snap_half`) |
 | $U_g(t)$, $\varepsilon$ | influence of cluster $g$ on $\hat S(t)$; the scaling of its weights by $1 + \varepsilon$ | reals | `stats.py::_km_influence_chunks` |
-| $\mathrm{RM}(h)$, $h$, $\lambda_j$ | restricted mean $\int_0^h \hat S(t)\,dt$ to the horizon $h$; the length of the step at $t_j$ inside $[0, h]$ | reals | `SurvivalCurve.restricted_mean`, `.restricted_horizon` |
+| $\mathrm{RM}(h)$, $h$, $\lambda_j$ | restricted mean $\int_0^h \hat S(t)\,dt$; its upper limit $h \ge 0$, a depth (any depth in Proposition 8; not the censoring horizon $T_{\max}$ unless chosen so); the length of the step at $t_j$ inside $[0, h]$ | reals | `SurvivalCurve.restricted_mean`, `.restricted_horizon` ($h$) |
 | $d(t)$, $\mathcal T_+$, $d^\ast$, $\mathcal A$, $T^\ast$ | a robustness trace, the positive checkpoints, its maximum and maximizing set, the peak depth (v1.4 §5.8) | | `traces`, `checkpoints`, `peak_times`, `at_horizon` |
 | $\hat\eta$ | the nested mean of $\ln T^\ast$ (§8) | real | `PeakTimeSummary.log_mean` |
 | $x_i$ | positive values in Proposition 11 (the $T^\ast$) | reals | |
@@ -133,8 +137,8 @@ that order, so the result is bitwise the same for any order or chunking of the i
 
 ### 3.2 Unbiasedness
 
-**Proposition 1 (v1.4 §6.3; proof derived here).** Let $G_1, \dots, G_G$ be identically
-distributed graphs, let each graph's trajectories be independent of the other graphs and of
+**Proposition 1 (v1.4 §6.3; proof derived here).** Let the $G$ graphs $G_g$ be identically
+distributed, let each graph's trajectories be independent of the other graphs and of
 their trajectories (each trajectory has its own stream), and let the allocation
 $(C_g, R_{gc})$ be *nonadaptive*: fixed in advance, or a function of the graphs only, never of
 observed values. Then $\mathbb{E}\hat\mu = \mu$.
@@ -321,7 +325,7 @@ False (the decision at $1/2$ is then the float one, §6.4). v1.4 §6.3 asks for 
 whatever the allocation, so the nested curve takes every allocation.
 
 **Proposition 5 (one horizon; derived here).** Suppose every censored trajectory has
-$T_i = h$ and every observed depth is $\le h$. Then for every $t \in [0, h]$,
+$T_i = T_{\max}$ and every observed depth is $\le T_{\max}$. Then for every $t \in [0, T_{\max}]$,
 
 $$
 \hat S(t) = \frac{\sum_i w_i\,\mathbf 1[\tau_i > t]}{\sum_i w_i},
@@ -331,11 +335,11 @@ and with graph-equal weights this is the nested mean (§3.1) of $\mathbf 1[\tau 
 Proposition 1 it is unbiased for $S(t)$.
 
 *Proof.* Every trajectory has $T_i \ge t_1$, so $Y_1 = W = \sum_i w_i$. Censoring happens only at
-$h \ge t_J$, so between consecutive event depths only events leave the risk set:
+$T_{\max} \ge t_J$, so between consecutive event depths only events leave the risk set:
 $Y_{j+1} = Y_j - D_j$ for $j < J$. The product telescopes,
 $\hat S(t_j) = \prod_{k \le j} Y_{k+1}/Y_k = (Y_j - D_j)/W$ (with $Y_{J+1} := Y_J - D_J$), and
 $Y_j - D_j$ is the weight of the trajectories with $T_i > t_j$ or censored at $t_j$, which are
-exactly those with $\tau_i > t_j$ (a censored trajectory has $\tau_i > h \ge t_j$). Between event
+exactly those with $\tau_i > t_j$ (a censored trajectory has $\tau_i > T_{\max} \ge t_j$). Between event
 depths both sides are constant, and before $t_1$ both equal 1. The nested mean is
 $\sum_i F_i w_i/W$ with these weights (§3.1). ∎
 
@@ -438,8 +442,8 @@ $\sum_j \lambda_j U_g(t_j)$ ($\lambda_j$ the length of the step at $t_j$ inside 
 horizon is the §6.4 error of the nested mean of $\min(\tau, T_{\max})$ (same telescoping as
 Proposition 7).
 
-A horizon above the largest follow-up depth is refused, because $\hat S$ is unknown there, unless
-the curve has reached 0 (then $\hat S = 0$ beyond, and the extra area is 0).
+An upper limit $h$ above the largest follow-up depth is refused, because $\hat S$ is unknown
+there, unless the curve has reached 0 (then $\hat S = 0$ beyond, and the extra area is 0).
 
 **The mean.** `SurvivalCurve.mean` is the weighted mean of the depths, given only when no
 trajectory is censored (it then equals $\mathrm{RM}$ at the largest depth); otherwise it is None.
@@ -657,7 +661,8 @@ assert float(stats.nested_mean(g[perm], c[perm], r[perm], values[perm]).mean) ==
 Half the graphs (at random) have mean 1 and get four gate sequences, the others mean 0 and one
 (an allocation that depends on the graph, not on observed values). Over 2000 ensembles of 40
 graphs the nested estimate averages to $\mu = 1/2$ and the pooled mean to about
-$\mathbb{E}[nm]/\mathbb{E}[n] = 0.8$ (Proposition 2):
+$\mathbb{E}[N(\mathcal G)m(\mathcal G)]/\mathbb{E}[N(\mathcal G)] = (\frac12 \cdot 4 \cdot 1)/(\frac12 \cdot 4 + \frac12 \cdot 1) = 0.8$
+(Proposition 2, with $N(\mathcal G)$ the gate sequences of a graph, one row each):
 
 ```python
 rng = np.random.default_rng(3)

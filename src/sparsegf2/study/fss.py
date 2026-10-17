@@ -1520,8 +1520,8 @@ class SharedFit:
     Houdayer-Hartmann: ``cost`` is the pooled quality (the mean ``chi2`` over all observables'
     bracketed points), ``costs`` and ``points_used`` per observable at the shared parameters.
     Polynomial: ``cost = chi2 / dof`` over all observables (one master curve each, on the point
-    sets ``selected`` that their own fits chose), ``costs`` each observable's ``chi2_o / (N_o -
-    degree - 1)`` at the shared parameters.
+    sets ``selected`` that their own fits chose), ``costs`` each observable's ``chi2_o / (|S_o|
+    - degree - 1)`` at the shared parameters, ``|S_o|`` the size of its set (study/07 §14).
     """
 
     p_c: float
