@@ -146,6 +146,17 @@ def test_chi_square_tail_matches_closed_forms():
     assert wsref.chi2_sf(0.0, 7) == 1.0
 
 
+@pytest.mark.parametrize("dof", [719, 4000, 11519])
+def test_chi_square_tail_at_the_degrees_of_freedom_of_the_large_tests(dof):
+    # no closed form here: compare with the Wilson-Hilferty approximation, which is accurate to
+    # about 1e-3 relative around the 1e-3 tail and to about 1% around 5e-6, the levels that matter
+    for k in (-2.0, 0.0, 1.0, 2.0, 3.0, 4.75):
+        x = dof + k * math.sqrt(2 * dof)
+        z = ((x / dof) ** (1 / 3) - (1 - 2 / (9 * dof))) / math.sqrt(2 / (9 * dof))
+        approx = 0.5 * math.erfc(z / math.sqrt(2))
+        assert wsref.chi2_sf(x, dof) == pytest.approx(approx, rel=0.02)
+
+
 def test_chi_square_helper_pools_small_cells_and_detects_bias():
     # the three small cells (expected 3 in all) join the smaller of the two others: [13, 12] vs [14, 11]
     stat, dof, p = wsref.chi2_p([10, 12, 1, 1, 1], [11, 11, 1, 1, 1], min_expected=5)
