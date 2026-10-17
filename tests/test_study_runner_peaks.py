@@ -2,7 +2,7 @@
 Propositions 18(d) and 20; docs/study/05-store-and-reproducibility.md).
 
 * ``peak_D`` records ``se_exact`` True (``D(0)`` from the orderings has its true standard
-  errors), on the peak and on every ``sensitivity_z`` entry, and seeds its bootstrap of ``T*``
+  errors), on the peak and on every ``sensitivity_plateau_z`` entry, and seeds its bootstrap of ``T*``
   with ``observables.bootstrap_seed(key, "peak_D", version)``, the seed the catalog names: a
   bootstrap rebuilt from the stored orderings, exact counts and ``k`` with that seed equals the
   stored one, and the seed of the earlier derivation (``region_seed`` with the horizon) does
@@ -30,7 +30,7 @@ from sparsegf2.study.store import STORE_FILE, TableauStore
 _UNIFORM = {"samples": 12, "exact_budget": 6}
 _MANIFEST = dict(
     depth={"layers": {"fixed": 10}, "checkpoints": {"list": [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
-    analysis={"peak": {"bootstrap": 40, "z": 1.0}},
+    analysis={"peak": {"bootstrap": 40, "plateau_z": 1.0}},
     observables={
         **sup.BASE["observables"],
         "uniform_erasure": _UNIFORM,
@@ -59,7 +59,7 @@ def _rebuilt_bootstrap(store: TableauStore, key, data: dict, seed) -> dict:
         domain,
         np.array([r["first_failure"] for r in rows]),
         key.n,
-        z=data["z"],
+        z=data["plateau_z"],
         replicates=data["bootstrap"]["replicates"],
         seed=seed,
         exact_counts=np.array([r["exact_counts"] for r in rows]),

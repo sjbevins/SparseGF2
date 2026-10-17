@@ -164,7 +164,7 @@ def test_requirements_name_what_a_trajectory_records():
     # is simulated: no circuit runs again for them
     narrower = sup.manifest(depth={"layers": {"fixed": 10}, "checkpoints": {"list": [2]}})
     for chain in (
-        [sup.manifest(analysis={"peak": {"z": 2.0, "bootstrap": 5}})],
+        [sup.manifest(analysis={"peak": {"plateau_z": 2.0, "bootstrap": 5}})],
         [sup.manifest(analysis={"peak": {"bootstrap": 0}})],
         [sup.manifest(), narrower],
     ):

@@ -71,7 +71,7 @@ labeling of exploratory analyses (§9).
 | $T^*$ | peak time (v1.4 §5.8) of one trajectory | float or missing | `t_star`, `_t_star` |
 | $h_i$ | whether $T_{\max}$ is in trajectory $i$'s maximizing set | bool | `at_horizon` |
 | $w_i$ | graph-equal weight of trajectory $i$, $\propto 1/(C_g R_{gc})$ | int | `stats.graph_equal_weights` |
-| $z_{\mathrm{pl}}$ | the plateau width of the peak rule (manifest `analysis.peak.z`) | float | `plateau_z` |
+| $z_{\mathrm{pl}}$ | the plateau width of the peak rule (manifest `analysis.peak.plateau_z`) | float | `plateau_z` |
 | $(p_c, z, \nu)$ | scaling parameters; $z$ the dynamical exponent | floats | `fit.p_c`, `fit.z`, `fit.nu` |
 | $e_u$ | engine seconds of unit $u$ estimated by `api.estimate_ensemble` | float | `engine_seconds` |
 | $m_u$ | measured seconds of a unit (engine and ingestion) | float | `units.elapsed_seconds` |
@@ -97,9 +97,11 @@ labeling of exploratory analyses (§9).
   `p`, `t`, each a value or a list. Tokens are compared canonically (`"0.1"`, `0.1` and `"1/10"`
   are one rate). Absent keys match everything; a selection that matches nothing is refused with
   what the study has.
-* **The plateau width** of the peak rule is reported as `plateau_z`; the letter `z` in the
-  scaling fits is the dynamical exponent (gap G-FSS-1). The manifest key itself is
-  `analysis.peak.z` (doc 02); see §9.
+* **The plateau width** of the peak rule is `plateau_z` everywhere: the manifest keys
+  `analysis.peak.plateau_z` and `analysis.peak.sensitivity_plateau_z` (doc 02; schema /1's `z`
+  and `sensitivity_z` are refused with the new names), the catalog parameters and the stored
+  peak records (doc 04), and every output of this layer. The letter `z` in the scaling fits is
+  the dynamical exponent (gap G-FSS-1).
 
 ### 3.2 The functions and their results
 
@@ -571,11 +573,10 @@ on a loaded machine one thread avoids waiting for the others.
   lower bound. Longer horizons (`extend` with a larger $T_{\max}$) are the remedy v1.4 §5.9
   names first.
 * **S13. FSS settings are arguments, not yet a manifest block.** Gap G-FSS-1 proposes an
-  `analysis.fss` block and renaming `analysis.peak.z` to `plateau_z`. The manifest
-  (`study/manifest.py`, another part) has neither yet, and refuses unknown keys. Until it does,
-  `fss` takes the settings as arguments with stated defaults and echoes every resolved setting in
-  its report (so a report is reproducible from itself), and every output of this layer names the
-  plateau width `plateau_z`. The manifest change is recorded as an open item.
+  `analysis.fss` block (open) and renaming `analysis.peak.z` to `plateau_z` (done: manifest
+  schema /2). Until the block exists, `fss` takes the settings as arguments with stated
+  defaults and echoes every resolved setting in its report (so a report is reproducible from
+  itself).
 * **S14. A new job status.** A study job that a budget ended with units left reports `stopped`
   (ensemble jobs have no budgets and never do); `completed` always means no work is left.
 * **S15. The MCP subset.** `init`, `extend`, `compute`, `export`, `verify`, `plot` and the

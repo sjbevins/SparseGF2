@@ -107,7 +107,7 @@ and no random stream: it reads what the engine produced.
 | $T_\varepsilon(d)$ | $\Pr[\mathrm{Bin}(n, \varepsilon) \ge d]$ | probability | `_binomial_tails` |
 | $d(t)$, $\mathrm{se}(t)$ | a depth trace at the checkpoints and its standard error | reals | `d`, `se` of `peak` |
 | $d^*$, $\mathcal A$, $T^*$ | the maximum over $\mathcal T_+$, the maximizing set, its log midpoint | real, set, real | `Peak.d_star`, `.maximizing_set`, `.t_star` |
-| $z$ | the plateau width in standard errors | real $\ge 0$ | `z` |
+| $z$ | the plateau width in standard errors (not the dynamic exponent of the scaling fits) | real $\ge 0$ | `z` (argument of `peak`); `plateau_z` in the catalog parameters, the stored peak records and the manifest |
 | $q$ | the number of checkpoints on a true plateau (§4.6) | integer $\ge 1$ | |
 | $\Phi_{\mathcal N}$ | the standard normal distribution function (not the channel failure $\Phi$) | function | |
 | $\tau_{\mathrm{int}}$ | the integrated autocorrelation time of a chain's records | real $\ge 1$ | `erasures.chain_diagnostics` |
@@ -311,7 +311,7 @@ semantics and stored as its expansion, since a range does not depend on $n$: `"1
 `resolve_params` puts every given value in that form (and the defaults are stored in it), so
 $J = 1$, $1.0$ and `numpy.float64(1)` give one key, couplings `[0, 1, 2]` and `[0.0, 1.0, 2.0]` give
 one key, a correlated entry keys alike as written in the manifest file and as the parsed manifest
-holds it, and the design manifest's `analysis.peak` (`sensitivity_z: [0, 1, 2]`) keys as the
+holds it, and the manifest's `analysis.peak` (`sensitivity_plateau_z: [0, 1, 2]`) keys as the
 default. A string where a number belongs is refused, also by `region_seed`.
 
 **Convention (an entry computes under its own key).** `compute(id, snapshot, params, version=None)`
@@ -706,7 +706,7 @@ being computed to its `compute` (§3.10), so `id` and `version` are that entry's
 version 2 beside version 1 leaves every version-1 seed and value unchanged, and the two versions
 (or a renamed copy) draw independent regions. `observables.py::bootstrap_seed` builds the tuple of
 (d) for `bootstrap_peak`. It has neither $z$ nor the replicate count $B$: the bootstraps at the
-widths of `sensitivity_z` resample the same orderings (paired replicates), and $B$ replicates are
+widths of `sensitivity_plateau_z` resample the same orderings (paired replicates), and $B$ replicates are
 the first $B$ of any larger count (the draws run replicate by replicate). **Departure note.** The
 T4 task brief first keyed these seeds by the native stream index $u$ (the design table, §5, names
 only a "keyed region sampler"); ruling R-SEED (design §3) makes graph and run seeds depend on
@@ -747,8 +747,8 @@ $$
 $$
 
 $6\Phi_{\mathcal N}(-2) = 0.1365$ for $q = 3$, $z = 2$ (the test checks this rate). The rule is
-fixed in the manifest before the data are seen (`analysis.peak.rule`, `z`); `peak_sensitivity`
-reports it at every `sensitivity_z`, as v1.4 §5.8 asks.
+fixed in the manifest before the data are seen (`analysis.peak.rule`, `plateau_z`); `peak_sensitivity`
+reports it at every `sensitivity_plateau_z`, as v1.4 §5.8 asks.
 
 **When the errors are not the true ones.** The statements above hold for $\hat D(0)$ from the
 orderings (Proposition 13: $s_Y/\sqrt S$ estimates the true error) and for $\hat D(J)$ from exact
@@ -759,7 +759,7 @@ lower bound: if the true standard deviation is $\kappa\,\mathrm{se}$ with $\kapp
 standard deviations, each comparison leaves out a true maximizer with probability about
 $\Phi_{\mathcal N}(-z/\kappa)$, the bound becomes $q(q-1)\Phi_{\mathcal N}(-z/\kappa)$, and since
 $\kappa$ changes with $J$, $n$, $\beta$ and `thin`, the effective width of the predeclared rule
-differs between conditions (so does that of every `sensitivity_z`). Measured factors are in §9.
+differs between conditions (so does that of every `sensitivity_plateau_z`). Measured factors are in §9.
 The record says which case applies (`Peak.se_exact`, from `CorrelatedProfile.se_exact`; the
 runner passes it for every stored `peak_D` and `peak_D_J`, `docs/study/05-store-and-reproducibility.md`);
 a `thin` near the chain's $\tau_{\mathrm{int}}$, measured on the graph with `erasures.sample_regions`
@@ -1353,7 +1353,7 @@ bootstrap seed's tag left out of the version record) each fail `tests/test_study
   with the default `thin` = 1 the plateau at the manifest's $z = 1$ spans about $1/2.3$ to
   $1/3.6$ of a true standard deviation at $J = 2$ (the factors above), true plateau checkpoints are
   left out more often than $q(q-1)\Phi_{\mathcal N}(-z)$, $T^*_J$ moves toward single, noisy maxima,
-  `sensitivity_z` understates the rule's fragility, and the effective width differs between
+  `sensitivity_plateau_z` understates the rule's fragility, and the effective width differs between
   conditions, which matters when $T^*_J$ enters a finite-size-scaling comparison. The record says
   so (`Peak.se_exact` False, stored by the runner on every `peak_D_J` and its sensitivity); the remedy is a `thin` near the chain's $\tau_{\mathrm{int}}$
   (measured with `erasures.sample_regions` at the probe's settings), as `thin` = 20 achieved above.

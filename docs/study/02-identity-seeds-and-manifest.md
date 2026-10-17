@@ -173,7 +173,7 @@ manifest read back would schedule F by `depth.checkpoints`). The sections:
 
 | key | type, default | constraints and meaning |
 |---|---|---|
-| `schema` | string, optional | must equal `"sparsegf2.study.manifest/1"` |
+| `schema` | string, optional | must equal `"sparsegf2.study.manifest/2"` (schema /1 named the plateau width `peak.z` and its grid `peak.sensitivity_z`; those keys are refused with the new names in the message, without an alias: the letter $z$ is the dynamic exponent of the scaling fits, v1.4 §5.9) |
 | `experiment_id` | string, required | §3.2 |
 | `label` | `"exploratory"` (default) or `"confirmatory"` | keeps exploratory and confirmatory runs apart (v1.4 §9); a confirmatory manifest freezes its conditions and its `analysis` section (§3.11, item 8) |
 | `conditions` | list of blocks, required | each block `{"n": [...], "beta": [...], "p": [...]}`: the product of its lists; $n \ge 5$ integers; $\beta$, $p$ tokens; no list repeats a value |
@@ -191,7 +191,7 @@ manifest read back would schedule F by `depth.checkpoints`). The sections:
 | `observables.correlated_erasure` | list, default empty | each entry: `couplings` (required; each $J \ge 0$, the domain of $Q_{G,J}$ in v1.4 §5.7), `sizes` (`null` = every $m = 1..n-1$, a list kept in its order, or a range string `"a:b[:step]"` stored as its expansion; all within $[1, n-1]$ for every $n$), `samples` (100), `thin` (1), `geometry` (`"interaction"`), `method` (`"auto"`), `burn_in` (`null`), `tempering` (true), `ladder` (`"auto"`), `max_step` (`null`), `name` (`null`, or a name outside `RESERVED_PROBE_NAMES`, the names of the runner's own probes); validated by building the engine probe. The probe of entry $i$ is named `name`, else `correlated_erasure` for $i = 0$ and `correlated_erasure_`$i$ after (`Observables.probe_names`), so appending entries renames nothing; `Observables.correlated_probes` builds them under these names |
 | `storage` | `{"graphs_per_unit": 8, "compression_level": 6}` | compression level $0..9$ |
 | `resources` | `{"num_threads": null, "max_unit_trajectories": 4096}` | threads $\ge 1$ or `null` |
-| `analysis` | `{"peak": {"rule": "plateau", "z": 1.0, "sensitivity_z": [0, 1, 2], "bootstrap": 200}, "bootstrap": 1000, "censoring": "survival"}` | the predeclared peak and censoring rules (v1.4 §5.8, §6); `peak.rule` must be `"plateau"` and `censoring` `"survival"` (`peak.z` and every `sensitivity_z` entry $\ge 0$, bootstraps $\ge 0$) |
+| `analysis` | `{"peak": {"rule": "plateau", "plateau_z": 1.0, "sensitivity_plateau_z": [0, 1, 2], "bootstrap": 200}, "bootstrap": 1000, "censoring": "survival"}` | the predeclared peak and censoring rules (v1.4 §5.8, §6); `peak.rule` must be `"plateau"` and `censoring` `"survival"` (`peak.plateau_z`, the plateau width in standard errors, and every `sensitivity_plateau_z` entry $\ge 0$, bootstraps $\ge 0$) |
 
 `to_json()` writes **every** key, defaults included, in canonical JSON; `digest()` is its SHA-256. Reading also refuses what no key
 alone can show: a duplicate condition, a layer table or a checkpoint table that does not cover exactly the sizes in use, a checkpoint-table entry beyond its size's
@@ -761,7 +761,7 @@ more_rates = [{"n": [16, 24], "beta": ["0", "0.1"], "p": ["0.1", "0.15", "0.2", 
 print(mf.check_extension(confirmed, revised(label="confirmatory", conditions=more_rates))[:100])
 assert mf.check_extension(m, revised(conditions=more_rates)) is None  # exploratory: allowed
 assert "freezes its analysis rules" in mf.check_extension(
-    confirmed, revised(label="confirmatory", **{"analysis.peak.z": 2.0})
+    confirmed, revised(label="confirmatory", **{"analysis.peak.plateau_z": 2.0})
 )
 assert mf.check_extension(confirmed, revised(label="confirmatory", **{"trials.graphs": 40})) is None
 ```

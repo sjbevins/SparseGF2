@@ -299,17 +299,6 @@ def safe_name(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._=+-" else "_" for ch in text)
 
 
-def _peak_rule(rule: Mapping[str, Any]) -> dict[str, Any]:
-    """The manifest's ``analysis.peak`` with its width named ``plateau_z``: the plateau rule's
-    ``z`` (v1.4 §5.8) is not the dynamical exponent ``z`` of the scaling fits (v1.4 §5.9)."""
-    return {
-        "rule": rule.get("rule"),
-        "plateau_z": rule.get("z"),
-        "sensitivity_plateau_z": list(rule.get("sensitivity_z", [])),
-        "bootstrap": rule.get("bootstrap"),
-    }
-
-
 # ---------------------------------------------------------------------------------------------
 # conditions and the `where` filter
 # ---------------------------------------------------------------------------------------------
@@ -631,7 +620,7 @@ def status(store: Any) -> dict[str, Any]:
         "observables": [
             {"id": o, "version": v, "params": json.loads(p)} for o, v, p in stored_keys
         ],
-        "peak_rule": _peak_rule(latest.analysis.peak.to_dict()),
+        "peak_rule": latest.analysis.peak.to_dict(),  # plateau_z: not the dynamic exponent z
         "versions": {
             k: versions.get(k) for k in ("randomness_contract", "store_schema", "sparsegf2")
         },

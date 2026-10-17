@@ -325,7 +325,7 @@ For protocol F, from the engine's arrays of row $i$ (all functions of `study/obs
 |---|---|---|---|
 | `first_passage` | `{}` | $\tau_0$ (status `censored` and NaN if not reached) | `FirstPassage.to_dict()` with the checkpoint bounds $\widehat\tau^{\mathrm{chk}}_\ell$ over the domain $S_r$, the domain and its digest |
 | `peak_d_cyc` | `rule = "exact"` | $T^*$ of the zero-extended $d_{\mathrm{cyc}}$ over the domain (status `missing` when $d^* = 0$) | `Peak.to_dict()` (maximizing set, $k_t$ on it, horizon flag), the domain and its digest |
-| `peak_D` | `analysis.peak` | $T^*$ of $D(0)$ by the plateau rule | the peak, one peak per `sensitivity_z` (each with `se_exact` True: the orderings give the true errors), the bootstrap of $T^*$ (`bootstrap` replicates; seed `observables.bootstrap_seed(key, "peak_D", version)`, the catalog's: neither the horizon nor the checkpoints enter it) |
+| `peak_D` | `analysis.peak` | $T^*$ of $D(0)$ by the plateau rule | the peak, one peak per `sensitivity_plateau_z` (each with `se_exact` True: the orderings give the true errors), the bootstrap of $T^*$ (`bootstrap` replicates; seed `observables.bootstrap_seed(key, "peak_D", version)`, the catalog's: neither the horizon nor the checkpoints enter it) |
 | `peak_D_J` | `analysis.peak` and `J` | $T^*$ of $D(J)$ | the peak, the sensitivity (each with `se_exact` from the probe's sampler: False for the chain, whose binomial errors are lower bounds, True for exact samples; doc 04 §4.6), the probe name |
 
 For protocol P: the trace row (no $k$, status `no_reference`, final layer $T$) and the snapshot

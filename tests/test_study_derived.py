@@ -73,11 +73,11 @@ def _same_rows(a: dict, b: dict) -> bool:
 @pytest.mark.parametrize(
     "change",
     [
-        {"analysis": {"peak": {"z": 2.0, "bootstrap": 5}}},  # the plateau width
+        {"analysis": {"peak": {"plateau_z": 2.0, "bootstrap": 5}}},  # the plateau width
         {"analysis": {"peak": {"bootstrap": 0}}},  # the bootstrap of T* off
         {"depth": {"layers": {"fixed": 10}, "checkpoints": {"list": [2]}}},  # S_r narrower
     ],
-    ids=["z", "bootstrap", "domain"],
+    ids=["plateau_z", "bootstrap", "domain"],
 )
 def test_a_revision_of_what_is_derived_runs_no_circuit(tmp_path, monkeypatch, change):
     first, second = sup.manifest(), sup.manifest(**change)
@@ -134,8 +134,8 @@ def test_derive_from_stored_data_gives_the_rows_the_run_stored(tmp_path):
 
 
 def test_a_revision_that_returns_to_an_earlier_rule_reads_the_current_values(tmp_path):
-    rule_1 = {"peak": {"z": 1.0, "bootstrap": 5}}
-    rule_2 = {"peak": {"z": 2.0, "bootstrap": 5}}
+    rule_1 = {"peak": {"plateau_z": 1.0, "bootstrap": 5}}
+    rule_2 = {"peak": {"plateau_z": 2.0, "bootstrap": 5}}
     a = sup.manifest(analysis=rule_1)
     b = sup.manifest(analysis=rule_2)
     back = sup.manifest(analysis=rule_1, storage={"graphs_per_unit": 3})  # returns to rule 1

@@ -325,8 +325,8 @@ def test_parameters_are_resolved_and_keyed_canonically():
     assert json.loads(plateau) == {
         "bootstrap": 200,
         "rule": "plateau",
-        "sensitivity_z": [0.0, 1.0, 2.0],
-        "z": 1.0,
+        "plateau_z": 1.0,
+        "sensitivity_plateau_z": [0.0, 1.0, 2.0],
     }
     assert ob.params_key("first_passage") == "{}"
     with pytest.raises(ValueError, match="couplings"):
@@ -379,8 +379,9 @@ def test_numerically_equal_parameters_have_one_key():
     assert ob.params_key("correlated_failure", parsed.to_dict()) == ob.params_key(
         "correlated_failure", raw
     )
-    # the design's manifest block analysis.peak (sensitivity_z as JSON ints) gives the default key
-    manifest_peak = {"rule": "plateau", "z": 1, "sensitivity_z": [0, 1, 2], "bootstrap": 200}
+    # the manifest block analysis.peak (sensitivity_plateau_z as JSON ints) gives the default key
+    manifest_peak = {"rule": "plateau", "plateau_z": 1, "sensitivity_plateau_z": [0, 1, 2],
+                     "bootstrap": 200}  # fmt: skip
     assert ob.params_key("peak_D", manifest_peak) == ob.params_key("peak_D")
     # resolved values are in canonical form, so the computation sees one value too
     resolved = ob.resolve_params("mean_leakage", {"m": np.int64(3), "J": 1})
@@ -426,18 +427,18 @@ def test_entries_declare_the_kind_of_every_parameter():
         "1",
         "trajectory",
         ("trace:D",),
-        {"z": 1, "width": 2},
+        {"plateau_z": 1, "width": 2},
         "test (v1.4 §5.8)",
         ob.peak,
         kinds={"width": "real?"},
     )
-    assert type(custom.params["z"]) is float and custom.params["width"] == 2.0
-    assert custom.kinds == {"z": "real", "width": "real?"}
+    assert type(custom.params["plateau_z"]) is float and custom.params["width"] == 2.0
+    assert custom.kinds == {"plateau_z": "real", "width": "real?"}
     for kwargs, message in (
         ({"params": {"width": 1}}, "has no kind"),
-        ({"params": {"z": 1}, "kinds": {"width": "real"}}, "not parameters"),
+        ({"params": {"plateau_z": 1}, "kinds": {"width": "real"}}, "not parameters"),
         ({"params": {"width": 1}, "kinds": {"width": "complex"}}, "must be one of"),
-        ({"params": {"z": "wide"}}, "default of parameter 'z'"),
+        ({"params": {"plateau_z": "wide"}}, "default of parameter 'plateau_z'"),
     ):
         args = {
             "id": "custom",
@@ -456,8 +457,9 @@ def test_peak_parameters_are_only_those_a_function_consumes():
     """peak_D's bootstrap is run by bootstrap_peak (orderings); D(J) has no orderings, so
     peak_D_J lists no bootstrap (its key would claim replicates that never ran). Its coupling J
     and the name of its correlated probe select the trace (two probes may share a coupling)."""
-    assert set(ob.get("peak_D").params) == {"rule", "z", "sensitivity_z", "bootstrap"}
-    assert set(ob.get("peak_D_J").params) == {"rule", "z", "sensitivity_z", "J", "name"}
+    params = {"rule", "plateau_z", "sensitivity_plateau_z"}  # the dynamic exponent is z
+    assert set(ob.get("peak_D").params) == {*params, "bootstrap"}
+    assert set(ob.get("peak_D_J").params) == {*params, "J", "name"}
     assert "bootstrap" not in json.loads(ob.params_key("peak_D_J", {"J": 1.0, "name": "ring"}))
     with pytest.raises(ValueError, match="name"):
         ob.params_key("peak_D_J", {"J": 1.0})

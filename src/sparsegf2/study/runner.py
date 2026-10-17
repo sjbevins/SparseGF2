@@ -933,14 +933,14 @@ def _derive_rows(
         elif name == "peak_D":
             if src.d_value is None or src.d_se is None:
                 raise ValueError(f"{key}: peak_D needs D(0)")
-            z = float(params["z"])
+            z = float(params["plateau_z"])
             # D(0) from the orderings: its se are the true standard errors (se_exact True)
             pk = ob.peak(dom, src.d_value, src.d_se, rule="plateau", z=z, k_at=dom_k,
                          horizon=layers, se_exact=True)  # fmt: skip
             data = {**pk.to_dict(), **info}
             data["sensitivity"] = [
                 s.to_dict()
-                for s in ob.peak_sensitivity(dom, src.d_value, src.d_se, params["sensitivity_z"],
+                for s in ob.peak_sensitivity(dom, src.d_value, src.d_se, params["sensitivity_plateau_z"],
                                              k_at=dom_k, horizon=layers, se_exact=True)
             ]  # fmt: skip
             data["bootstrap"] = None
@@ -973,14 +973,14 @@ def _derive_rows(
                 raise ValueError(f"{key}: probe {probe!r} has no coupling J = {params['J']}")
             i = int(where[0])
             rob, rob_se = rob_all[:, i], se_all[:, i]
-            z = float(params["z"])
+            z = float(params["plateau_z"])
             # the chain's binomial se are lower bounds: the record says so (se_exact False)
             pk = ob.peak(dom, rob, rob_se, rule="plateau", z=z, k_at=dom_k, horizon=layers,
                          se_exact=se_exact)  # fmt: skip
             data = {**pk.to_dict(), **info}
             data["sensitivity"] = [
                 s.to_dict()
-                for s in ob.peak_sensitivity(dom, rob, rob_se, params["sensitivity_z"],
+                for s in ob.peak_sensitivity(dom, rob, rob_se, params["sensitivity_plateau_z"],
                                              k_at=dom_k, horizon=layers, se_exact=se_exact)
             ]  # fmt: skip
             data["probe"] = probe

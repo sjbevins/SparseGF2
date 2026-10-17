@@ -127,7 +127,7 @@ __all__ = [
 ]
 
 #: The schema identifier written in every canonical manifest.
-MANIFEST_SCHEMA = "sparsegf2.study.manifest/1"
+MANIFEST_SCHEMA = "sparsegf2.study.manifest/2"
 
 #: The two labels that keep exploratory and confirmatory runs apart (v1.4 §9, "Rate grid").
 LABELS = ("exploratory", "confirmatory")
@@ -995,27 +995,45 @@ def _protocols(value: Any, where: str) -> tuple[ProtocolSettings, ...]:
 _DEFAULT_PROTOCOLS = (ProtocolSettings("F"),)
 
 
+#: The peak-rule keys renamed when the manifest schema became /2 (the letter z is the dynamic
+#: exponent of the scaling fits, v1.4 §5.9): reading an old key is refused with the new one named.
+_RENAMED_PEAK_KEYS = {"z": "plateau_z", "sensitivity_z": "sensitivity_plateau_z"}
+
+
 @dataclass(frozen=True)
 class Peak:
-    """The predeclared peak rule (v1.4 §5.8): plateau width $z$, its sensitivity grid, bootstrap size."""
+    """The predeclared peak rule (v1.4 §5.8): the plateau width $z_{\\mathrm{pl}}$
+    (``plateau_z``, in standard errors), its sensitivity grid (``sensitivity_plateau_z``) and
+    the bootstrap size. The width is not called ``z``: that letter is the dynamic exponent of
+    the finite-size-scaling fits (v1.4 §5.9). Schema /1 named them ``z`` and ``sensitivity_z``;
+    reading those keys is refused with the new name in the message (no alias)."""
 
     rule: str = "plateau"
-    z: float = 1.0
-    sensitivity_z: tuple[float, ...] = (0.0, 1.0, 2.0)
+    plateau_z: float = 1.0
+    sensitivity_plateau_z: tuple[float, ...] = (0.0, 1.0, 2.0)
     bootstrap: int = 200
 
     @classmethod
     def from_dict(cls, data: Any, where: str) -> Peak:
-        d = _object(data, where, optional=("rule", "z", "sensitivity_z", "bootstrap"))
+        if isinstance(data, Mapping):
+            for old, new in _RENAMED_PEAK_KEYS.items():
+                if old in data:
+                    raise ValueError(
+                        f"{where}.{old}: this key is now {where}.{new} (the plateau width of the "
+                        "peak rule; z is the dynamic exponent of the scaling fits)"
+                    )
+        d = _object(
+            data, where, optional=("rule", "plateau_z", "sensitivity_plateau_z", "bootstrap")
+        )
         sensitivity = tuple(
-            _real(v, f"{where}.sensitivity_z[{i}]", minimum=0.0)
+            _real(v, f"{where}.sensitivity_plateau_z[{i}]", minimum=0.0)
             for i, v in enumerate(
-                _list(d.get("sensitivity_z", [0, 1, 2]), f"{where}.sensitivity_z")
+                _list(d.get("sensitivity_plateau_z", [0, 1, 2]), f"{where}.sensitivity_plateau_z")
             )
         )
         return cls(
             _choice(d.get("rule", "plateau"), f"{where}.rule", ("plateau",)),
-            _real(d.get("z", 1.0), f"{where}.z", minimum=0.0),
+            _real(d.get("plateau_z", 1.0), f"{where}.plateau_z", minimum=0.0),
             sensitivity,
             _int(d.get("bootstrap", 200), f"{where}.bootstrap", minimum=0),
         )
@@ -1023,8 +1041,8 @@ class Peak:
     def to_dict(self) -> dict[str, Any]:
         return {
             "rule": self.rule,
-            "z": self.z,
-            "sensitivity_z": list(self.sensitivity_z),
+            "plateau_z": self.plateau_z,
+            "sensitivity_plateau_z": list(self.sensitivity_plateau_z),
             "bootstrap": self.bootstrap,
         }
 

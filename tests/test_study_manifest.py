@@ -40,7 +40,7 @@ from sparsegf2.study.manifest import (
 PROPERTY = settings(max_examples=200, deadline=None, database=None, derandomize=True)
 
 EXAMPLE_TEXT = """
-{"schema": "sparsegf2.study.manifest/1", "experiment_id": "ws-pilot-001",
+{"schema": "sparsegf2.study.manifest/2", "experiment_id": "ws-pilot-001",
  "label": "exploratory",
  "conditions": [{"n": [16, 24], "beta": ["0", "0.1"], "p": ["0.1", "0.15", "0.2"]}],
  "depth": {"layers": {"per_n": 8}, "checkpoints": {"count": 12}},
@@ -54,8 +54,8 @@ EXAMPLE_TEXT = """
                                          "thin": 20, "geometry": "interaction"}]},
  "storage": {"graphs_per_unit": 8, "compression_level": 6},
  "resources": {"num_threads": null, "max_unit_trajectories": 4096},
- "analysis": {"peak": {"rule": "plateau", "z": 1.0, "sensitivity_z": [0, 1, 2],
-                       "bootstrap": 200},
+ "analysis": {"peak": {"rule": "plateau", "plateau_z": 1.0,
+                       "sensitivity_plateau_z": [0, 1, 2], "bootstrap": 200},
               "bootstrap": 1000, "censoring": "survival"}}
 """
 EXAMPLE = json.loads(EXAMPLE_TEXT)
@@ -105,7 +105,7 @@ def test_the_design_example_parses_and_round_trips(manifest):
 
 def test_the_canonical_text_writes_every_default_and_tokens_as_strings(manifest):
     doc = json.loads(manifest.to_json())
-    assert doc["schema"] == "sparsegf2.study.manifest/1"
+    assert doc["schema"] == "sparsegf2.study.manifest/2"
     assert doc["conditions"] == [{"n": [16, 24], "beta": ["0", "0.1"], "p": ["0.1", "0.15", "0.2"]}]
     assert doc["depth"] == {"layers": {"per_n": 8}, "checkpoints": {"count": 12}}
     assert doc["trials"]["measurement_replicas"] == 1
@@ -125,7 +125,7 @@ def test_minimal_manifest_gets_the_defaults_of_the_design_example():
         "seeds": {"master_graph_seed": 1, "master_circuit_seed": 2},
     }
     m = ExperimentManifest.from_json(minimal)
-    assert m.label == "exploratory" and m.schema == "sparsegf2.study.manifest/1"
+    assert m.label == "exploratory" and m.schema == "sparsegf2.study.manifest/2"
     assert m.stride == 2 and m.trials.measurement_replicas == 1  # the stride defaults to C
     assert m.seeds.gate_mode == "shared" and m.dynamics.stop_when_purified is False
     obs = m.observables
@@ -216,7 +216,7 @@ def test_digest_changes_with_every_scientific_setting(manifest):
         ("experiment_id", "ws-pilot-002"),
         ("dynamics.stop_when_purified", True),
         ("observables.uniform_erasure.samples", 201),
-        ("analysis.peak.z", 1.5),
+        ("analysis.peak.plateau_z", 1.5),
         ("conditions.0.p", ["0.1", "0.15"]),
     ]:
         digests.add(ExperimentManifest.from_json(mutated(path, value)).digest())
@@ -224,13 +224,14 @@ def test_digest_changes_with_every_scientific_setting(manifest):
 
 
 MINIMAL_TEXT = (
-    '{"analysis":{"bootstrap":1000,"censoring":"survival","peak":{"bootstrap":200,"rule":"plateau",'
-    '"sensitivity_z":[0.0,1.0,2.0],"z":1.0}},"conditions":[{"beta":["0.5"],"n":[8],"p":["0.1"]}],'
+    '{"analysis":{"bootstrap":1000,"censoring":"survival","peak":{"bootstrap":200,'
+    '"plateau_z":1.0,"rule":"plateau","sensitivity_plateau_z":[0.0,1.0,2.0]}},'
+    '"conditions":[{"beta":["0.5"],"n":[8],"p":["0.1"]}],'
     '"depth":{"checkpoints":{"count":4},"layers":{"fixed":16}},"dynamics":{"stop_when_purified":false},'
     '"experiment_id":"m","label":"exploratory","observables":{"contiguous_distance":true,'
     '"correlated_erasure":[],"tableau_snapshots":true,"uniform_erasure":{"exact_budget":5000,'
     '"samples":200}},"resources":{"max_unit_trajectories":4096,"num_threads":null},'
-    '"schema":"sparsegf2.study.manifest/1","seeds":{"gate_mode":"shared","master_circuit_seed":2,'
+    '"schema":"sparsegf2.study.manifest/2","seeds":{"gate_mode":"shared","master_circuit_seed":2,'
     '"master_graph_seed":1},"storage":{"compression_level":6,"graphs_per_unit":8},'
     '"trials":{"circuit_index_stride":2,"circuits_per_graph":2,"graphs":3,'
     '"measurement_replicas":1}}'
@@ -250,12 +251,12 @@ def test_the_canonical_text_of_a_minimal_manifest_is_the_documented_form():
     m = ExperimentManifest.from_json(minimal)
     assert m.to_json() == MINIMAL_TEXT
     assert m.digest() == hashlib.sha256(MINIMAL_TEXT.encode("utf-8")).hexdigest()
-    assert m.digest() == "49f6a7f590c72379c81ec4156ea62c7e29763abcb9100b993a98583b5f0392c1"
+    assert m.digest() == "9bbe68ade29fc201ffaffb1d6271c1f2e0019b07d28977c50827e498c0fbb855"
 
 
 def test_the_digest_of_the_design_example_is_pinned(manifest):
     # a change of this value means the canonical form changed: bump the manifest schema
-    assert manifest.digest() == "071f97fc90da2e504f6cf19ec1908658b3d431840f404e374543156c6d4c6278"
+    assert manifest.digest() == "ee8aa73dcde44232e2866cc1272d5ec200ddb66fdf3aac4d465f78324ed4110d"
     assert hashlib.sha256(manifest.to_json().encode("utf-8")).hexdigest() == manifest.digest()
 
 
@@ -325,7 +326,7 @@ MALFORMED = [
     ("trials", DELETE, r"missing required key\(s\) \['trials'\]"),
     ("seeds", DELETE, r"missing required key\(s\) \['seeds'\]"),
     ("experiment_id", DELETE, r"missing required key\(s\) \['experiment_id'\]"),
-    ("schema", "sparsegf2.study.manifest/2", "manifest.schema: this version reads"),
+    ("schema", "sparsegf2.study.manifest/1", "manifest.schema: this version reads"),
     ("experiment_id", "has space", "manifest.experiment_id must be 1 to 64 characters"),
     ("experiment_id", 5, "manifest.experiment_id must be 1 to 64 characters"),
     ("label", "pilot", r"manifest.label: must be one of \['exploratory', 'confirmatory'\]"),
@@ -575,10 +576,14 @@ MALFORMED = [
     ("resources.num_threads", 2.0, "resources.num_threads: must be an integer"),
     ("resources.max_unit_trajectories", 0, r"max_unit_trajectories: must be at least 1"),
     ("analysis.peak.rule", "exact", r"analysis.peak.rule: must be one of \['plateau'\]"),
-    ("analysis.peak.z", -1, r"analysis.peak.z: must be at least 0"),
-    ("analysis.peak.z", "1", "analysis.peak.z: must be a number"),
-    ("analysis.peak.sensitivity_z", [], r"sensitivity_z: give at least one entry"),
-    ("analysis.peak.sensitivity_z", [0, -1], r"sensitivity_z\[1\]: must be at least 0"),
+    ("analysis.peak.plateau_z", -1, r"analysis.peak.plateau_z: must be at least 0"),
+    ("analysis.peak.plateau_z", "1", "analysis.peak.plateau_z: must be a number"),
+    ("analysis.peak.sensitivity_plateau_z", [], r"sensitivity_plateau_z: give at least one entry"),
+    (
+        "analysis.peak.sensitivity_plateau_z",
+        [0, -1],
+        r"sensitivity_plateau_z\[1\]: must be at least 0",
+    ),
     ("analysis.peak.bootstrap", -1, r"analysis.peak.bootstrap: must be at least 0"),
     ("analysis.bootstrap", 1.5, "analysis.bootstrap: must be an integer"),
     ("analysis.censoring", "none", r"analysis.censoring: must be one of \['survival'\]"),
@@ -591,6 +596,19 @@ MALFORMED = [
 def test_malformed_manifests_are_refused_naming_the_field(path, value, fragment):
     with pytest.raises(ValueError, match=fragment):
         ExperimentManifest.from_json(mutated(path, value))
+
+
+@pytest.mark.parametrize(
+    "old, new", [("z", "plateau_z"), ("sensitivity_z", "sensitivity_plateau_z")]
+)
+def test_the_schema_1_names_of_the_plateau_width_are_refused_naming_the_new_key(old, new):
+    # the plateau width is plateau_z (z is the dynamic exponent of the scaling fits); no alias
+    data = mutated(f"analysis.peak.{old}", 1.0 if old == "z" else [0, 1])
+    with pytest.raises(ValueError, match=rf"analysis\.peak\.{old}: this key is now "
+                       rf"manifest\.analysis\.peak\.{new}"):  # fmt: skip
+        ExperimentManifest.from_json(data)
+    del data["analysis"]["peak"][old]
+    assert ExperimentManifest.from_json(data) == ExperimentManifest.from_json(EXAMPLE)
 
 
 def test_malformed_table_includes_enough_cases():
@@ -1151,8 +1169,8 @@ def test_direct_construction_and_replace_obey_the_rules_of_reading(manifest):
         ({"storage": mf.Storage(8, 10)}, r"manifest.storage.compression_level: must be at most 9"),
         ({"resources": mf.Resources(0)}, r"manifest.resources.num_threads: must be at least 1"),
         (
-            {"analysis": mf.Analysis(mf.Peak(z=-1.0))},
-            r"manifest.analysis.peak.z: must be at least 0",
+            {"analysis": mf.Analysis(mf.Peak(plateau_z=-1.0))},
+            r"manifest.analysis.peak.plateau_z: must be at least 0",
         ),
         ({"trials": {"graphs": 20}}, r"manifest.trials: expected a Trials, got dict"),
         (
@@ -1525,7 +1543,7 @@ ALLOWED = {
     ],
     "storage": [("storage", {"graphs_per_unit": 4, "compression_level": 9})],
     "resources": [("resources", {"num_threads": 4, "max_unit_trajectories": 100})],
-    "analysis": [("analysis", {"peak": {"z": 2.0}, "bootstrap": 10})],
+    "analysis": [("analysis", {"peak": {"plateau_z": 2.0}, "bootstrap": 10})],
 }
 
 
@@ -1756,10 +1774,13 @@ def test_a_confirmatory_manifest_freezes_its_conditions_and_analysis():
         ([("conditions.0.n", [16, 24, 32])], "condition (n = 32, beta = 0, p = 0.1) is new"),
         ([("conditions.0.beta", ["0", "0.1", "0.3"])], "(n = 16, beta = 0.3, p = 0.1) is new"),
         (
-            [("analysis.peak.z", 2.0)],
-            "analysis changed from {'peak': {'rule': 'plateau', 'z': 1.0",
+            [("analysis.peak.plateau_z", 2.0)],
+            "analysis changed from {'peak': {'rule': 'plateau', 'plateau_z': 1.0",
         ),
-        ([("analysis.peak.sensitivity_z", [0, 1])], "a confirmatory manifest freezes its analysis"),
+        (
+            [("analysis.peak.sensitivity_plateau_z", [0, 1])],
+            "a confirmatory manifest freezes its analysis",
+        ),
         ([("analysis.bootstrap", 10)], "a confirmatory manifest freezes its analysis rules"),
     ]:
         message = check_extension(confirmed, with_changes(*base, *changes))

@@ -1205,7 +1205,7 @@ def bootstrap_seed(key: TrajectoryKey | str, observable_id: str, version: str) -
     with ``TAG`` = :data:`BOOTSTRAP_SEED_TAG` (``0x57535242``, ``"WSRB"``) and the words as in
     :func:`region_seed`. So a stored bootstrap is a function of the trajectory's data and its key
     ``(id, version, params)``. The plateau width ``z`` and the replicate count are not in the
-    seed: the bootstrap at every ``z`` of ``sensitivity_z`` resamples the same orderings (paired
+    seed: the bootstrap at every ``z`` of ``sensitivity_plateau_z`` resamples the same orderings (paired
     replicates), and ``B`` replicates are the first ``B`` of any larger count. *Distinct inputs,
     distinct seeds; no collision* with the region (``"WSRO"``), graph (``"WSG1"``) or run
     (``"WSC1"``) seeds: the argument of :func:`region_seed` (fixed positions in a fixed-length
@@ -1477,7 +1477,7 @@ class Peak:
         """Plain Python (NaN as None), for a stored trajectory observable."""
         return {
             "rule": self.rule,
-            "z": self.z,
+            "plateau_z": self.z,
             "d_star": None if math.isnan(self.d_star) else self.d_star,
             "maximizing_set": self.maximizing_set.tolist(),
             "t_star": None if math.isnan(self.t_star) else self.t_star,
@@ -1996,8 +1996,8 @@ PARAM_KINDS: Mapping[str, str] = MappingProxyType(
         "budget": "int?",
         "max_n": "int",
         "rule": "text",
-        "z": "real",
-        "sensitivity_z": "reals",
+        "plateau_z": "real",
+        "sensitivity_plateau_z": "reals",
         "bootstrap": "int",
     }
 )
@@ -2656,7 +2656,7 @@ _CORRELATED = {
     "ladder": "auto",
     "max_step": None,
 }
-_PLATEAU = {"rule": "plateau", "z": 1.0, "sensitivity_z": (0.0, 1.0, 2.0)}
+_PLATEAU = {"rule": "plateau", "plateau_z": 1.0, "sensitivity_plateau_z": (0.0, 1.0, 2.0)}
 
 for _entry in (
     ObservableDef(
@@ -2842,8 +2842,9 @@ for _entry in (
         "trajectory",
         ("trace:D", "k_trace", "probe:erasure_first_failure", "probe:uncorrectable_region_counts"),
         {**_PLATEAU, "bootstrap": 200},
-        "the plateau peak of D(0)(t): A = {t : D(t) >= D* - z sqrt(se(t)^2 + se(t*)^2)}, "
-        "T* = exp(mean_A ln t), sensitivity over z, bootstrap of T* resampling each checkpoint's "
+        "the plateau peak of D(0)(t): A = {t : D(t) >= D* - z sqrt(se(t)^2 + se(t*)^2)} with "
+        "z = plateau_z, "
+        "T* = exp(mean_A ln t), sensitivity over sensitivity_plateau_z, bootstrap of T* resampling each checkpoint's "
         "orderings (bootstrap_peak, seeded by bootstrap_seed(trajectory key, id, version)) "
         "(v1.4 §5.8)",
         peak,
@@ -2855,9 +2856,9 @@ for _entry in (
         ("trace:D_J", "k_trace"),
         {**_PLATEAU, "J": REQUIRED, "name": REQUIRED},
         "the plateau peak of D(J)(t) at one coupling J of the correlated probe name (two probes "
-        "may share a coupling, so both keys name the trace), sensitivity over z; no bootstrap of "
+        "may share a coupling, so both keys name the trace), sensitivity over sensitivity_plateau_z; no bootstrap of "
         "T* (the probe keeps failing fractions only); its se are binomial, lower bounds for the "
-        "chain, so the plateau is narrower than z there: record se_exact (v1.4 §5.8)",
+        "chain, so the plateau is narrower than plateau_z there: record se_exact (v1.4 §5.8)",
         peak,
     ),
     ObservableDef(
