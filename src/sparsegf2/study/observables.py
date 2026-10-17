@@ -60,7 +60,7 @@ import numpy as np
 
 from sparsegf2 import analysis, erasures, graphs
 from sparsegf2.codes import StabilizerCode
-from sparsegf2.study.identity import TrajectoryKey, canonical_json
+from sparsegf2.study.identity import TrajectoryKey, canonical_json, token_words
 from sparsegf2.tableau import PhaseFreeTableau
 
 __all__ = [
@@ -1014,8 +1014,10 @@ def _text_words(text: str) -> tuple[int, int]:
     """``w(x)``: the 32-bit words (low, high) of ``blake2b(x.encode(), digest_size=8)`` read little-endian.
 
     The repository's convention for a string in a seed (design §3, ruling R-SEED: the probe-name
-    hash of :mod:`sparsegf2.mipt`, ``identity.rate_hash``). A private copy of the helper
-    ``identity.token_words`` announced for the identity module.
+    hash of :mod:`sparsegf2.mipt`, :func:`~sparsegf2.study.identity.rate_hash`), for any string:
+    :func:`~sparsegf2.study.identity.token_words` gives the same words for a probability token
+    (and is used for the tokens), but parses its input as one, so the experiment id, the
+    observable id and the version go through this function.
     """
     value = int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "little")
     return value & 0xFFFFFFFF, value >> 32
@@ -1105,8 +1107,8 @@ def region_seed(
         REGION_SEED_TAG,
         *_text_words(trajectory.experiment_id),
         _seed_word(trajectory.n, "n"),
-        *_text_words(trajectory.beta.token),
-        *_text_words(trajectory.p.token),
+        *token_words(trajectory.beta),
+        *token_words(trajectory.p),
         _seed_word(trajectory.g, "g"),
         _seed_word(trajectory.c, "c"),
         _seed_word(trajectory.r, "r"),

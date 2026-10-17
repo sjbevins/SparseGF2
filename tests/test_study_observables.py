@@ -20,6 +20,7 @@ import pytest
 
 import _study_oracle as oracle
 from sparsegf2 import StabilizerCode, erasures, graphs, mipt
+from sparsegf2.study import identity
 from sparsegf2.study import observables as ob
 from sparsegf2.study.identity import TrajectoryKey
 from sparsegf2.tableau import PhaseFreeTableau
@@ -1068,6 +1069,9 @@ def test_region_seed_derivation():
     assert tags == {ob.REGION_SEED_TAG}
     assert not tags & {0x57534731, 0x57534331}  # the graph (WSG1) and run (WSC1) domains
     assert int.from_bytes(b"WSRO", "big") == ob.REGION_SEED_TAG
+    # the identity module's token words and the private string words are one convention
+    for token in ("0", "1", "0.1", "1/7", "0.25", "0.0625"):
+        assert ob._text_words(token) == identity.token_words(token)
     assert ob.region_seed(str(base), 2, 3, 0.5, "a", "1") == ob.region_seed(
         base, 2, 3, 0.5, "a", "1"
     )

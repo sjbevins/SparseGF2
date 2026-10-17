@@ -633,9 +633,10 @@ coincide only through a collision of `SeedSequence`'s hash. (c) Every field ente
 `erasures.sample_regions(..., seed=list(seed))`. **Departure note.** The design table (§5) first
 keyed these seeds by the native stream index $u$; ruling R-SEED (design §3) makes graph and run
 seeds depend on $(n, \beta)$, so $u$ alone no longer identifies a trajectory, and the controller
-asked for the full key. The identity module's helper for $w$ (`identity.token_words`) was announced
-but not yet committed when this part was written; `observables.py::_text_words` computes the same
-words privately (§9).
+asked for the full key. The words of $\beta$ and $p$ come from `identity.token_words`, the helper the
+graph and run seeds use; that helper parses its input as a probability token, so the experiment id,
+the observable id and the version go through `observables.py::_text_words`, the same convention for
+any string (a test checks that the two agree on tokens).
 
 ### 4.6 Peaks
 
@@ -1164,5 +1165,5 @@ of $n - 1$, which is equivalent: validated inputs force $\tilde P(n) = 1$ when $
   (`route="enumerate"`), the optional `k` cross-check of the uniform estimators,
   `t_star_is_checkpoint` (validation requirement 13), and `catalog_markdown`.
 * **Seeds (ruling R-SEED).** The retrospective seeds use the full trajectory key, not the stream
-  index $u$ of the design table; $w(x)$ is computed by a private helper equal to the announced
-  `identity.token_words`, which was not committed when this part was written.
+  index $u$ of the design table. The token words come from `identity.token_words`; the other
+  strings use a private helper with the same convention (Proposition 18).
