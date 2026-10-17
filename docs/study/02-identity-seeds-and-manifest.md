@@ -2,7 +2,8 @@
 
 How the Watts–Strogatz study names things so that every graph, circuit and trajectory can be
 rebuilt from one frozen description: exact rate tokens, trajectory keys, the seeds of graphs and
-of circuits, the trajectory index $u = g\,s + c$ and why extending the study never renumbers it, the
+of circuits (domain-tagged word tuples that name the condition, so that only the rates of one
+condition are coupled), the trajectory index $u = g\,s + c$ and why extending the study never renumbers it, the
 graph record with its edge digest, canonical JSON and digests, the experiment manifest field by
 field, the checkpoint rule of v1.4 §9 stated exactly with its rounding (and its list and table
 forms), the rules under which a later manifest may extend an earlier one, and the schedule that
@@ -44,7 +45,7 @@ the observables and the statistics read these identities.
 It implements
 
 * **tokens** for $\beta$ and $p$ (`study/identity.py::Token`), and the trajectory key (`TrajectoryKey`);
-* **seeds and indices**: `graph_seed`, `run_seed` for the two gate modes, `rate_hash`, `stream_index`;
+* **seeds and indices**: `graph_seed`, `run_seed` for the two gate modes, `rate_hash` and `token_words`, `stream_index`;
 * **graph records**: `GraphRecord`, `build_graph`, `validate_graph`, `edge_digest`;
 * **canonical bytes**: `canonical_json`, `sha256_hex`, `json_digest`, and the version constants;
 * **the manifest** (`study/manifest.py::ExperimentManifest`): strict reading, the canonical form and its digest,
@@ -53,7 +54,7 @@ It implements
 
 It changes no probability law and no random stream (the sampling it names is documented in
 [01-ensemble-and-sampling.md](01-ensemble-and-sampling.md)). Departures from v1.4 and the design are listed in §9
-(D1, D2, D4 of the design and the new rules N1–N6 introduced here).
+(D1, D2, D4 and D6 of the design and the new rules N1–N7 introduced here).
 
 ## 2. Notation
 
@@ -67,9 +68,12 @@ It changes no probability law and no random stream (the sampling it names is doc
 | $G_*$, $C$ | graphs per condition, circuits per graph | integers $\ge 1$ | `trials.graphs`, `trials.circuits_per_graph` |
 | $s$ | the circuit index stride, $s \ge C$, frozen | integer | `trials.circuit_index_stride`, `manifest.stride` |
 | $u$ | the trajectory index $u = g s + c$ | integer | `stream_index(g, c, stride)` |
-| $M_g$, $M_c$ | the master graph seed and the master circuit seed | integers in $[0, 2^{32})$ | `seeds.master_graph_seed`, `seeds.master_circuit_seed` |
-| $\sigma_p$ | the run seed for rate $p$ | integer or pair | `run_seed(M_c, gate_mode, p)` |
-| $h(x)$ | the rate hash: first 8 bytes of BLAKE2b ($\texttt{digest\_size}=8$) of $\operatorname{tok}(x)$, little-endian | $[0, 2^{64})$ | `rate_hash` |
+| $M_g$, $M_c$ | the master graph seed and the master circuit seed (they may be equal) | integers in $[0, 2^{32})$ | `seeds.master_graph_seed`, `seeds.master_circuit_seed` |
+| $h(x)$ | the token hash: first 8 bytes of BLAKE2b ($\texttt{digest\_size}=8$) of $\operatorname{tok}(x)$, little-endian | $[0, 2^{64})$ | `rate_hash` |
+| $\lambda_x$, $\eta_x$ | the low and high 32-bit words of $h(x)$: $\lambda_x = h(x) \bmod 2^{32}$, $\eta_x = \lfloor h(x)/2^{32}\rfloor$ | integers in $[0, 2^{32})$ | `token_words(x)` |
+| $\tau_G$, $\tau_C$ | the domain tags `0x57534731` ("WSG1") and `0x57534331` ("WSC1") | integers | `GRAPH_SEED_TAG`, `CIRCUIT_SEED_TAG` |
+| $\gamma_g$ | the graph seed of graph $g$ of $(n,\beta)$: $(\tau_G, M_g, n, \lambda_\beta, \eta_\beta, g)$, six words | tuple | `graph_seed(M_g, n, beta, g)` |
+| $\sigma$ | the run seed of the condition: $(\tau_C, M_c, n, \lambda_\beta, \eta_\beta)$ (shared mode, five words; the same for every $p$) or that tuple followed by $\lambda_p, \eta_p$ (independent mode, seven words) | tuple | `run_seed(M_c, n, beta, gate_mode, p)` |
 | $T_{\max}(n)$ | the horizon in layers | integer $\ge 1$ | `manifest.layers(n, beta)` |
 | $N_T$ | the requested geometric checkpoint count | integer in $[1, 1000]$ | `depth.checkpoints.count` |
 | $a_j$ | $T_{\max}^{\,j/(N_T - 1)}$, $j = 0, \dots, N_T - 1$ | real | |
@@ -108,18 +112,22 @@ for a future versioned extension). Its canonical string is
 `"<id>:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"` and `TrajectoryKey.parse` inverts it; the colon and the equals sign occur in no
 token and no identifier, so the string is unambiguous.
 
-### 3.3 Seeds (v1.4 §7.2; design §3)
+### 3.3 Seeds (v1.4 §7.2; design §3, ruling R-SEED)
 
-* **Graph seed.** $\texttt{graph\_seed}(M_g, g) = (M_g, g)$, a pair of unsigned 32-bit words. This is the native collection convention
-  ("`realizations` builds graph $i$ from `[seed, i]`", `api.py::_build_graph`) and the example of v1.4 §8.1. It does not depend
-  on $p$, so one collection per $(n,\beta)$ serves every rate. It does not depend on $n$ or $\beta$ either: graphs of different
-  sizes and rewiring probabilities share random numbers (common random numbers; comparisons across $\beta$ or $n$ are paired).
-* **Run seed.** $\sigma_p = M_c$ in `gate_mode="shared"` (the native coupling: trajectory $u$ draws the same gates and the same mask
-  uniforms at every $p$, document 01 Proposition 12), and $\sigma_p = (M_c, h(p))$ in `gate_mode="independent"` (design D4: gates and
-  masks are independent across rates; nothing is nested). $h(p)$ is the first 8 bytes of
-  `blake2b(token.encode("ascii"), digest_size=8)`, read little-endian: the convention the engine uses for probe names, not a
-  truncation of the 64-byte digest.
-* **Range.** Seeds and labels are in $[0, 2^{32})$, so that $(M, g)$ is a two-word `SeedSequence` entropy.
+v1.4 couples the conditions across the measurement rate $p$ only: for one $(n, \beta)$ the graphs, gates and mask uniforms are common to all $p$. It does not
+couple them across $n$ or $\beta$, and finite-size fits treat the samples of different sizes and rewiring probabilities as independent (document 01, §3.8). So every seed is a
+**fixed-length tuple of 32-bit words** that begins with a domain tag and names the condition. Write $h(x)$ for the 64-bit hash of the canonical token string of $x$ (the first 8 bytes of
+`blake2b(token.encode("ascii"), digest_size=8)`, read little-endian: the convention the engine uses for probe names, not a truncation of the 64-byte digest) and $(\lambda_x, \eta_x)$
+for its low and high 32-bit words (`token_words`).
+
+* **Graph seed.** $\gamma_g(n,\beta) = (\tau_G, M_g, n, \lambda_\beta, \eta_\beta, g)$, six words (`graph_seed`). It does not depend on $p$, so one collection per $(n,\beta)$ serves every rate. It depends on
+  $n$, $\beta$ and $g$, so the collections of different conditions are independent samples.
+* **Run seed.** In `gate_mode="shared"`: $\sigma(n,\beta) = (\tau_C, M_c, n, \lambda_\beta, \eta_\beta)$, five words, **the same for every $p$** (the native coupling: trajectory $u$ draws the same gates and the same mask
+  uniforms at every $p$, document 01 Proposition 12). In `gate_mode="independent"` (design D4): $\sigma(n,\beta,p) = (\tau_C, M_c, n, \lambda_\beta, \eta_\beta, \lambda_p, \eta_p)$, seven words; gates and
+  masks are independent across rates and nothing is nested.
+* **Domain tags.** $\tau_G = \texttt{0x57534731}$ and $\tau_C = \texttt{0x57534331}$ are the ASCII codes of `WSG1` and `WSC1`. They make graph seeds and run seeds disjoint whatever the master seeds are,
+  so $M_g = M_c$ is allowed (Proposition 4). A different derivation of the seeds needs different tags; `version_record()` records both.
+* **Range.** Master seeds, sizes and graph labels are in $[0, 2^{32})$: each is exactly one word of a tuple (a larger integer would be split into several words by `SeedSequence`).
 
 ### 3.4 The stream index (v1.4 §7.2; design D2)
 
@@ -132,16 +140,17 @@ trajectories of the graph labels $g_0, \dots, g_1 - 1$ must be given the graphs 
 
 ### 3.5 Graph records and the edge digest (v1.4 §2.2 "Tracking", §8)
 
-`build_graph(n, beta, g, M_g)` calls `graphs.watts_strogatz(n, 4, float(beta), seed=(M_g, g))`, validates the result
+`build_graph(n, beta, g, M_g)` calls `graphs.watts_strogatz(n, 4, float(beta), seed=`$\gamma_g(n,\beta)$`)` with the six-word graph seed of §3.3, validates the result
 (`validate_graph`: canonical sorted form, $2n$ edges, minimum degree 2, $C(n,2)$ at $\beta = 0$; for $n = 5$ the checks leave $K_5$) and returns a
-`GraphRecord`: $n$, the token $\beta$, $g$, the seed pair, the `generator` version string
+`GraphRecord`: $n$, the token $\beta$, $g$, the seed tuple, the `generator` version string
 (`GRAPH_GENERATOR_VERSION = "ws-offset-major-reject-1"`), the `edge_order` (`"offset-major"`), the read-only edge array of shape $(2n, 2)$
 and the **edge digest**: the SHA-256 of the bytes `b"SGF2EDGES1\x00"` (11 bytes), then $n$ as an unsigned 32-bit little-endian integer,
 then the edge rows $a_1, b_1, a_2, b_2, \dots$ as signed 32-bit little-endian integers, in the canonical order ($a < b$, rows increasing).
-`GraphRecord.verify` re-checks the digest and the graph; `regenerate` rebuilds the graph from the seed and requires the same record.
+`GraphRecord.verify` re-checks the digest and the graph; `regenerate` rebuilds the graph from the record (the master graph seed is the second word of the seed tuple, everything else is recomputed from $(n, \beta, g)$)
+and requires the same record, so a record whose seed tuple has an altered word, another length or the other domain's tag does not reproduce.
 
 The other version constants of `study/identity.py`: `CLIFFORD_ENUMERATION_VERSION` (the numbering $j = 16 s + b$), `DYNAMICS_VERSION`,
-`ROWSPACE_FORMAT_VERSION` (`"SGF2RS1"`), `STORE_SCHEMA_VERSION`; `version_record()` collects them with `mipt.RANDOMNESS_CONTRACT` and the package version.
+`ROWSPACE_FORMAT_VERSION` (`"SGF2RS1"`), `STORE_SCHEMA_VERSION`, and the two seed tags; `version_record()` collects them with `mipt.RANDOMNESS_CONTRACT` and the package version.
 
 ### 3.6 Canonical JSON and digests
 
@@ -167,7 +176,7 @@ message names the field (`manifest.trials.graphs: must be at least 1, got 0`). A
 | `trials.graphs`, `trials.circuits_per_graph` | integers $\ge 1$, required | $G_*$, $C$ |
 | `trials.circuit_index_stride` | integer $\ge C$, default $C$ | the frozen stride $s$ |
 | `trials.measurement_replicas` | must be 1 | design D1: the native engine draws gates and masks from one stream |
-| `seeds.master_graph_seed`, `seeds.master_circuit_seed` | integers in $[0, 2^{32})$, required | must differ (N1) |
+| `seeds.master_graph_seed`, `seeds.master_circuit_seed` | integers in $[0, 2^{32})$, required | may be equal (the tags of §3.3 separate the domains, Proposition 4) |
 | `seeds.gate_mode` | `"shared"` (default) or `"independent"` | §3.3 |
 | `dynamics.stop_when_purified` | bool, default false | passed to the engine |
 | `observables.tableau_snapshots` | bool, default true | `tableau_snapshot` probe at $\mathcal T(n,\beta)$ |
@@ -180,7 +189,8 @@ message names the field (`manifest.trials.graphs: must be at least 1, got 0`). A
 
 `to_json()` writes **every** key, defaults included, in canonical JSON; `digest()` is its SHA-256. Reading also refuses what no key
 alone can show: a duplicate condition, a layer table or a checkpoint table that does not cover exactly the sizes in use, a checkpoint-table entry beyond its size's
-$T_{\max}$, correlated sizes outside $[1, n-1]$, and two correlated-erasure probes with the same name. `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
+$T_{\max}$, correlated sizes outside $[1, n-1]$, two correlated-erasure probes with the same name, and two different $\beta$ tokens (in `gate_mode="independent"` also two rates) whose 64-bit seed hashes
+coincide, which would give two conditions one seed (probability $2^{-64}$ per pair; Proposition 4). `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
 snapshots with `stop_when_purified`, a work unit larger than `max_unit_trajectories`, and checkpoint-list entries above $T_{\max}$ for every size (they are dropped everywhere and have no effect).
 
 ### 3.8 Conditions and their canonical factorization
@@ -225,7 +235,7 @@ where $S_i$ is the own schedule of revision $i$ at $(n,\beta)$ and a revision th
 A store keeps every revision. `check_extension(old, new)` returns `None` when `new` only extends `old`, else a message naming the **first** forbidden change, checked in this order:
 
 1. `schema`, `experiment_id`, `label` unchanged;
-2. the seeds and `gate_mode` unchanged (the pairs of §3.3 fix every recorded graph and trajectory);
+2. the seeds and `gate_mode` unchanged (the seed tuples of §3.3 fix every recorded graph and trajectory);
 3. the stride unchanged (it fixes every $u$); `dynamics` and `measurement_replicas` unchanged;
 4. `trials.graphs` and `trials.circuits_per_graph` not smaller;
 5. every old $(n, \beta, p)$ still present;
@@ -270,12 +280,25 @@ below 1). The test `test_float64_is_the_nearest_double_and_hex_round_trips` chec
 
 ### 4.2 Seeds and indices
 
-**Proposition 4 (graph seeds).** (a) For $M, g \in [0,2^{32})$ the seed $(M, g)$ is the entropy `[M, g]` of two `uint32` words, the same as the native `[seed, i]`.
-(b) `SeedSequence([M, 0])` and `SeedSequence(M)` generate the same state, because numpy pads the entropy with zero words; `SeedSequence([M, g])` with $g \ge 1$ differs. (c) Consequently, if the master circuit
-seed equalled the master graph seed, graph 0 would be built from the very state words that key the circuit streams of the run; the manifest refuses equal master seeds (N1).
+**Proposition 4 (seed tuples).** Take the graph seeds $\gamma_g(n,\beta) = (\tau_G, M_g, n, \lambda_\beta, \eta_\beta, g)$ and the run seeds $\sigma(n,\beta)$ (five words, shared mode) and
+$\sigma(n,\beta,p)$ (seven words, independent mode) of §3.3, all words below $2^{32}$.
 
-*Proof.* (a) is the definition. (b) is checked numerically in `test_graph_zero_shares_its_seed_with_the_plain_master_seed` (and follows from the zero padding of the entropy pool). (c) is (b) with $g = 0$. ∎
-That distinct pairs give distinct generated states is a property of the hash behind `SeedSequence`; it is checked on a grid (`test_graph_seed_gives_the_stream_the_graph_generator_uses`), not proved.
+* (a) *Injective within a study.* In one manifest, $(n,\beta,g) \mapsto \gamma_g(n,\beta)$, $(n,\beta) \mapsto \sigma(n,\beta)$ and $(n,\beta,p) \mapsto \sigma(n,\beta,p)$ are injective as maps into tuples of integers: two different graphs
+  of one study, and two different conditions, have different seeds.
+* (b) *Disjoint domains.* No graph seed equals a run seed, whatever $M_g$ and $M_c$ are. So equal master seeds are harmless.
+* (c) *No identification through zero padding.* Every seed has 6, 5 or 7 words, more than the four that `SeedSequence` hashes by position, and the length is fixed within a domain and a gate mode. So two different seeds of the study
+  generate the same state only through a collision of the mixing hash inside `SeedSequence`, never because one of them is the other extended by zero words.
+
+*Proof.* (a) The words $M_g$ (or $M_c$), $n$ and, for a graph, $g$ are read off the tuple. The pair $(\lambda_x, \eta_x)$ determines $h(x) = \lambda_x + 2^{32}\eta_x$, and the tokens of a manifest have pairwise different
+hashes: the constructor refuses two $\beta$ tokens, and in independent mode two rates, with equal hashes (`manifest._distinct_seed_words`; for a given pair the probability is $2^{-64}$). So the tuple determines $\beta$ (and $p$).
+(b) The first word of a graph seed is $\tau_G$ and the first word of a run seed is $\tau_C \ne \tau_G$; they differ in the first position (and in the length). (c) `SeedSequence` reads an entropy that is a list of integers below
+$2^{32}$ as that list of 32-bit words $w_0, w_1, \dots$. It fills a pool of four words, `pool[i] = hashmix(w_i)` for $i < 4$ and `hashmix(0)` when the entropy has no word $i$, mixes every pool word into every other, and then mixes each
+further word $w_i$ ($i \ge 4$) into all four pool words, with a hash constant that advances at every step. For at most four words, therefore, appending zero words changes nothing: `[s]`, `[s, 0]` and `[s, 0, 0, 0]` generate
+one state, which is the hazard of the first draft, whose graph 0 had the seed $(M, 0)$ and so the state of the plain seed $M$, the key of the circuit streams when $M_c = M$. From the fifth word on, every word, a zero included,
+takes its own mixing step and changes the state. A study seed has at least five words, so this identification cannot occur; two different seeds of one domain and mode are two different word sequences of the same length. ∎
+That different entropy arrays generate different states is a property of the hash behind `SeedSequence`; it is checked on grids and not proved
+(`test_graph_seeds_differ_across_masters_sizes_betas_and_labels`, `test_run_seeds_differ_across_masters_sizes_and_betas_in_both_modes`, and for numpy's padding rule
+`test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words`).
 
 **Proposition 5 (the stream index).** For a stride $s \ge 1$ the map $(g, c) \mapsto g\,s + c$ is a bijection from $\mathbb N \times \lbrace 0, \dots, s-1\rbrace$ onto $\mathbb N$ with inverse
 $u \mapsto (\lfloor u/s\rfloor, u \bmod s)$. An engine run with `circuits_per_graph = s` gives trajectory $u$ the graph $\lfloor u/s\rfloor$ and the circuit stream $u$. Therefore the graph and
@@ -286,11 +309,12 @@ $s$ changes $u$ for every pair with $g \ge 1$, which is why $s$ is frozen.
 $s' \ne s$ and $g \ge 1$ then $g s' + c \ne g s + c$. ∎ The test `test_the_engine_runs_trajectory_u_on_graph_u_over_stride` checks the graph assignment, and
 `tests/test_study_sampling.py::test_unrelated_choices_leave_the_circuit_unchanged` checks that appended graphs leave trajectory $u$ unchanged.
 
-**Proposition 6 (the two gate modes).** In `shared` mode all rates of a condition use the seed $M_c$; by document 01 (Proposition 12) trajectory $u$ then has the same graph, gates and mask uniforms at every rate, and masks are nested in $p$.
-In `independent` mode the seeds $(M_c, h(p))$ of two different tokens differ unless $h(p) = h(p')$, a collision of a 64-bit hash (probability $2^{-64}$ for a given pair, not zero); then
-the streams are independent, nothing is nested and each rate is a separate ensemble.
+**Proposition 6 (the two gate modes, and the conditions).** In `shared` mode all rates of a condition $(n,\beta)$ use the one run seed $\sigma(n,\beta)$, which contains no $p$; by document 01 (Proposition 12) trajectory $u$ then has the same graph,
+gates and mask uniforms at every rate, and masks are nested in $p$. In `independent` mode the seeds $\sigma(n,\beta,p)$ of two different rates of a manifest differ in the last two words (the manifest refuses a collision of their 64-bit hashes), so the
+streams are independent in the ideal model, nothing is nested and each rate is a separate ensemble. In both modes two different conditions have different run seeds and different graph seeds (Proposition 4(a)): the conditions
+are independent samples, and only the rates of one condition are ever coupled (document 01, Proposition 14).
 
-*Proof.* The first statement is Proposition 12 of document 01. The second follows from the definition of $h$ and from the independence of `SeedSequence` streams of different entropy (§9, ideal). ∎
+*Proof.* The first statement is Proposition 12 of document 01, with the definition of $\sigma(n,\beta)$. The second and third follow from Proposition 4(a) and the independence of `SeedSequence` streams of different entropy (§9, ideal). ∎
 
 ### 4.3 Records and canonical text
 
@@ -335,7 +359,7 @@ number rounded by the same rule. ∎ The computation in `study/manifest.py::_hal
 ### 4.5 Revisions
 
 **Proposition 11 (what an accepted revision guarantees).** (a) If `check_extension(old, new)` is `None`, then for every trajectory $(n, \beta, p, g, c)$ of `old` (with $g < G_*^{\mathrm{old}}$, $c < C^{\mathrm{old}}$):
-the graph record (same $n$, $\beta$, seed pair, generator), the stream index $u$, the run seed and the float $\operatorname{fl}(p)$ are the same in `new`; the condition still exists in `new` with $T_{\max}^{\mathrm{new}} \ge T_{\max}^{\mathrm{old}}$ and the old
+the graph record (same $n$, $\beta$, seed tuple, generator), the stream index $u$, the run seed and the float $\operatorname{fl}(p)$ are the same in `new`; the condition still exists in `new` with $T_{\max}^{\mathrm{new}} \ge T_{\max}^{\mathrm{old}}$ and the old
 trajectory is the prefix of its extension (document 01, Proposition 13); every observable recorded under `old` has the same settings in `new`. (b) Extension is reflexive and transitive: `check_extension(a, a)` is `None`, and if `check_extension(a, b)` and `check_extension(b, c)` are `None` then so is `check_extension(a, c)`.
 The checkpoint rule is not part of the guarantee: it may change freely (Proposition 12 says what survives).
 
@@ -395,15 +419,24 @@ The checks of §3.11, in order, return the message of the first failure; the con
 
 Cost: $r - 1$ extension checks plus $r$ schedule computations.
 
+### 5.6 Computing a seed
+
+1. Check the master seed, $n$ and (for a graph) $g$ as integers in $[0, 2^{32})$ (`ValueError` otherwise, naming the argument); parse the tokens of $\beta$ (and, in independent mode, of $p$) to canonical strings (§5.1).
+2. For each token compute the 8-byte BLAKE2b digest of its canonical string, read it as a little-endian integer $h$ and split it into $\lambda = h \bmod 2^{32}$ and $\eta = \lfloor h/2^{32}\rfloor$.
+3. Concatenate in the order of §3.3: $(\tau_G, M_g, n, \lambda_\beta, \eta_\beta, g)$, or $(\tau_C, M_c, n, \lambda_\beta, \eta_\beta)$ followed by $(\lambda_p, \eta_p)$ in independent mode.
+4. Hand the tuple to the generator or the engine, which feeds it to `numpy.random.SeedSequence` (`graphs.watts_strogatz(..., seed=gamma)`, `MonitoredCircuit.run(..., seed=sigma)`).
+
+Cost: one BLAKE2b of a few bytes per token. Exactness: exact integer arithmetic; the state derived from the tuple is `SeedSequence`'s.
+
 ## 6. From the mathematics to the code
 
 | mathematics | code |
 |---|---|
 | token $x$, $\operatorname{tok}(x)$, $\operatorname{fl}(x)$, hex (§3.1) | `study/identity.py::Token` (`parse`, `token`, `float64`, `hex`, `is_exact`) |
-| rate hash $h(x)$ (§3.3) | `study/identity.py::rate_hash` |
+| token hash $h(x)$ and its words $(\lambda_x, \eta_x)$ (§3.3) | `study/identity.py::rate_hash`, `token_words` |
 | experiment id (§3.2) | `study/identity.py::check_experiment_id` |
 | trajectory key (§3.2) | `study/identity.py::TrajectoryKey` (`parse`, `stream_index`) |
-| graph seed, run seed (§3.3) | `study/identity.py::graph_seed`, `run_seed`; `ExperimentManifest.graph_seed`, `run_seed` |
+| graph seed $\gamma_g(n,\beta)$, run seed $\sigma$, tags $\tau_G, \tau_C$ (§3.3) | `study/identity.py::graph_seed`, `run_seed`, `GRAPH_SEED_TAG`, `CIRCUIT_SEED_TAG`; `ExperimentManifest.graph_seed(n, beta, g)`, `run_seed(n, beta, p)`; the refusal of equal seed hashes `study/manifest.py::_distinct_seed_words` |
 | $u = g s + c$ and inverse (§3.4) | `study/identity.py::stream_index`, `split_stream_index`; `ExperimentManifest.stream_index` |
 | $C(n,2)$, $L_n$ (document 01) | `study/identity.py::circulant_edges`, `original_edge_list` |
 | graph record (§3.5) | `study/identity.py::GraphRecord`, `build_graph`, `validate_graph`, `edge_digest` |
@@ -450,12 +483,34 @@ for _ in range(20_000):
 ### (b) Seeds, the stream index and the engine
 
 ```python
-print(ident.graph_seed(17, 3), ident.run_seed(29, "shared", "0.1"), ident.run_seed(29, "independent", "0.1"))
+def words(text):
+    """The low and high 32-bit words of the 8-byte BLAKE2b hash of a token string, read little-endian."""
+    return struct.unpack("<II", hashlib.blake2b(text.encode("ascii"), digest_size=8).digest())
+
+
+GRAPH_TAG, CIRCUIT_TAG = int.from_bytes(b"WSG1", "big"), int.from_bytes(b"WSC1", "big")
+gamma = ident.graph_seed(17, 16, "0.1", 3)  # graph 3 of the condition (n = 16, beta = 0.1)
+shared = ident.run_seed(29, 16, "0.1", "shared")
+independent = ident.run_seed(29, 16, "0.1", "independent", "0.15")
+print(gamma, shared, independent, sep="\n")
+assert gamma == (GRAPH_TAG, 17, 16, *words("0.1"), 3) and len(gamma) == 6
+assert shared == (CIRCUIT_TAG, 29, 16, *words("0.1")) and len(shared) == 5
+assert independent == (*shared, *words("0.15")) and len(independent) == 7
+assert all(ident.run_seed(29, 16, "0.1", "shared", p) == shared for p in ("0.1", "0.15", "0.2"))  # no p in it
 assert ident.rate_hash("0.1") == int.from_bytes(hashlib.blake2b(b"0.1", digest_size=8).digest(), "little")
-# (s, 0) is the SeedSequence of s itself: the reason the manifest refuses equal master seeds
-zero = np.random.SeedSequence([17, 0]).generate_state(4)
-assert np.array_equal(zero, np.random.SeedSequence(17).generate_state(4))
-assert not np.array_equal(np.random.SeedSequence([17, 1]).generate_state(4), zero)
+assert ident.token_words("0.1") == words("0.1") and sum(w << (32 * i) for i, w in enumerate(words("0.1"))) == ident.rate_hash("0.1")
+
+# only the rates of one condition share a seed: sizes and rewiring probabilities have their own
+assert len({ident.graph_seed(17, n, b, 3) for n in (16, 24) for b in ("0", "0.1")}) == 4
+assert len({ident.run_seed(29, n, b, "shared") for n in (16, 24) for b in ("0", "0.1")}) == 4
+
+# the zero padding of SeedSequence: up to four words a trailing zero changes nothing, so the first draft's
+# graph 0 (the pair (s, 0)) had the state of the plain seed s; a study seed has five words or more
+state = lambda seed: np.random.SeedSequence(seed).generate_state(4).tolist()
+assert state([17, 0]) == state([17]) == state(17) and state([17, 1]) != state(17)
+assert state(ident.graph_seed(17, 16, "0.1", 0)) != state(ident.graph_seed(17, 16, "0.1", 0)[:-1])  # the zero counts
+assert ident.graph_seed(17, 16, "0.1", 0) != ident.run_seed(17, 16, "0.1", "shared")  # equal masters, two domains
+assert state(17) not in (state(ident.graph_seed(17, 16, "0.1", 0)), state(ident.run_seed(17, 16, "0.1", "shared")))
 
 stride = 8
 for g, c in [(0, 0), (0, 7), (1, 0), (3, 1), (19, 7)]:
@@ -472,7 +527,8 @@ spec = mipt.MonitoredCircuit(
     num_system=12, edges=[r.edges for r in records], circuits_per_graph=4, layers=40,
     measurement_rate=0.1, schedule="random_edges", reference="purification",
 )
-text = str(spec.circuit(ident.stream_index(1, 3, 4), seed=29))  # graph 1, circuit 3
+seed = ident.run_seed(29, 12, "0.3", "shared")  # the run seed of the condition (12, 0.3)
+text = str(spec.circuit(ident.stream_index(1, 3, 4), seed=seed))  # graph 1, circuit 3
 pairs = set()
 for line in text.splitlines():
     if line.startswith("CLIFFORD_2Q"):
@@ -482,10 +538,10 @@ assert pairs <= {tuple(e) for e in records[1].edges.tolist()}  # all gates are e
 assert not pairs <= {tuple(e) for e in records[0].edges.tolist()}  # and not all of graph 0's
 
 # a run on explicit indices: the list of graphs must reach the largest label
-result = spec.run(indices=[ident.stream_index(1, 3, 4)], seed=29)
+result = spec.run(indices=[ident.stream_index(1, 3, 4)], seed=seed)
 assert result.trajectories.tolist() == [7]  # graph 1, circuit 3, trajectory 1 * 4 + 3
 try:
-    spec.run(indices=[ident.stream_index(3, 0, 4)], seed=29)  # graph 3: only graphs 0, 1, 2 were given
+    spec.run(indices=[ident.stream_index(3, 0, 4)], seed=seed)  # graph 3: only graphs 0, 1, 2 were given
 except ValueError as error:
     print("refused:", str(error)[:90])
 else:
@@ -499,7 +555,8 @@ rec = ident.build_graph(16, "0.1", 3, 17)
 print(rec.to_dict())
 payload = b"SGF2EDGES1\x00" + struct.pack("<I", 16) + b"".join(struct.pack("<ii", int(a), int(b)) for a, b in rec.edges)
 assert hashlib.sha256(payload).hexdigest() == rec.edge_digest and len(payload) == 11 + 4 + 8 * 32
-assert np.array_equal(rec.edges, graphs.watts_strogatz(16, 4, 0.1, seed=(17, 3)))
+assert rec.seed == ident.graph_seed(17, 16, "0.1", 3)
+assert np.array_equal(rec.edges, graphs.watts_strogatz(16, 4, 0.1, seed=rec.seed))
 rec.verify()
 assert rec.regenerate() == rec
 ```
@@ -536,12 +593,18 @@ spec = mipt.MonitoredCircuit(**kwargs, edges=[ident.build_graph(16, "0.1", g, 17
 assert spec.gates_per_layer == 8 and spec.circuits_per_graph == 8 and spec.num_trajectories == 24
 key = m.trajectory_key(16, "0.1", "0.15", 2, 5)
 assert m.stream_index(2, 5) == 21 and str(key) == "ws-demo:n=16:beta=0.1:p=0.15:g=2:c=5:r=0"
-assert m.run_seed("0.1") == 29 and m.graph_seed(2) == (17, 2) and m.warnings == ()
+assert m.run_seed(16, "0.1", "0.1") == ident.run_seed(29, 16, "0.1", "shared") == m.run_seed(16, "0.1", "0.15")
+assert m.graph_seed(16, "0.1", 2) == ident.graph_seed(17, 16, "0.1", 2) != m.graph_seed(24, "0.1", 2)
+assert m.warnings == ()
+
+# equal master seeds are accepted: graph seeds and run seeds carry different tags (ruling R-SEED)
+equal = mf.ExperimentManifest.from_json({**MANIFEST, "seeds": {"master_graph_seed": 17, "master_circuit_seed": 17}})
+assert equal.graph_seed(16, "0.1", 0) != equal.run_seed(16, "0.1", "0.1") and equal.digest() != m.digest()
 
 # strict reading: every message names the field
 for bad in (
     {**MANIFEST, "trials": {"graphs": 20, "circuits_per_graph": 2, "measurement_replicas": 2}},
-    {**MANIFEST, "seeds": {"master_graph_seed": 17, "master_circuit_seed": 17}},
+    {**MANIFEST, "seeds": {"master_graph_seed": 17, "master_circuit_seed": 2**32}},
     {**MANIFEST, "conditions": [{"n": [16, 4], "beta": ["0"], "p": ["0.1"]}]},
     {**MANIFEST, "layout": {}},
 ):
@@ -667,10 +730,10 @@ Files: `tests/test_study_identity.py` (identity), `tests/test_study_manifest.py`
 | Proposition 3 (float) | `test_float64_is_the_nearest_double_and_hex_round_trips` (property), `test_a_third_stays_rational_and_records_float_and_hex` | the neighboring doubles are no closer; `fromhex(hex)` returns the float |
 | malformed tokens | `test_malformed_tokens_are_refused_with_a_message_naming_the_field`, `test_token_constructor_guards_its_value` | 18 bad inputs, message starts with the field name |
 | trajectory key (§3.2) | `test_trajectory_key_*` (5 tests, one a property) | canonical string, parse round trip, frozen and hashable, bad fields refused |
-| Proposition 4 (seeds) | `test_graph_seed_*`, `test_graph_zero_shares_its_seed_with_the_plain_master_seed`, `test_run_seed_*` | `(master, g)` equals the native `[seed, i]` of `api._build_graph`; distinct pairs on a grid give distinct states; `(s, 0)` equals `s`; the rate hash against `hashlib` and a pinned value |
+| Proposition 4 (seed tuples) | `test_the_seed_tags_spell_their_domains`, `test_token_words_are_the_low_and_high_halves_of_the_blake2b_hash` (4 tokens), `test_token_words_name_the_token_and_not_its_spelling`, `test_graph_seed_is_the_tagged_tuple_of_master_size_beta_and_graph`, `test_graph_seed_refuses_what_is_not_a_seed_word_or_a_token` (12 cases), `test_graph_seeds_differ_across_masters_sizes_betas_and_labels`, `test_graph_seed_is_injective_in_the_condition_and_the_graph` (property), `test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds`, `test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words`, `test_seed_tuples_have_one_fixed_length_per_domain_and_it_exceeds_the_pool`, `test_graph_seed_gives_the_stream_the_graph_generator_uses`; `tests/test_study_manifest.py::test_equal_master_seeds_are_accepted_because_the_seed_domains_are_disjoint`, `test_two_tokens_with_one_seed_hash_are_refused`, `test_seeds_depend_on_the_condition_and_only_the_run_seed_on_the_gate_mode` | the words recomputed in the test with `hashlib` and `struct` and by the independent `tests/_ws_reference.py::graph_seed`, `run_seed`, `token_words`; pinned golden words and tuples; 192 graph seeds (3 masters, 4 sizes, 4 betas, 4 labels) pairwise different as tuples and as `SeedSequence` states; equal seeds iff equal arguments (300 random examples); 48 graph seeds and 36 run seeds with equal master seeds never meet, as tuples or as states, and none is the state of the plain master seed; the numpy padding rule (up to four words a trailing zero changes nothing, from the fifth it does); lengths 6, 5 and 7; a forced hash collision between two $\beta$ tokens, or two rates in independent mode, is refused |
 | Proposition 5 (stream index) | `test_stream_index_values_and_inverse`, `test_stream_index_is_one_to_one_and_ignores_the_totals` (property), `test_the_engine_runs_trajectory_u_on_graph_u_over_stride`; `tests/test_study_sampling.py::test_unrelated_choices_leave_the_circuit_unchanged` | exact; bijection and independence of the totals; the engine assignment; appended graphs leave $u$ unchanged |
-| Proposition 6 (modes) | `tests/test_study_sampling.py::test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent` | exact |
-| Proposition 7, graph record (§3.5) | `test_build_graph_returns_the_validated_record_of_the_native_graph`, `test_the_digest_is_pinned_and_agrees_with_the_independent_reference`, `test_graph_record_identity_comes_from_the_digest_and_the_provenance`, `test_verify_detects_a_tampered_graph`, `test_edge_digest_is_strict_about_canonical_form`, `test_validate_graph_*` | the digest against `struct` and `hashlib` computed in the test and against the reference rewiring of `tests/_ws_reference.py`; a pinned vector; tampering detected |
+| Proposition 6 (modes, conditions) | `test_run_seed_shared_is_one_tuple_per_condition_for_every_rate`, `test_run_seed_independent_appends_the_words_of_the_rate`, `test_run_seeds_differ_across_masters_sizes_and_betas_in_both_modes` (96 seeds), `test_run_seed_refuses_unknown_modes_and_bad_arguments`; `tests/test_study_sampling.py::test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent`, and for the independence of conditions `test_graph_collections_of_different_sizes_are_independent_samples`, `test_graph_collections_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_sizes_are_independent_samples` | exact: one five-word seed for every rate in shared mode, a seven-word seed per rate in independent mode; the conditions' seeds all differ; the four statistical tests of document 01 (Proposition 14, §8), each with the shared seed of the first draft as negative control |
+| Proposition 7, graph record (§3.5) | `test_build_graph_returns_the_validated_record_of_the_native_graph`, `test_the_digest_is_pinned_and_agrees_with_the_independent_reference`, `test_graph_record_identity_comes_from_the_digest_and_the_provenance`, `test_verify_detects_a_tampered_graph`, `test_edge_digest_is_strict_about_canonical_form`, `test_validate_graph_*` | the digest against `struct` and `hashlib` computed in the test and against the reference rewiring of `tests/_ws_reference.py` seeded with the reference's own seed tuple; six pinned digests; tampering detected, including every altered word of the seed tuple, the other domain's tag, a five-word tuple and the old pair |
 | Proposition 8 (canonical JSON) | `test_canonical_json_*`, `test_sha256_hex_matches_the_published_vectors` | sorted keys, tokens as strings, numpy and tuples, refusals with the path of the value, published SHA-256 vectors |
 | Proposition 9 (manifest digest) | `test_digest_is_stable_across_key_order_whitespace_and_spelling`, `test_the_canonical_blocks_group_sizes_that_share_rates_and_betas`, `test_digest_changes_with_every_scientific_setting`, `test_the_canonical_text_of_a_minimal_manifest_is_the_documented_form`, `test_the_digest_of_the_design_example_is_pinned` | 10 shuffled spellings and 4 factorizations give one digest; 13 changes give 13 new digests; a literal canonical text and a `hashlib` digest |
 | strict reading (§3.7) | `test_malformed_manifests_are_refused_naming_the_field` (130 cases), `test_bad_json_text_is_refused`, `test_duplicate_conditions_across_blocks_and_equal_floats_are_refused`, `test_from_json_reads_text_dicts_and_files` | each case refused with a message that names the field |
@@ -684,21 +747,23 @@ Files: `tests/test_study_identity.py` (identity), `tests/test_study_manifest.py`
 
 ## 9. Limitations and departures
 
-Departures from v1.4 and the design (D1, D2, D4 are the design's; N1–N6 are introduced here, each with its reason):
+Departures from v1.4 and the design (D1, D2, D4 and D6 are the design's; N1–N7 are introduced here, each with its reason):
 
 * **D1.** `measurement_replicas` must be 1: the native engine draws gates and masks from one stream, so independent mask replicates on the same gates do not exist (v1.4 §7.2, §8.1). The key keeps $r$.
 * **D2.** The frozen stride $s \ge C$ (§3.4, Proposition 5).
-* **D4.** `gate_mode="independent"` derives the run seed from the rate token (§3.3).
-* **N1.** The master graph seed and the master circuit seed must differ, because graph 0 would otherwise share its seed words with the circuit streams (Proposition 4). This refuses a manifest the design would accept.
-* **N2.** Seeds and graph labels are below $2^{32}$ (§3.3), so $(M, g)$ is a two-word entropy. Larger seeds are refused rather than reduced.
+* **D4.** `gate_mode="independent"` appends the two words of the hash of the rate token to the run seed (§3.3).
+* **D6 (ruling R-SEED).** Graph seeds and run seeds are domain-tagged fixed-length tuples that depend on $(n, \beta)$ (§3.3), not the native collection convention `[seed, i]` shared by every condition: v1.4 couples conditions across $p$ only, and finite-size fits need sizes and rewiring probabilities to be independent samples (document 01, §3.8, Proposition 14). The graphs are still generated by the native `graphs.watts_strogatz`, and within one $(n, \beta)$ the native collection mapping $u = g s + c$ holds. A consequence of the change from the first draft: every graph and trajectory differs from what the pair convention gave (nothing had been stored).
+* **N1 (superseded by ruling R-SEED).** The first version refused equal master seeds, because graph 0 had the seed $(M, 0)$, which `SeedSequence` pads to the plain seed $M$, the key of the circuit streams when $M_c = M$. With the domain tags and the fixed lengths of §3.3 the hazard is gone (Proposition 4) and equal master seeds are accepted.
+* **N2.** Master seeds, sizes and graph labels are below $2^{32}$ (§3.3): each is one word of a seed tuple. Larger values are refused rather than reduced.
 * **N3.** The digest is computed from the canonical factorization of the conditions, not from the blocks as written (§3.8, Proposition 9). Two manifests that describe the same conditions have one digest; the design's example, which is a single product block, is unchanged.
 * **N4.** `label` is restricted to `exploratory` and `confirmatory` (v1.4 §9), and a revision may not change it. The manifest does not enforce v1.4's rule that the rate grid is frozen before confirmatory runs: a confirmatory manifest may still gain conditions, as for an exploratory one.
 * **N5 (superseded by ruling R-CK).** The first version of this part let a revision only *add* checkpoints, which made a larger $T_{\max}$ under the geometric rule impossible without an explicit list. Ruling R-CK replaced that: a revision may raise $T_{\max}$ and change the checkpoint rule in any way, and the schedule used for work is the union of the schedules of all revisions (§3.9, Proposition 12). The costs: the union of a long chain is as large as the sum of its own schedules (the points of the geometric rule of every horizon that was ever used), and a trajectory run under an earlier revision holds only that revision's depths until the runner reruns it to the longer horizon.
 * **N6.** `monitored_circuit_kwargs` leaves out `edges` and `probes`: the graph records of a work unit and the probes are the runner's. Two tokens with the same float64 are refused as a duplicate condition (§3.8).
+* **N7.** The manifest refuses two different $\beta$ tokens (in `gate_mode="independent"` also two rates) whose 64-bit seed hashes coincide (§3.7, Proposition 4(a)). It makes "different conditions have different seeds" a fact about every accepted manifest, at the price of refusing a manifest with probability $2^{-64}$ per pair of tokens.
 
 Other limitations:
 
-* **Hash-based claims.** That distinct seeds give distinct streams, that two different graphs have different digests, and that two different tokens have different rate hashes are claims about SHA-256, BLAKE2b and the `SeedSequence` mixing; they are checked on grids and not proved.
+* **Hash-based claims.** That distinct seeds give distinct streams, that two different graphs have different digests, and that two different tokens of different manifests have different token hashes are claims about SHA-256, BLAKE2b and the `SeedSequence` mixing; they are checked on grids and not proved (within one manifest the token hashes are checked, N7).
 * **JSON numbers.** A float is read through its shortest round-trip decimal, which is the typed decimal only for at most 15 significant digits (Proposition 2); the exact forms (decimal or rational strings) have no such limit.
 * **Analysis settings can change in a revision.** They touch no stored value; values derived under them record the settings used. The `peak` rule is "predeclared" (v1.4 §5.8) only if the label is confirmatory and the manifest is not revised, which the code does not enforce (N4).
 * **No store.** Nothing here persists a manifest, a record or a key; document 05 describes the store that does.

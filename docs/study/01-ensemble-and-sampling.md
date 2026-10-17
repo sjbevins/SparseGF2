@@ -76,7 +76,7 @@ mathematics, the independent reference implementations and conformance tests
 | $A_j$ | the eligible targets $V \setminus (N_{G^{(j-1)}}(a_j) \cup \lbrace a_j\rbrace)$ | subset of $V$ | the loop condition `w != a and w not in adj[a]` |
 | $b'_j$ | the new endpoint | vertex | `w` |
 | $\mu_{n,\beta}$ | the law of $G^{(m)}$ | probability on graphs | `graphs.watts_strogatz` |
-| $g$, $G_g$ | a graph label and the graph drawn for it | integer, graph | `graph_seed(master, g)` |
+| $g$, $G_g$ | a graph label and the graph drawn for it (for the condition $(n, \beta)$) | integer, graph | `identity.graph_seed(master, n, beta, g)` |
 | $E_g$ | the edge set of $G_g$, sorted, $a < b$ | set of pairs | the rows of `edges` |
 | $h(n)$ | gates per layer, $\lfloor n/2\rfloor$ | integer | `gates_per_layer` |
 | $e_{t,a}$, $Q_{t,a}$ | the edge and the Clifford of gate $a$ of layer $t$ | $E_g$, $\lbrace 0, \dots, 11519\rbrace$ | `next_below(rng, len(edges))`, `next_below(rng, 11520)` |
@@ -169,8 +169,11 @@ $n \ge 5$. The law is generally **not** uniform over simple graphs with $2n$ edg
 
 ### 3.4 The native realization (`GRAPH_GENERATOR_VERSION = "ws-offset-major-reject-1"`)
 
-The generator is `graphs.py::watts_strogatz(n, 4, beta, seed=...)`. For graph $g$ the study passes
-`seed = (master, g)` (document 02). The generator uses the xoshiro256** state
+The generator is `graphs.py::watts_strogatz(n, 4, beta, seed=...)`. For graph $g$ of the condition
+$(n, \beta)$ the study passes the six-word seed
+`(GRAPH_SEED_TAG, master, n, lo, hi, g)` of `identity.graph_seed` (document 02, §3.3; $(lo, hi)$ are the
+two 32-bit words of a hash of the token of $\beta$), so the seed names the condition (§3.8). The generator
+accepts any seed; it uses the xoshiro256** state
 `np.random.SeedSequence(seed).generate_state(4, dtype=np.uint64)` (`_kernel/rng.py::seed_state`; an
 all-zero state would become $(1,0,0,0)$) and two draws:
 
@@ -212,12 +215,35 @@ for every site at every rate, including $p = 0$ and $p = 1$.
 
 Trajectory $u$ of a run with seed $\sigma$ draws its circuit from the stream
 `stream_state(key_struct, u)`, with `key_struct` the first two words of
-`SeedSequence(σ).generate_state(4)` (`mipt.py::_keys`; the last two words key the probe streams). One
+`SeedSequence(σ).generate_state(4)` (`mipt.py::_keys`; the last two words key the probe streams). The
+study's $\sigma$ is the run seed `identity.run_seed(master, n, beta, gate_mode, p)` of the condition
+(document 02, §3.3): five words that name $(n, \beta)$ in `gate_mode="shared"`, the same at every $p$ (§3.8). One
 trajectory therefore draws, in this order and nothing else (`_kernel/ensemble.py`, module docstring,
 item 4): for each layer $t = 1, \dots, T$, for each gate $a = 1, \dots, h(n)$ an edge index and a Clifford
 index, then $n$ mask uniforms. A graph collection assigns trajectory $u$ to graph
 $\lfloor u / \texttt{circuits\_per\_graph} \rfloor$ and never draws graph randomness from the circuit
 stream.
+
+### 3.8 What is coupled and what is not (v1.4 §1, §6.2, §7.2; design §3 and §11, ruling R-SEED)
+
+The study couples its conditions across the measurement rate $p$ only: for one $(n, \beta)$ the graphs, the
+gates and the mask uniforms are the same at every $p$ (so curves across $p$ are paired and the masks are
+nested, Proposition 12). It does **not** couple them across $n$ or $\beta$. Finite-size fits and comparisons
+between rewiring probabilities treat the samples of different $(n, \beta)$ as independent, and samples built
+from one raw stream are not: the same raw draws would feed `next_below(|E|)` at different $|E|$, and the first
+rewiring decisions $B_j = [U_j < \beta]$ would coincide. (The first draft of the design shared the seed
+$(M, g)$ across conditions, as the native collection convention does; ruling R-SEED replaced it.) The seeds are
+fixed-length tuples of 32-bit words that name the condition (document 02, §3.3). With the tags
+$\tau_G = \texttt{0x57534731}$ and $\tau_C = \texttt{0x57534331}$ (the ASCII codes of `WSG1` and `WSC1`) and
+$(\lambda_x, \eta_x)$ the low and high 32-bit words of the 64-bit hash of the token of $x$:
+
+| seed | tuple | words | depends on |
+|---|---|---|---|
+| graph $g$ of $(n, \beta)$ | $(\tau_G, M_g, n, \lambda_\beta, \eta_\beta, g)$ | 6 | $n$, $\beta$, $g$; not $p$ |
+| run, `gate_mode="shared"` | $(\tau_C, M_c, n, \lambda_\beta, \eta_\beta)$ | 5 | $n$, $\beta$; not $p$ |
+| run, `gate_mode="independent"` | $(\tau_C, M_c, n, \lambda_\beta, \eta_\beta, \lambda_p, \eta_p)$ | 7 | $n$, $\beta$, $p$ |
+
+Proposition 14 states the consequences, and four tests check them (§8).
 
 ## 4. Propositions and proofs
 
@@ -445,13 +471,15 @@ independent. ∎ So a rate token $x$ (document 02) is realized by Bernoulli($P_{
 $\lvert P_{\mathrm{real}} - x\rvert < 2^{-52}$, below any statistical resolution (v1.4 §7.2: the ideal law "cannot in general be
 represented by a finite binary floating-point threshold").
 
-**Proposition 12 (shared uniforms nest the masks).** In `gate_mode="shared"` (one master circuit seed for
-every rate), fix the graph, the trajectory index $u$ and the horizon. Then the schedule $\Gamma$ and the
+**Proposition 12 (shared uniforms nest the masks).** In `gate_mode="shared"` (the run seed of the condition
+$(n, \beta)$, which is the same for every rate), fix the condition, the graph, the trajectory index $u$ and the
+horizon. Then the schedule $\Gamma$ and the
 uniforms $U_{t,i}$ are the same at every rate, and for $p_1 \le p_2$ the masks satisfy
 $M_{t,i}(p_1) \le M_{t,i}(p_2)$ for all $t, i$. For each fixed $p$ the law of $(G, \Gamma, M)$ is the
 product law of §3.1.
 
-*Proof.* The draws of a trajectory are consumed in the order of §3.7: for each layer, the gate draws, then
+*Proof.* In shared mode the run seed does not contain $p$ (document 02, Proposition 6), so trajectory $u$ has the
+same stream at every rate. The draws of a trajectory are consumed in the order of §3.7: for each layer, the gate draws, then
 exactly $n$ doubles, and the number and order of all draws depend on the stream and on $(n, \lvert E\rvert)$ only (the
 rare rejections inside `next_below` depend on the stream, not on $p$): `gen_layer` always draws the doubles,
 and $p$ enters only in the comparison $U < q_p$. So $\Gamma$ and $U$ do not depend on $p$.
@@ -474,6 +502,31 @@ separate key `key_probe` (the last two words of the seed), checkpoints only deci
 trajectory owns its state array, so scheduling cannot change it (`tests/test_invariance.py`,
 `tests/test_randomness_contract.py`). ∎ A layer is not independently addressable: the state after $t-1$ layers
 is reached only by replaying them, which is why extending the horizon reruns from layer 0 (design D3).
+
+**Proposition 14 (conditions are independent samples; only the rates of one condition are coupled).** Let the
+seed tuples of §3.8 be given and assume, as in the rest of this document, that streams of different `SeedSequence`
+entropy are independent (the ideal model; document 02, §9). Then
+
+* (a) for two different conditions $(n, \beta) \ne (n', \beta')$ of one study, the graph collections
+  $(G_g)_g$ and $(G'_g)_g$ and the run seeds are four different families of tuples, so the collections and the
+  circuit streams of the two conditions are mutually independent;
+* (b) within one condition, graph $g$ and graph $g' \ne g$ are independent, and the graph collection is the same
+  at every rate (the graph seed has no $p$);
+* (c) in `gate_mode="shared"` the rates of one condition use one run seed: the gates and the mask uniforms of
+  trajectory $u$ are the same at every rate and the masks are nested (Proposition 12); in `gate_mode="independent"`
+  the rates have different run seeds, so their circuits are independent and nothing is nested;
+* (d) a graph seed never equals a run seed, whatever the master seeds are, so one master seed may serve both.
+
+*Proof.* The statements (a), (b) and (d) are the injectivity of the seed maps (document 02, Proposition 4): a graph
+seed determines $(M_g, n, \beta, g)$ and a run seed $(M_c, n, \beta)$ (and $p$ in independent mode), and a graph seed
+and a run seed differ in the first word. Different tuples are different entropy, hence independent streams in the ideal
+model, and functions of independent streams are independent. (c) is Proposition 12 for the shared mode, and for the
+independent mode the seeds differ by the words of $p$ (document 02, Proposition 6). ∎ *What the tests check.* Independence
+cannot be proved for a pseudorandom generator (v1.4 §7.1). The tests look where a shared seed shows at once (§8): the visit of the first rewiring
+attempt of graph $g$ at two sizes, or two values of $\beta$, would be identical if the first draws were shared; and the
+index of the first gate would be equal at two values of $\beta$ (the same $2n$ values from the same draws), and its
+cell $[e/2n, (e+1)/2n)$ would contain the same first draw at two sizes. Each statistic has an exact null law under independence; each
+is degenerate under the shared seeds of the first draft, which the tests use as the negative control.
 
 ## 5. Algorithms
 
@@ -534,8 +587,8 @@ lines and an `M` line of the measured sites before each `TICK`.
   trajectories (`correlation_pvalues`). Given the gates the masks are independent Bernoulli($p$), so for any weights
   $c$ that depend on the gates only $z_i = \sum Y c/\sqrt{p(1-p)\sum c^2}$ is standard normal, and the $z_i$ of different sites
   are independent (`gate_dependence_pvalues`).
-* **False-alarm accounting.** Roughly 80 such tests run with fixed seeds, about 40 chi-square tests at $10^{-6}$ and
-  about 40 z-tests at $6.8\times10^{-6}$ (counting each assertion of §8 once). A correct implementation at fresh
+* **False-alarm accounting.** Roughly 84 such tests run with fixed seeds, about 40 chi-square tests at $10^{-6}$ and
+  about 44 z-tests at $6.8\times10^{-6}$ (counting each assertion of §8 once). A correct implementation at fresh
   seeds would fail at least one with probability below $4\times10^{-4}$; at the fixed seeds the outcome is
   deterministic. Passing says no deviation was found at the stated sensitivity, not that the generator is
   random (v1.4 §7.4).
@@ -562,6 +615,7 @@ lines and an `M` line of the measured sites before each `TICK`.
 | $j = 16s + b$ (§3.5) | `clifford.py::Clifford.from_index`, `symplectic_group`; kernel `_kernel/tableau.py::apply_2q` |
 | mask $[U < q_p]$ (§3.6) | `_kernel/ensemble.py::gen_layer` (`next_double(rng) < p`); $q_p$ = `identity.Token.float64` |
 | streams (§3.7) | `_kernel/rng.py::stream_state`, `mipt.py::_keys`; the export `MonitoredCircuit.circuit` |
+| seeds of graphs and runs (§3.8) | `study/identity.py::graph_seed`, `run_seed`, `token_words`; `ExperimentManifest.graph_seed`, `run_seed`; test side `tests/_ws_reference.py::graph_seed`, `run_seed`, `token_words` |
 | study protocol keywords | `study/manifest.py::ExperimentManifest.monitored_circuit_kwargs` (document 02) |
 | parsing and transcribing circuits in tests | `tests/_ws_reference.py::parse_circuit`, `study_draws` |
 | statistics (§5.4) | `tests/_ws_reference.py::chi2_sf`, `chi2_p`, `uniform_p`, `binomial_pmf`; `tests/test_study_sampling.py` helpers |
@@ -572,7 +626,8 @@ The blocks share one namespace and run in order; a block may use the names an ea
 
 ### (a) The exact law at n = 6, against the native generator
 
-The dynamic program of §5.2 in 25 lines, with exact fractions, and 20,000 graphs from the generator.
+The dynamic program of §5.2 in 25 lines, with exact fractions, and 20,000 graphs from the generator, each seeded
+with the study's graph seed `identity.graph_seed(17, n, "0.5", g)` (§3.8).
 
 ```python
 import itertools
@@ -581,6 +636,7 @@ from fractions import Fraction
 import numpy as np
 
 from sparsegf2 import graphs, mipt
+from sparsegf2.study import identity as ident
 
 
 def exact_law(n, beta):
@@ -626,7 +682,7 @@ exact_sd = float(sum(q * (new_edges(m) - exact_mean) ** 2 for m, q in law.items(
 total, count, seen = 20_000, 0, {}
 for g in range(total):
     mask = 0
-    for u, v in graphs.watts_strogatz(n, 4, 0.5, seed=(17, g)).tolist():
+    for u, v in graphs.watts_strogatz(n, 4, 0.5, seed=ident.graph_seed(17, n, "0.5", g)).tolist():
         mask |= bit[(u, v)]
     seen[mask] = seen.get(mask, 0) + 1
     count += new_edges(mask)
@@ -737,9 +793,10 @@ def rewire(n, beta, seed, mapping="reject"):
 n, beta, trials = 24, 0.5, 200
 equal = {"reject": 0, "index": 0}
 for g in range(trials):
-    native = graphs.watts_strogatz(n, 4, beta, seed=(17, g))
+    seed = ident.graph_seed(17, n, "0.5", g)
+    native = graphs.watts_strogatz(n, 4, beta, seed=seed)
     for mapping in equal:
-        equal[mapping] += np.array_equal(rewire(n, beta, (17, g), mapping), native)
+        equal[mapping] += np.array_equal(rewire(n, beta, seed, mapping), native)
 print("graphs equal to the native one, of", trials, ":", equal)
 assert equal == {"reject": trials, "index": 0}
 
@@ -800,10 +857,11 @@ for p in (Fraction(1, 10), Fraction(1, 2), Fraction(1, 3)):
 assert Fraction(float(Fraction(1, 2))) == Fraction(1, 2)  # a dyadic rate is exact
 
 n = 10
-edges = graphs.watts_strogatz(n, 4, 0.3, seed=(17, 0))
+edges = ident.build_graph(n, "0.3", 0, 17).edges  # graph 0 of (10, 0.3) under the study's seed
+RUN_SEED = ident.run_seed(29, n, "0.3", "shared")  # one run seed for every rate of the condition (10, 0.3)
 
 
-def exported(p, layers, u=3, seed=29):
+def exported(p, layers, u=3, seed=RUN_SEED):
     spec = mipt.MonitoredCircuit(
         num_system=n, edges=[edges], circuits_per_graph=4, layers=layers, measurement_rate=p,
         schedule="random_edges", reference="purification", checkpoints="every_layer",
@@ -841,8 +899,9 @@ Stream $u$ of the circuit key, drawn by hand in the order of §3.7, equals the e
 ```python
 from sparsegf2._kernel.rng import stream_state
 
-n, layers, seed, u, p = 10, 4, 29, 3, 0.3
-edges = graphs.watts_strogatz(n, 4, 0.3, seed=(17, 0))
+n, layers, u, p = 10, 4, 3, 0.3
+seed = ident.run_seed(29, n, "0.3", "shared")
+edges = ident.build_graph(n, "0.3", 0, 17).edges
 spec = mipt.MonitoredCircuit(
     num_system=n, edges=[edges], circuits_per_graph=4, layers=layers, measurement_rate=p,
     schedule="random_edges", gates_per_layer=n // 2, random_orientation=False,
@@ -867,6 +926,52 @@ assert "\n".join(lines) == str(spec.circuit(u, seed=seed))
 print("\n".join(lines[3:6]))
 ```
 
+### (h) Sizes and rewiring probabilities are independent samples (Proposition 14)
+
+The visit of the first rewiring attempt is read from the first draws of a graph seed. Under the study's seeds it is
+independent between two sizes, and nested between two values of $\beta$ only by chance; under the native collection
+convention of the first draft (one seed $(17, g)$ for every condition) it is the same draw.
+
+```python
+import math
+
+num_graphs = 2000
+
+
+def first_attempt(n, beta, seed):
+    """The visit of the first rewiring decision that succeeds (2n if none): the first draws of the seed."""
+    rng = seed_state(seed)
+    for j in range(2 * n):
+        if next_double(rng) < float(beta):
+            return j
+    return 2 * n
+
+
+conventions = {
+    "study": lambda n, beta, g: ident.graph_seed(17, n, beta, g),  # the condition is in the seed
+    "shared": lambda n, beta, g: (17, g),  # one seed per g for every condition
+}
+q_sizes = sum(0.25 ** (j + 1) for j in range(24)) + 2.0**-49  # P(equal) for first attempts, beta = 1/2, n = 12 and 16
+q_betas = 10 / 13  # P(first attempt at beta = 1/2 is not after that at beta = 0.3), up to 1e-14
+for name, seed_of in conventions.items():
+    equal = sum(
+        first_attempt(12, "0.5", seed_of(12, "0.5", g)) == first_attempt(16, "0.5", seed_of(16, "0.5", g))
+        for g in range(num_graphs)
+    )
+    nested = sum(
+        first_attempt(16, "0.5", seed_of(16, "0.5", g)) <= first_attempt(16, "0.3", seed_of(16, "0.3", g))
+        for g in range(num_graphs)
+    )
+    z_equal = (equal - num_graphs * q_sizes) / math.sqrt(num_graphs * q_sizes * (1 - q_sizes))
+    z_nested = (nested - num_graphs * q_betas) / math.sqrt(num_graphs * q_betas * (1 - q_betas))
+    print(f"{name:7s} sizes 12 and 16: equal {equal} of {num_graphs} (z = {z_equal:.1f});"
+          f" betas 0.3 and 0.5: nested {nested} (z = {z_nested:.1f})")
+    if name == "study":
+        assert abs(z_equal) < 4.5 and abs(z_nested) < 4.5  # about a third equal, about 10/13 nested
+    else:
+        assert equal > 0.99 * num_graphs and nested == num_graphs  # the same draws
+```
+
 ## 8. Validation map
 
 All tests are in `tests/test_study_sampling.py` unless marked. "z-test" means $\lvert z\rvert < 4.5$; "χ²" means $p > 10^{-6}$.
@@ -875,7 +980,7 @@ The sample sizes are the ones in the tests.
 | claim | test | what is checked |
 |---|---|---|
 | chi-square tail (§5.4) | `test_chi_square_tail_matches_closed_forms`, `test_chi_square_helper_pools_small_cells_and_detects_bias` | closed forms ($\nu$ even up to 40, 1, 3), published critical values (relative error $10^{-5}$); a 10% bias is rejected |
-| native generator = independent rewiring (v1.4 §7.4, requirement 1) | `test_the_reference_rewiring_equals_the_native_generator_trace_for_trace`, `test_equality_holds_for_every_seed_form`, `test_equality_and_validity_for_arbitrary_seeds` | exact equality of edge arrays: 8,640 graphs ($n = 5, \dots, 40$, $\beta \in \lbrace 0, .05, .3, 1\rbrace$, 60 seeds), seven seed forms, and a hypothesis property over $n \le 60$ and 32-bit master seeds |
+| native generator = independent rewiring (v1.4 §7.4, requirement 1) | `test_the_reference_rewiring_equals_the_native_generator_trace_for_trace`, `test_equality_holds_for_every_seed_form`, `test_equality_and_validity_for_arbitrary_seeds` | exact equality of edge arrays: 8,640 graphs ($n = 5, \dots, 40$, $\beta \in \lbrace 0, .05, .3, 1\rbrace$, 60 graph labels, each seeded with the study's graph seed), ten seed forms (integers, lists, pairs, and the five-, six- and seven-word tuples of §3.8), and a hypothesis property over $n \le 60$ and 32-bit master seeds that also compares the seed with the reference's independent derivation |
 | Proposition 8 (mapping) | `test_the_mapping_from_random_numbers_to_targets_matters_not_only_the_law` | at most 2 of 200 graphs equal under the index mapping; it passes the uniformity test |
 | Proposition 3, 4(b), (e), (f) | `test_graph_properties_hold_at_every_size_and_rewiring_probability`, `test_c_n_2_is_the_complete_graph_up_to_five_vertices_and_a_ring_after`; `tests/test_study_identity.py::test_circulant_edges_follow_the_definition`, `test_original_edge_list_is_offset_major_and_matches_the_native_ring`, `test_validate_graph_*` | exact, $n = 5, \dots, 40$ (odd and even), simple, $2n$ edges, degree $\ge 2$, $\beta = 0$ is $C(n,2)$, $n = 5$ is $K_5$ |
 | Proposition 4(a) (abort) | `test_the_abort_fires_on_a_corrupted_order_and_never_on_the_real_one`, `test_no_reachable_state_lacks_the_visited_edge` | the abort fires on a corrupted order; exhaustive over all reachable graphs for $n = 5, 6, 7$ |
@@ -890,7 +995,8 @@ The sample sizes are the ones in the tests.
 | Proposition 11 (mask law) | `test_masks_are_independent_bernoulli_p_at_every_site`, `test_the_extreme_rates_measure_nothing_or_everything` | z-tests per site and for the total (8,000 layers $\times$ 12 sites); a wrong rate is rejected; $p = 0, 1$ exact |
 | masks uncorrelated (v1.4 §7.4) | `test_masks_have_no_site_or_layer_correlation_beyond_chance`, `test_the_correlation_tests_have_the_power_to_see_planted_dependence` | six correlation families, χ² each; planted site and layer dependence rejected |
 | masks independent of gates | `test_masks_are_independent_of_the_gate_draws` | three layer offsets of "site touched by a gate", four correlations of the layer count with the gate classes and edges |
-| Proposition 12 (nesting; requirement 11) | `test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent` | exact: 9 rates, 5 aligned $(g,c,u)$: the same gates, mask $=$ `uniform < float64(p)`, nested chain; independent mode: other gates, not nested |
+| Proposition 12 (nesting; requirement 11) | `test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates`, `test_nesting_does_not_hold_when_the_gate_mode_is_independent` | exact: 9 rates, 5 aligned $(g,c,u)$: one run seed (five words) for all rates, the same gates, mask $=$ `uniform < float64(p)`, nested chain; independent mode: three seven-word seeds, other gates, not nested |
+| Proposition 14 (independent conditions) | `test_graph_collections_of_different_sizes_are_independent_samples`, `test_graph_collections_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_betas_are_independent_samples`, `test_circuit_streams_of_different_sizes_are_independent_samples`; `tests/test_study_identity.py::test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds` | z-tests with exact null laws, each with the shared seed of the first draft as negative control. Sizes 12 and 16, $\beta = 1/2$, 3,000 graphs: first rewiring attempt equal for 1,021 (null $q = 1/3$, $z = 0.81$; shared: 3,000). $\beta = 0.3$ and $0.5$ at $n = 16$: attempt at $0.5$ not after that at $0.3$ for 2,311 of 3,000 (null $10/13$, $z = 0.14$; shared: 3,000). Edge indices at $\beta = 0.1$ and $0.3$, $n = 12$: equal at 372 of 9,600 gate draws (null $1/24$, $z = -1.43$; shared: all). First gate of $n = 12$ and $16$: cells overlapping for 67 of 1,000 trajectories (null $1/16$, $z = 0.59$; shared: all) |
 | Proposition 13 (requirement 6) | `test_a_longer_horizon_extends_the_circuit_prefix`, `test_unrelated_choices_leave_the_circuit_unchanged`, `test_the_simulated_code_dimension_has_a_horizon_independent_prefix` | exact: prefixes for three horizon pairs; probes, checkpoints and appended graphs leave the export unchanged; $k_t$ for $t \le 6$ equal at $T = 6$ and $14$ and under sparse checkpoints |
 
 Covered elsewhere and not repeated: `tests/test_protocol.py` (oracle equality for 20 specs and the laws of the
@@ -910,13 +1016,15 @@ generic draws), `tests/test_invariance.py` (chunks, threads, replay), `tests/tes
 * **Reference checks.** v1.4 §2.2 says to abort on an absent original edge without saying when. The reference checks
   the visited edge at every visit, with $B_j = 0$ as well, which is the stronger form; Proposition 4(a) holds
   for it.
-* **Graph seeds shared across sizes and rewiring probabilities.** The graph of $(n, \beta, g)$ uses the seed
-  `(master, g)` for every $n$ and $\beta$: graphs of different sizes or rewiring probabilities share random
-  numbers. This is harmless within a fixed $(n, \beta)$ and means that comparisons across $\beta$ or $n$ are
-  paired (document 02, §3.3).
+* **Independence across conditions is a hash property.** The seeds of different conditions differ (document 02,
+  Proposition 4), and different `SeedSequence` entropy is treated as independent streams (Proposition 14). That
+  is a property of the mixing function, not a theorem; the tests of §8 look at the first draws, where a shared seed
+  would show, and nothing more. Only the rates of one condition are coupled (§3.8): comparisons across $n$ or
+  $\beta$ are comparisons of independent samples, and a paired analysis across them would need a different design.
 * **Departures from v1.4 and the design.** D1 (no measurement replicas $r > 0$), D2 (the circuit index stride), D3
-  (depth extension reruns from layer 0, Proposition 13), D4 (`gate_mode="independent"`) and D5 (the absent-edge
-  abort lives in the reference and the tests, Proposition 4(a)) are as listed in the design §9. No probability
+  (depth extension reruns from layer 0, Proposition 13), D4 (`gate_mode="independent"`), D5 (the absent-edge
+  abort lives in the reference and the tests, Proposition 4(a)) and D6 (domain-tagged seeds that depend on
+  $(n, \beta)$, ruling R-SEED, §3.8) are as listed in the design §9 and §11. No probability
   law, stream or numbering is changed.
 * **The mapping is frozen.** A different but equally valid target sampler would give a valid ensemble and other
   graphs; it needs a new `GRAPH_GENERATOR_VERSION` and cannot be mixed with records made under this one
