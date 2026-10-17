@@ -1921,10 +1921,15 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
         return 2.0 + 0.022 * n * n + 1e-3 * num_qubits
     if p.kind == "tableau_snapshot":
         # all N rows over all N qubits, a transpose of the tableau: O(N^2 / 32 + set bits).
-        # Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-17, purification picture,
-        # scrambled states, the costliest): 8, 34 and 134 us at N = 128, 256 and 512, about
-        # 0.0005 us per N^2; priced at 4 times that
-        return 2.0 + 0.002 * num_qubits * num_qubits
+        # Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-17, scrambled states,
+        # tests/test_estimates.py's method): 0.0005 us per N^2 in the purification picture
+        # (its reference columns stay sparse) and 0.001 in the single and no-reference
+        # pictures (dense: twice the set bits) for N up to 3072; above N = 2048 the scattered
+        # writes of a power-of-two N alias in the cache: 0.0027 at N = 4096, 0.0047 at 8192
+        # (0.0013 at 6144). Priced at 4 times the dense cost up to N = 2048, growing as
+        # (N / 2048)^1.5 above it: 3 times or more at every measured point
+        growth = max(1.0, num_qubits / 2048) ** 1.5
+        return 2.0 + 0.004 * num_qubits * num_qubits * growth
     if p.kind == "correlated_erasure":
         return _correlated_us(p, mc, words)
     # any newer probe: priced as a pass over every qubit

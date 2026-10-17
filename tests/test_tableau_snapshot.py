@@ -595,7 +595,6 @@ def test_the_json_probe_its_layout_summary_and_saved_file(tmp_path, n, shape):
     direct = api._build_spec(spec).run(3, seed=1)
     for t, e in itertools.product(range(3), range(2)):
         assert saved.tableau(t, e) == direct.tableau(t, e)
-    assert api._probe_us(api._build_spec(spec).probes[1], api._build_spec(spec)) > 0
     # the saved run read back by load_results: the same probe summary and its storage rows
     loaded = api.load_results(str(tmp_path / "run"))
     assert loaded["probes"]["tableau_snapshot"] == out["probes"]["tableau_snapshot"]
