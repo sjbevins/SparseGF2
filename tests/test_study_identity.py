@@ -12,6 +12,7 @@ code under test, and golden vectors were computed from the independent reference
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import struct
@@ -24,7 +25,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import _ws_reference as wsref
-from sparsegf2 import api, graphs, mipt
+from sparsegf2 import graphs, mipt
 from sparsegf2.study import identity as ident
 from sparsegf2.study.identity import (
     GraphRecord,
@@ -313,68 +314,324 @@ def test_trajectory_key_round_trips(experiment, n, num, den, g, c, r):
 # ---------------------------------------------------------------------------
 
 
-def test_graph_seed_is_the_master_seed_and_the_graph_label():
-    assert graph_seed(17, 3) == (17, 3)
-    assert graph_seed(0, 0) == (0, 0)
-    assert graph_seed(2**32 - 1, 2**32 - 1) == (2**32 - 1, 2**32 - 1)
-    assert graph_seed(np.int64(17), np.int64(3)) == (17, 3)
-    for bad in [(-1, 0), (0, -1), (2**32, 0), (0, 2**32), (1.5, 0), (True, 0), ("1", 0)]:
-        with pytest.raises(ValueError, match="master_graph_seed|g must|g:|integer"):
-            graph_seed(*bad)  # type: ignore[arg-type]
+# Golden words, computed from hashlib and struct and pinned: the 64-bit BLAKE2b hash of the
+# canonical token (digest_size=8, little-endian) as its low and high 32-bit words.
+WORDS = {
+    "0": (2642226052, 1977601347),
+    "0.1": (2007713733, 3507754741),
+    "0.15": (3479488031, 1099992840),
+    "1/3": (3963472482, 2705452238),
+}
+GRAPH_TAG, CIRCUIT_TAG = 0x57534731, 0x57534331  # b"WSG1" and b"WSC1" as big-endian integers
+RATES = ["0", "0.05", "0.1", "0.15", "0.2", "1/3", "0.5", "1"]
 
 
-def test_graph_seed_is_the_native_collection_convention():
-    # "realizations": G builds graph i from the seed [seed, i] (api._build_graph, v1.4 section 7.2)
-    spec = {"family": "watts_strogatz", "k": 4, "beta": 0.1, "seed": 17, "realizations": 4}
-    for g, edges in enumerate(api._build_graph(spec, 16)):
-        assert np.array_equal(edges, graphs.watts_strogatz(16, 4, 0.1, seed=graph_seed(17, g)))
-        assert np.array_equal(edges, build_graph(16, "0.1", g, 17).edges)
+def _state(seed) -> tuple[int, ...]:
+    """The four state words the generators read from a seed: ``SeedSequence(seed).generate_state(4)``."""
+    return tuple(np.random.SeedSequence(seed).generate_state(4).tolist())
+
+
+def test_the_seed_tags_spell_their_domains():
+    assert ident.GRAPH_SEED_TAG == GRAPH_TAG == int.from_bytes(b"WSG1", "big") == wsref.GRAPH_TAG
+    assert ident.CIRCUIT_SEED_TAG == CIRCUIT_TAG == int.from_bytes(b"WSC1", "big")
+    assert ident.CIRCUIT_SEED_TAG == wsref.CIRCUIT_TAG
+    assert ident.GRAPH_SEED_TAG != ident.CIRCUIT_SEED_TAG
+    assert max(ident.GRAPH_SEED_TAG, ident.CIRCUIT_SEED_TAG) < 2**32  # one word each
+    assert (ident.GRAPH_SEED_TAG, ident.CIRCUIT_SEED_TAG) == (1465075505, 1465074481)
+
+
+@pytest.mark.parametrize("text, words", list(WORDS.items()))
+def test_token_words_are_the_low_and_high_halves_of_the_blake2b_hash(text, words):
+    digest = hashlib.blake2b(text.encode(), digest_size=8).digest()
+    value = int.from_bytes(digest, "little")
+    assert (
+        words == (value % 2**32, value // 2**32) == struct.unpack("<II", digest)
+    )  # the golden words
+    assert ident.token_words(text) == words == wsref.token_words(text)
+    assert words[0] + (words[1] << 32) == rate_hash(text) == value
+    assert all(0 <= w < 2**32 for w in words)
+    # the digest of 8 bytes, not the first 8 bytes of the 64-byte digest
+    assert words != struct.unpack("<II", hashlib.blake2b(text.encode()).digest()[:8])
+
+
+def test_token_words_name_the_token_and_not_its_spelling():
+    assert (
+        ident.token_words(0.1)
+        == ident.token_words("1/10")
+        == ident.token_words(" .10 ")
+        == WORDS["0.1"]
+    )
+    assert ident.token_words(Token.parse("3/20")) == ident.token_words(0.15) == WORDS["0.15"]
+    assert ident.token_words(Fraction(1, 3)) == WORDS["1/3"]
+    words = [ident.token_words(r) for r in RATES]
+    assert len(set(words)) == len(RATES)  # different tokens, different words
+    with pytest.raises(ValueError, match="must lie in"):
+        ident.token_words("1.5")
+
+
+def test_graph_seed_is_the_tagged_tuple_of_master_size_beta_and_graph():
+    seed = graph_seed(17, 16, "0.1", 3)
+    assert seed == (
+        0x57534731,
+        17,
+        16,
+        2007713733,
+        3507754741,
+        3,
+    )  # spelled out with the golden words
+    assert seed == (GRAPH_TAG, 17, 16, *WORDS["0.1"], 3) == wsref.graph_seed(17, 16, "0.1", 3)
+    assert len(seed) == 6 and all(type(w) is int and 0 <= w < 2**32 for w in seed)
+    # the token, not its spelling, names beta; numpy integers are accepted
+    assert graph_seed(17, 16, 0.1, 3) == graph_seed(17, 16, "1/10", 3) == seed
+    assert graph_seed(17, 16, Token.parse("0.10"), 3) == seed
+    assert graph_seed(np.int64(17), np.int64(16), "0.1", np.int64(3)) == seed
+    # the largest words are single words
+    top = 2**32 - 1
+    assert graph_seed(top, top, "1/3", top) == (GRAPH_TAG, top, top, *WORDS["1/3"], top)
+    # the master graph seed 0 and graph label 0 give a seed with zero words, still six words long
+    assert graph_seed(0, 5, "0", 0) == (GRAPH_TAG, 0, 5, *WORDS["0"], 0)
+
+
+@pytest.mark.parametrize(
+    "bad, fragment",
+    [
+        ((-1, 16, "0.1", 0), "master_graph_seed must be at least 0"),
+        ((2**32, 16, "0.1", 0), r"master_graph_seed must be below 2\*\*32"),
+        ((1.5, 16, "0.1", 0), "master_graph_seed must be an integer"),
+        ((True, 16, "0.1", 0), "master_graph_seed must be an integer"),
+        ((17, -1, "0.1", 0), "n must be at least 0"),
+        ((17, 2**32, "0.1", 0), r"n must be below 2\*\*32"),
+        ((17, 16.0, "0.1", 0), "n must be an integer"),
+        ((17, 16, "1.5", 0), "beta must lie in"),
+        ((17, 16, "x", 0), "beta must be a decimal"),
+        ((17, 16, "0.1", -1), "g must be at least 0"),
+        ((17, 16, "0.1", 2**32), r"g must be below 2\*\*32"),
+        ((17, 16, "0.1", "3"), "g must be an integer"),
+    ],
+)
+def test_graph_seed_refuses_what_is_not_a_seed_word_or_a_token(bad, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        graph_seed(*bad)
+
+
+def test_graph_seeds_differ_across_masters_sizes_betas_and_labels():
+    # (master, n, beta, g) is read back from the tuple, so equal seeds mean equal arguments; the
+    # SeedSequence states are different too (a property of the hash behind it, checked on this
+    # grid and not proved)
+    grid = list(
+        itertools.product(
+            (0, 1, 17), (5, 6, 16, 17), ("0", "0.05", "0.1", "1/3"), (0, 1, 2, 2**32 - 1)
+        )
+    )
+    seeds = [graph_seed(*args) for args in grid]
+    assert len(set(seeds)) == len(grid)
+    assert len({_state(s) for s in seeds}) == len(grid)
+    for args, seed in zip(grid, seeds, strict=True):
+        assert seed == wsref.graph_seed(*args)  # read from the definition in the reference
+    # one coordinate at a time, from the study's example: the master, the size, beta (two words), g
+    base = graph_seed(17, 16, "0.1", 3)
+    for other, changed_words in [
+        (graph_seed(18, 16, "0.1", 3), 1),
+        (graph_seed(17, 17, "0.1", 3), 1),
+        (graph_seed(17, 16, "0.2", 3), 2),
+        (graph_seed(17, 16, "0.1", 4), 1),
+    ]:
+        assert sum(a != b for a, b in zip(base, other, strict=True)) == changed_words
+        assert _state(base) != _state(other)
+
+
+@PROPERTY
+@given(
+    st.tuples(
+        st.integers(0, 2**32 - 1),
+        st.integers(5, 2**32 - 1),
+        st.fractions(min_value=0, max_value=1, max_denominator=60),
+        st.integers(0, 2**32 - 1),
+    ),
+    st.integers(0, 4),
+    st.data(),
+)
+def test_graph_seed_is_injective_in_the_condition_and_the_graph(args, which, data):
+    master, n, beta, g = args
+    other = [master, n, beta, g]
+    if which < 4:  # change one coordinate; which == 4 keeps all of them
+        other[which] = data.draw(
+            [
+                st.integers(0, 2**32 - 1),
+                st.integers(5, 2**32 - 1),
+                st.fractions(min_value=0, max_value=1, max_denominator=60),
+                st.integers(0, 2**32 - 1),
+            ][which]
+        )
+    same = (master, n, Token.parse(beta), g) == (
+        other[0],
+        other[1],
+        Token.parse(other[2]),
+        other[3],
+    )
+    assert (graph_seed(master, n, beta, g) == graph_seed(*other)) == same
+
+
+def test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds():
+    # ruling R-SEED: the tags make the two domains disjoint, so one master seed may serve both.
+    # Before it, graph 0 of master s was SeedSequence([s, 0]), which numpy pads to SeedSequence(s):
+    # the very words that key the circuit streams when the circuit seed was s.
+    master = 17
+    sizes, betas = (5, 16, 24), ("0", "0.1", "0.3", "1/3")
+    graph_seeds = [graph_seed(master, n, b, g) for n in sizes for b in betas for g in range(4)]
+    run_seeds = [
+        run_seed(master, n, b, mode, p)
+        for n in sizes
+        for b in betas
+        for mode, p in [("shared", None), ("independent", "0.1"), ("independent", "0.15")]
+    ]
+    assert len(set(graph_seeds)) == len(graph_seeds) == 48
+    assert len(set(run_seeds)) == len(run_seeds) == 36
+    assert not set(graph_seeds) & set(run_seeds)
+    assert {s[0] for s in graph_seeds} == {GRAPH_TAG} and {s[0] for s in run_seeds} == {CIRCUIT_TAG}
+    assert not {_state(s) for s in graph_seeds} & {_state(s) for s in run_seeds}
+    plain = _state(master)  # the old collision: the plain seed s is the key of the circuit streams
+    assert plain not in {_state(s) for s in graph_seeds + run_seeds}
+    assert _state((master, 0)) == plain  # numpy's zero padding, the reason the old rule was needed
+    # and the tag is what separates them: the same words under the other tag give another state
+    g = graph_seed(master, 16, "0.1", 3)
+    assert _state(g) != _state((CIRCUIT_TAG, *g[1:]))
+
+
+def test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words():
+    # the facts about numpy that the proof in the documentation uses
+    assert _state([17]) == _state([17, 0]) == _state([17, 0, 0, 0]) == _state(17)
+    assert _state([17, 5, 9]) == _state([17, 5, 9, 0])
+    assert _state([17, 5, 9, 1]) != _state(
+        [17, 5, 9, 1, 0]
+    )  # the fifth word is mixed in, zero or not
+    assert _state([17, 5, 9, 1, 7]) != _state([17, 5, 9, 1, 7, 0])
+    assert _state([17, 5, 9, 1, 7]) != _state([17, 5, 9, 1])
+    assert _state([17, 5, 9, 1, 0, 0]) != _state([17, 5, 9, 1, 0])
+    # the first four words are hashed by position, so swapping two of them changes the state
+    assert _state([17, 5, 9, 1, 7]) != _state([5, 17, 9, 1, 7])
+    # the study's seeds: every length exceeds four, so trailing zero words (g = 0) are not dropped
+    seed = graph_seed(17, 16, "0.1", 0)
+    assert seed[-1] == 0 and _state(seed) != _state(seed[:-1])
+    zero_master = graph_seed(
+        0, 16, "0.1", 0
+    )  # a master seed of 0 and graph 0: zero words inside and at the end
+    assert len({_state(zero_master), _state(zero_master[:-1]), _state(zero_master[:2])}) == 3
+
+
+def test_seed_tuples_have_one_fixed_length_per_domain_and_it_exceeds_the_pool():
+    sizes, betas = (5, 16), ("0", "0.1")
+    assert {len(graph_seed(17, n, b, g)) for n in sizes for b in betas for g in (0, 9)} == {6}
+    assert {
+        len(run_seed(29, n, b, "shared", p)) for n in sizes for b in betas for p in (None, "0.1")
+    } == {5}
+    assert {
+        len(run_seed(29, n, b, "independent", p)) for n in sizes for b in betas for p in RATES
+    } == {7}
+    assert (
+        min(5, 6, 7) > 4
+    )  # SeedSequence hashes four words by position; a longer entropy is mixed in whole
+
+
+def test_run_seed_shared_is_one_tuple_per_condition_for_every_rate():
+    seed = run_seed(29, 16, "0.1", "shared")
+    assert seed == (0x57534331, 29, 16, 2007713733, 3507754741)  # spelled out with the golden words
+    assert seed == (CIRCUIT_TAG, 29, 16, *WORDS["0.1"]) == wsref.run_seed(29, 16, "0.1")
+    assert len(seed) == 5 and all(type(w) is int and 0 <= w < 2**32 for w in seed)
+    for p in RATES + [0.5, Token.parse("0.2"), Fraction(3, 20), None]:
+        assert (
+            run_seed(29, 16, "0.1", "shared", p) == seed
+        )  # the rate does not enter in shared mode
+    assert run_seed(29, 16, 0.1, "shared") == run_seed(29, 16, "1/10", "shared") == seed
+    assert run_seed(np.int64(29), np.int64(16), "0.1", "shared") == seed
+    with pytest.raises(
+        ValueError, match="p must lie in"
+    ):  # a malformed rate is refused in every mode
+        run_seed(29, 16, "0.1", "shared", "2")
+
+
+def test_run_seed_independent_appends_the_words_of_the_rate():
+    seed = run_seed(29, 16, "0.1", "independent", "0.15")
+    assert seed == (0x57534331, 29, 16, 2007713733, 3507754741, 3479488031, 1099992840)
+    assert seed == wsref.run_seed(29, 16, "0.1", "0.15") and len(seed) == 7
+    assert seed[:5] == run_seed(29, 16, "0.1", "shared")
+    assert (
+        run_seed(29, 16, "0.1", "independent", 0.15)
+        == run_seed(29, 16, "0.1", "independent", "3/20")
+        == seed
+    )
+    assert seed[5] + (seed[6] << 32) == rate_hash(
+        "0.15"
+    )  # the words are the halves of the rate hash
+    assert rate_hash("0.1") == 15065691896991664069  # golden value
+    seeds = {run_seed(29, 16, "0.1", "independent", p) for p in RATES}
+    assert len(seeds) == len(RATES)  # one seed per rate
+    assert len({_state(s) for s in seeds}) == len(RATES)
+    with pytest.raises(ValueError, match="needs p_token"):
+        run_seed(29, 16, "0.1", "independent")
+
+
+def test_run_seeds_differ_across_masters_sizes_and_betas_in_both_modes():
+    for mode, p in [("shared", None), ("independent", "0.15")]:
+        grid = list(
+            itertools.product((0, 29, 2**32 - 1), (5, 6, 16, 17), ("0", "0.05", "0.1", "1/3"))
+        )
+        seeds = [run_seed(m, n, b, mode, p) for m, n, b in grid]
+        assert len(set(seeds)) == len(grid)
+        assert len({_state(s) for s in seeds}) == len(grid)
+        for (m, n, b), seed in zip(grid, seeds, strict=True):
+            assert seed == wsref.run_seed(m, n, b, p)
+    # the coupling is across the rate only: p enters nothing but the independent tuple
+    assert len({run_seed(29, 16, "0.1", "shared", p) for p in RATES}) == 1
+    assert len({run_seed(29, 16, "0.1", "independent", p) for p in RATES}) == len(RATES)
+
+
+def test_run_seed_refuses_unknown_modes_and_bad_arguments():
+    with pytest.raises(ValueError, match="gate_mode must be one of"):
+        run_seed(29, 16, "0.1", "coupled", "0.1")
+    with pytest.raises(ValueError, match="master_circuit_seed"):
+        run_seed(-1, 16, "0.1", "shared")
+    with pytest.raises(ValueError, match="2\\*\\*32"):
+        run_seed(2**32, 16, "0.1", "shared")
+    with pytest.raises(ValueError, match="n must be at least 0"):
+        run_seed(29, -1, "0.1", "shared")
+    with pytest.raises(ValueError, match="beta must lie in"):
+        run_seed(29, 16, "2", "shared")
+    with pytest.raises(ValueError, match="p must lie in"):
+        run_seed(29, 16, "0.1", "independent", "2")
 
 
 def test_graph_seed_gives_the_stream_the_graph_generator_uses():
-    # (master, g) and [master, g] are the same SeedSequence, and different pairs differ
-    a = np.random.SeedSequence(graph_seed(17, 3)).generate_state(4)
-    assert np.array_equal(a, np.random.SeedSequence([17, 3]).generate_state(4))
-    pairs = [(m, g) for m in (0, 1, 17, 2**32 - 1) for g in (0, 1, 2, 2**32 - 1)]
-    states = {tuple(np.random.SeedSequence(p).generate_state(4).tolist()) for p in pairs}
-    assert len(states) == len(pairs)
+    # the six words are the entropy as given: the generator reads SeedSequence(seed).generate_state(4)
+    seed = graph_seed(17, 16, "0.1", 3)
+    a = np.random.SeedSequence(seed).generate_state(4)
+    assert np.array_equal(a, np.random.SeedSequence(list(seed)).generate_state(4))
+    assert np.array_equal(
+        a, np.random.SeedSequence(list(wsref.graph_seed(17, 16, "0.1", 3))).generate_state(4)
+    )
+    words = np.random.SeedSequence(seed).generate_state(
+        4, dtype=np.uint64
+    )  # what the xoshiro state is
+    assert words.tolist() == wsref.seed_words(seed)
 
 
-def test_graph_zero_shares_its_seed_with_the_plain_master_seed():
-    # numpy pads the entropy with zero words: (s, 0) is the SeedSequence of s itself. If the master
-    # circuit seed were the master graph seed, graph 0 would be built from the very words that
-    # key the circuit streams, which is why the manifest refuses equal master seeds.
-    plain = np.random.SeedSequence(17).generate_state(4)
-    assert np.array_equal(np.random.SeedSequence(graph_seed(17, 0)).generate_state(4), plain)
-    assert not np.array_equal(np.random.SeedSequence(graph_seed(17, 1)).generate_state(4), plain)
-
-
-def test_run_seed_shared_is_the_master_seed_for_every_rate():
-    assert run_seed(29, "shared", "0.1") == 29
-    assert run_seed(29, "shared", "1/3") == 29
-    assert run_seed(0, "shared", 0.5) == 0
-
-
-def test_run_seed_independent_hashes_the_rate_token():
-    h = rate_hash("0.1")
-    expected = int.from_bytes(hashlib.blake2b(b"0.1", digest_size=8).digest(), "little")
-    assert h == expected == 15065691896991664069  # golden value
-    assert run_seed(29, "independent", "0.1") == (29, h)
-    assert run_seed(29, "independent", 0.1) == (29, h) == run_seed(29, "independent", "1/10")
-    assert run_seed(29, "independent", "0.15") == (29, rate_hash("0.15"))
-    rates = ["0", "0.05", "0.1", "0.15", "0.2", "1/3", "0.5", "1"]
-    assert len({rate_hash(r) for r in rates}) == len(rates)
-    # the first 8 bytes of a 64-byte BLAKE2b digest would be a different number
-    assert h != int.from_bytes(hashlib.blake2b(b"0.1").digest()[:8], "little")
-
-
-def test_run_seed_refuses_unknown_modes_and_bad_seeds():
-    with pytest.raises(ValueError, match="gate_mode must be one of"):
-        run_seed(29, "coupled", "0.1")
-    with pytest.raises(ValueError, match="master_circuit_seed"):
-        run_seed(-1, "shared", "0.1")
-    with pytest.raises(ValueError, match="2\\*\\*32"):
-        run_seed(2**32, "shared", "0.1")
+def test_the_study_builds_its_graphs_with_the_native_generator_and_the_study_seed():
+    # ruling R-SEED: graphs come from graphs.watts_strogatz seeded with the six-word tuple, not from
+    # the native collection convention [seed, i] (api._build_graph), which shares seeds across sizes
+    # and rewiring probabilities
+    for g in range(4):
+        record = build_graph(16, "0.1", g, 17)
+        seed = (0x57534731, 17, 16, 2007713733, 3507754741, g)  # spelled out with the golden words
+        assert record.seed == seed == graph_seed(17, 16, "0.1", g)
+        assert np.array_equal(record.edges, graphs.watts_strogatz(16, 4, 0.1, seed=seed))
+        assert np.array_equal(
+            record.edges, wsref.rewire(16, 0.1, wsref.graph_seed(17, 16, "0.1", g))
+        )
+    old = [graphs.watts_strogatz(16, 4, 0.1, seed=(17, g)) for g in range(8)]
+    new = [build_graph(16, "0.1", g, 17).edges for g in range(8)]
+    assert (
+        sum(np.array_equal(a, b) for a, b in zip(old, new, strict=True)) <= 1
+    )  # another convention
 
 
 def test_stream_index_values_and_inverse():
@@ -432,12 +689,13 @@ def test_the_engine_runs_trajectory_u_on_graph_u_over_stride():
         reference="purification",
     )
     assert spec.num_trajectories == 3 * stride
+    seed = run_seed(29, n, "0.3", "shared")  # the study's own run seed for the condition (9, 0.3)
     for g in range(3):
         allowed = {tuple(e) for e in records[g].edges.tolist()}
         others = [{tuple(e) for e in r.edges.tolist()} for k, r in enumerate(records) if k != g]
         for c in (0, stride - 1):  # the unused circuit labels are valid too
             u = stream_index(g, c, stride)
-            layers = wsref.parse_circuit(str(spec.circuit(u, seed=29)))
+            layers = wsref.parse_circuit(str(spec.circuit(u, seed=seed)))
             used = {(min(a, b), max(a, b)) for layer in layers for a, b, _ in layer.gates}
             assert used <= allowed
             assert all(not used <= other for other in others)  # 150 gates reveal the graph
@@ -502,9 +760,11 @@ def test_build_graph_returns_the_validated_record_of_the_native_graph():
     record = build_graph(16, "0.1", 3, 17)
     assert isinstance(record, GraphRecord)
     assert (record.n, record.beta, record.g) == (16, Token.parse("0.1"), 3)
-    assert record.seed == (17, 3) and record.edge_order == "offset-major"
+    assert (
+        record.seed == (GRAPH_TAG, 17, 16, *WORDS["0.1"], 3) and record.edge_order == "offset-major"
+    )
     assert record.generator == ident.GRAPH_GENERATOR_VERSION
-    native = graphs.watts_strogatz(16, 4, 0.1, seed=(17, 3))
+    native = graphs.watts_strogatz(16, 4, 0.1, seed=record.seed)
     assert np.array_equal(record.edges, native) and record.num_edges == 32
     assert not record.edges.flags.writeable and record.edges.dtype == np.int64
     assert record.edge_digest == edge_digest(native, 16) == _independent_digest(native.tolist(), 16)
@@ -516,20 +776,25 @@ def test_build_graph_returns_the_validated_record_of_the_native_graph():
 
 
 def test_the_digest_is_pinned_and_agrees_with_the_independent_reference():
-    # golden vectors: the reference rewiring (_ws_reference, no package code) and the digest
-    # computed with struct and hashlib in this file
+    # golden vectors: the reference rewiring (_ws_reference, no package code) seeded with the
+    # reference's own seed tuple, and the digest computed with struct and hashlib in this file
     cases = {
-        (16, "0.1", 3, 17): "ccc5c1aaedfb3941f462c6dbfe0a3ecdd0fa98106c89863539c5d51434abfe45",
-        (24, "0", 0, 17): None,
-        (24, "1", 5, 29): None,
+        (16, "0.1", 3, 17): "23df2ca38f4a3c47ecb35f795677530d515588dabffd16abbadfbeee77c43e6c",
+        (16, "0.1", 0, 17): "584305b4853745a796fe4c6641d5e9c15cb6fe3f1118157ad2b98c1908215aa6",
+        (24, "0", 0, 17): "02a2e2d6c52195fe0b83dbc2ab55d1cbb711c2eaa7824be4d7b14ccb241c5dc0",
+        (24, "1", 5, 29): "c6f7d572b2f71e849a31674176a6db3bba4e3aad37897564453ac5c5c828e040",
+        (12, "0.2", 1, 17): "0b3ddb56ad6b698a0510cafbbeb23aa6b67dc0d1ca6c1ec1ac753d214857139f",
+        (24, "0.3", 7, 5): "1e0e8b4a9ffa0f812506baaf04bdb0145fa7885b6cebadc577187f37acfbaaff",
     }
     for (n, beta, g, master), pinned in cases.items():
         record = build_graph(n, beta, g, master)
-        reference = wsref.rewire(n, Token.parse(beta).float64, (master, g))
+        seed = wsref.graph_seed(master, n, beta, g)
+        reference = wsref.rewire(n, Token.parse(beta).float64, seed)
+        assert record.seed == seed
         assert np.array_equal(record.edges, reference)
-        assert record.edge_digest == _independent_digest(reference.tolist(), n)
-        if pinned is not None:
-            assert record.edge_digest == pinned
+        assert record.edge_digest == _independent_digest(reference.tolist(), n) == pinned
+    # beta = 0 is the circulant graph whatever the seed: the digest does not depend on it
+    assert build_graph(24, "0", 0, 17).edge_digest == build_graph(24, "0", 9, 3).edge_digest
 
 
 def test_beta_zero_graph_is_the_circulant_and_n_five_is_complete():
@@ -545,9 +810,11 @@ def test_graph_record_identity_comes_from_the_digest_and_the_provenance():
     assert a == b and hash(a) == hash(b)
     assert a != build_graph(12, "0.2", 2, 17) and a != build_graph(12, "0.3", 1, 17)
     assert a != build_graph(12, "0.2", 1, 18)
+    assert a != build_graph(13, "0.2", 1, 17)  # the same label g of another size is another graph
     assert a != "not a record"
     d = a.to_dict()
-    assert d["n"] == 12 and d["beta"] == "0.2" and d["seed"] == [17, 1] and d["num_edges"] == 24
+    assert d["n"] == 12 and d["beta"] == "0.2" and d["num_edges"] == 24
+    assert d["seed"] == [GRAPH_TAG, 17, 12, *wsref.token_words("0.2"), 1] == list(a.seed)
     assert "edges" not in d and a.to_dict(include_edges=True)["edges"] == a.edges.tolist()
     json.dumps(d)  # plain JSON
 
@@ -563,9 +830,21 @@ def test_verify_detects_a_tampered_graph():
     forged = GraphRecord(**{**record.__dict__, "edges": other.edges})
     with pytest.raises(ValueError, match="does not match its digest"):
         forged.verify()
-    wrong_seed = GraphRecord(**{**record.__dict__, "seed": (17, 9)})
-    with pytest.raises(ValueError, match="does not reproduce"):
-        wrong_seed.regenerate()
+    # the seed tuple is part of the record: any altered word, or a tuple of another length, fails
+    master, tag = record.seed[1], record.seed[0]
+    altered = [
+        (tag, master + 1, *record.seed[2:]),  # another master seed
+        (tag, master, record.seed[2] + 1, *record.seed[3:]),  # another size word
+        (tag, master, *record.seed[2:5], record.seed[5] + 8),  # another graph word
+        (CIRCUIT_TAG, *record.seed[1:]),  # the other domain's tag
+        record.seed[:5],  # a tuple of five words
+        (17, 1),  # the old convention
+    ]
+    for seed in altered:
+        wrong_seed = GraphRecord(**{**record.__dict__, "seed": seed})
+        with pytest.raises(ValueError, match="does not reproduce"):
+            wrong_seed.regenerate()
+    assert GraphRecord(**{**record.__dict__}).regenerate() == record  # the untouched record does
 
 
 def _bad_graph(kind: str, n: int = 8) -> np.ndarray:
@@ -726,6 +1005,9 @@ def test_version_record_names_every_version_and_the_native_contract():
     assert record["dynamics"] == ident.DYNAMICS_VERSION
     assert record["rowspace_format"] == ident.ROWSPACE_FORMAT_VERSION == "SGF2RS1"
     assert record["store_schema"] == ident.STORE_SCHEMA_VERSION
+    # the seed derivation is versioned by its domain tags: a different derivation needs new tags
+    assert record["graph_seed_tag"] == ident.GRAPH_SEED_TAG == 0x57534731
+    assert record["circuit_seed_tag"] == ident.CIRCUIT_SEED_TAG == 0x57534331
     assert all(isinstance(v, (str, int)) and v != "" for v in record.values())
     json.dumps(record)
 

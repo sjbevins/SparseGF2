@@ -23,6 +23,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import _ws_reference as wsref
 from sparsegf2 import mipt
 from sparsegf2.study import identity as ident
 from sparsegf2.study import manifest as mf
@@ -438,7 +439,8 @@ MALFORMED = [
     ("seeds.master_graph_seed", -1, r"master_graph_seed: must be at least 0"),
     ("seeds.master_graph_seed", 2**32, r"master_graph_seed: must be at most 4294967295"),
     ("seeds.master_circuit_seed", 1.5, "master_circuit_seed: must be an integer"),
-    ("seeds.master_circuit_seed", 17, "master_graph_seed and master_circuit_seed must differ"),
+    ("seeds.master_circuit_seed", -1, r"master_circuit_seed: must be at least 0"),
+    ("seeds.master_circuit_seed", 2**32, r"master_circuit_seed: must be at most 4294967295"),
     ("seeds.gate_mode", "coupled", r"seeds.gate_mode: must be one of \['shared', 'independent'\]"),
     ("seeds.master_circuit_seed", DELETE, r"missing required key\(s\) \['master_circuit_seed'\]"),
     # dynamics
@@ -639,7 +641,12 @@ def test_layers_rules(manifest):
         (lambda m: m.layers(16.0, 0), "n: must be an integer"),
         (lambda m: m.layers(16, "x"), "beta must be a decimal"),
         (lambda m: m.monitored_circuit_kwargs(16, 0, "0.3"), r"p = 0.3\) is not a condition"),
-        (lambda m: m.run_seed("2"), "must lie in"),
+        (lambda m: m.run_seed(16, "0", "2"), "must lie in"),
+        (lambda m: m.run_seed(16, "0", "0.3"), r"p = 0.3\) is not a condition"),
+        (lambda m: m.run_seed(20, "0", "0.1"), r"\(n = 20, beta = 0, p = 0.1\) is not a condition"),
+        (lambda m: m.graph_seed(20, "0", 0), r"\(n = 20, beta = 0\) is not a condition"),
+        (lambda m: m.graph_seed(16, "0.2", 0), r"n = 16, beta = 0.2\) is not a condition"),
+        (lambda m: m.graph_seed(16, "0", -1), "g must be at least 0"),
     ],
 )
 def test_unknown_conditions_are_refused(manifest, call, fragment):
@@ -932,19 +939,85 @@ def test_the_kwargs_build_the_study_protocol_for_even_and_odd_sizes(n):
 
 
 def test_seed_helpers_and_trajectory_keys(manifest):
-    assert manifest.graph_seed(3) == (17, 3)
-    assert manifest.run_seed("0.1") == 29 == manifest.run_seed("0.2")
+    # graph seeds name (n, beta, g); the example's master graph seed is 17
+    assert manifest.graph_seed(16, "0.1", 3) == wsref.graph_seed(17, 16, "0.1", 3)
+    assert manifest.graph_seed(24, 0, 0) == wsref.graph_seed(17, 24, "0", 0)
+    assert manifest.graph_seed(16, "0.1", 3) == (0x57534731, 17, 16, 2007713733, 3507754741, 3)
+    # shared mode: one run seed per (n, beta), the same at every rate; the master circuit seed is 29
+    shared = manifest.run_seed(16, "0.1", "0.1")
+    assert shared == wsref.run_seed(29, 16, "0.1") == (0x57534331, 29, 16, 2007713733, 3507754741)
+    assert all(manifest.run_seed(16, "0.1", p) == shared for p in ("0.1", "0.15", 0.2, "1/5"))
+    assert (
+        manifest.run_seed(24, "0.1", "0.1") != shared and manifest.run_seed(16, 0, "0.1") != shared
+    )
     assert manifest.stream_index(3, 1) == 25
     key = manifest.trajectory_key(16, 0.1, "3/20", 3, 1)
     assert str(key) == "ws-pilot-001:n=16:beta=0.1:p=0.15:g=3:c=1:r=0"
     assert key.stream_index(manifest.stride) == manifest.stream_index(3, 1)
+    # independent mode appends the words of the rate: one run seed per rate
     independent = ExperimentManifest.from_json(mutated("seeds.gate_mode", "independent"))
-    assert independent.run_seed("0.1") == (29, ident.rate_hash("0.1"))
-    assert independent.run_seed("0.1") != independent.run_seed("0.15")
+    assert independent.run_seed(16, "0.1", "0.1") == wsref.run_seed(29, 16, "0.1", "0.1")
+    assert independent.run_seed(16, "0.1", "0.1") != independent.run_seed(16, "0.1", "0.15")
+    assert independent.run_seed(16, "0.1", "0.15")[:5] == shared and len(shared) == 5
+    assert independent.graph_seed(16, "0.1", 3) == manifest.graph_seed(
+        16, "0.1", 3
+    )  # not the mode's
     with pytest.raises(ValueError, match="below the circuit index stride 8"):
         manifest.stream_index(0, 8)
     with pytest.raises(ValueError, match="is not a condition"):
         manifest.trajectory_key(16, 0.1, "0.3", 0, 0)
+
+
+def test_seeds_depend_on_the_condition_and_only_the_run_seed_on_the_gate_mode(manifest):
+    # every (n, beta) has its own graph collection and its own run seed (ruling R-SEED); the rate
+    # enters the run seed in independent mode only, and never the graph seed
+    independent = ExperimentManifest.from_json(mutated("seeds.gate_mode", "independent"))
+    pairs = [(c.n, c.beta) for c in manifest.conditions()]
+    assert len(pairs) == 4
+    graph = {manifest.graph_seed(n, b, g) for n, b in pairs for g in range(3)}
+    assert len(graph) == 12  # four conditions x three graphs, all different
+    shared = {manifest.run_seed(n, b, p) for n, b in pairs for p in manifest.rates(n, b)}
+    assert len(shared) == 4  # one per condition
+    per_rate = {independent.run_seed(n, b, p) for n, b in pairs for p in independent.rates(n, b)}
+    assert len(per_rate) == 12  # one per (condition, rate)
+    assert not graph & shared and not graph & per_rate  # disjoint domains
+
+
+def test_equal_master_seeds_are_accepted_because_the_seed_domains_are_disjoint():
+    # the first draft refused them (graph 0 was SeedSequence([s, 0]) == SeedSequence(s)); the tags
+    # of ruling R-SEED separate the domains whatever the master seeds are
+    equal = ExperimentManifest.from_json(mutated("seeds.master_circuit_seed", 17))
+    assert equal.seeds.master_graph_seed == equal.seeds.master_circuit_seed == 17
+    assert ExperimentManifest.from_json(equal.to_json()) == equal
+    assert equal.digest() != ExperimentManifest.from_json(EXAMPLE_TEXT).digest()
+    graph = [equal.graph_seed(c.n, c.beta, g) for c in equal.conditions() for g in range(4)]
+    runs = [equal.run_seed(c.n, c.beta, c.rates[0]) for c in equal.conditions()]
+    assert not set(graph) & set(runs)
+    plain = tuple(np.random.SeedSequence(17).generate_state(4).tolist())
+    states = [tuple(np.random.SeedSequence(s).generate_state(4).tolist()) for s in graph + runs]
+    assert plain not in states and len(set(states)) == len(states)
+    # and the conditions of one manifest give distinct seeds (the same graph label, other n or beta)
+    assert len(set(graph)) == len(graph)
+
+
+def test_two_tokens_with_one_seed_hash_are_refused(monkeypatch):
+    # The words of beta name the condition in every seed, so two different beta tokens with equal
+    # 64-bit hashes (probability 2**-64 per pair) are refused; likewise two rates in independent
+    # mode, where the words of the rate enter the run seed (in shared mode they do not).
+    real = mf.token_words
+    same = {Token.parse("0.3"): real("0.1")}  # beta = 0.3 gets the words of beta = 0.1
+    monkeypatch.setattr(mf, "token_words", lambda t: same.get(Token.parse(t), real(t)))
+    with pytest.raises(ValueError, match="beta values 0.1 and 0.3 have the same 64-bit seed hash"):
+        ExperimentManifest.from_json(mutated("conditions.0.beta", ["0.1", "0.3"]))
+    ExperimentManifest.from_json(EXAMPLE_TEXT)  # the example has no such pair
+    same[Token.parse("0.2")] = real("0.15")  # rate 0.2 gets the words of rate 0.15
+    ExperimentManifest.from_json(EXAMPLE_TEXT)  # shared mode: the rates' words are in no seed
+    with pytest.raises(ValueError, match="p values 0.15 and 0.2 have the same 64-bit seed hash"):
+        ExperimentManifest.from_json(mutated("seeds.gate_mode", "independent"))
+    # the real hash has no collision among the tokens of a fine grid (checked, not proved)
+    monkeypatch.undo()
+    grid = [f"{k}/{d}" for d in (997, 1000) for k in range(d + 1)]
+    assert len({mf.token_words(t) for t in grid}) == len({Token.parse(t) for t in grid})
 
 
 def test_warnings_flag_allowed_but_doubtful_choices(manifest):

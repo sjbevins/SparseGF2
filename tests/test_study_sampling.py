@@ -8,13 +8,20 @@ Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored
   prefixes do not depend on the horizon; the native Clifford numbering is ``16 s + b``.
 * **Statistical**, at fixed seeds, with the false-alarm rate stated: every chi-square test
   passes when its p-value exceeds ``ALPHA = 1e-6``, every z-test when ``|z| < SIGMAS = 4.5``
-  (two-sided false alarm 6.8e-6). Roughly 80 such assertions run here (about 40 of each kind),
-  so a *correct* implementation at fresh seeds would fail one with probability below 4e-4; at
-  the fixed seeds the outcome is deterministic. Statistics use exact reference laws: the
-  occupancy law of with-replacement edge draws, Binomial(2n, beta) rewiring counts, and the
-  exact distribution of the rewiring process for n = 6 and 7 (a dynamic program with no random
-  numbers). The sensitivity of each family is shown by negative controls (a wrong beta, a
-  biased target sampler, a biased Clifford sample, a wrong rate must fail).
+  (two-sided false alarm 6.8e-6). Roughly 84 such assertions run here (about 40 chi-square
+  tests and 44 z-tests), so a *correct* implementation at fresh seeds would fail one with
+  probability below 4e-4; at the fixed seeds the outcome is deterministic. Statistics use exact
+  reference laws: the occupancy law of with-replacement edge draws, Binomial(2n, beta)
+  rewiring counts, and the exact distribution of the rewiring process for n = 6 and 7 (a
+  dynamic program with no random numbers). The sensitivity of each family is shown by negative
+  controls (a wrong beta, a biased target sampler, a biased Clifford sample, a wrong rate, and
+  seeds that are shared across sizes or rewiring probabilities must fail).
+
+Every graph and every circuit below is drawn from the study's own seeds (ruling R-SEED:
+``identity.graph_seed(master, n, beta, g)`` and ``identity.run_seed(master, n, beta, mode, p)``),
+not from ad hoc seeds, so the conformance tests exercise the seed derivation too: the
+collections of different ``(n, beta)`` are independent samples, and only the rates of one
+``(n, beta)`` are coupled (nested masks).
 
 What the existing tests already prove, and is not repeated here:
 
@@ -30,7 +37,8 @@ What the existing tests already prove, and is not repeated here:
 This file adds the study protocol itself (manifest keywords, even and odd n), the full
 11,520-index and 720-class uniformity with the check of ``j // 16`` against ``clifford.py``,
 the with-replacement law, independence diagnostics, mask correlations, nesting over a grid of
-rates, horizon and probe independence, ``gate_mode="independent"``, and the graph law.
+rates, horizon and probe independence, ``gate_mode="independent"``, the graph law, and the
+independence of the samples of different sizes and rewiring probabilities.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import _reference_rng as ref
 import _ws_reference as wsref
 from _protocol_oracle import oracle_circuit_text
 from sparsegf2 import graphs, mipt
@@ -58,6 +67,11 @@ SIGMAS = 4.5  # z-tests: |z| must stay below this
 MASTER_GRAPH = 17
 MASTER_CIRCUIT = 29
 PROPERTY = settings(max_examples=200, deadline=None, database=None, derandomize=True)
+
+
+def graph_seed(n: int, beta, g: int) -> tuple[int, ...]:
+    """The study's seed of graph ``g`` of ``(n, beta)`` under the master graph seed (ruling R-SEED)."""
+    return ident.graph_seed(MASTER_GRAPH, n, beta, g)
 
 
 def make_manifest(
@@ -184,7 +198,7 @@ def test_the_reference_rewiring_equals_the_native_generator_trace_for_trace():
     count = 0
     for n, beta in itertools.product(SIZES, BETAS):
         for g in range(60):
-            seed = (MASTER_GRAPH, g)
+            seed = graph_seed(n, beta, g)  # the study's six-word seed of graph g of (n, beta)
             expected = wsref.rewire(n, beta, seed)
             assert np.array_equal(expected, graphs.watts_strogatz(n, 4, beta, seed=seed)), (
                 n,
@@ -196,7 +210,19 @@ def test_the_reference_rewiring_equals_the_native_generator_trace_for_trace():
 
 
 @pytest.mark.parametrize(
-    "seed", [0, 1, 2**32 - 1, 2**64 + 5, [3, 1, 4], (0, 0), (2**32 - 1, 2**32 - 1)]
+    "seed",
+    [
+        0,
+        1,
+        2**32 - 1,
+        2**64 + 5,
+        [3, 1, 4],
+        (0, 0),
+        (2**32 - 1, 2**32 - 1),
+        (ident.GRAPH_SEED_TAG, 17, 16, 2007713733, 3507754741, 3),  # a graph seed of the study
+        (ident.CIRCUIT_SEED_TAG, 29, 16, 2007713733, 3507754741),  # a shared run seed: five words
+        (ident.CIRCUIT_SEED_TAG, 29, 16, 2007713733, 3507754741, 3479488031, 1099992840),  # seven
+    ],
 )
 def test_equality_holds_for_every_seed_form(seed):
     for n, beta in [(9, 0.4), (16, 0.2), (31, 0.7)]:
@@ -218,7 +244,9 @@ def test_equality_holds_for_every_seed_form(seed):
 )
 def test_equality_and_validity_for_arbitrary_seeds(n, beta, master, g):
     record = build_graph(n, beta, g, master)  # validated: simple, 2n edges, beta = 0 gives C(n, 2)
-    assert np.array_equal(record.edges, wsref.rewire(n, beta, (master, g)))
+    seed = wsref.graph_seed(master, n, Token.parse(beta).token, g)  # the reference's own seed tuple
+    assert record.seed == seed
+    assert np.array_equal(record.edges, wsref.rewire(n, beta, seed))
 
 
 def test_the_mapping_from_random_numbers_to_targets_matters_not_only_the_law():
@@ -228,23 +256,23 @@ def test_the_mapping_from_random_numbers_to_targets_matters_not_only_the_law():
     n, beta, seeds = 24, 0.5, 200
     same = sum(
         np.array_equal(
-            wsref.rewire(n, beta, (MASTER_GRAPH, g), mapping="index"),
-            graphs.watts_strogatz(n, 4, beta, seed=(MASTER_GRAPH, g)),
+            wsref.rewire(n, beta, graph_seed(n, beta, g), mapping="index"),
+            graphs.watts_strogatz(n, 4, beta, seed=graph_seed(n, beta, g)),
         )
         for g in range(seeds)
     )
     assert same <= 2  # about 24 rewirings per graph: equal only by luck
     assert all(  # with no rewiring there is no target to map
         np.array_equal(
-            wsref.rewire(n, 0.0, (MASTER_GRAPH, g), mapping="index"),
-            graphs.watts_strogatz(n, 4, 0.0, seed=(MASTER_GRAPH, g)),
+            wsref.rewire(n, 0.0, graph_seed(n, 0.0, g), mapping="index"),
+            graphs.watts_strogatz(n, 4, 0.0, seed=graph_seed(n, 0.0, g)),
         )
         for g in range(5)
     )
     # ... while the law is the same: the index mapping passes the same uniformity test below
     visits: list[wsref.Visit] = []
     for g in range(3000):
-        wsref.rewire(n, beta, (MASTER_GRAPH, g), mapping="index", record=visits)
+        wsref.rewire(n, beta, graph_seed(n, beta, g), mapping="index", record=visits)
     assert target_pit_p(visits) > ALPHA
 
 
@@ -334,7 +362,7 @@ def test_the_native_generator_has_the_exact_law_at_n_6(beta):
     law = wsref.exact_law(n, beta)
     counts: dict[int, int] = {}
     for g in range(total):
-        mask = wsref.graph_mask(graphs.watts_strogatz(n, 4, beta, seed=(MASTER_GRAPH, g)), n)
+        mask = wsref.graph_mask(graphs.watts_strogatz(n, 4, beta, seed=graph_seed(n, beta, g)), n)
         counts[mask] = counts.get(mask, 0) + 1
     assert set(counts) <= set(law)  # never a graph outside the support
     keys = sorted(law)
@@ -357,7 +385,7 @@ def test_each_plausible_misreading_of_the_rewiring_rule_is_rejected(misreading):
     # on the same seeds, passes.
     n, beta, total = 6, 0.5, 30_000
     law = wsref.exact_law(n, beta)
-    seeds = [(MASTER_GRAPH, g) for g in range(total)]
+    seeds = [graph_seed(n, beta, g) for g in range(total)]
     wrong = [wsref.graph_mask(wsref.rewire_misreading(n, beta, s, misreading), n) for s in seeds]
     assert wsref.law_p(wrong, law) < ALPHA
     right = [wsref.graph_mask(wsref.rewire(n, beta, s), n) for s in seeds]
@@ -374,7 +402,7 @@ def test_the_native_generator_has_the_exact_moments_at_n_7(beta):
     new = np.array([wsref.new_edge_count(wsref.mask_edges(m, n), n) for m in law], dtype=float)
     q = np.array(list(law.values()))
     assert q.sum() == pytest.approx(1.0, abs=1e-12)
-    sample = [graphs.watts_strogatz(n, 4, beta, seed=(MASTER_GRAPH, g)) for g in range(total)]
+    sample = [graphs.watts_strogatz(n, 4, beta, seed=graph_seed(n, beta, g)) for g in range(total)]
     for values, stat in [(degvar, wsref.degree_variance), (new, wsref.new_edge_count)]:
         mean = float(q @ values)
         var = float(q @ (values - mean) ** 2)
@@ -414,9 +442,11 @@ def rewiring_trace(request):
     records, attempts = [], np.zeros(total, dtype=int)
     for g in range(total):
         visits: list[wsref.Visit] = []
-        edges = wsref.rewire(n, beta, (MASTER_GRAPH, g), record=visits)
+        edges = wsref.rewire(n, beta, graph_seed(n, beta, g), record=visits)
         if g < 2000:  # tie the recorded decisions to the native generator
-            assert np.array_equal(edges, graphs.watts_strogatz(n, 4, beta, seed=(MASTER_GRAPH, g)))
+            assert np.array_equal(
+                edges, graphs.watts_strogatz(n, 4, beta, seed=graph_seed(n, beta, g))
+            )
         records.append(visits)
         attempts[g] = sum(v.attempted for v in visits)
     return beta, n, records, attempts
@@ -490,7 +520,7 @@ def test_rejection_sampling_uses_n_over_the_eligible_size_draws_on_average(rewir
 def test_a_biased_target_sampler_fails_the_uniformity_test():
     visits: list[wsref.Visit] = []
     for g in range(3000):
-        wsref.rewire(24, 0.5, (MASTER_GRAPH, g), mapping="first", record=visits)
+        wsref.rewire(24, 0.5, graph_seed(24, 0.5, g), mapping="first", record=visits)
     assert target_pit_p(visits) < ALPHA  # always the smallest eligible vertex: seen at once
 
 
@@ -510,8 +540,9 @@ SPEC_CASES = [
 def test_the_exported_circuit_is_the_oracle_and_the_direct_transcription(n, p, mode):
     manifest = make_manifest(n, [p], 12, 4, graphs_count=2, gate_mode=mode)
     spec, records = make_spec(manifest, n, p)
-    seed = manifest.run_seed(p)
-    assert (seed == MASTER_CIRCUIT) == (mode == "shared")
+    seed = manifest.run_seed(n, "0.3", p)  # the manifest's beta is 0.3
+    assert seed == wsref.run_seed(MASTER_CIRCUIT, n, "0.3", None if mode == "shared" else p)
+    assert len(seed) == (5 if mode == "shared" else 7)
     for u in (0, 3, 4, 7):  # graphs 0 and 1, circuits 0 and 3
         g, c = divmod(u, manifest.stride)
         assert u == manifest.stream_index(g, c)
@@ -533,8 +564,9 @@ def test_each_layer_has_floor_n_over_two_gates_on_edges_with_the_low_endpoint_fi
     spec, records = make_spec(manifest, n, "0.2")
     assert spec.gates_per_layer == n // 2
     allowed = {tuple(e) for e in records[0].edges.tolist()}
+    seed = manifest.run_seed(n, "0.3", "0.2")
     for u in range(3):
-        layers = wsref.parse_circuit(str(spec.circuit(u, seed=MASTER_CIRCUIT)))
+        layers = wsref.parse_circuit(str(spec.circuit(u, seed=seed)))
         assert len(layers) == 25
         for layer in layers:
             assert len(layer.gates) == n // 2
@@ -550,8 +582,9 @@ def test_the_circuit_follows_the_graph_edges_only():
     spec, records = make_spec(manifest, 20, "0.1", beta="0.5")
     allowed = {tuple(e) for e in records[0].edges.tolist()}
     used = set()
+    seed = manifest.run_seed(20, "0.5", "0.1")
     for u in range(20):
-        for layer in wsref.parse_circuit(str(spec.circuit(u, seed=MASTER_CIRCUIT))):
+        for layer in wsref.parse_circuit(str(spec.circuit(u, seed=seed))):
             used |= {(x, y) for x, y, _ in layer.gates}
     assert used == allowed  # 20 x 100 x 10 draws reach all 40 edges
 
@@ -567,7 +600,7 @@ def big():
     n, layers, k = 24, 400, 72
     manifest = make_manifest(n, ["0.3"], layers, k)
     spec, records = make_spec(manifest, n, "0.3")
-    return Sample(spec, records, manifest.run_seed("0.3"), range(k)), records[0]
+    return Sample(spec, records, manifest.run_seed(n, "0.3", "0.3"), range(k)), records[0]
 
 
 def test_edge_draws_are_uniform_over_the_graphs_edges(big):
@@ -632,7 +665,7 @@ def test_disjoint_pairs_of_edge_draws_are_independent_and_uniform():
     n, layers, k = 8, 300, 100
     manifest = make_manifest(n, ["0.2"], layers, k)
     spec, records = make_spec(manifest, n, "0.2")
-    sample = Sample(spec, records, manifest.run_seed("0.2"), range(k))
+    sample = Sample(spec, records, manifest.run_seed(n, "0.3", "0.2"), range(k))
     num_edges = len(records[0].edges)
     assert num_edges == 16
     cells = np.concatenate(
@@ -713,7 +746,7 @@ def masks():
     n, layers, k, p = 12, 200, 40, 0.3
     manifest = make_manifest(n, ["0.3"], layers, k)
     spec, records = make_spec(manifest, n, "0.3")
-    return Sample(spec, records, manifest.run_seed("0.3"), range(k)), p
+    return Sample(spec, records, manifest.run_seed(n, "0.3", "0.3"), range(k)), p
 
 
 def frequency_pvalues(mask: np.ndarray, p: float) -> dict[str, float]:
@@ -869,7 +902,8 @@ def test_the_extreme_rates_measure_nothing_or_everything():
     for p, expected in (("0", []), ("1", list(range(9)))):
         spec, _ = make_spec(manifest, 9, p)
         for u in range(2):
-            layers = wsref.parse_circuit(str(spec.circuit(u, seed=manifest.run_seed(p))))
+            seed = manifest.run_seed(9, "0.3", p)
+            layers = wsref.parse_circuit(str(spec.circuit(u, seed=seed)))
             assert all(layer.measured == expected for layer in layers)
 
 
@@ -887,8 +921,9 @@ def test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates():
     records = [build_graph(n, "0.3", g, MASTER_GRAPH) for g in range(2)]
     for g, c in [(0, 0), (0, 5), (1, 0), (1, 3), (1, 5)]:  # aligned (g, c, u)
         u = manifest.stream_index(g, c)
-        seed = manifest.run_seed("0.1")
-        assert all(manifest.run_seed(p) == seed for p in RATE_GRID)  # shared gate mode
+        seed = manifest.run_seed(n, "0.3", "0.1")
+        assert seed == wsref.run_seed(MASTER_CIRCUIT, n, "0.3")  # five words, no rate in them
+        assert all(manifest.run_seed(n, "0.3", p) == seed for p in RATE_GRID)  # shared gate mode
         draws = wsref.study_draws(seed, u, len(records[g].edges), n, layers)
         exports = {p: wsref.parse_circuit(str(specs[p].circuit(u, seed=seed))) for p in RATE_GRID}
         ordered = sorted(RATE_GRID, key=lambda p: Token.parse(p).value)
@@ -914,8 +949,9 @@ def test_masks_are_uniform_below_the_float_threshold_and_nested_across_rates():
 def test_nesting_does_not_hold_when_the_gate_mode_is_independent():
     n, layers, stride = 10, 40, 4
     manifest = make_manifest(n, ["0.1", "0.2", "0.3"], layers, stride, gate_mode="independent")
-    seeds = {p: manifest.run_seed(p) for p in ("0.1", "0.2", "0.3")}
-    assert len(set(seeds.values())) == 3 and all(s[0] == MASTER_CIRCUIT for s in seeds.values())
+    seeds = {p: manifest.run_seed(n, "0.3", p) for p in ("0.1", "0.2", "0.3")}
+    assert len(set(seeds.values())) == 3
+    assert all(s == wsref.run_seed(MASTER_CIRCUIT, n, "0.3", p) for p, s in seeds.items())
     records = [build_graph(n, "0.3", 0, MASTER_GRAPH)]
     u = manifest.stream_index(0, 2)
     out = {}
@@ -948,9 +984,11 @@ def test_a_longer_horizon_extends_the_circuit_prefix(short, long):
     manifest_long = make_manifest(n, ["0.25"], long, stride)
     spec_short, _ = make_spec(manifest_short, n, "0.25")
     spec_long, _ = make_spec(manifest_long, n, "0.25")
+    seed = manifest_short.run_seed(n, "0.3", "0.25")
+    assert seed == manifest_long.run_seed(n, "0.3", "0.25")  # the horizon is in no seed
     for u in range(stride):
-        a = wsref.parse_circuit(str(spec_short.circuit(u, seed=MASTER_CIRCUIT)))
-        b = wsref.parse_circuit(str(spec_long.circuit(u, seed=MASTER_CIRCUIT)))
+        a = wsref.parse_circuit(str(spec_short.circuit(u, seed=seed)))
+        b = wsref.parse_circuit(str(spec_long.circuit(u, seed=seed)))
         assert len(a) == short and len(b) == long and a == b[:short]
 
 
@@ -960,26 +998,28 @@ def test_unrelated_choices_leave_the_circuit_unchanged():
     n, layers, stride = 12, 20, 4
     manifest = make_manifest(n, ["0.2"], layers, stride, graphs_count=2)
     spec, records = make_spec(manifest, n, "0.2")
-    base = str(spec.circuit(5, seed=MASTER_CIRCUIT))
+    seed = manifest.run_seed(n, "0.3", "0.2")
+    base = str(spec.circuit(5, seed=seed))
     with_probes, _ = make_spec(
         manifest, n, "0.2", probes=[mipt.code_dimension(), mipt.contiguous_distance()]
     )
-    assert str(with_probes.circuit(5, seed=MASTER_CIRCUIT)) == base
+    assert str(with_probes.circuit(5, seed=seed)) == base
     for checkpoints in ("final", 5, [0, 7, 20]):
         other = mipt.MonitoredCircuit(
             **{**manifest.monitored_circuit_kwargs(n, "0.3", "0.2"), "checkpoints": checkpoints},
             edges=[r.edges for r in records],
         )
-        assert str(other.circuit(5, seed=MASTER_CIRCUIT)) == base
+        assert str(other.circuit(5, seed=seed)) == base
     # more graphs appended to the collection do not renumber or change trajectory 5 (graph 1)
     bigger = make_manifest(n, ["0.2"], layers, stride, graphs_count=6)
     spec_big, _ = make_spec(bigger, n, "0.2")
-    assert str(spec_big.circuit(5, seed=MASTER_CIRCUIT)) == base
+    assert bigger.run_seed(n, "0.3", "0.2") == seed  # the number of graphs is in no seed
+    assert str(spec_big.circuit(5, seed=seed)) == base
     assert spec_big.num_trajectories == 6 * stride and spec.num_trajectories == 2 * stride
     # more circuits per graph (a larger stride) renumber, which is why the stride is frozen
     wider = make_manifest(n, ["0.2"], layers, stride + 4, graphs_count=2)
     spec_wide, _ = make_spec(wider, n, "0.2")
-    assert str(spec_wide.circuit(5, seed=MASTER_CIRCUIT)) != base
+    assert str(spec_wide.circuit(5, seed=seed)) != base
 
 
 def test_the_simulated_code_dimension_has_a_horizon_independent_prefix():
@@ -995,7 +1035,7 @@ def test_the_simulated_code_dimension_has_a_horizon_independent_prefix():
             edges=graph,
             probes=[mipt.code_dimension()],
         )
-        values = spec.run(stride, seed=MASTER_CIRCUIT).values["code_dimension"]
+        values = spec.run(stride, seed=manifest.run_seed(n, "0.3", "0.3")).values["code_dimension"]
         results[(layers, str(checkpoints))] = values
     short, long = results[(6, "every_layer")], results[(14, "every_layer")]
     sparse = results[(14, "[0, 6, 14]")]
@@ -1004,3 +1044,127 @@ def test_the_simulated_code_dimension_has_a_horizon_independent_prefix():
     assert np.array_equal(sparse[:, 1], long[:, 6]) and np.array_equal(sparse[:, 2], long[:, 14])
     assert (np.diff(long, axis=1) <= 0).all()  # k_t is nonincreasing (v1.4 section 5.2)
     assert (long[:, 0] == n).all()  # r_0 = 0, k_0 = n
+
+
+# ---------------------------------------------------------------------------
+# the samples of different (n, beta) are independent; only the rates are coupled (ruling R-SEED)
+# ---------------------------------------------------------------------------
+#
+# v1.4 couples conditions across the rate p only (nested masks, shared gates). Graph g of (n, beta)
+# and graph g of (n', beta') must not share raw random numbers: finite-size fits treat the sizes and
+# the rewiring probabilities as independent samples. The first rewiring decisions and the first gate
+# draws are where a shared seed shows at once. Each test has its null law (exact), a z-test with the
+# false-alarm rate of the file, and a negative control: the convention the study first drafted, one
+# seed for every condition, makes the very same statistic degenerate.
+
+
+def z_binomial(count: int, trials: int, q: float) -> float:
+    """The standard score of ``count`` successes in ``trials`` independent trials of probability ``q``."""
+    return (count - trials * q) / math.sqrt(trials * q * (1 - q))
+
+
+def first_attempts(n: int, beta: str, count: int, seed_of) -> np.ndarray:
+    """For graphs ``0..count-1`` of ``(n, beta)``: the visit of the first rewiring attempt (``2 n`` if none).
+
+    Before the first success every visit consumes exactly one ``next_double()``, the decision
+    ``< beta``, so the index of the first success is read from the stream of the seed alone, with
+    the reference generator (the trace-for-trace test above ties it to the native one).
+    """
+    threshold = Token.parse(beta).float64
+    out = np.empty(count, dtype=int)
+    for g in range(count):
+        rng = ref.Xoshiro(wsref.seed_words(seed_of(n, beta, g)))
+        j = 0
+        while j < 2 * n and not rng.next_double() < threshold:
+            j += 1
+        out[g] = j
+    return out
+
+
+def first_attempt_pmf(n: int, beta: Fraction) -> list[Fraction]:
+    """``P(first attempt at visit j)`` for ``j = 0..2n-1`` and ``P(no attempt)`` at index ``2n``."""
+    return [(1 - beta) ** j * beta for j in range(2 * n)] + [(1 - beta) ** (2 * n)]
+
+
+def shared_seed(n: int, beta, g: int) -> tuple[int, int]:
+    """The convention of the first draft, kept as a negative control: one seed ``(master, g)`` for all."""
+    return (MASTER_GRAPH, g)
+
+
+def test_graph_collections_of_different_sizes_are_independent_samples():
+    small, large, count = 12, 16, 3000
+    pa, pb = first_attempt_pmf(small, Fraction(1, 2)), first_attempt_pmf(large, Fraction(1, 2))
+    q = float(sum(x * y for x, y in zip(pa, pb, strict=False)))  # P(equal) for independent draws
+    assert 0.33 < q < 0.34  # about 1/3: the first attempt is Geometric(1/2) at both sizes
+    a = first_attempts(small, "0.5", count, graph_seed)
+    b = first_attempts(large, "0.5", count, graph_seed)
+    agree = int((a == b).sum())
+    assert abs(z_binomial(agree, count, q)) < SIGMAS  # about 1000 of 3000 agree, by chance alone
+    # negative control: with one seed per g for every size the first decisions are the same draws
+    old_a = first_attempts(small, "0.5", count, shared_seed)
+    old_b = first_attempts(large, "0.5", count, shared_seed)
+    assert int((old_a == old_b).sum()) > 0.99 * count
+    assert abs(z_binomial(int((old_a == old_b).sum()), count, q)) > SIGMAS
+
+
+def test_graph_collections_of_different_betas_are_independent_samples():
+    # One seed for every beta would nest the decisions (u < beta): the first rewiring at the larger
+    # beta could only come at or before that at the smaller one. For independent collections it
+    # does so with the probability P(J_high <= J_low), exactly computed from the two geometric laws.
+    n, count = 16, 3000
+    p_low, p_high = first_attempt_pmf(n, Fraction(3, 10)), first_attempt_pmf(n, Fraction(1, 2))
+    q = float(sum(p_high[j] * sum(p_low[j:]) for j in range(2 * n + 1)))
+    assert 0.76 < q < 0.78  # about 0.5 / (1 - 0.35)
+    low = first_attempts(n, "0.3", count, graph_seed)
+    high = first_attempts(n, "0.5", count, graph_seed)
+    assert abs(z_binomial(int((high <= low).sum()), count, q)) < SIGMAS
+    # negative control: a shared seed always nests (the decisions are one uniform per visit)
+    assert (
+        first_attempts(n, "0.5", count, shared_seed) <= first_attempts(n, "0.3", count, shared_seed)
+    ).all()
+
+
+def test_circuit_streams_of_different_betas_are_independent_samples():
+    # the same size, rate and trajectory index u: the edge indices (uniform on 2n values) agree with
+    # probability 1 / 2n when the run seeds are independent, and always when they are shared
+    n, layers, k, p = 12, 40, 40, "0.2"
+    low_manifest = make_manifest(n, [p], layers, k, beta="0.1")
+    high_manifest = make_manifest(n, [p], layers, k, beta="0.3")
+    (low_spec, low_records), (high_spec, high_records) = (
+        make_spec(low_manifest, n, p, beta="0.1"),
+        make_spec(high_manifest, n, p, beta="0.3"),
+    )
+    low_seed = low_manifest.run_seed(n, "0.1", p)
+    high_seed = high_manifest.run_seed(n, "0.3", p)
+    assert low_seed != high_seed
+    low = Sample(low_spec, low_records, low_seed, range(k)).edge
+    high = Sample(high_spec, high_records, high_seed, range(k)).edge
+    assert low.size == 40 * 40 * (n // 2) == 9600
+    assert abs(z_binomial(int((low == high).sum()), low.size, 1 / (2 * n))) < SIGMAS
+    # negative control: the master circuit seed itself, shared by both betas, gives equal draws
+    shared_low = Sample(low_spec, low_records, MASTER_CIRCUIT, range(k)).edge
+    shared_high = Sample(high_spec, high_records, MASTER_CIRCUIT, range(k)).edge
+    assert np.array_equal(shared_low, shared_high)
+
+
+def test_circuit_streams_of_different_sizes_are_independent_samples():
+    # Under one shared seed trajectory u of every size starts from the same first draw X, and the
+    # first gate's edge index is floor(2 n X): the intervals [e / 2n, (e + 1) / 2n) of two sizes
+    # always overlap (at X). For independent seeds they overlap with the probability computed here.
+    small, large, k, p = 12, 16, 1000, "0.2"
+    first, shared = {}, {}
+    for n in (small, large):
+        manifest = make_manifest(n, [p], 1, k)  # k trajectories on graph 0, one layer
+        spec, records = make_spec(manifest, n, p)
+        first[n] = Sample(spec, records, manifest.run_seed(n, "0.3", p), range(k)).edge[:, 0, 0]
+        shared[n] = Sample(spec, records, MASTER_CIRCUIT, range(k)).edge[:, 0, 0]
+    b, c = 2 * small, 2 * large
+
+    def overlap(e: int, f: int) -> bool:
+        return e * c < (f + 1) * b and f * b < (e + 1) * c
+
+    q = sum(overlap(e, f) for e in range(b) for f in range(c)) / (b * c)
+    assert q == (b + c - math.gcd(b, c)) / (b * c) == 0.0625  # the cells of the two grids that meet
+    hits = sum(overlap(int(e), int(f)) for e, f in zip(first[small], first[large], strict=True))
+    assert abs(z_binomial(hits, k, q)) < SIGMAS
+    assert all(overlap(int(e), int(f)) for e, f in zip(shared[small], shared[large], strict=True))

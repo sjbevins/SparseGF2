@@ -35,15 +35,22 @@ parsed into layers, and the same draws transcribed from the protocol of v1.4 §7
 for each of the $\\lfloor n/2 \\rfloor$ gates one ``next_below(|E|)`` edge draw and one
 ``next_below(11520)`` Clifford draw, then one ``next_double`` per site).
 
+**Seeds** (:func:`token_words`, :func:`graph_seed`, :func:`run_seed`): the seed tuples of the
+design (§3, ruling R-SEED), written from their definition with ``hashlib`` and ``struct``:
+domain tag, master seed, size, the two 32-bit words of the BLAKE2b hash of the canonical token
+(and of the rate in independent mode), and the graph label. Tokens are canonical strings.
+
 **Statistics** (:func:`chi2_sf`, :func:`chi2_p`): the chi-square tail by the regularized upper
 incomplete gamma function, checked in ``test_study_sampling.py`` against closed forms.
 """
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import math
 import re
+import struct
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
@@ -76,6 +83,34 @@ def circulant_edges(n: int) -> list[frozenset[int]]:
 def original_edge_list(n: int) -> list[tuple[int, int]]:
     """$L_n$: ``d = 1, 2`` outer, ``i = 0..n-1`` inner, ``(a, b) = (i, (i + d) mod n)``."""
     return [(i, (i + d) % n) for d in (1, 2) for i in range(n)]
+
+
+GRAPH_TAG = int.from_bytes(b"WSG1", "big")  #: first word of every graph seed (0x57534731)
+CIRCUIT_TAG = int.from_bytes(b"WSC1", "big")  #: first word of every run seed (0x57534331)
+
+
+def token_words(text: str) -> tuple[int, int]:
+    """The two 32-bit words, low first, of ``blake2b(text, digest_size=8)`` read little-endian.
+
+    ``text`` is a canonical token string such as ``"0.1"`` or ``"1/3"``. The little-endian
+    integer of the 8 digest bytes has the first four bytes (little-endian) as its low word and
+    the last four as its high word, which is what ``struct`` reads.
+    """
+    digest = hashlib.blake2b(text.encode("ascii"), digest_size=8).digest()
+    low, high = struct.unpack("<II", digest)
+    return low, high
+
+
+def graph_seed(master: int, n: int, beta: str, g: int) -> tuple[int, ...]:
+    """The graph seed ``(WSG1, master, n, beta words, g)`` of graph ``g`` of ``(n, beta)``."""
+    return (GRAPH_TAG, master, n, *token_words(beta), g)
+
+
+def run_seed(master: int, n: int, beta: str, p: str | None = None) -> tuple[int, ...]:
+    """The run seed ``(WSC1, master, n, beta words)``, shared mode (``p is None``) or with the
+    words of the rate ``p`` appended (independent mode)."""
+    base = (CIRCUIT_TAG, master, n, *token_words(beta))
+    return base if p is None else (*base, *token_words(p))
 
 
 def seed_words(seed: Any) -> list[int]:

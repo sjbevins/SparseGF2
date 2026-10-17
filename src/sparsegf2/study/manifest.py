@@ -21,7 +21,11 @@ Sections (all keys are listed in ``docs/study/02-identity-seeds-and-manifest.md`
   engine are every layer.
 * ``trials``: graphs $G_*$, circuits per graph $C$, the frozen circuit index stride $s \\ge C$
   and the measurement replicas $R = 1$ (design D1).
-* ``seeds``: ``master_graph_seed``, ``master_circuit_seed``, ``gate_mode``.
+* ``seeds``: ``master_graph_seed``, ``master_circuit_seed``, ``gate_mode``. The seeds of
+  graphs and runs are domain-tagged tuples that name the condition (ruling R-SEED,
+  :func:`~sparsegf2.study.identity.graph_seed` and ``run_seed``), so the two master seeds may
+  be equal, and different sizes and rewiring probabilities get independent samples; the
+  manifest methods ``graph_seed(n, beta, g)`` and ``run_seed(n, beta, p)`` give them.
 * ``dynamics``, ``observables``, ``storage``, ``resources``, ``analysis``: typed settings with
   the defaults of the design example; a later task may add fields.
 
@@ -63,7 +67,7 @@ import math
 import numbers
 import operator
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -80,6 +84,7 @@ from sparsegf2.study.identity import (
     run_seed,
     sha256_hex,
     stream_index,
+    token_words,
 )
 
 __all__ = [
@@ -514,7 +519,12 @@ class Trials:
 
 @dataclass(frozen=True)
 class Seeds:
-    """The master seeds (unsigned 32-bit) and how the circuit seed depends on the rate."""
+    """The master seeds (unsigned 32-bit) and how the run seed depends on the rate.
+
+    Graph seeds and run seeds are tuples with different domain tags, so the two master seeds
+    may be equal (ruling R-SEED; :func:`~sparsegf2.study.identity.graph_seed`,
+    :func:`~sparsegf2.study.identity.run_seed`).
+    """
 
     master_graph_seed: int
     master_circuit_seed: int
@@ -537,12 +547,6 @@ class Seeds:
             minimum=0,
             maximum=SEED_LIMIT - 1,
         )
-        if graph == circuit:
-            raise ValueError(
-                f"{where}: master_graph_seed and master_circuit_seed must differ (both are {graph}): "
-                "graph 0 is built from the seed (s, 0), which is the same SeedSequence as the plain "
-                "circuit seed s"
-            )
         return cls(
             graph, circuit, _choice(d.get("gate_mode", "shared"), f"{where}.gate_mode", GATE_MODES)
         )
@@ -946,6 +950,25 @@ def _refuse_constant(name: str) -> Any:
     raise ValueError(f"JSON has no {name}; use a finite number")
 
 
+def _distinct_seed_words(tokens: Iterable[Token], what: str) -> None:
+    """Refuse two different tokens whose seed words (:func:`token_words`) coincide.
+
+    The words of $\\beta$ (and, with ``gate_mode="independent"``, of $p$) name the condition
+    inside every seed, so a collision of two 64-bit hashes would give two conditions one seed.
+    It has probability $2^{-64}$ for a given pair; refusing it makes "different conditions have
+    different seeds" a fact about every accepted manifest and not a likelihood.
+    """
+    seen: dict[tuple[int, int], Token] = {}
+    for token in tokens:
+        other = seen.setdefault(token_words(token), token)
+        if other != token:
+            raise ValueError(
+                f"manifest.conditions: the {what} values {other} and {token} have the same "
+                "64-bit seed hash, so their conditions would share seeds (probability 2**-64 for "
+                "a given pair): use another value for one of them"
+            )
+
+
 @dataclass(frozen=True)
 class ExperimentManifest:
     """The immutable description of one study (see the module docstring).
@@ -954,7 +977,9 @@ class ExperimentManifest:
     canonical text and ``digest()`` its SHA-256. The constructor validates the cross-field
     rules: no duplicate condition, a layer table and a checkpoint table that cover exactly the
     sizes in use, table entries within $[0, T_{\\max}(n)]$, correlated-erasure sizes within
-    $[1, n - 1]$, an exact-count budget of at least $n$, and different master seeds.
+    $[1, n - 1]$, an exact-count budget of at least $n$, and tokens whose 64-bit seed hashes are
+    all different (so that different conditions have different seeds; see ``graph_seed``). The
+    two master seeds may be equal: graph seeds and run seeds carry different domain tags.
     """
 
     experiment_id: str
@@ -979,6 +1004,9 @@ class ExperimentManifest:
         _choice(self.label, "manifest.label", LABELS)
         conditions = self.conditions()  # refuses duplicates
         object.__setattr__(self, "blocks", _canonical_blocks(conditions))
+        _distinct_seed_words((c.beta for c in conditions), "beta")
+        if self.seeds.gate_mode == "independent":
+            _distinct_seed_words((p for c in conditions for p in c.rates), "p")
         sizes = sorted({c.n for c in conditions})
         if self.depth.layers.kind == "table":
             listed = [n for n, _ in self.depth.layers.table]
@@ -1220,11 +1248,18 @@ class ExperimentManifest:
         """$G_* C$ trajectories at every $(n, \\beta, p)$."""
         return self.trials.graphs * self.trials.circuits_per_graph
 
-    def graph_seed(self, g: int) -> tuple[int, int]:
-        return graph_seed(self.seeds.master_graph_seed, g)
+    def graph_seed(self, n: int, beta: Token | str | float, g: int) -> tuple[int, ...]:
+        """The seed of graph $g$ of the condition $(n, \\beta)$: ``identity.graph_seed``."""
+        n, beta_t, _ = self._condition(n, beta)
+        return graph_seed(self.seeds.master_graph_seed, n, beta_t, g)
 
-    def run_seed(self, p: Token | str | float) -> int | tuple[int, int]:
-        return run_seed(self.seeds.master_circuit_seed, self.seeds.gate_mode, p)
+    def run_seed(
+        self, n: int, beta: Token | str | float, p: Token | str | float
+    ) -> tuple[int, ...]:
+        """The seed of the runs at the condition $(n, \\beta, p)$ in this manifest's gate mode:
+        ``identity.run_seed``. In ``"shared"`` mode it is the same for every $p$."""
+        n, beta_t, p_t = self._condition(n, beta, p)
+        return run_seed(self.seeds.master_circuit_seed, n, beta_t, self.seeds.gate_mode, p_t)
 
     def stream_index(self, g: int, c: int) -> int:
         return stream_index(g, c, self.stride)

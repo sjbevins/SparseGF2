@@ -11,14 +11,18 @@ the correctly rounded ``float64`` handed to the simulator, and ``float.hex()`` o
 The ideal Bernoulli($x$) law and the law the simulator realizes differ by less than
 $2^{-52}$ (v1.4 §7.2, §9; ``docs/study/01-ensemble-and-sampling.md``).
 
-**Seeds** (:func:`graph_seed`, :func:`run_seed`, :func:`stream_index`). Graph $g$ of every
-$(n, \\beta)$ is built from the seed ``(master_graph_seed, g)``, so the graph collection does
-not depend on the measurement rate, and one collection is reused at every $p$. Trajectory
-$(g, c)$ has the native stream index $u = g \\cdot s + c$, with the stride $s$ frozen in the
-manifest, so adding graphs or circuits never renumbers an existing trajectory.
-``gate_mode="shared"`` runs every rate under the master circuit seed (the native coupling:
-gates and mask uniforms are common to all $p$); ``"independent"`` derives the seed from the
-rate token.
+**Seeds** (:func:`graph_seed`, :func:`run_seed`, :func:`stream_index`; ruling R-SEED). Every
+seed is a fixed-length tuple of 32-bit words that begins with a domain tag and names the
+condition: graph $g$ of $(n, \\beta)$ is built from ``(GRAPH_SEED_TAG, master_graph_seed, n,
+*token_words(beta), g)``, so the graph collection does not depend on the measurement rate
+(one collection serves every $p$) and sizes and rewiring probabilities get independent
+collections. The run seed is ``(CIRCUIT_SEED_TAG, master_circuit_seed, n,
+*token_words(beta))`` in ``gate_mode="shared"``, the same for every $p$ (the native coupling:
+gates and mask uniforms are common to all rates, masks are nested), and that tuple followed
+by ``token_words(p)`` in ``"independent"``. The two tags make graph seeds and run seeds
+disjoint whatever the master seeds are. Trajectory $(g, c)$ has the native stream index
+$u = g \\cdot s + c$, with the stride $s$ frozen in the manifest, so adding graphs or
+circuits never renumbers an existing trajectory.
 
 **Graph records** (:class:`GraphRecord`, :func:`build_graph`). A record holds the
 Watts–Strogatz graph $G_g \\sim \\mu_{n,\\beta}$ of v1.4 §2 with the seed and generator version
@@ -51,11 +55,13 @@ from sparsegf2 import graphs, mipt
 from sparsegf2._version import __version__
 
 __all__ = [
+    "CIRCUIT_SEED_TAG",
     "CLIFFORD_ENUMERATION_VERSION",
     "DYNAMICS_VERSION",
     "EDGE_DIGEST_MAGIC",
     "GATE_MODES",
     "GRAPH_GENERATOR_VERSION",
+    "GRAPH_SEED_TAG",
     "ORIGINAL_EDGE_ORDER",
     "ROWSPACE_FORMAT_VERSION",
     "SEED_LIMIT",
@@ -76,6 +82,7 @@ __all__ = [
     "sha256_hex",
     "split_stream_index",
     "stream_index",
+    "token_words",
     "validate_graph",
     "version_record",
 ]
@@ -112,9 +119,19 @@ ORIGINAL_EDGE_ORDER = "offset-major"
 #: Prefix of the bytes whose SHA-256 is an edge digest.
 EDGE_DIGEST_MAGIC = b"SGF2EDGES1\x00"
 
-#: Seeds and graph labels are unsigned 32-bit integers. ``(master, g)`` is then a two-word
-#: ``SeedSequence`` entropy, and the map ``(master, g) -> stream`` is one-to-one.
+#: Master seeds, sizes and graph labels are unsigned 32-bit integers: each is exactly one word of
+#: the seed tuples below (a larger value would be split into several words by ``SeedSequence``).
 SEED_LIMIT = 2**32
+
+#: The first word of every graph seed, ``b"WSG1"`` read as a big-endian integer (design §3,
+#: ruling R-SEED). Together with :data:`CIRCUIT_SEED_TAG` it makes the two seed domains disjoint
+#: whatever the master seeds are. A different derivation of the seeds needs different tags.
+GRAPH_SEED_TAG = 0x57534731
+
+#: The first word of every run (circuit) seed, ``b"WSC1"`` read as a big-endian integer.
+CIRCUIT_SEED_TAG = 0x57534331
+
+_WORD_MASK = SEED_LIMIT - 1
 
 #: The two ways the circuit seed depends on the measurement rate (design §3).
 GATE_MODES = ("shared", "independent")
@@ -132,6 +149,8 @@ def version_record() -> dict[str, Any]:
         "dynamics": DYNAMICS_VERSION,
         "rowspace_format": ROWSPACE_FORMAT_VERSION,
         "store_schema": STORE_SCHEMA_VERSION,
+        "graph_seed_tag": GRAPH_SEED_TAG,
+        "circuit_seed_tag": CIRCUIT_SEED_TAG,
         "randomness_contract": int(mipt.RANDOMNESS_CONTRACT),
         "sparsegf2": __version__,
     }
@@ -161,8 +180,8 @@ def _seed_word(value: Any, what: str) -> int:
     v = _integer(value, what, minimum=0)
     if v >= SEED_LIMIT:
         raise ValueError(
-            f"{what} must be below 2**32 = {SEED_LIMIT} (a 32-bit seed word, so that "
-            f"(master, g) is a two-word entropy and different pairs give different streams), got {v}"
+            f"{what} must be below 2**32 = {SEED_LIMIT} (one 32-bit word of a seed tuple; a larger "
+            f"value would be split into several words), got {v}"
         )
     return v
 
@@ -293,14 +312,29 @@ class Token:
 
 
 def rate_hash(token: Token | str | float) -> int:
-    """The 64-bit number that seeds ``gate_mode="independent"`` for a rate (design §3).
+    """The 64-bit hash that names a rate, or a rewiring probability, in a seed (design §3).
 
     The first 8 bytes of ``blake2b(token.encode("ascii"), digest_size=8)`` of the canonical
     token string, read little-endian: the same convention as the probe-name hash of
-    ``sparsegf2.mipt`` (``digest_size=8``, not a truncated 64-byte digest).
+    ``sparsegf2.mipt`` (``digest_size=8``, not a truncated 64-byte digest). Equal tokens give
+    equal hashes whatever their spelling; :func:`token_words` splits the hash into the two
+    32-bit words that enter the seeds.
     """
     text = Token.parse(token, what="rate").token
     return int.from_bytes(hashlib.blake2b(text.encode("ascii"), digest_size=8).digest(), "little")
+
+
+def token_words(token: Token | str | float) -> tuple[int, int]:
+    r"""The two 32-bit words ``(lo, hi)`` of :func:`rate_hash` of a token, low word first.
+
+    ``lo = h mod 2**32`` and ``hi = h // 2**32`` for ``h = rate_hash(token)``. They name the
+    rewiring probability $\beta$ (and, in ``gate_mode="independent"``, the rate $p$) inside a
+    seed tuple. Two different tokens have different words unless their 64-bit hashes collide
+    (probability $2^{-64}$ for a given pair); the manifest refuses a collision among its own
+    tokens.
+    """
+    value = rate_hash(token)
+    return value & _WORD_MASK, value >> 32
 
 
 # ---------------------------------------------------------------------------
@@ -387,36 +421,63 @@ class TrajectoryKey:
         return stream_index(self.g, self.c, stride)
 
 
-def graph_seed(master: int, g: int) -> tuple[int, int]:
-    """The seed of graph $g$: ``(master, g)`` with ``master`` the master graph seed (v1.4 §7.2, design §3).
+def graph_seed(
+    master_graph_seed: int, n: int, beta_token: Token | str | float, g: int
+) -> tuple[int, int, int, int, int, int]:
+    r"""The seed of graph $g$ of the condition $(n, \beta)$ (v1.4 §7.2, design §3, ruling R-SEED).
 
-    It is the native collection convention (``realizations`` builds graph $i$ from
-    ``[seed, i]``). It does not depend on $n$, $\\beta$ or the rate $p$, so one collection per
-    $(n, \\beta)$ serves every rate, and graphs of different sizes share random numbers
-    (common random numbers: compare different $\\beta$ or $n$ on the same seed as paired).
-    Both words are below $2^{32}$.
+    The six 32-bit words ``(GRAPH_SEED_TAG, master_graph_seed, n, lo, hi, g)`` with
+    ``(lo, hi) = token_words(beta_token)``. It does not depend on the measurement rate $p$, so
+    one collection per $(n, \beta)$ serves every rate (v1.4 couples conditions across $p$
+    only); it does depend on $n$ and $\beta$, so the collections of different sizes and of
+    different rewiring probabilities are independent samples, as finite-size fits assume. The
+    tuple always has six words, so the zero padding of ``SeedSequence`` cannot identify two
+    of them, and the tag keeps it away from every :func:`run_seed`.
     """
-    return (_seed_word(master, "master_graph_seed"), _seed_word(g, "g"))
+    master = _seed_word(master_graph_seed, "master_graph_seed")
+    size = _seed_word(n, "n")
+    beta = Token.parse(beta_token, what="beta")
+    label = _seed_word(g, "g")
+    lo, hi = token_words(beta)
+    return (GRAPH_SEED_TAG, master, size, lo, hi, label)
 
 
-def run_seed(master: int, gate_mode: str, p_token: Token | str | float) -> int | tuple[int, int]:
-    """The seed passed to ``MonitoredCircuit.run`` for the rate ``p_token`` (design §3).
+def run_seed(
+    master_circuit_seed: int,
+    n: int,
+    beta_token: Token | str | float,
+    gate_mode: str,
+    p_token: Token | str | float | None = None,
+) -> tuple[int, ...]:
+    r"""The seed passed to ``MonitoredCircuit.run`` for the condition $(n, \beta, p)$ (design §3).
 
-    ``master`` is the master circuit seed.
+    * ``"shared"``: ``(CIRCUIT_SEED_TAG, master_circuit_seed, n, lo, hi)`` with
+      ``(lo, hi) = token_words(beta_token)``: five words, the same for every rate, so trajectory
+      $u$ draws the same gate sequence and the same mask uniforms at every $p$ and the masks are
+      nested in $p$ (v1.4 §7.3). ``p_token`` is checked when given and otherwise ignored.
+    * ``"independent"``: the same five words followed by ``token_words(p_token)``: seven words,
+      different for every rate, so gates and masks are independent across rates and nothing is
+      nested. ``p_token`` is required.
 
-    * ``"shared"``: ``master`` for every rate. Trajectory $u$ then draws the same gate
-      sequence and the same mask uniforms at every $p$, so the masks are nested in $p$
-      (v1.4 §7.3).
-    * ``"independent"``: ``(master, rate_hash(p_token))``. Gates and masks are independent
-      across rates; nothing is nested.
+    The seeds of different $(n, \beta)$ differ (the conditions are independent samples), and
+    the tag keeps every run seed away from every :func:`graph_seed`, so equal master seeds are
+    harmless. Within a gate mode the length is fixed (5 or 7, above the pool size 4 of
+    ``SeedSequence``), so zero padding cannot identify two seeds.
     """
-    master = _seed_word(master, "master_circuit_seed")
-    rate = Token.parse(p_token, what="p")  # checked in every mode
+    master = _seed_word(master_circuit_seed, "master_circuit_seed")
+    size = _seed_word(n, "n")
+    beta = Token.parse(beta_token, what="beta")
+    if gate_mode not in GATE_MODES:
+        raise ValueError(f"gate_mode must be one of {list(GATE_MODES)}, got {gate_mode!r}")
+    rate = None if p_token is None else Token.parse(p_token, what="p")  # checked in every mode
+    base = (CIRCUIT_SEED_TAG, master, size, *token_words(beta))
     if gate_mode == "shared":
-        return master
-    if gate_mode == "independent":
-        return (master, rate_hash(rate))
-    raise ValueError(f"gate_mode must be one of {list(GATE_MODES)}, got {gate_mode!r}")
+        return base
+    if rate is None:
+        raise ValueError(
+            "run_seed with gate_mode='independent' needs p_token: the seed names the rate"
+        )
+    return (*base, *token_words(rate))
 
 
 _MAX_INDEX = 2**63 - 1  # the engine takes int64 trajectory indices
@@ -620,7 +681,8 @@ class GraphRecord:
     """The record of graph $G_g$ for $(n, \\beta, g)$ (v1.4 §2.2 "Tracking", §8; design §3).
 
     * ``n``, ``beta`` (a :class:`Token`), ``g``: the identity;
-    * ``seed``: ``(master_graph_seed, g)``, the seed ``graphs.watts_strogatz`` was called with;
+    * ``seed``: ``(GRAPH_SEED_TAG, master_graph_seed, n, lo, hi, g)`` (:func:`graph_seed`), the
+      seed ``graphs.watts_strogatz`` was called with;
     * ``generator``: :data:`GRAPH_GENERATOR_VERSION`; ``edge_order``: :data:`ORIGINAL_EDGE_ORDER`;
     * ``edges``: the canonical sorted edge list (read-only ``(2n, 2)`` int64);
     * ``edge_digest``: :func:`edge_digest` of ``edges``.
@@ -633,7 +695,7 @@ class GraphRecord:
     n: int
     beta: Token
     g: int
-    seed: tuple[int, int]
+    seed: tuple[int, ...]
     generator: str
     edge_order: str
     edges: np.ndarray
@@ -670,8 +732,18 @@ class GraphRecord:
             )
 
     def regenerate(self) -> GraphRecord:
-        """Rebuild the graph from its seed and return the new record, which must equal this one."""
-        again = build_graph(self.n, self.beta, self.g, self.seed[0])
+        """Rebuild the graph from its seed and return the new record, which must equal this one.
+
+        The master graph seed is the second word of ``seed``; everything else is recomputed
+        from ``(n, beta, g)``, so a record whose seed tuple, generator or digest was altered
+        does not reproduce.
+        """
+        if len(self.seed) != 6:
+            raise ValueError(
+                f"graph record (n={self.n}, beta={self.beta}, g={self.g}) does not reproduce: its "
+                f"seed must be the six words of graph_seed(...), got {self.seed!r}"
+            )
+        again = build_graph(self.n, self.beta, self.g, self.seed[1])
         if again != self:
             raise ValueError(
                 f"graph record (n={self.n}, beta={self.beta}, g={self.g}) does not reproduce: "
@@ -702,17 +774,18 @@ def build_graph(
 ) -> GraphRecord:
     """Graph $G_g \\sim \\mu_{n,\\beta}$ of $(n, \\beta, g)$ as a validated :class:`GraphRecord`.
 
-    The graph is ``graphs.watts_strogatz(n, 4, float(beta), seed=(master_graph_seed, g))``: the
-    sequential rewiring of $C(n, 2)$ of v1.4 §2.2, each of the $2n$ original edges, in the
-    offset-major order, rewired with probability $\\beta$ to a target drawn uniformly from the
-    vertices that are neither the retained endpoint nor its neighbors. The result is then
-    checked by :func:`validate_graph` (simple, $2n$ edges, $\\beta = 0$ gives $C(n, 2)$,
-    $n = 5$ gives $K_5$) and recorded with the digest of its canonical edge list. $n \\ge 5$
-    (the native generator needs $k = 4 < n$). Nothing here depends on the rate $p$.
+    The graph is ``graphs.watts_strogatz(n, 4, float(beta), seed=graph_seed(master_graph_seed,
+    n, beta, g))``: the sequential rewiring of $C(n, 2)$ of v1.4 §2.2, each of the $2n$ original
+    edges, in the offset-major order, rewired with probability $\\beta$ to a target drawn
+    uniformly from the vertices that are neither the retained endpoint nor its neighbors. The
+    result is then checked by :func:`validate_graph` (simple, $2n$ edges, $\\beta = 0$ gives
+    $C(n, 2)$, $n = 5$ gives $K_5$) and recorded with the digest of its canonical edge list.
+    $n \\ge 5$ (the native generator needs $k = 4 < n$). Nothing here depends on the rate $p$.
     """
     n = _integer(n, "n", minimum=5)
     beta = Token.parse(beta_token, what="beta")
-    seed = graph_seed(master_graph_seed, g)
+    label = _seed_word(g, "g")
+    seed = graph_seed(master_graph_seed, n, beta, label)
     edges = graphs.watts_strogatz(n, 4, beta.float64, seed=seed)
     edges = np.ascontiguousarray(edges, dtype=np.int64)
     validate_graph(edges, n, beta)
@@ -721,7 +794,7 @@ def build_graph(
     return GraphRecord(
         n=n,
         beta=beta,
-        g=seed[1],
+        g=label,
         seed=seed,
         generator=GRAPH_GENERATOR_VERSION,
         edge_order=ORIGINAL_EDGE_ORDER,
