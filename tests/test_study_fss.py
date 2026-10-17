@@ -10,6 +10,7 @@ probability.
 
 import json
 import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -313,7 +314,7 @@ def test_the_fit_recovers_the_parameters_of_exact_data():
 
 def test_the_fit_recovers_the_parameters_within_its_bootstrap_errors():
     # 20 graphs, a 5% graph effect shared by the rates of a size and 3% rate noise. A Monte
-    # Carlo over 40 such datasets (07-finite-size-scaling.md §10, not run here) gave fit standard
+    # Carlo over 40 such datasets (07-finite-size-scaling.md §11, not run here) gave fit standard
     # deviations 0.016, 0.043, 0.11 for (p_c, z, nu), no visible bias, and bootstrap errors
     # 0.85-0.91 of them. Each parameter within 4 bootstrap errors (at least 3.4 true ones):
     # false alarm about 2e-3 overall (more if these 40-replicate errors come out low).
@@ -722,6 +723,15 @@ def test_replicates_that_cannot_be_refitted_are_counted():
     cmp = fss.compare_shared_independent([lone, other], bounds=BOX, replicates=3, starts=1)
     assert cmp.prefers == "undetermined" and cmp.failed == 3
     assert "every bootstrap refit failed" in cmp.message
+    # the same with the polynomial method, and for the comparison of the two methods
+    pboot = fss.bootstrap_fit(lone, bounds=BOX, method="polynomial", replicates=3, starts=1)
+    assert pboot.fit.usable and pboot.failed == 3
+    pcmp = fss.compare_shared_independent(
+        [lone, other], bounds=BOX, method="polynomial", replicates=3, starts=1
+    )
+    assert pcmp.prefers == "undetermined" and pcmp.failed == 3
+    methods = fss.compare_methods(lone, bounds=BOX, replicates=3, starts=1)
+    assert methods.failed == 3 and np.isnan(methods.se_difference).all()
     single = fss.bootstrap_fit(_hierarchical(sizes=(32,), seed=1), bounds=BOX, replicates=2)
     assert single.statuses == ("too_few_sizes",) * 2 and single.failed == 2
     with pytest.raises(ValueError, match="replicates must be an integer >= 2"):
@@ -743,3 +753,309 @@ def test_less_common_input_checks():
     assert fss.ScalingData(n=[8], p=[0.1], y=[1.0], se=[0.1], beta=0.25).beta == "0.25"
     with pytest.raises(ValueError, match="need parameter names"):
         fss.minimize_bounded(lambda v: 0.0, {"a": (0, 1)})
+
+
+# ---------------------------------------------------------------------------------------------
+# the polynomial master curve (ruling R-FSS)
+# ---------------------------------------------------------------------------------------------
+
+
+def _exact_least_squares(x, big_y, sigma, degree):
+    """chi2 and coefficients of the weighted polynomial least squares, in exact rationals
+    (normal equations solved by Gauss-Jordan elimination)."""
+    m = degree + 1
+    rows = [[xi**k / si for k in range(m)] for xi, si in zip(x, sigma, strict=True)]
+    rhs = [yi / si for yi, si in zip(big_y, sigma, strict=True)]
+    normal = [[sum(r[a] * r[b] for r in rows) for b in range(m)] for a in range(m)]
+    vector = [sum(r[a] * v for r, v in zip(rows, rhs, strict=True)) for a in range(m)]
+    for col in range(m):
+        pivot = next(i for i in range(col, m) if normal[i][col] != 0)
+        normal[col], normal[pivot] = normal[pivot], normal[col]
+        vector[col], vector[pivot] = vector[pivot], vector[col]
+        for i in range(m):
+            if i != col and normal[i][col] != 0:
+                f = normal[i][col] / normal[col][col]
+                normal[i] = [a - f * b for a, b in zip(normal[i], normal[col], strict=True)]
+                vector[i] -= f * vector[col]
+    coef = [vector[i] / normal[i][i] for i in range(m)]
+    resid = [v - sum(c * r[k] for k, c in enumerate(coef)) for r, v in zip(rows, rhs, strict=True)]
+    return sum(e * e for e in resid), coef, resid
+
+
+@pytest.mark.parametrize("degree", [1, 2, 3])
+def test_polynomial_cost_is_the_exact_weighted_least_squares(degree):
+    # nu = 1 and z = 1: x = (p - p_c) n and Y = y / n are exact rationals of the float inputs
+    rng = np.random.default_rng(degree)
+    n = np.repeat([8, 16, 32], 5)
+    p = np.tile(np.linspace(0.1, 0.3, 5), 3)
+    y = rng.uniform(1, 30, n.size)
+    se = rng.uniform(0.1, 1.0, n.size)
+    data = fss.ScalingData(n=n, p=p, y=y, se=se)
+    everything = np.ones(n.size, dtype=bool)
+    cost = fss.polynomial_cost(data, 0.19, 1.0, 1.0, degree=degree, selected=everything)
+    x = [(Fraction(float(pi)) - Fraction(0.19)) * int(ni) for pi, ni in zip(p, n, strict=True)]
+    big_y = [Fraction(float(yi)) / int(ni) for yi, ni in zip(y, n, strict=True)]
+    sigma = [Fraction(float(si)) / int(ni) for si, ni in zip(se, n, strict=True)]
+    chi2, coef, resid = _exact_least_squares(x, big_y, sigma, degree)
+    assert cost.chi2 == pytest.approx(float(chi2), rel=1e-10)
+    assert np.allclose(cost.coefficients, [float(c) for c in coef], rtol=1e-8, atol=1e-10)
+    assert np.allclose(cost.residuals, [float(e) for e in resid], rtol=1e-8, atol=1e-10)
+    assert cost.dof == n.size - degree - 1 and cost.points_used == n.size
+    assert cost.chi2_per_dof == pytest.approx(cost.chi2 / cost.dof)
+    json.dumps(cost.to_dict())
+
+
+def test_the_window_rules():
+    data = _exact(rates=np.linspace(0.1, 0.3, 11))
+    x = fss.scaled_coordinates(data, *TRUTH)[0]
+    overlap = fss.window_points(data, *TRUTH)
+    lo = max(x[data.n == s].min() for s in SIZES)
+    hi = min(x[data.n == s].max() for s in SIZES)
+    assert np.array_equal(overlap, (x >= lo) & (x <= hi))
+    assert overlap[data.n == 16].all()  # the smallest size's range is the overlap here
+    assert np.array_equal(fss.window_points(data, *TRUTH, window=1.0), np.abs(x) <= 1.0)
+    # p_c far below every rate: the sizes' scaled ranges no longer overlap
+    assert not fss.window_points(data, 0.0, 1.0, 0.6).any()
+    for bad in ("all", 0.0, -1.0, math.inf, True):
+        with pytest.raises(ValueError, match="window must be"):
+            fss.window_points(data, *TRUTH, window=bad)
+
+
+def test_the_polynomial_fit_recovers_exact_parameters():
+    data = _exact(rates=np.linspace(0.1, 0.3, 21))
+    for window in ("overlap", 1.0):
+        fit = fss.fit_collapse(data, bounds=BOX, method="polynomial", window=window, starts=3)
+        assert fit.status == "ok" and fit.method == "polynomial" and fit.degree == 3
+        assert np.allclose(fit.params, TRUTH, atol=[1e-5, 1e-4, 1e-3]), fit.params
+        assert fit.window_stable and fit.window_iterations >= 1
+        assert fit.dof == fit.points_used - 4 - 3 and fit.chi2_per_dof == pytest.approx(fit.cost)
+        assert fit.cost < 1e-3  # 1% errors and a nearly cubic F over the window
+        # the window is self-consistent: drawn again at the fit, it is the set that was used
+        again = fss.window_points(data, fit.p_c, fit.z, fit.nu, window=window)
+        assert np.array_equal(again, fit.selected)
+        assert fit.window_range[0] <= fit.window_range[1] and len(fit.coefficients) == 4
+        json.dumps(fit.to_dict())
+
+
+def test_the_polynomial_objective_is_continuous_where_the_quality_jumps():
+    # on a fixed point set the objective is a smooth function of the parameters: steps of 1e-9
+    # change it by at most about its local slope times the step, across a measured rate
+    # (0.18), where the Houdayer-Hartmann quality jumps
+    data = _hierarchical(seed=1)
+    fit = fss.fit_collapse(data, bounds=BOX, method="polynomial", starts=3)
+
+    def poly(pc, z=fit.z, nu=fit.nu):
+        return fss.polynomial_cost(data, pc, z, nu, selected=fit.selected).chi2
+
+    h = 1e-9
+    slope = abs(poly(0.18 + 1e-5) - poly(0.18 - 1e-5)) / 2e-5
+    steps = [abs(poly(0.18 + (k + 1) * h) - poly(0.18 + k * h)) for k in range(-3, 3)]
+    assert max(steps) <= 2 * slope * h + 1e-12, (steps, slope)
+    hh_jump = abs(
+        fss.collapse_cost(data, 0.18 + h, fit.z, fit.nu).cost
+        - fss.collapse_cost(data, 0.18 - h, fit.z, fit.nu).cost
+    )
+    assert hh_jump > 1e-3
+    for dz, dnu in ((1e-9, 0.0), (0.0, 1e-9)):  # and in z and nu
+        assert abs(poly(fit.p_c, fit.z + dz, fit.nu + dnu) - poly(fit.p_c)) < 1e-5
+
+
+def test_the_degree_changes_the_answer_until_it_is_enough():
+    # a steep master curve over a wide window (x_max = 2): a low degree cannot follow it, so
+    # chi2/dof is large and nu biased; enough degree brings both back
+    steep = _exact(f=lambda x: 2.0 / (1.0 + np.exp(3.0 * x)) + 0.5, rates=np.linspace(0.1, 0.3, 21))
+    scan = fss.polynomial_degree_scan(
+        steep, bounds=BOX, degrees=(2, 3, 9), window=2.0, initial=TRUTH, starts=2
+    )
+    assert scan.degrees == (2, 3, 9) and scan.params.shape == (3, 3)
+    assert scan.chi2_per_dof[0] > 100 * scan.chi2_per_dof[2]
+    assert abs(scan.params[0, 2] - 1.5) > 0.05  # degree 2: nu biased
+    assert np.allclose(scan.params[2], TRUTH, atol=[1e-3, 1e-2, 2e-2])  # degree 9: back
+    assert np.all(scan.spread >= 0) and scan.dof.tolist() == [f.dof for f in scan.fits]
+    json.dumps(scan.to_dict())
+    with pytest.raises(ValueError, match="degree must be"):
+        fss.polynomial_degree_scan(steep, bounds=BOX, degrees=(0,))
+    with pytest.raises(ValueError, match="must not be empty"):
+        fss.polynomial_degree_scan(steep, bounds=BOX, degrees=())
+
+
+def test_chi2_per_dof_is_about_one_for_independent_errors():
+    # independent normal errors of known size (no graph effect): over 20 datasets the mean of
+    # chi2/dof (about 40 degrees of freedom each) is 1 within 4 of its standard errors
+    # (measured 0.94 +- 0.06; false alarm below 1e-4 if the window and the fit added nothing)
+    n = np.repeat(SIZES, 21)
+    p = np.tile(np.linspace(0.1, 0.3, 21), len(SIZES))
+    truth = n * _f1((p - 0.2) * n ** (1 / 1.5))
+    values = []
+    for seed in range(20):
+        rng = np.random.default_rng(500 + seed)
+        se = 0.02 * truth
+        data = fss.ScalingData(n=n, p=p, y=truth + rng.normal(0, 1, n.size) * se, se=se)
+        fit = fss.fit_collapse(data, bounds=BOX, method="polynomial", initial=TRUTH, starts=2)
+        values.append(fit.chi2_per_dof)
+    values = np.array(values)
+    assert abs(values.mean() - 1) < 4 * values.std(ddof=1) / math.sqrt(values.size)
+
+
+def test_the_two_methods_agree_on_clean_and_on_noisy_data():
+    clean = fss.compare_methods(_exact(rates=np.linspace(0.1, 0.3, 21)), bounds=BOX, replicates=0)
+    assert clean.houdayer_hartmann.usable and clean.polynomial.usable
+    assert np.all(np.abs(clean.difference) < [1e-3, 1e-2, 2e-2])
+    assert np.isnan(clean.se_difference).all() and clean.replicates == 0
+    noisy = fss.compare_methods(_hierarchical(seed=7), bounds=BOX, replicates=20, seed=3, starts=4)
+    # in development z = (-0.64, 0.52, 1.29); |z| < 4 fails with probability about 1e-4 when
+    # the methods agree in distribution and the 20-replicate errors are right
+    assert noisy.failed == 0 and np.all(np.abs(noisy.z) < 4), noisy.z
+    assert np.all(noisy.se_difference < noisy.se_houdayer_hartmann)  # paired: errors cancel
+    assert np.allclose(noisy.difference, noisy.polynomial.params - noisy.houdayer_hartmann.params)
+    json.dumps(noisy.to_dict())
+
+
+def test_too_few_points_for_the_polynomial_give_a_status():
+    data = _exact(rates=np.linspace(0.1, 0.3, 7))
+    # degree 9 needs 10 distinct rates of one size inside the window
+    fit = fss.fit_collapse(data, bounds=BOX, method="polynomial", degree=9, starts=1)
+    assert fit.status == "too_few_points" and "distinct rates" in fit.message
+    assert not fit.usable and math.isnan(fit.cost)
+    one = fss.fit_collapse(_exact(sizes=(32,)), bounds=BOX, method="polynomial")
+    assert one.status == "too_few_sizes"
+    # a window holding one size only: p_c far below the rates separates the sizes' ranges
+    wide = {"p_c": (0.0, 0.3), "z": (0.0, 2.0), "nu": (0.5, 3.0)}
+    apart = fss.fit_collapse(
+        data, bounds=wide, method="polynomial", initial=[0.0, 1.0, 0.6], starts=0
+    )
+    assert apart.status == "too_few_points" and "two sizes" in apart.message
+    # 2 sizes x 4 rates all in a wide window, a cubic and 3 parameters: one degree of freedom;
+    # one point less: none
+    tiny = _exact(sizes=(16, 32), rates=np.array([0.19, 0.195, 0.2, 0.205]))
+    few = fss.fit_collapse(
+        tiny, bounds=BOX, method="polynomial", window=1.0, initial=TRUTH, starts=0
+    )
+    assert few.status == "ok" and few.dof == 1 and few.points_used == 8
+    fewer = fss.fit_collapse(
+        tiny.subset((tiny.n == 16) | (tiny.p != 0.205)),
+        bounds=BOX,
+        method="polynomial",
+        window=1.0,
+        initial=TRUTH,
+        starts=0,
+    )
+    assert fewer.status == "too_few_points" and "degrees of freedom" in fewer.message
+    # without 4 distinct rates in any size the master curve is not determined
+    flat = fss.fit_collapse(
+        tiny.subset(tiny.p != 0.205),
+        bounds=BOX,
+        method="polynomial",
+        window=1.0,
+        initial=TRUTH,
+        starts=0,
+    )
+    assert flat.status == "too_few_points" and "distinct rates" in flat.message
+
+
+def test_the_polynomial_method_runs_through_every_tool():
+    a = _exact(f=_f1, rates=np.linspace(0.1, 0.3, 21), name="tau1")
+    b = _exact(f=_f2, rates=np.linspace(0.1, 0.3, 21), name="T_cyc")
+    shared = fss.fit_shared([a, b], bounds=BOX, method="polynomial", starts=2)
+    assert shared.status == "ok" and shared.method == "polynomial"
+    assert np.allclose(shared.params, TRUTH, atol=[1e-4, 1e-3, 1e-2])
+    assert len(shared.selected) == 2 and shared.dof > 0 and max(shared.costs) < 1e-3
+    loso = fss.leave_one_size_out(a, bounds=BOX, method="polynomial", starts=2)
+    assert all(f.method == "polynomial" for f in loso.fits)
+    usable = [k for k, f in enumerate(loso.fits) if f.usable]
+    assert usable and np.allclose(loso.params[usable], TRUTH, atol=[1e-3, 1e-2, 3e-2])
+    held = loso.held_out_cost[usable]
+    assert np.all(held[~np.isnan(held)] < 1.0)
+    fit = fss.fit_collapse(a, bounds=BOX, method="polynomial", starts=2)
+    diag = fss.collapse_diagnostics(a, fit)
+    assert np.array_equal(diag.bracketed, fit.selected)
+    assert diag.coverage == pytest.approx(fit.points_used / a.size)
+    assert np.isnan(diag.chi2[~fit.selected]).all() and diag.drift_fit.method == "polynomial"
+    assert "outside the polynomial window" in " ".join(diag.notes)
+    boot = fss.bootstrap_fit(
+        _hierarchical(seed=5), bounds=BOX, method="polynomial", replicates=5, seed=1, starts=1
+    )
+    assert boot.fit.method == "polynomial" and boot.failed == 0 and np.all(boot.se > 0)
+    rates = np.linspace(0.12, 0.28, 17)
+    h1 = _hierarchical((0.2, 1.0, 1.2), _f1, rates=rates, sg=0.02, sp=0.02, seed=11, name="a")
+    h2 = _hierarchical((0.2, 1.0, 2.5), _f2, rates=rates, sg=0.02, sp=0.02, seed=12, name="b")
+    cmp = fss.compare_shared_independent(
+        [h1, h2], bounds=BOX, method="polynomial", replicates=9, seed=5, starts=2, alpha=0.1
+    )
+    # in development: delta 181 against a null whose largest of 9 replicates was 27
+    assert cmp.method == "polynomial" and cmp.failed == 0
+    assert cmp.prefers == "independent" and cmp.p_value == pytest.approx(1 / 10)
+    assert cmp.delta == pytest.approx(cmp.shared.chi2 - sum(f.chi2 for f in cmp.independent))
+
+
+def test_polynomial_settings_are_checked():
+    data = _exact()
+    with pytest.raises(ValueError, match="method must be one of"):
+        fss.fit_collapse(data, bounds=BOX, method="spline")
+    with pytest.raises(ValueError, match="degree must be"):
+        fss.fit_collapse(data, bounds=BOX, method="polynomial", degree=11)
+    with pytest.raises(ValueError, match="window must be"):
+        fss.fit_collapse(data, bounds=BOX, method="polynomial", window="wide")
+    with pytest.raises(ValueError, match="window_iterations"):
+        fss.fit_collapse(data, bounds=BOX, method="polynomial", window_iterations=0)
+    with pytest.raises(ValueError, match="boolean mask"):
+        fss.polynomial_cost(data, *TRUTH, selected=[True])
+    undefined = fss.polynomial_cost(data, 0.2, -400.0, 1.0)
+    assert math.isnan(undefined.chi2) and undefined.coefficients is None
+
+
+def test_polynomial_paths_without_a_usable_answer():
+    data = _exact(rates=np.linspace(0.1, 0.3, 11))
+    # n^(1/nu) overflows: the window is empty and the objective undefined
+    assert not fss.window_points(data, 0.2, 1.0, 1e-3).any()
+    assert math.isnan(fss.polynomial_cost(data, 0.2, 1.0, 1e-3).chi2)
+    # n^(-z) overflows over the whole box: no parameters anywhere
+    hopeless = {"p_c": (0.1, 0.3), "z": (-500.0, -400.0), "nu": (0.5, 3.0)}
+    fit = fss.fit_collapse(data, bounds=hopeless, method="polynomial", initial=[0.2, -450, 1.5])
+    assert fit.status == "too_few_points" and "undefined" in fit.message
+    # a shared fit inherits the failure of an observable fitted alone
+    other = _exact(sizes=(32,), name="lonely")
+    shared = fss.fit_shared([data, other], bounds=BOX, method="polynomial", starts=1)
+    assert shared.status == "too_few_sizes" and "lonely" in shared.message
+    # user starts join the independent ones
+    twin = _exact(f=_f2, rates=np.linspace(0.1, 0.3, 11), name="twin")
+    started = fss.fit_shared([data, twin], bounds=BOX, method="polynomial", initial=TRUTH, starts=0)
+    assert started.status == "ok" and np.allclose(started.params, TRUTH, atol=[1e-3, 1e-2, 3e-2])
+    # leave-one-size-out when the full polynomial fit fails: each part is fitted afresh
+    loso = fss.leave_one_size_out(
+        _exact(sizes=(16, 32), rates=np.linspace(0.1, 0.3, 7)),
+        bounds=BOX,
+        method="polynomial",
+        degree=9,
+        starts=1,
+    )
+    assert not loso.full.usable
+    assert [f.status for f in loso.fits] == ["too_few_sizes", "too_few_sizes"]
+    # the methods side by side on data that cannot be fitted
+    single = _hierarchical(sizes=(32,), seed=2)
+    cmp = fss.compare_methods(single, bounds=BOX, replicates=3)
+    assert cmp.failed == 3 and np.isnan(cmp.z).all()
+
+
+def test_an_unsettled_window_is_reported():
+    # one window fit from a reference far from the optimum: the window drawn again at the fit
+    # differs from the one used, and the fit says so
+    data = _exact(rates=np.linspace(0.1, 0.3, 21))
+    fit = fss.fit_collapse(
+        data,
+        bounds=BOX,
+        method="polynomial",
+        initial=[0.26, 1.0, 1.5],
+        starts=0,
+        window_iterations=1,
+    )
+    assert fit.usable and fit.window_stable is False and fit.window_iterations == 1
+    again = fss.window_points(data, fit.p_c, fit.z, fit.nu)
+    assert not np.array_equal(again, fit.selected)
+    diag = fss.collapse_diagnostics(data, fit)
+    assert any("did not settle" in note for note in diag.notes)
+    settled = fss.fit_collapse(
+        data, bounds=BOX, method="polynomial", initial=[0.26, 1.0, 1.5], starts=0
+    )
+    assert settled.window_stable and settled.window_iterations > 1
+    assert np.allclose(settled.params, TRUTH, atol=[1e-4, 1e-3, 1e-2])

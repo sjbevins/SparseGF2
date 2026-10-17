@@ -21,18 +21,29 @@ its variance ``dYbar_i^2``; then
     S = (1/N) sum_i (Y_i - Ybar_i)^2 / (dY_i^2 + dYbar_i^2)
 
 over the ``N`` points that some other size brackets. ``S`` is about 1 for a collapse within the
-errors and grows as the collapse fails.
+errors and grows as the collapse fails. It jumps where a bracket switches.
 
-**Fits.** :func:`fit_collapse` minimizes ``S`` over a box of ``(p_c, z, nu)`` with
-:func:`minimize_bounded` (Nelder–Mead in the unbounded variables ``phi`` of
-``theta = lo + (hi - lo)(1 + sin phi)/2``, from several starts; deterministic given its seed).
-:func:`fit_shared` fits one ``(p_c, z, nu)`` to several observables (each keeps its own ``F``),
-and :func:`compare_shared_independent` tests that hypothesis against independent fits with a
-bootstrap null built by graph-cluster resampling paired across ``p``. :func:`leave_one_size_out`
-refits without each size; :func:`bootstrap_fit` resamples graphs once per ``(n, beta)`` and
-recomputes every rate's mean from the same graphs; :func:`collapse_diagnostics` reports
-bracketing coverage, the drift of the fit when the smallest size is removed, and passes the
-censoring and horizon-peak fractions of every point through.
+**Polynomial master curve** (ruling R-FSS, a continuous alternative): on a fixed set of points,
+
+    chi2(p_c, z, nu) = min_a sum_i (Y_i - F_a(x_i))^2 / dY_i^2,   F_a(x) = sum_{k<=d} a_k x^k,
+
+with ``a`` solved in closed form (weighted linear least squares), so only ``(p_c, z, nu)`` are
+searched. The set is a window in ``x`` (the overlap of the sizes, or ``|x| <= x_max``) drawn at
+reference parameters and kept during a search, then drawn again at the fit until it settles
+(:func:`window_points`, :func:`polynomial_cost`).
+
+**Fits.** :func:`fit_collapse` minimizes either objective (``method``) over a box of
+``(p_c, z, nu)`` with :func:`minimize_bounded` (Nelder–Mead in the unbounded variables ``phi``
+of ``theta = lo + (hi - lo)(1 + sin phi)/2``, from several starts; deterministic given its
+seed). :func:`fit_shared` fits one ``(p_c, z, nu)`` to several observables (each keeps its own
+``F``), and :func:`compare_shared_independent` tests that hypothesis against independent fits
+with a bootstrap null built by graph-cluster resampling paired across ``p``.
+:func:`leave_one_size_out` refits without each size; :func:`bootstrap_fit` resamples graphs once
+per ``(n, beta)`` and recomputes every rate's mean from the same graphs;
+:func:`collapse_diagnostics` reports coverage, the drift of the fit when the smallest size is
+removed, and passes the censoring and horizon-peak fractions of every point through;
+:func:`compare_methods` fits both methods and compares them against the bootstrap spread, and
+:func:`polynomial_degree_scan` shows the degree's effect.
 
 The inputs are nested means and their graph-cluster errors (:mod:`.stats`), gathered in a
 :class:`ScalingData` (one observable at one ``beta``). Exploratory and confirmatory analyses are
@@ -44,7 +55,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -53,31 +64,53 @@ from numpy.typing import ArrayLike
 from . import stats as _stats
 
 __all__ = [
+    "DEFAULT_DEGREE",
+    "HOUDAYER_HARTMANN",
+    "MAX_DEGREE",
+    "METHODS",
     "PARAMETERS",
+    "POLYNOMIAL",
     "STATUSES",
     "BootstrapFit",
     "CollapseCost",
     "CollapseDiagnostics",
     "CollapseFit",
+    "DegreeScan",
     "LeaveOneSizeOut",
+    "MethodComparison",
     "MinimizeResult",
+    "PolynomialCost",
     "ScalingData",
     "SharedComparison",
     "SharedFit",
     "bootstrap_fit",
     "collapse_cost",
     "collapse_diagnostics",
+    "compare_methods",
     "compare_shared_independent",
     "fit_collapse",
     "fit_shared",
     "leave_one_size_out",
     "minimize_bounded",
+    "polynomial_cost",
+    "polynomial_degree_scan",
     "scaled_coordinates",
     "scaling_data",
+    "window_points",
 ]
 
 #: The fitted parameters, in this order everywhere (``params`` arrays, bounds, replicates).
 PARAMETERS = ("p_c", "z", "nu")
+
+#: The collapse objectives: Houdayer and Hartmann's quality (the default) and the polynomial
+#: master curve of ruling R-FSS.
+HOUDAYER_HARTMANN = "houdayer_hartmann"
+POLYNOMIAL = "polynomial"
+METHODS = (HOUDAYER_HARTMANN, POLYNOMIAL)
+
+#: The polynomial master curve's default degree and the largest one allowed.
+DEFAULT_DEGREE = 3
+MAX_DEGREE = 10
 
 #: Fit statuses. ``ok`` and ``at_bound`` (some parameter on its box bound: widen the box)
 #: and ``not_converged`` (evaluation budget spent) return parameters; ``too_few_sizes`` (fewer
@@ -442,6 +475,202 @@ def collapse_cost(data: ScalingData, p_c: float, z: float, nu: float) -> Collaps
 
 
 # ---------------------------------------------------------------------------------------------
+# the polynomial master curve (ruling R-FSS)
+# ---------------------------------------------------------------------------------------------
+
+
+def window_points(
+    data: ScalingData, p_c: float, z: float, nu: float, window: str | float = "overlap"
+) -> np.ndarray:
+    """The points in the polynomial method's window at ``(p_c, z, nu)``, as a boolean mask.
+
+    ``window="overlap"``: the scaled abscissas that every size covers,
+    ``x in [max_n min_i x_ni, min_n max_i x_ni]`` (no point when the sizes' ranges do not
+    overlap); a number ``x_max > 0``: ``|x| <= x_max``. Both ends are included. A fit draws the
+    window once and keeps that point set during a search (so its objective is continuous in the
+    parameters), then draws it again at the fitted parameters until it no longer changes. Where
+    ``n^(1/nu)`` overflows the window is empty. (``z`` does not enter the window.)
+    """
+    _check_params(p_c, z, nu)
+    rule = _window(window)
+    with np.errstate(over="ignore", invalid="ignore"):
+        x = (data.p - p_c) * np.power(data.n.astype(np.float64), 1.0 / nu)
+    if not np.all(np.isfinite(x)):
+        return np.zeros(data.size, dtype=bool)
+    if rule == "overlap":
+        lo = max(float(x[data.n == s].min()) for s in data.sizes)
+        hi = min(float(x[data.n == s].max()) for s in data.sizes)
+        return (x >= lo) & (x <= hi)
+    return np.abs(x) <= float(rule)
+
+
+@dataclass(frozen=True, eq=False)
+class _PolySolution:
+    """The weighted least-squares master curve at fixed ``(p_c, z, nu)``.
+
+    In the basis ``(x / x_scale)^k``: coefficients ``coef_scaled`` and their covariance
+    ``cov_scaled`` (for unit-variance whitened residuals); ``residuals`` are
+    ``(Y_i - F(x_i)) / dY_i``.
+    """
+
+    chi2: float
+    residuals: np.ndarray
+    x: np.ndarray
+    big_y: np.ndarray
+    sigma: np.ndarray
+    x_scale: float
+    coef_scaled: np.ndarray
+    cov_scaled: np.ndarray
+    rank: int
+
+    @property
+    def coefficients(self) -> np.ndarray:
+        """``a_k`` of ``F(x) = sum_k a_k x^k``."""
+        return self.coef_scaled / self.x_scale ** np.arange(self.coef_scaled.size)
+
+    def predict(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``F(x)`` and the variance of the fitted value at each ``x``."""
+        basis = np.vander(
+            np.asarray(x, dtype=np.float64) / self.x_scale, self.coef_scaled.size, increasing=True
+        )
+        return basis @ self.coef_scaled, np.einsum("ij,jk,ik->i", basis, self.cov_scaled, basis)
+
+
+class _Polynomial:
+    """One observable's points on a fixed set, for the polynomial master-curve objective."""
+
+    def __init__(
+        self, n: np.ndarray, p: np.ndarray, y: np.ndarray, se: np.ndarray, degree: int
+    ) -> None:
+        self.n, self.p, self.y, self.se = n, p, y, se
+        self.n_float = n.astype(np.float64)
+        self.degree = degree
+        self.count = int(n.size)
+
+    @classmethod
+    def subset(cls, data: ScalingData, mask: np.ndarray, degree: int) -> _Polynomial:
+        return cls(data.n[mask], data.p[mask], data.y[mask], data.se[mask], degree)
+
+    def solve(self, p_c: float, z: float, nu: float) -> _PolySolution | None:
+        """The closed-form fit of ``F`` at ``(p_c, z, nu)``; None where it is undefined."""
+        if self.count == 0:
+            return None
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            x = (self.p - p_c) * np.power(self.n_float, 1.0 / nu)
+            amp = np.power(self.n_float, -z)
+            big_y = self.y * amp
+            sigma = self.se * amp
+            x_scale = float(np.max(np.abs(x)))
+            if not math.isfinite(x_scale):
+                return None
+            x_scale = x_scale if x_scale > 0 else 1.0
+            a = np.vander(x / x_scale, self.degree + 1, increasing=True) / sigma[:, None]
+            b = big_y / sigma
+        if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and np.all(sigma > 0)):
+            return None
+        try:
+            u, s, vt = np.linalg.svd(a, full_matrices=False)
+        except np.linalg.LinAlgError:  # pragma: no cover - LAPACK did not converge
+            return None
+        keep = s > s[0] * max(a.shape) * np.finfo(np.float64).eps
+        inv = 1.0 / s[keep]
+        coef = vt[keep].T @ (inv * (u[:, keep].T @ b))
+        resid = b - a @ coef
+        cov = (vt[keep].T * inv**2) @ vt[keep]
+        return _PolySolution(
+            chi2=float(resid @ resid),
+            residuals=resid,
+            x=x,
+            big_y=big_y,
+            sigma=sigma,
+            x_scale=x_scale,
+            coef_scaled=coef,
+            cov_scaled=cov,
+            rank=int(keep.sum()),
+        )
+
+    def chi2(self, p_c: float, z: float, nu: float) -> float:
+        solution = self.solve(p_c, z, nu)
+        return math.inf if solution is None else solution.chi2
+
+
+@dataclass(frozen=True, eq=False)
+class PolynomialCost:
+    """The polynomial master-curve objective at given parameters on one point set.
+
+    ``chi2 = min_a sum_i (Y_i - F_a(x_i))^2 / dY_i^2`` over the ``points_used`` points of
+    ``selected``, ``F_a(x) = sum_{k=0}^{degree} a_k x^k`` (``coefficients``), solved in closed
+    form; ``dof = points_used - (degree + 1)`` (the parameters are given here, not fitted) and
+    ``chi2_per_dof``; ``residuals`` are ``(Y_i - F(x_i)) / dY_i`` (NaN outside the set).
+    ``chi2`` is NaN where the objective is undefined (overflow, or no point).
+    """
+
+    chi2: float
+    dof: int
+    chi2_per_dof: float
+    points_used: int
+    total_points: int
+    degree: int
+    selected: np.ndarray
+    residuals: np.ndarray
+    coefficients: np.ndarray | None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = _plain(self)
+        return out
+
+
+def polynomial_cost(
+    data: ScalingData,
+    p_c: float,
+    z: float,
+    nu: float,
+    *,
+    degree: int = DEFAULT_DEGREE,
+    selected: ArrayLike | None = None,
+    window: str | float = "overlap",
+) -> PolynomialCost:
+    """The polynomial objective of ruling R-FSS at ``(p_c, z, nu)``.
+
+    The points are ``selected`` (a boolean mask) or, without it, :func:`window_points` at these
+    parameters. In scaled coordinates the master curve ``F(x) = sum_k a_k x^k`` minimizing
+    ``sum_i (Y_i - F(x_i))^2 / dY_i^2`` is a weighted linear least-squares problem in ``a``:
+    with ``A_ik = x_i^k / dY_i`` and ``b_i = Y_i / dY_i``, ``a = A^+ b`` (the pseudoinverse,
+    from the singular value decomposition of ``A`` in the better-conditioned basis
+    ``(x / max|x|)^k``) and ``chi2 = |b - A a|^2``. Since ``(Y - F)/dY = (y - n^z F)/s``, the
+    objective is in the units of the data's own errors.
+    """
+    _check_params(p_c, z, nu)
+    deg = _degree(degree)
+    if selected is None:
+        mask = window_points(data, p_c, z, nu, window)
+    else:
+        mask = np.asarray(selected)
+        if mask.shape != (data.size,) or mask.dtype != np.bool_:
+            raise ValueError(
+                f"selected must be a boolean mask with one entry per point ({data.size})"
+            )
+    solution = _Polynomial.subset(data, mask, deg).solve(p_c, z, nu)
+    residuals = np.full(data.size, np.nan)
+    used = int(mask.sum())
+    dof = used - (deg + 1)
+    if solution is None:
+        return PolynomialCost(math.nan, dof, math.nan, used, data.size, deg, mask, residuals, None)
+    residuals[mask] = solution.residuals
+    return PolynomialCost(
+        chi2=solution.chi2,
+        dof=dof,
+        chi2_per_dof=solution.chi2 / dof if dof > 0 else math.nan,
+        points_used=used,
+        total_points=data.size,
+        degree=deg,
+        selected=mask,
+        residuals=residuals,
+        coefficients=solution.coefficients,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
 # the bounded Nelder–Mead
 # ---------------------------------------------------------------------------------------------
 
@@ -664,6 +893,8 @@ def minimize_bounded(
 # fits
 # ---------------------------------------------------------------------------------------------
 
+_USABLE = ("ok", "at_bound", "not_converged")
+
 
 def _min_points(min_points: int | None, total: int) -> int:
     if min_points is None:
@@ -676,9 +907,8 @@ def _min_points(min_points: int | None, total: int) -> int:
 
 
 def _objective(collapses: Sequence[_Collapse], needs: Sequence[int]) -> Callable[..., float]:
-    """The pooled quality: the mean ``chi2`` over every observable's bracketed points.
-
-    ``+inf`` when some observable has fewer bracketed points than it needs.
+    """The pooled Houdayer-Hartmann quality: the mean ``chi2`` over every observable's
+    bracketed points; ``+inf`` when some observable has fewer bracketed points than it needs.
     """
 
     def objective(theta: np.ndarray) -> float:
@@ -704,17 +934,58 @@ def _parameter_box(bounds: Any) -> np.ndarray:
     return box
 
 
-@dataclass(frozen=True)
+def _method(method: Any) -> str:
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {list(METHODS)}, not {method!r}")
+    return str(method)
+
+
+def _degree(degree: Any) -> int:
+    if (
+        isinstance(degree, bool)
+        or not isinstance(degree, (int, np.integer))
+        or not 1 <= degree <= MAX_DEGREE
+    ):
+        raise ValueError(f"degree must be an integer from 1 to {MAX_DEGREE}, not {degree!r}")
+    return int(degree)
+
+
+def _window(window: Any) -> str | float:
+    if isinstance(window, str):
+        if window != "overlap":
+            raise ValueError(f"window must be 'overlap' or a positive x_max, not {window!r}")
+        return window
+    if isinstance(window, bool) or not isinstance(window, (int, float, np.integer, np.floating)):
+        raise ValueError(f"window must be 'overlap' or a positive x_max, not {window!r}")
+    value = float(window)
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"window must be 'overlap' or a positive x_max, not {window!r}")
+    return value
+
+
+@dataclass(frozen=True, eq=False)
 class _Settings:
     box: np.ndarray
     starts: int
     seed: Any
     min_points: int | None
     max_evaluations: int
+    method: str = HOUDAYER_HARTMANN
+    degree: int = DEFAULT_DEGREE
+    window: str | float = "overlap"
+    window_iterations: int = 5
 
 
 def _settings(
-    bounds: Any, starts: int, seed: Any, min_points: int | None, max_evaluations: int
+    bounds: Any,
+    starts: int,
+    seed: Any,
+    min_points: int | None,
+    max_evaluations: int,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
+    window_iterations: int = 5,
 ) -> _Settings:
     box = _parameter_box(bounds)
     if isinstance(starts, bool) or not isinstance(starts, (int, np.integer)) or starts < 0:
@@ -725,8 +996,24 @@ def _settings(
         raise ValueError("max_evaluations must be a positive integer")
     if max_evaluations < 1:
         raise ValueError("max_evaluations must be a positive integer")
+    if (
+        isinstance(window_iterations, bool)
+        or not isinstance(window_iterations, (int, np.integer))
+        or window_iterations < 1
+    ):
+        raise ValueError(f"window_iterations must be a positive integer, not {window_iterations!r}")
     _stats._seed_sequence(seed)
-    return _Settings(box, int(starts), seed, min_points, int(max_evaluations))
+    return _Settings(
+        box,
+        int(starts),
+        seed,
+        min_points,
+        int(max_evaluations),
+        _method(method),
+        _degree(degree),
+        _window(window),
+        int(window_iterations),
+    )
 
 
 @dataclass(frozen=True)
@@ -740,47 +1027,67 @@ class _Outcome:
     evaluations: int
     starts: int
     needs: tuple[int, ...]
+    chi2: float = math.nan
+    dof: int = 0
 
 
-def _fit(
+def _no_fit(
+    count: int, status: str, message: str, needs: tuple[int, ...], evaluations: int = 0
+) -> _Outcome:
+    return _Outcome(
+        np.full(3, np.nan),
+        math.nan,
+        tuple(0 for _ in range(count)),
+        status,
+        message,
+        (),
+        evaluations,
+        0,
+        needs,
+    )
+
+
+def _status(result: MinimizeResult) -> tuple[str, str, tuple[str, ...]]:
+    at_bound = tuple(name for name, flag in zip(PARAMETERS, result.at_bound, strict=True) if flag)
+    if not result.converged:
+        return "not_converged", "the evaluation budget ran out before convergence", at_bound
+    if at_bound:
+        return (
+            "at_bound",
+            f"{', '.join(at_bound)} at a bound of the box: widen it and refit",
+            at_bound,
+        )
+    return "ok", "", at_bound
+
+
+_TOO_FEW_SIZES = (
+    "a collapse compares sizes: every observable needs at least two sizes (three to constrain "
+    "p_c, z and nu); got {sizes}"
+)
+
+
+def _fit_hh(
     collapses: Sequence[_Collapse],
     totals: Sequence[int],
     settings: _Settings,
     initial: ArrayLike | None,
     starts: int | None = None,
 ) -> _Outcome:
+    """Minimize the (pooled) Houdayer-Hartmann quality."""
     needs = tuple(_min_points(settings.min_points, t) for t in totals)
-    nan3 = np.full(3, np.nan)
-    sizes = [c.sizes.size for c in collapses]
+    sizes = [int(c.sizes.size) for c in collapses]
     if min(sizes) < 2:
-        return _Outcome(
-            nan3,
-            math.nan,
-            tuple(0 for _ in collapses),
-            "too_few_sizes",
-            "a collapse compares sizes: every observable needs at least two sizes (three to "
-            f"constrain p_c, z and nu); got {sizes}",
-            (),
-            0,
-            0,
-            needs,
-        )
+        return _no_fit(len(collapses), "too_few_sizes", _TOO_FEW_SIZES.format(sizes=sizes), needs)
     short = [t for t, need in zip(totals, needs, strict=True) if t < need]
     if short:
-        return _Outcome(
-            nan3,
-            math.nan,
-            tuple(0 for _ in collapses),
+        return _no_fit(
+            len(collapses),
             "too_few_points",
             f"fewer points ({short}) than the {needs} bracketed points a fit needs (min_points)",
-            (),
-            0,
-            0,
             needs,
         )
-    objective = _objective(collapses, needs)
     result = minimize_bounded(
-        objective,
+        _objective(collapses, needs),
         settings.box,
         initial=initial,
         starts=settings.starts if starts is None else starts,
@@ -788,29 +1095,18 @@ def _fit(
         max_evaluations=settings.max_evaluations,
     )
     if not math.isfinite(result.fun):
-        return _Outcome(
-            nan3,
-            math.nan,
-            tuple(0 for _ in collapses),
+        return _no_fit(
+            len(collapses),
             "too_few_points",
             f"no parameters in the box bracket at least {list(needs)} points (min_points) of "
             "every observable: the sizes' scaled ranges do not overlap enough; widen the box or "
             "the rate window, or add rates",
-            (),
-            result.evaluations,
-            result.starts,
             needs,
+            result.evaluations,
         )
     params = result.x
     used = tuple(int(np.sum(~np.isnan(c.chi2(*(float(v) for v in params))))) for c in collapses)
-    at_bound = tuple(name for name, flag in zip(PARAMETERS, result.at_bound, strict=True) if flag)
-    if not result.converged:
-        status, message = "not_converged", "the evaluation budget ran out before convergence"
-    elif at_bound:
-        status = "at_bound"
-        message = f"{', '.join(at_bound)} at a bound of the box: widen it and refit"
-    else:
-        status, message = "ok", ""
+    status, message, at_bound = _status(result)
     return _Outcome(
         params,
         result.fun,
@@ -824,17 +1120,183 @@ def _fit(
     )
 
 
+def _free(box: np.ndarray) -> int:
+    return int(np.sum(box[:, 1] > box[:, 0]))
+
+
+def _poly_problem(poly: _Polynomial) -> str:
+    """Why a point set cannot carry a polynomial collapse ("" when it can)."""
+    sizes = np.unique(poly.n)
+    if sizes.size < 2:
+        return (
+            f"the window holds points of {sizes.size} size(s): a collapse needs points of at "
+            "least two sizes in it"
+        )
+    distinct = max(np.unique(poly.p[poly.n == s]).size for s in sizes)
+    if distinct < poly.degree + 1:
+        return (
+            f"no size has {poly.degree + 1} distinct rates in the window: a degree-"
+            f"{poly.degree} master curve would not be determined at every parameter value"
+        )
+    return ""
+
+
+def _fit_poly(
+    polys: Sequence[_Polynomial],
+    settings: _Settings,
+    initial: ArrayLike | None,
+    starts: int | None = None,
+) -> _Outcome:
+    """Minimize the total polynomial chi2 over ``(p_c, z, nu)`` on fixed point sets."""
+    degree = settings.degree
+    n_free = _free(settings.box)
+    needs = tuple(degree + 2 + n_free for _ in polys)
+    problems = [message for message in map(_poly_problem, polys) if message]
+    dof = sum(poly.count - (degree + 1) for poly in polys) - n_free
+    if problems or dof < 1:
+        total = sum(poly.count for poly in polys)
+        message = (
+            problems[0]
+            if problems
+            else (
+                f"the window holds {total} points: a degree-{degree} master curve and {n_free} "
+                f"fitted parameters leave {dof} degrees of freedom (at least 1 is needed)"
+            )
+        )
+        out = _no_fit(len(polys), "too_few_points", message, needs)
+        return _Outcome(
+            out.params,
+            out.cost,
+            tuple(p.count for p in polys),
+            out.status,
+            out.message,
+            (),
+            0,
+            0,
+            needs,
+            math.nan,
+            max(dof, 0),
+        )
+
+    def objective(theta: np.ndarray) -> float:
+        p_c, z, nu = (float(v) for v in theta)
+        total = 0.0
+        for poly in polys:
+            total += poly.chi2(p_c, z, nu)
+        return total
+
+    result = minimize_bounded(
+        objective,
+        settings.box,
+        initial=initial,
+        starts=settings.starts if starts is None else starts,
+        seed=settings.seed,
+        max_evaluations=settings.max_evaluations,
+    )
+    if not math.isfinite(result.fun):
+        out = _no_fit(
+            len(polys),
+            "too_few_points",
+            "the polynomial objective is undefined everywhere the search went (n^z or n^(1/nu) "
+            "overflows): narrow the box",
+            needs,
+            result.evaluations,
+        )
+        return out
+    status, message, at_bound = _status(result)
+    return _Outcome(
+        result.x,
+        result.fun / dof,
+        tuple(p.count for p in polys),
+        status,
+        message,
+        at_bound,
+        result.evaluations,
+        result.starts,
+        needs,
+        result.fun,
+        dof,
+    )
+
+
+@dataclass(frozen=True, eq=False)
+class _WindowFit:
+    outcome: _Outcome
+    selected: np.ndarray
+    stable: bool
+    iterations: int
+    solution: _PolySolution | None
+
+
+def _rows(initial: ArrayLike | None) -> np.ndarray | None:
+    return None if initial is None else np.atleast_2d(np.asarray(initial, dtype=np.float64))
+
+
+def _reference(data: ScalingData, settings: _Settings, initial: ArrayLike | None) -> np.ndarray:
+    """Where the polynomial window is first drawn: ``initial``'s first row, else the
+    Houdayer-Hartmann fit with the same settings, else the center of the box."""
+    rows = _rows(initial)
+    if rows is not None:
+        return rows[0]
+    hh = _fit_hh([_Collapse.of(data)], [data.size], settings, None)
+    return hh.params if hh.status in _USABLE else settings.box.mean(axis=1)
+
+
+def _window_fit(
+    data: ScalingData,
+    settings: _Settings,
+    initial: ArrayLike | None,
+    reference: np.ndarray,
+) -> _WindowFit:
+    """The polynomial fit with a self-consistent window.
+
+    The window is drawn at ``reference``; the fit keeps that point set during its search
+    (``initial`` or the reference, and ``starts`` random starts); the window is drawn again at
+    the fitted parameters, and the fit repeated from there (no random starts) until the set no
+    longer changes, at most ``window_iterations`` fits.
+    """
+    theta = np.asarray(reference, dtype=np.float64)
+    used = window_points(data, theta[0], theta[1], theta[2], window=settings.window)
+    rows = _rows(initial)
+    start_rows = rows if rows is not None else theta
+    for iteration in range(1, settings.window_iterations + 1):
+        poly = _Polynomial.subset(data, used, settings.degree)
+        if iteration == 1:
+            outcome = _fit_poly([poly], settings, start_rows)
+        else:
+            outcome = _fit_poly([poly], settings, theta, starts=0)
+        if outcome.status not in _USABLE:
+            return _WindowFit(outcome, used, False, iteration, None)
+        p_c, z, nu = (float(v) for v in outcome.params)
+        again = window_points(data, p_c, z, nu, window=settings.window)
+        if np.array_equal(again, used) or iteration == settings.window_iterations:
+            stable = bool(np.array_equal(again, used))
+            return _WindowFit(outcome, used, stable, iteration, poly.solve(p_c, z, nu))
+        used, theta = again, outcome.params
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 @dataclass(frozen=True, eq=False)
 class CollapseFit:
     """A fitted collapse of one observable at one ``beta``.
 
     ``p_c``, ``z``, ``nu`` (NaN when the status is ``too_few_sizes`` or ``too_few_points``),
-    the quality ``cost`` at them, ``points_used`` of ``total_points`` (bracketed points),
-    ``status`` (one of :data:`STATUSES`) with a ``message``, the parameters ``at_bound``, and the
-    settings that produced it (``bounds``; ``min_points``, the bracketed points required here,
-    from ``min_points_setting``, the value given, None for the default rule; ``random_starts``
-    as given and ``starts`` run; ``seed``; ``max_evaluations``) with the data's ``observable``,
-    ``beta``, ``label`` and ``estimator``.
+    the objective ``cost`` at them (``method="houdayer_hartmann"``: the mean ``chi2`` of the
+    bracketed points; ``"polynomial"``: ``chi2 / dof``), ``points_used`` of ``total_points``
+    (bracketed points, or the points in the window), ``status`` (one of :data:`STATUSES`) with
+    a ``message``, the parameters ``at_bound``, and the settings that produced it (``bounds``;
+    ``min_points``, the points required here, from ``min_points_setting``, the value given, None
+    for the default rule; ``random_starts`` as given and ``starts`` run; ``seed``;
+    ``max_evaluations``) with the data's ``observable``, ``beta``, ``label`` and ``estimator``.
+
+    Polynomial fits also have the ``degree``, the ``window`` rule, the total ``chi2`` and
+    ``dof = points_used - (degree + 1) - (free parameters)``, the point set ``selected`` (a mask
+    over the data's points), the ``window_range`` ``(min x, max x)`` of the set at the fit,
+    whether the window was ``window_stable`` after ``window_iterations`` fits, and the
+    ``coefficients`` of ``F(x) = sum_k a_k x^k``. ``chi2 / dof`` is about 1 when the points
+    scatter about the master curve as their errors say; the rates of a size share graphs, so
+    their errors are correlated and ``chi2`` does not follow a chi-square law (the bootstrap
+    gives the uncertainties).
     """
 
     p_c: float
@@ -859,6 +1321,17 @@ class CollapseFit:
     seed: Any
     max_evaluations: int
     evaluations: int
+    method: str = HOUDAYER_HARTMANN
+    degree: int | None = None
+    window: str | float | None = None
+    chi2: float = math.nan
+    dof: int | None = None
+    selected: np.ndarray | None = None
+    window_range: tuple[float, float] | None = None
+    window_stable: bool | None = None
+    window_iterations: int = 0
+    coefficients: np.ndarray | None = None
+    _settings: Any = field(default=None, repr=False)
 
     @property
     def params(self) -> np.ndarray:
@@ -868,15 +1341,42 @@ class CollapseFit:
     @property
     def usable(self) -> bool:
         """True when the fit returned parameters (``ok``, ``at_bound`` or ``not_converged``)."""
-        return self.status in ("ok", "at_bound", "not_converged")
+        return self.status in _USABLE
+
+    @property
+    def chi2_per_dof(self) -> float:
+        """``chi2 / dof`` of a polynomial fit (NaN otherwise)."""
+        return self.chi2 / self.dof if self.dof else math.nan
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
         return out
 
 
-def _collapse_fit(data: ScalingData, settings: _Settings, outcome: _Outcome) -> CollapseFit:
+def _collapse_fit(
+    data: ScalingData, settings: _Settings, outcome: _Outcome, window: _WindowFit | None = None
+) -> CollapseFit:
     p_c, z, nu = (float(v) for v in outcome.params)
+    extra: dict[str, Any] = {}
+    if settings.method == POLYNOMIAL:
+        extra = {
+            "degree": settings.degree,
+            "window": settings.window,
+            "chi2": outcome.chi2,
+            "dof": outcome.dof,
+        }
+        if window is not None:
+            extra.update(
+                selected=window.selected,
+                window_stable=window.stable,
+                window_iterations=window.iterations,
+            )
+            if window.solution is not None:
+                x = window.solution.x
+                extra.update(
+                    window_range=(float(x.min()), float(x.max())),
+                    coefficients=window.solution.coefficients,
+                )
     return CollapseFit(
         p_c=p_c,
         z=z,
@@ -900,52 +1400,95 @@ def _collapse_fit(data: ScalingData, settings: _Settings, outcome: _Outcome) -> 
         seed=settings.seed,
         max_evaluations=settings.max_evaluations,
         evaluations=outcome.evaluations,
+        method=settings.method,
+        _settings=settings,
+        **extra,
     )
 
 
 def _settings_of(fit: CollapseFit, starts: int | None = None) -> _Settings:
     """The settings a fit was made with (``starts`` overrides its random starts)."""
-    return _Settings(
-        np.array(fit.bounds),
-        fit.random_starts if starts is None else int(starts),
-        fit.seed,
-        fit.min_points_setting,
-        fit.max_evaluations,
-    )
+    settings: _Settings = fit._settings
+    return settings if starts is None else replace(settings, starts=int(starts))
+
+
+def _fit_one(
+    data: ScalingData,
+    settings: _Settings,
+    initial: ArrayLike | None,
+    reference: np.ndarray | None = None,
+) -> CollapseFit:
+    if settings.method == HOUDAYER_HARTMANN:
+        outcome = _fit_hh([_Collapse.of(data)], [data.size], settings, initial)
+        return _collapse_fit(data, settings, outcome)
+    if data.sizes.size < 2:
+        needs = (settings.degree + 2 + _free(settings.box),)
+        outcome = _no_fit(1, "too_few_sizes", _TOO_FEW_SIZES.format(sizes=[1]), needs)
+        return _collapse_fit(data, settings, outcome)
+    ref = _reference(data, settings, initial) if reference is None else reference
+    window = _window_fit(data, settings, initial, ref)
+    return _collapse_fit(data, settings, window.outcome, window)
 
 
 def fit_collapse(
     data: ScalingData,
     *,
     bounds: Any,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
     initial: ArrayLike | None = None,
     starts: int = 8,
     seed: Any = 0,
     min_points: int | None = None,
     max_evaluations: int = 2000,
+    window_iterations: int = 5,
 ) -> CollapseFit:
-    """Fit ``(p_c, z, nu)`` by minimizing the Houdayer–Hartmann quality (:func:`collapse_cost`).
+    """Fit ``(p_c, z, nu)`` to one observable at one ``beta``.
 
     ``bounds``: ``{"p_c": (lo, hi), "z": (lo, hi), "nu": (lo, hi)}`` or three pairs in that
-    order (``lo == hi`` fixes a parameter; ``nu``'s lower bound must be positive). A parameter
-    vector is admissible only when at least ``min_points`` points are bracketed (default
-    ``max(3, ceil(P/2))`` of the ``P`` points), since the quality of a few bracketed points
-    says little; inadmissible vectors count as ``+inf``. The search is
+    order (``lo == hi`` fixes a parameter; ``nu``'s lower bound must be positive). The search is
     :func:`minimize_bounded` from ``initial`` (or the box center) and ``starts`` random starts
-    drawn from ``seed``. The status says whether the result is usable (:data:`STATUSES`); a
-    fit never raises for lack of data.
+    drawn from ``seed``. The status says whether the result is usable (:data:`STATUSES`); a fit
+    never raises for lack of data.
+
+    ``method="houdayer_hartmann"`` (the default) minimizes the collapse quality of
+    :func:`collapse_cost`. A parameter vector is admissible only when at least ``min_points``
+    points are bracketed (default ``max(3, ceil(P/2))`` of the ``P`` points); inadmissible
+    vectors count as ``+inf``.
+
+    ``method="polynomial"`` (ruling R-FSS) minimizes ``chi2(p_c, z, nu) = min_a sum_i (Y_i -
+    F_a(x_i))^2 / dY_i^2`` with a polynomial master curve of ``degree`` whose coefficients are
+    solved in closed form (:func:`polynomial_cost`), on a fixed point set: the ``window``
+    (:func:`window_points`) drawn at ``initial``'s first row, else at the Houdayer-Hartmann fit,
+    else at the box center; after each search it is drawn again at the fitted parameters and
+    the fit repeated until the set no longer changes (at most ``window_iterations`` fits;
+    ``window_stable`` says whether it settled). The set needs points of two sizes, a size with
+    ``degree + 1`` distinct rates and one degree of freedom; ``min_points`` does not apply.
     """
-    settings = _settings(bounds, starts, seed, min_points, max_evaluations)
-    outcome = _fit([_Collapse.of(data)], [data.size], settings, initial)
-    return _collapse_fit(data, settings, outcome)
+    settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        method,
+        degree,
+        window,
+        window_iterations,
+    )
+    return _fit_one(data, settings, initial)
 
 
 @dataclass(frozen=True, eq=False)
 class SharedFit:
     """One ``(p_c, z, nu)`` fitted to several observables, each with its own scaling function.
 
-    ``cost`` is the pooled quality (the mean ``chi2`` over all observables' bracketed points),
-    ``costs`` and ``points_used`` per observable at the shared parameters.
+    Houdayer-Hartmann: ``cost`` is the pooled quality (the mean ``chi2`` over all observables'
+    bracketed points), ``costs`` and ``points_used`` per observable at the shared parameters.
+    Polynomial: ``cost = chi2 / dof`` over all observables (one master curve each, on the point
+    sets ``selected`` that their own fits chose), ``costs`` each observable's ``chi2_o / (N_o -
+    degree - 1)`` at the shared parameters.
     """
 
     p_c: float
@@ -966,6 +1509,12 @@ class SharedFit:
     starts: int
     seed: Any
     evaluations: int
+    method: str = HOUDAYER_HARTMANN
+    degree: int | None = None
+    window: str | float | None = None
+    chi2: float = math.nan
+    dof: int | None = None
+    selected: tuple[np.ndarray, ...] | None = None
 
     @property
     def params(self) -> np.ndarray:
@@ -973,7 +1522,7 @@ class SharedFit:
 
     @property
     def usable(self) -> bool:
-        return self.status in ("ok", "at_bound", "not_converged")
+        return self.status in _USABLE
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
@@ -1004,17 +1553,35 @@ def _datasets(datasets: Sequence[ScalingData]) -> list[ScalingData]:
 
 
 def _shared_fit(
-    items: Sequence[ScalingData], settings: _Settings, outcome: _Outcome, beta: str | None
+    items: Sequence[ScalingData],
+    settings: _Settings,
+    outcome: _Outcome,
+    beta: str | None,
+    polys: Sequence[_Polynomial] | None = None,
+    selected: tuple[np.ndarray, ...] | None = None,
 ) -> SharedFit:
     params = outcome.params
     costs: list[float] = []
-    if np.all(np.isfinite(params)):
-        for d in items:
+    for i, d in enumerate(items):
+        if not np.all(np.isfinite(params)):
+            costs.append(math.nan)
+        elif polys is None:
             cc = _Collapse.of(d).chi2(*(float(v) for v in params))
             ok = ~np.isnan(cc)
             costs.append(float(np.mean(cc[ok])) if ok.any() else math.nan)
-    else:
-        costs = [math.nan] * len(items)
+        else:
+            own = polys[i].count - (settings.degree + 1)
+            value = polys[i].chi2(*(float(v) for v in params))
+            costs.append(value / own if own > 0 else math.nan)
+    extra: dict[str, Any] = {}
+    if settings.method == POLYNOMIAL:
+        extra = {
+            "degree": settings.degree,
+            "window": settings.window,
+            "chi2": outcome.chi2,
+            "dof": outcome.dof,
+            "selected": selected,
+        }
     return SharedFit(
         p_c=float(params[0]),
         z=float(params[1]),
@@ -1034,30 +1601,84 @@ def _shared_fit(
         starts=outcome.starts,
         seed=settings.seed,
         evaluations=outcome.evaluations,
+        method=settings.method,
+        **extra,
     )
+
+
+def _shared_polynomial(
+    items: Sequence[ScalingData],
+    settings: _Settings,
+    initial: ArrayLike | None,
+    independent: Sequence[CollapseFit],
+    beta: str | None,
+) -> SharedFit:
+    """The shared polynomial fit on the point sets the observables' own fits chose."""
+    failed = [f for f in independent if not f.usable]
+    if failed:
+        outcome = _no_fit(
+            len(items),
+            failed[0].status,
+            f"the fit of {failed[0].observable} alone failed, so it has no window: "
+            f"{failed[0].message}",
+            tuple(f.min_points for f in independent),
+        )
+        return _shared_fit(items, settings, outcome, beta)
+    selected = tuple(f.selected for f in independent if f.selected is not None)
+    polys = [
+        _Polynomial.subset(d, s, settings.degree) for d, s in zip(items, selected, strict=True)
+    ]
+    rows = np.array([f.params for f in independent])
+    user = _rows(initial)
+    if user is not None:
+        rows = np.vstack([user, rows])
+    outcome = _fit_poly(polys, settings, rows)
+    return _shared_fit(items, settings, outcome, beta, polys, selected)
 
 
 def fit_shared(
     datasets: Sequence[ScalingData],
     *,
     bounds: Any,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
     initial: ArrayLike | None = None,
     starts: int = 8,
     seed: Any = 0,
     min_points: int | None = None,
     max_evaluations: int = 2000,
+    window_iterations: int = 5,
 ) -> SharedFit:
     """Fit one ``(p_c, z, nu)`` to several observables at one ``beta`` (the shared hypothesis).
 
-    Every observable keeps its own scaling function: the quality is evaluated per observable
-    and pooled, ``S_shared = sum_o sum_i chi2_oi / sum_o N_o``, with each observable needing its
-    own ``min_points`` bracketed points. Same options as :func:`fit_collapse`.
+    Every observable keeps its own scaling function. Houdayer-Hartmann: the quality is evaluated
+    per observable and pooled, ``S_shared = sum_o sum_i chi2_oi / sum_o N_o``, each observable
+    needing its own ``min_points`` bracketed points. Polynomial: each observable is first fitted
+    alone (:func:`fit_collapse`), which fixes its window; the shared fit minimizes
+    ``sum_o chi2_o`` on those point sets, starting from the independent parameters. Same
+    options as :func:`fit_collapse`.
     """
     items = _datasets(datasets)
     beta = _common_beta(items)
-    settings = _settings(bounds, starts, seed, min_points, max_evaluations)
-    outcome = _fit([_Collapse.of(d) for d in items], [d.size for d in items], settings, initial)
-    return _shared_fit(items, settings, outcome, beta)
+    settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        method,
+        degree,
+        window,
+        window_iterations,
+    )
+    if settings.method == HOUDAYER_HARTMANN:
+        outcome = _fit_hh(
+            [_Collapse.of(d) for d in items], [d.size for d in items], settings, initial
+        )
+        return _shared_fit(items, settings, outcome, beta)
+    independent = [_fit_one(d, settings, initial) for d in items]
+    return _shared_polynomial(items, settings, initial, independent, beta)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1118,13 +1739,49 @@ def _replicate_values(
     return ystar, sestar
 
 
+def _valid(y: np.ndarray, se: np.ndarray) -> np.ndarray:
+    return np.isfinite(y) & np.isfinite(se) & (se > 0)
+
+
 def _replicate_collapse(
     n: np.ndarray, p: np.ndarray, y: np.ndarray, se: np.ndarray
 ) -> tuple[_Collapse, int] | None:
-    keep = np.isfinite(y) & np.isfinite(se) & (se > 0)
+    keep = _valid(y, se)
     if not keep.any():
         return None
     return _Collapse(n[keep], p[keep], y[keep], se[keep]), int(keep.sum())
+
+
+def _replicate_polynomial(
+    n: np.ndarray, p: np.ndarray, y: np.ndarray, se: np.ndarray, mask: np.ndarray, degree: int
+) -> _Polynomial | None:
+    keep = mask & _valid(y, se)
+    if not keep.any():
+        return None
+    return _Polynomial(n[keep], p[keep], y[keep], se[keep], degree)
+
+
+def _refit(
+    data: ScalingData,
+    fit: CollapseFit,
+    settings: _Settings,
+    y: np.ndarray,
+    se: np.ndarray,
+    p: np.ndarray | None = None,
+) -> _Outcome | None:
+    """Refit replicate values ``y``, ``se`` (rates ``p``) with the fit's method and window,
+    from the fit's parameters, without random starts; None when no point is usable."""
+    rates = data.p if p is None else p
+    if settings.method == HOUDAYER_HARTMANN:
+        prepared = _replicate_collapse(data.n, rates, y, se)
+        if prepared is None:
+            return None
+        return _fit_hh([prepared[0]], [prepared[1]], settings, fit.params, starts=0)
+    assert fit.selected is not None
+    poly = _replicate_polynomial(data.n, rates, y, se, fit.selected, settings.degree)
+    if poly is None:
+        return None
+    return _fit_poly([poly], settings, fit.params, starts=0)
 
 
 @dataclass(frozen=True, eq=False)
@@ -1155,10 +1812,23 @@ class BootstrapFit:
         return out
 
 
+def _replicate_count(replicates: Any, smallest: int) -> int:
+    if (
+        isinstance(replicates, bool)
+        or not isinstance(replicates, (int, np.integer))
+        or replicates < smallest
+    ):
+        raise ValueError(f"replicates must be an integer >= {smallest}")
+    return int(replicates)
+
+
 def bootstrap_fit(
     data: ScalingData,
     *,
     bounds: Any,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
     replicates: int = 200,
     seed: Any = 0,
     level: float = 0.95,
@@ -1166,46 +1836,50 @@ def bootstrap_fit(
     starts: int = 8,
     min_points: int | None = None,
     max_evaluations: int = 2000,
+    window_iterations: int = 5,
 ) -> BootstrapFit:
     """The uncertainty of ``(p_c, z, nu)`` by resampling graphs (v1.4 §5.8, §9).
 
     For every size ``n`` the graphs are resampled once per replicate
     (``graph_bootstrap(labels_n, replicates, seed=[seed, n])``) and every rate's mean and error
     at that size are recomputed from the same drawn graphs, so the coupling of the rates
-    (shared graphs, gates and mask uniforms) is kept. Each replicate is refitted from the data's
-    fit (no random starts); a point whose replicate error is 0 or undefined is left out of that
-    replicate. Returns the replicate parameters, their standard deviations and percentile
-    intervals. Needs the per-graph values (:func:`scaling_data`).
+    (shared graphs, gates and mask uniforms) is kept. Each replicate is refitted with the same
+    method from the data's fit (no random starts; a polynomial refit keeps the fit's window); a
+    point whose replicate error is 0 or undefined is left out of that replicate. Returns the
+    replicate parameters, their standard deviations and percentile intervals. Needs the
+    per-graph values (:func:`scaling_data`).
     """
-    settings = _settings(bounds, starts, seed, min_points, max_evaluations)
+    settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        method,
+        degree,
+        window,
+        window_iterations,
+    )
     lvl = _stats._level(level)
-    if (
-        isinstance(replicates, bool)
-        or not isinstance(replicates, (int, np.integer))
-        or replicates < 2
-    ):
-        raise ValueError("replicates must be an integer >= 2")
-    draws = _draws_by_size([data], int(replicates), seed)
-    outcome = _fit([_Collapse.of(data)], [data.size], settings, initial)
-    fit = _collapse_fit(data, settings, outcome)
-    reps = np.full((int(replicates), 3), np.nan)
-    costs = np.full(int(replicates), np.nan)
+    reps_count = _replicate_count(replicates, 2)
+    draws = _draws_by_size([data], reps_count, seed)
+    fit = _fit_one(data, settings, initial)
+    reps = np.full((reps_count, 3), np.nan)
+    costs = np.full(reps_count, np.nan)
     statuses: list[str] = []
     if fit.usable:
         ystar, sestar = _replicate_values(data, draws)
-        for b in range(int(replicates)):
-            prepared = _replicate_collapse(data.n, data.p, ystar[b], sestar[b])
-            if prepared is None:
+        for b in range(reps_count):
+            out = _refit(data, fit, settings, ystar[b], sestar[b])
+            if out is None:
                 statuses.append("too_few_points")
                 continue
-            collapse, count = prepared
-            out = _fit([collapse], [count], settings, fit.params, starts=0)
             statuses.append(out.status)
-            if out.status in ("ok", "at_bound", "not_converged"):
+            if out.status in _USABLE:
                 reps[b] = out.params
                 costs[b] = out.cost
     else:
-        statuses = [fit.status] * int(replicates)
+        statuses = [fit.status] * reps_count
     usable = ~np.isnan(reps[:, 0])
     good = reps[usable]
     se = good.std(axis=0, ddof=1) if good.shape[0] > 1 else np.full(3, np.nan)
@@ -1236,10 +1910,13 @@ def bootstrap_fit(
 class SharedComparison:
     """Shared ``(p_c, z, nu)`` against independent fits, with a bootstrap null.
 
-    ``delta = shared.cost - independent_cost`` (``independent_cost`` pools the independent fits'
-    ``chi2`` the same way), ``null`` its replicates under the shared hypothesis (NaN for failed
-    refits), ``p_value = (1 + #{null >= delta}) / (1 + B')`` over the ``B'`` usable replicates,
-    and ``prefers``: ``"independent"`` when ``p_value <= alpha``, ``"shared"`` otherwise, and
+    ``delta`` measures how much worse the shared fit is: for the Houdayer-Hartmann method
+    ``shared.cost - independent_cost`` (``independent_cost`` pools the independent fits'
+    ``chi2`` the same way); for the polynomial method ``shared.chi2 - sum_o chi2_o`` on the same
+    point sets (``independent_cost`` is then ``sum_o chi2_o / sum_o dof_o``). ``null`` holds its
+    replicates under the shared hypothesis (NaN for failed refits),
+    ``p_value = (1 + #{null >= delta}) / (1 + B')`` over the ``B'`` usable replicates, and
+    ``prefers``: ``"independent"`` when ``p_value <= alpha``, ``"shared"`` otherwise, and
     ``"undetermined"`` when a fit gave no parameters. ``message`` explains an undetermined
     result.
     """
@@ -1255,6 +1932,7 @@ class SharedComparison:
     failed: int
     seed: Any
     message: str
+    method: str = HOUDAYER_HARTMANN
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
@@ -1271,6 +1949,9 @@ def compare_shared_independent(
     datasets: Sequence[ScalingData],
     *,
     bounds: Any,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
     replicates: int = 200,
     seed: Any = 0,
     alpha: float = 0.05,
@@ -1278,46 +1959,58 @@ def compare_shared_independent(
     starts: int = 8,
     min_points: int | None = None,
     max_evaluations: int = 2000,
+    window_iterations: int = 5,
 ) -> SharedComparison:
     """Test one shared ``(p_c, z, nu)`` against independent exponents (v1.4 §5.8, §5.9).
 
-    The statistic is the increase of the pooled quality when the parameters are shared,
-    ``delta = S_shared(theta_s) - S_independent`` (``S_independent`` the pooled quality of the
-    independent fits ``theta_o``). Its null distribution is built by graph-cluster resampling
-    of data that satisfy the shared hypothesis exactly: every observable ``o`` is mapped point
-    by point to
+    The statistic ``delta`` (see :class:`SharedComparison`) is the cost of sharing the
+    parameters. Its null distribution is built by graph-cluster resampling of data that satisfy
+    the shared hypothesis exactly: every observable ``o`` is mapped point by point to
 
         p' = p_c^s + (p - p_c^o) n^(1/nu_o - 1/nu_s),   y' = y n^(z_s - z_o)
 
     (and its graph means and errors by the same factor), which gives at ``theta_s`` exactly the
-    scaled coordinates the observable has at its own ``theta_o``, so its collapse quality is
-    kept and the shared parameters are exact for the mapped data. Each replicate resamples the
-    graphs once per size (``graph_bootstrap(labels_n, B, seed=[seed, n])``), applies the draws
-    to every rate and observable, recomputes the means and errors, refits shared and
-    independent parameters (starting from ``theta_s``) and records ``delta*``. The p-value is
+    scaled coordinates the observable has at its own ``theta_o``, so its collapse (and, for the
+    polynomial method, its point set) is kept and the shared parameters are exact for the
+    mapped data. Each replicate resamples the graphs once per size
+    (``graph_bootstrap(labels_n, B, seed=[seed, n])``), applies the draws to every rate and
+    observable, recomputes the means and errors, refits shared and independent parameters
+    (starting from ``theta_s``) and records ``delta*``. The p-value is
     ``(1 + #{delta* >= delta}) / (1 + B')``. Needs the per-graph values of every point.
     """
     items = _datasets(datasets)
     beta = _common_beta(items)
-    settings = _settings(bounds, starts, seed, min_points, max_evaluations)
+    settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        method,
+        degree,
+        window,
+        window_iterations,
+    )
     if not (isinstance(alpha, float) and 0 < alpha < 1):
         raise ValueError(f"alpha must be a probability strictly between 0 and 1, not {alpha!r}")
-    if (
-        isinstance(replicates, bool)
-        or not isinstance(replicates, (int, np.integer))
-        or replicates < 1
-    ):
-        raise ValueError("replicates must be a positive integer")
-    reps = int(replicates)
+    reps = _replicate_count(replicates, 1)
     draws = _draws_by_size(items, reps, seed)
-    collapses = [_Collapse.of(d) for d in items]
-    shared_out = _fit(collapses, [d.size for d in items], settings, initial)
-    shared = _shared_fit(items, settings, shared_out, beta)
-    independent = tuple(
-        _collapse_fit(d, settings, _fit([c], [d.size], settings, initial))
-        for d, c in zip(items, collapses, strict=True)
-    )
-    independent_cost = _pooled(independent)
+    polynomial = settings.method == POLYNOMIAL
+    if polynomial:
+        independent = tuple(_fit_one(d, settings, initial) for d in items)
+        shared = _shared_polynomial(items, settings, initial, independent, beta)
+        dofs = sum(f.dof or 0 for f in independent)
+        independent_cost = sum(f.chi2 for f in independent) / dofs if dofs else math.nan
+    else:
+        collapses = [_Collapse.of(d) for d in items]
+        shared = _shared_fit(
+            items, settings, _fit_hh(collapses, [d.size for d in items], settings, initial), beta
+        )
+        independent = tuple(
+            _collapse_fit(d, settings, _fit_hh([c], [d.size], settings, initial))
+            for d, c in zip(items, collapses, strict=True)
+        )
+        independent_cost = _pooled(independent)
     null = np.full(reps, np.nan)
     if not (shared.usable and all(f.usable for f in independent)):
         bad = [shared.status] + [f.status for f in independent]
@@ -1333,8 +2026,12 @@ def compare_shared_independent(
             failed=reps,
             seed=seed,
             message=f"a fit returned no parameters (statuses {bad}): no comparison",
+            method=settings.method,
         )
-    delta = shared.cost - independent_cost
+    if polynomial:
+        delta = shared.chi2 - sum(f.chi2 for f in independent)
+    else:
+        delta = shared.cost - independent_cost
     theta_s = shared.params
     mapped = []
     for d, f in zip(items, independent, strict=True):
@@ -1342,24 +2039,11 @@ def compare_shared_independent(
         factor = n ** (theta_s[1] - f.z)
         p_new = theta_s[0] + (d.p - f.p_c) * n ** (1.0 / f.nu - 1.0 / theta_s[2])
         ystar, sestar = _replicate_values(d, draws)
-        mapped.append((d.n, p_new, ystar * factor, sestar * factor))
+        mapped.append((d.n, p_new, ystar * factor, sestar * factor, f.selected))
     for b in range(reps):
-        prepared = [_replicate_collapse(n, p_new, ys[b], ss[b]) for n, p_new, ys, ss in mapped]
-        if any(x is None for x in prepared):
-            continue
-        cols = [x[0] for x in prepared if x is not None]
-        counts = [x[1] for x in prepared if x is not None]
-        s_out = _fit(cols, counts, settings, theta_s, starts=0)
-        i_outs = [
-            _fit([c], [k], settings, theta_s, starts=0) for c, k in zip(cols, counts, strict=True)
-        ]
-        if s_out.status not in ("ok", "at_bound", "not_converged") or any(
-            o.status not in ("ok", "at_bound", "not_converged") for o in i_outs
-        ):
-            continue
-        ind_total = sum(o.cost * o.used[0] for o in i_outs)
-        ind_count = sum(o.used[0] for o in i_outs)
-        null[b] = s_out.cost - ind_total / ind_count
+        value = _null_replicate(mapped, b, settings, theta_s, polynomial)
+        if value is not None:
+            null[b] = value
     valid = null[~np.isnan(null)]
     p_value = (1.0 + float(np.sum(valid >= delta))) / (1.0 + valid.size) if valid.size else math.nan
     if valid.size == 0:
@@ -1379,11 +2063,49 @@ def compare_shared_independent(
         failed=int(reps - valid.size),
         seed=seed,
         message=message,
+        method=settings.method,
     )
 
 
+def _null_replicate(
+    mapped: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]],
+    b: int,
+    settings: _Settings,
+    theta_s: np.ndarray,
+    polynomial: bool,
+) -> float | None:
+    """``delta*`` of replicate ``b`` of the mapped data (None when a refit fails)."""
+    if polynomial:
+        polys = []
+        for n, p_new, ys, ss, mask in mapped:
+            assert mask is not None
+            poly = _replicate_polynomial(n, p_new, ys[b], ss[b], mask, settings.degree)
+            if poly is None:
+                return None
+            polys.append(poly)
+        s_out = _fit_poly(polys, settings, theta_s, starts=0)
+        i_outs = [_fit_poly([poly], settings, theta_s, starts=0) for poly in polys]
+        if s_out.status not in _USABLE or any(o.status not in _USABLE for o in i_outs):
+            return None
+        return s_out.chi2 - sum(o.chi2 for o in i_outs)
+    prepared = [_replicate_collapse(n, p_new, ys[b], ss[b]) for n, p_new, ys, ss, _ in mapped]
+    cols = [x[0] for x in prepared if x is not None]
+    counts = [x[1] for x in prepared if x is not None]
+    if len(cols) < len(prepared):
+        return None
+    s_out = _fit_hh(cols, counts, settings, theta_s, starts=0)
+    i_outs = [
+        _fit_hh([c], [k], settings, theta_s, starts=0) for c, k in zip(cols, counts, strict=True)
+    ]
+    if s_out.status not in _USABLE or any(o.status not in _USABLE for o in i_outs):
+        return None
+    ind_total = sum(o.cost * o.used[0] for o in i_outs)
+    ind_count = sum(o.used[0] for o in i_outs)
+    return float(s_out.cost - ind_total / ind_count)
+
+
 # ---------------------------------------------------------------------------------------------
-# leave one size out, diagnostics
+# leave one size out, diagnostics, the two methods side by side
 # ---------------------------------------------------------------------------------------------
 
 
@@ -1393,9 +2115,11 @@ class LeaveOneSizeOut:
 
     ``fits[k]`` is the fit without ``sizes[k]``; ``params`` ``(S, 3)`` their parameters;
     ``held_out_cost[k]`` the mean ``chi2`` of the points of ``sizes[k]`` against the master
-    curve of the other sizes at ``fits[k]``'s parameters (about 1 when the held-out size
-    collapses within its errors), over ``held_out_points[k]`` bracketed points; ``spread`` the
-    range (max - min) of each parameter over the refits.
+    curve of the other sizes at ``fits[k]``'s parameters (Houdayer-Hartmann: the bracketing
+    line of the other sizes; polynomial: the fitted polynomial, with its prediction variance,
+    at the held-out points inside the range it was fitted on), over ``held_out_points[k]``
+    points: about 1 when the held-out size collapses within its errors. ``spread`` is the range
+    (max - min) of each parameter over the refits.
     """
 
     full: CollapseFit
@@ -1411,34 +2135,92 @@ class LeaveOneSizeOut:
         return out
 
 
+def _without_size_polynomial(
+    data: ScalingData, full: CollapseFit, size: int, settings: _Settings, starts: int | None
+) -> tuple[CollapseFit, float, int]:
+    """A polynomial refit on the full fit's window minus one size, and the held-out cost."""
+    assert full.selected is not None
+    keep = data.n != size
+    part = data.subset(keep)
+    mask = full.selected[keep]
+    poly = _Polynomial.subset(part, mask, settings.degree)
+    outcome = _fit_poly([poly], settings, full.params, starts=starts)
+    solution = (
+        poly.solve(*(float(v) for v in outcome.params)) if outcome.status in _USABLE else None
+    )
+    window = _WindowFit(outcome, mask, True, 1, solution)
+    fit = _collapse_fit(part, settings, outcome, window)
+    if solution is None:
+        return fit, math.nan, 0
+    held = _Polynomial.subset(data, data.n == size, settings.degree)
+    x, big_y, dy = _held_coordinates(held, fit)
+    inside = (x >= solution.x.min()) & (x <= solution.x.max())
+    if not inside.any():
+        return fit, math.nan, 0
+    mean, var = solution.predict(x[inside])
+    chi2 = (big_y[inside] - mean) ** 2 / (dy[inside] ** 2 + var)
+    return fit, float(np.mean(chi2)), int(inside.sum())
+
+
+def _held_coordinates(
+    held: _Polynomial, fit: CollapseFit
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    amp = np.power(held.n_float, -fit.z)
+    return (held.p - fit.p_c) * np.power(held.n_float, 1.0 / fit.nu), held.y * amp, held.se * amp
+
+
 def leave_one_size_out(
     data: ScalingData,
     *,
     bounds: Any,
+    method: str = HOUDAYER_HARTMANN,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
     initial: ArrayLike | None = None,
     starts: int = 8,
     seed: Any = 0,
     min_points: int | None = None,
     max_evaluations: int = 2000,
+    window_iterations: int = 5,
 ) -> LeaveOneSizeOut:
     """Refit without each size in turn (held-out-size collapse diagnostics, v1.4 §5.8).
 
-    Each refit starts from the full fit (when it has parameters) and ``starts`` random starts.
-    With fewer than three sizes the refits have ``status = "too_few_sizes"``.
+    Each refit starts from the full fit (when it has parameters) and ``starts`` random starts;
+    a polynomial refit keeps the full fit's window minus the left-out size. With fewer than
+    three sizes the refits have ``status = "too_few_sizes"`` (or ``"too_few_points"``).
     """
-    settings = _settings(bounds, starts, seed, min_points, max_evaluations)
-    full_out = _fit([_Collapse.of(data)], [data.size], settings, initial)
-    full = _collapse_fit(data, settings, full_out)
+    settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        method,
+        degree,
+        window,
+        window_iterations,
+    )
+    full = _fit_one(data, settings, initial)
     start = full.params if full.usable else initial
     whole = _Collapse.of(data)
     sizes = tuple(int(s) for s in data.sizes)
     fits, held_cost, held_points = [], [], []
     for size in sizes:
+        if settings.method == POLYNOMIAL and full.usable:
+            fit, cost, points = _without_size_polynomial(data, full, size, settings, None)
+            fits.append(fit)
+            held_cost.append(cost)
+            held_points.append(points)
+            continue
         part = data.subset(data.n != size)
-        out = _fit([_Collapse.of(part)], [part.size], settings, start)
-        fit = _collapse_fit(part, settings, out)
+        if settings.method == POLYNOMIAL:
+            fit = _fit_one(part, settings, start)
+        else:
+            fit = _collapse_fit(
+                part, settings, _fit_hh([_Collapse.of(part)], [part.size], settings, start)
+            )
         fits.append(fit)
-        if fit.usable:
+        if fit.usable and settings.method == HOUDAYER_HARTMANN:
             chi2 = whole.chi2(fit.p_c, fit.z, fit.nu)[data.n == size]
             ok = ~np.isnan(chi2)
             held_cost.append(float(np.mean(chi2[ok])) if ok.any() else math.nan)
@@ -1468,11 +2250,13 @@ def leave_one_size_out(
 class CollapseDiagnostics:
     """What a fitted collapse rests on, point by point.
 
-    ``bracketed`` and ``chi2`` per point at the fit; ``coverage`` the bracketed fraction and
-    ``coverage_by_size``; ``drift_fit`` the refit without the smallest size and ``drift`` its
-    parameters minus the fit's (``drift_in_se`` divided by a bootstrap's errors when one is
-    given); the ``censored_fraction`` and ``horizon_fraction`` of every point as given, and their
-    maxima; ``notes`` in words.
+    ``bracketed`` and ``chi2`` per point at the fit (Houdayer-Hartmann: the points another size
+    brackets and their ``chi2``; polynomial: the points in the window and their squared
+    whitened residuals); ``coverage`` the fraction of points used and ``coverage_by_size``;
+    ``drift_fit`` the refit without the smallest size and ``drift`` its parameters minus the
+    fit's (``drift_in_se`` divided by a bootstrap's errors when one is given); the
+    ``censored_fraction`` and ``horizon_fraction`` of every point as given, and their maxima;
+    ``notes`` in words.
     """
 
     fit: CollapseFit
@@ -1505,17 +2289,28 @@ def collapse_diagnostics(
     bootstrap: BootstrapFit | None = None,
     starts: int | None = None,
 ) -> CollapseDiagnostics:
-    """Bracketing coverage, drift without the smallest size, and the censoring and
-    horizon-peak fractions of every point (v1.4 §5.9: report them per condition).
+    """Coverage, drift without the smallest size, and the censoring and horizon-peak fractions
+    of every point (v1.4 §5.9: report them per condition).
 
-    The drift refit uses the fit's own settings (bounds, ``min_points``, seed, budget; ``starts``
-    overrides its number of random starts) and starts from its parameters. ``bootstrap`` (a
+    The drift refit uses the fit's own method and settings (bounds, ``min_points``, seed,
+    budget; ``starts`` overrides its number of random starts; a polynomial refit keeps the fit's
+    window minus the smallest size) and starts from its parameters. ``bootstrap`` (a
     :func:`bootstrap_fit` of the same data) turns the drift into units of its errors.
     """
     if not isinstance(fit, CollapseFit):
         raise ValueError("fit must be a CollapseFit of the same data")
     notes: list[str] = []
-    if fit.usable:
+    polynomial = fit.method == POLYNOMIAL
+    if fit.usable and polynomial:
+        assert fit.selected is not None and fit.degree is not None
+        bracketed = fit.selected
+        chi2 = (
+            polynomial_cost(
+                data, fit.p_c, fit.z, fit.nu, degree=fit.degree, selected=fit.selected
+            ).residuals
+            ** 2
+        )
+    elif fit.usable:
         cc = collapse_cost(data, fit.p_c, fit.z, fit.nu)
         bracketed, chi2 = cc.bracketed, cc.chi2
     else:
@@ -1526,22 +2321,30 @@ def collapse_diagnostics(
     missing = int((~bracketed).sum())
     if fit.usable and missing:
         notes.append(
-            f"{missing} of {data.size} points are not bracketed by another size and do not "
+            f"{missing} of {data.size} points are outside the polynomial window"
+            if polynomial
+            else f"{missing} of {data.size} points are not bracketed by another size and do not "
             "enter the quality (the ends of the scaled range)"
         )
+    if polynomial and fit.window_stable is False:
+        notes.append(f"the window did not settle in {fit.window_iterations} fits")
     drift_fit = drift = drift_in_se = None
     if fit.usable and data.sizes.size >= 3:
         settings = _settings_of(fit, starts)
-        part = data.subset(data.n != data.sizes[0])
-        out = _fit([_Collapse.of(part)], [part.size], settings, fit.params)
-        drift_fit = _collapse_fit(part, settings, out)
+        smallest = int(data.sizes[0])
+        if polynomial:
+            drift_fit = _without_size_polynomial(data, fit, smallest, settings, None)[0]
+        else:
+            part = data.subset(data.n != smallest)
+            out = _fit_hh([_Collapse.of(part)], [part.size], settings, fit.params)
+            drift_fit = _collapse_fit(part, settings, out)
         if drift_fit.usable:
             drift = drift_fit.params - fit.params
             if bootstrap is not None:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     drift_in_se = drift / bootstrap.se
         else:
-            notes.append(f"the refit without n = {data.sizes[0]} failed: {drift_fit.message}")
+            notes.append(f"the refit without n = {smallest} failed: {drift_fit.message}")
     elif data.sizes.size < 3:
         notes.append("fewer than three sizes: no drift with the smallest size removed")
     max_c = None if data.censored_fraction is None else float(data.censored_fraction.max())
@@ -1574,4 +2377,180 @@ def collapse_diagnostics(
         label=data.label,
         estimator=data.estimator,
         notes=tuple(notes),
+    )
+
+
+@dataclass(frozen=True, eq=False)
+class MethodComparison:
+    """The Houdayer-Hartmann and polynomial fits of the same data, side by side.
+
+    ``difference`` is ``polynomial.params - houdayer_hartmann.params``. With ``replicates > 0``
+    both methods refit every graph-bootstrap replicate (the same draws, paired across ``p``):
+    ``se_difference`` is the standard deviation of the replicate differences, ``z`` the
+    difference in its units (``|z|`` of a few or less: the methods agree within the sampling
+    spread), and ``se_houdayer_hartmann``, ``se_polynomial`` each method's bootstrap error.
+    ``failed`` counts replicates where either refit gave no parameters.
+    """
+
+    houdayer_hartmann: CollapseFit
+    polynomial: CollapseFit
+    difference: np.ndarray
+    se_difference: np.ndarray
+    z: np.ndarray
+    se_houdayer_hartmann: np.ndarray
+    se_polynomial: np.ndarray
+    replicates: int
+    failed: int
+    seed: Any
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = _plain(self)
+        return out
+
+
+def compare_methods(
+    data: ScalingData,
+    *,
+    bounds: Any,
+    degree: int = DEFAULT_DEGREE,
+    window: str | float = "overlap",
+    replicates: int = 100,
+    seed: Any = 0,
+    initial: ArrayLike | None = None,
+    starts: int = 8,
+    min_points: int | None = None,
+    max_evaluations: int = 2000,
+    window_iterations: int = 5,
+) -> MethodComparison:
+    """Fit with both methods and compare their parameters against the bootstrap spread.
+
+    The polynomial fit draws its first window at the Houdayer-Hartmann fit (unless ``initial``
+    is given). With ``replicates > 0`` (and per-graph values in the data) each graph-bootstrap
+    replicate is refitted by both methods from their fits; the spread of the paired replicate
+    differences is the error of the difference, so ``z = difference / se_difference`` measures
+    the disagreement in units of what resampling the graphs explains (ruling R-FSS: the two
+    methods' agreement is a reported diagnostic).
+    """
+    hh_settings = _settings(
+        bounds,
+        starts,
+        seed,
+        min_points,
+        max_evaluations,
+        HOUDAYER_HARTMANN,
+        degree,
+        window,
+        window_iterations,
+    )
+    poly_settings = replace(hh_settings, method=POLYNOMIAL)
+    count = _replicate_count(replicates, 0)
+    hh = _fit_one(data, hh_settings, initial)
+    rows = _rows(initial)
+    if rows is not None:
+        reference = rows[0]
+    else:
+        reference = hh.params if hh.usable else hh_settings.box.mean(axis=1)
+    poly = _fit_one(data, poly_settings, initial, reference)
+    difference = poly.params - hh.params
+    nan3 = np.full(3, np.nan)
+    se_diff, se_hh, se_poly = nan3, nan3, nan3
+    failed = 0
+    if count and hh.usable and poly.usable:
+        draws = _draws_by_size([data], count, seed)
+        ystar, sestar = _replicate_values(data, draws)
+        pairs = []
+        for b in range(count):
+            a = _refit(data, hh, hh_settings, ystar[b], sestar[b])
+            c = _refit(data, poly, poly_settings, ystar[b], sestar[b])
+            if a is None or c is None or a.status not in _USABLE or c.status not in _USABLE:
+                failed += 1
+                continue
+            pairs.append((a.params, c.params))
+        if len(pairs) > 1:
+            first = np.array([pa for pa, _ in pairs])
+            second = np.array([pc for _, pc in pairs])
+            se_diff = (second - first).std(axis=0, ddof=1)
+            se_hh = first.std(axis=0, ddof=1)
+            se_poly = second.std(axis=0, ddof=1)
+    elif count:
+        failed = count
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = difference / se_diff
+    return MethodComparison(
+        houdayer_hartmann=hh,
+        polynomial=poly,
+        difference=difference,
+        se_difference=se_diff,
+        z=z,
+        se_houdayer_hartmann=se_hh,
+        se_polynomial=se_poly,
+        replicates=count,
+        failed=failed,
+        seed=seed,
+    )
+
+
+@dataclass(frozen=True, eq=False)
+class DegreeScan:
+    """Polynomial fits of the same data at several degrees: the degree's effect.
+
+    ``fits[k]`` at ``degrees[k]``; ``params`` ``(K, 3)``, ``chi2_per_dof`` and ``dof`` per
+    degree; ``spread`` the range of each parameter over the usable fits. A degree too low for
+    the master curve shows as ``chi2_per_dof`` well above 1 and parameters that move with the
+    degree; once the degree is enough, the parameters settle.
+    """
+
+    degrees: tuple[int, ...]
+    fits: tuple[CollapseFit, ...]
+    params: np.ndarray
+    chi2_per_dof: np.ndarray
+    dof: np.ndarray
+    spread: np.ndarray
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = _plain(self)
+        return out
+
+
+def polynomial_degree_scan(
+    data: ScalingData,
+    *,
+    bounds: Any,
+    degrees: Sequence[int] = (1, 2, 3, 4, 5),
+    window: str | float = "overlap",
+    initial: ArrayLike | None = None,
+    starts: int = 8,
+    seed: Any = 0,
+    max_evaluations: int = 2000,
+    window_iterations: int = 5,
+) -> DegreeScan:
+    """Fit the polynomial method at each degree (the same first window for all of them).
+
+    The first window is drawn at ``initial`` or at the Houdayer-Hartmann fit, once; each degree
+    then settles its own window. Report the scan with a polynomial fit (ruling R-FSS: the
+    degree's effect).
+    """
+    chosen = tuple(_degree(d) for d in degrees)
+    if not chosen:
+        raise ValueError("degrees must not be empty")
+    base = _settings(
+        bounds,
+        starts,
+        seed,
+        None,
+        max_evaluations,
+        POLYNOMIAL,
+        chosen[0],
+        window,
+        window_iterations,
+    )
+    reference = _reference(data, base, initial) if data.sizes.size >= 2 else None
+    fits = tuple(_fit_one(data, replace(base, degree=d), initial, reference) for d in chosen)
+    params = np.array([f.params for f in fits])
+    chi2_per_dof = np.array([f.chi2_per_dof for f in fits])
+    dof = np.array([f.dof if f.dof is not None else 0 for f in fits], dtype=np.int64)
+    ok = np.isfinite(params).all(axis=1)
+    spread = params[ok].max(axis=0) - params[ok].min(axis=0) if ok.any() else np.full(3, np.nan)
+    return DegreeScan(
+        degrees=chosen, fits=fits, params=params, chi2_per_dof=chi2_per_dof, dof=dof, spread=spread
     )
