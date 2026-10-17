@@ -341,7 +341,8 @@ DIR/
   .lock                      held by the one writer (api.py:_lock_output_dir)
   graphs/n8_beta0.2.npz      graphs 0..G-1 of (n, beta): graphs.save format, read by
                              graphs.load and by the API's {"family": "file"} graphs
-  graphs/n8_beta0.2.json     per graph: g, its seed words, generator, edge digest
+  graphs/n8_beta0.2.json     beta's token and double (float.hex); per graph: g, its seed
+                             words, generator, edge digest
   n8_beta0.2_p0.3/           one folder per condition ('/' of a rational token -> '-')
     result-000000000000.npz  saved parts: each an EnsembleResult file (mipt.py:EnsembleResult.save),
     result-000000000016.npz  named by its first stream index u, rows in increasing u
@@ -354,7 +355,8 @@ DIR/
 `sweep.json` (`study/sweep.py:_index`): `format`, `digest`, the canonical `spec`, `versions`
 (`study/identity.py:version_record`: graph generator, Clifford numbering, dynamics, row-space
 format, the three seed tags, `randomness_contract`, `sparsegf2`), `graphs` (per `(n, beta)`:
-files and count) and `conditions` (per `(n, beta, p)`: the tokens, `p`'s double in hex, the
+files, beta's double in hex and the count) and `conditions` (per `(n, beta, p)`: the tokens,
+the doubles of `beta` and `p` in hex (`Token.hex`, v1.4 §7.2), the
 folder, the run seed words and the target number of trajectories). A part file holds the
 spec with its graph collection, the seed (`seed_entropy` = the run seed words), `trajectories`
 (the stream indices `u`), `value::<probe>`, `snapshot::<probe>` and

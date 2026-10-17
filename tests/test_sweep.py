@@ -589,3 +589,17 @@ def test_spec_json_says_which_trajectories_it_counts(reference):
     g, c = np.meshgrid(range(2), range(2), indexing="ij")
     expected = (g * sweep_record["stride"] + c).ravel().tolist()
     assert expected == results[(6, "0", "0.1")].trajectories.tolist() == [0, 1, 4, 5]
+
+
+def test_the_records_carry_the_doubles_of_beta_and_p(reference):
+    directory, _ = reference
+    index = json.loads((directory / "sweep.json").read_text())
+    assert {(e["beta"], e["beta_float64"]) for e in index["graphs"]} == {
+        ("0", (0.0).hex()),
+        ("0.2", (0.2).hex()),
+    }
+    entry = next(c for c in index["conditions"] if c["path"] == "n8_beta0.2_p0.3")
+    assert (entry["beta_float64"], entry["p_float64"]) == ((0.2).hex(), (0.3).hex())
+    records = json.loads((directory / "graphs" / "n8_beta0.2.json").read_text())
+    assert records["beta_float64"] == (0.2).hex()
+    assert all(r["beta_float64"] == (0.2).hex() for r in records["graphs"])

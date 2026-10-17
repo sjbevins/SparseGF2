@@ -412,6 +412,7 @@ def _index(sweep: SweepSpec) -> dict[str, Any]:
             {
                 "n": n,
                 "beta": b.token,
+                "beta_float64": b.hex,
                 "file": f"{GRAPH_DIR}/{_name(n, b)}.npz",
                 "records": f"{GRAPH_DIR}/{_name(n, b)}.json",
                 "graphs": sweep.graphs[n],
@@ -422,6 +423,7 @@ def _index(sweep: SweepSpec) -> dict[str, Any]:
             {
                 "n": n,
                 "beta": b.token,
+                "beta_float64": b.hex,
                 "p": p.token,
                 "p_float64": p.hex,
                 "path": _name(n, b, p),
@@ -481,9 +483,10 @@ def _write_graphs(root: Path, sweep: SweepSpec, n: int, beta: Token) -> None:
     records = {
         "n": n,
         "beta": beta.token,
+        "beta_float64": beta.hex,  # the double the generator compared its draws with
         "generator": identity.GRAPH_GENERATOR_VERSION,
         "edge_order": identity.ORIGINAL_EDGE_ORDER,
-        "graphs": [r.to_dict() for r in built],
+        "graphs": [{**r.to_dict(), "beta_float64": beta.hex} for r in built],
     }
     api._atomic_write_text(records_path, json.dumps(records, indent=1))
 
