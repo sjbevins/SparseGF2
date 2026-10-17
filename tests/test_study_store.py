@@ -360,6 +360,10 @@ def test_meeting_an_identity_again_compares_instead_of_overwriting(tmp_path):
         sup.assert_unchanged(before, sup.records(store))
         other = store.tableau(store.trajectory_keys()[1], 10)
         cases = [
+            lambda tx: tx.put_snapshot(
+                tid, key, 5, status=SNAPSHOT_ABSENT, num_qubits=12, k=0, joint=None, phys=None,
+                unit_id=1,
+            ),  # a stored snapshot never becomes absent
             lambda tx: tx.put_snapshot(tid, key, 5, status=SNAPSHOT_STORED, num_qubits=12,
                                        k=other.physical_code(6).num_logical, joint=other,
                                        phys=other.physical_tableau(6), unit_id=1),
