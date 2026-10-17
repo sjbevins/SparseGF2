@@ -52,6 +52,7 @@ import argparse
 import functools
 import io
 import json
+import math
 import os
 import platform
 import shutil
@@ -320,17 +321,25 @@ SNAPSHOT_MEMBERS = ("snapshot::tableau_snapshot", "snapshot_counts::tableau_snap
 
 def disk_configs(row: dict, correlated_bytes: float | None) -> dict:
     """Bytes per trajectory of each configuration, from the members of the measured parts."""
+    # math.fsum is exact, so the rounded results do not depend on the Python version (the
+    # built-in sum of floats became compensated in Python 3.12 and can land on the other side of
+    # a rounding tie)
     m = row["members_per_trajectory"]
-    zip_overhead = row["bytes_per_trajectory"] - sum(m.values())  # headers and directory
-    a = zip_overhead + sum(
-        v for k, v in m.items() if k not in SNAPSHOT_MEMBERS and k != "value::erasure_first_failure"
+    zip_overhead = row["bytes_per_trajectory"] - math.fsum(m.values())  # headers and directory
+    a = math.fsum(
+        [zip_overhead]
+        + [
+            v
+            for k, v in m.items()
+            if k not in SNAPSHOT_MEMBERS and k != "value::erasure_first_failure"
+        ]
     )
-    b = a + m.get("value::erasure_first_failure", 0.0)
+    b = math.fsum([a, m.get("value::erasure_first_failure", 0.0)])
     return {
         "a": round(a),
         "b": round(b),
-        "c": None if correlated_bytes is None else round(b + GRID * correlated_bytes),
-        "a_snapshots": round(a + sum(m.get(k, 0.0) for k in SNAPSHOT_MEMBERS)),
+        "c": None if correlated_bytes is None else round(math.fsum([b, GRID * correlated_bytes])),
+        "a_snapshots": round(math.fsum([a] + [m.get(k, 0.0) for k in SNAPSHOT_MEMBERS])),
     }
 
 
@@ -534,7 +543,11 @@ def render_markdown(results: dict) -> str:
         lines.append(
             f"| {c['n']} | {c['beta']} | {c['p']} | {c['trajectories']} | "
             f"{c['mean_final_layer']:,} | {c['seconds']} | {c['model_seconds']} | "
-            f"{c['seconds'] / c['model_seconds']:.2f} |"
+            + (
+                f"{c['seconds'] / c['model_seconds']:.2f} |"
+                if c["model_seconds"] > 0  # a quick run on a fast machine can round it to 0
+                else "- |"
+            )
         )
     lines += [
         "",

@@ -105,7 +105,9 @@ def test_a_run_with_every_index_replaced_by_its_class_representative_is_identica
 
 def test_the_engine_draws_the_720_classes_uniformly():
     n, layers = 16, 512
-    mc, seed = condition(n=n, layers={str(n): layers})
+    # 7 graphs x 4 circuits: u = 0..24 must be trajectories of the collection (generate_ops reads
+    # graph u // 4; MonitoredCircuit checks the index, this direct kernel call does not)
+    mc, seed = condition(n=n, layers={str(n): layers}, graphs=7)
     a = mc._arrays()
     key_struct, _ = mipt._keys(mipt._seed_sequence(seed))
     classes = []
