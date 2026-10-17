@@ -41,6 +41,10 @@ manifest                              probe
 ``correlated_erasure[i]``             ``correlated_erasure(couplings, sizes, samples, ...)``
 ====================================  ==========================================================
 
+``checkpoints(n, beta)`` in the table stands for the schedule used for work: while there is
+one revision it is :meth:`ExperimentManifest.checkpoints`, and across revisions it is
+:func:`effective_checkpoints` (below).
+
 Revisions. A store keeps every manifest revision. :func:`check_extension` says whether a new
 manifest only extends an old one (more conditions, rates, graphs, circuits, a larger $T_{\\max}$,
 any other checkpoint rule, more observables) or changes something that would make the recorded

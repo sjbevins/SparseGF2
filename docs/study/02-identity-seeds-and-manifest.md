@@ -4,8 +4,10 @@ How the Watts–Strogatz study names things so that every graph, circuit and tra
 rebuilt from one frozen description: exact rate tokens, trajectory keys, the seeds of graphs and
 of circuits, the trajectory index $u = g\,s + c$ and why extending the study never renumbers it, the
 graph record with its edge digest, canonical JSON and digests, the experiment manifest field by
-field, the checkpoint rule of v1.4 §9 stated exactly with its rounding, and the rules under which
-a later manifest may extend an earlier one.
+field, the checkpoint rule of v1.4 §9 stated exactly with its rounding (and its list and table
+forms), the rules under which a later manifest may extend an earlier one, and the schedule that
+results across revisions (ruling R-CK: the union of the schedules of all revisions, which never
+drops a stored depth).
 
 This document is written for a reader fluent in the stabilizer formalism and for language
 models. Every symbol is defined where it first appears, every formula is the one the code
@@ -46,8 +48,8 @@ It implements
 * **graph records**: `GraphRecord`, `build_graph`, `validate_graph`, `edge_digest`;
 * **canonical bytes**: `canonical_json`, `sha256_hex`, `json_digest`, and the version constants;
 * **the manifest** (`study/manifest.py::ExperimentManifest`): strict reading, the canonical form and its digest,
-  the resolved conditions, $T_{\max}$, the geometric checkpoint rule, the `MonitoredCircuit` keywords of v1.4 §8.1,
-  and `check_extension` for revisions.
+  the resolved conditions, $T_{\max}$, the checkpoint rules (geometric, list, table), the `MonitoredCircuit` keywords of v1.4 §8.1,
+  `check_extension` for revisions and `effective_checkpoints` for the schedule across them.
 
 It changes no probability law and no random stream (the sampling it names is documented in
 [01-ensemble-and-sampling.md](01-ensemble-and-sampling.md)). Departures from v1.4 and the design are listed in §9
@@ -71,7 +73,8 @@ It changes no probability law and no random stream (the sampling it names is doc
 | $T_{\max}(n)$ | the horizon in layers | integer $\ge 1$ | `manifest.layers(n, beta)` |
 | $N_T$ | the requested geometric checkpoint count | integer in $[1, 1000]$ | `depth.checkpoints.count` |
 | $a_j$ | $T_{\max}^{\,j/(N_T - 1)}$, $j = 0, \dots, N_T - 1$ | real | |
-| $\mathcal T(n,\beta)$ | the sparse checkpoints, a sorted set of integers containing $0, 1, T_{\max}$ | set | `manifest.checkpoints(n, beta)` |
+| $S_r(n,\beta)$, also $\mathcal T(n,\beta)$ | the sparse checkpoints of revision $r$ from its own rule and horizon: a sorted set of integers containing $0, 1, T_{\max,r}$ | set | `manifest.checkpoints(n, beta)` |
+| $E_r(n,\beta)$ | the effective schedule used for work under revision $r$: $(S_1 \cup \dots \cup S_r) \cap [0, T_{\max,r}]$ (ruling R-CK) | set | `manifest.effective_checkpoints(revisions, n, beta)` |
 | $\mathcal P(n,\beta)$ | the rates run at $(n, \beta)$ | set of tokens | `manifest.rates(n, beta)` |
 | $\operatorname{dig}$ | SHA-256, written as 64 lowercase hexadecimal digits | string | `sha256_hex` |
 
@@ -160,7 +163,7 @@ message names the field (`manifest.trials.graphs: must be at least 1, got 0`). A
 | `label` | `"exploratory"` (default) or `"confirmatory"` | keeps exploratory and confirmatory runs apart (v1.4 §9) |
 | `conditions` | list of blocks, required | each block `{"n": [...], "beta": [...], "p": [...]}`: the product of its lists; $n \ge 5$ integers; $\beta$, $p$ tokens; no list repeats a value |
 | `depth.layers` | exactly one of `{"per_n": a}`, `{"fixed": T}`, `{"table": {"16": 128, ...}}` | $T_{\max} = a n$, $T$, or the table (keys are the sizes in use, exactly); every value an integer $\ge 1$ |
-| `depth.checkpoints` | exactly one of `{"count": N}`, `{"list": [...]}` | $1 \le N \le 1000$ (§3.9); a list: integers $\ge 0$, each $\le T_{\max}(n)$ for every $n$ |
+| `depth.checkpoints` | exactly one of `{"count": N}`, `{"list": [...]}`, `{"table": {"16": [...], ...}}` | $1 \le N \le 1000$ (§3.9); a list: one non-empty list of integers $\ge 0$ for every size, the entries above a size's $T_{\max}$ dropped for that size; a table: one list (possibly empty) of integers $\ge 0$ per size, the keys exactly the sizes in use, every entry $\le T_{\max}(n)$ |
 | `trials.graphs`, `trials.circuits_per_graph` | integers $\ge 1$, required | $G_*$, $C$ |
 | `trials.circuit_index_stride` | integer $\ge C$, default $C$ | the frozen stride $s$ |
 | `trials.measurement_replicas` | must be 1 | design D1: the native engine draws gates and masks from one stream |
@@ -176,9 +179,9 @@ message names the field (`manifest.trials.graphs: must be at least 1, got 0`). A
 | `analysis` | `{"peak": {"rule": "plateau", "z": 1.0, "sensitivity_z": [0, 1, 2], "bootstrap": 200}, "bootstrap": 1000, "censoring": "survival"}` | the predeclared peak and censoring rules (v1.4 §5.8, §6); `peak.rule` must be `"plateau"` and `censoring` `"survival"` (`peak.z` and every `sensitivity_z` entry $\ge 0$, bootstraps $\ge 0$) |
 
 `to_json()` writes **every** key, defaults included, in canonical JSON; `digest()` is its SHA-256. Reading also refuses what no key
-alone can show: a duplicate condition, a layer table that does not cover exactly the sizes in use, an explicit checkpoint beyond some $T_{\max}$, correlated sizes
-outside $[1, n-1]$, and two correlated-erasure probes with the same name. `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
-snapshots with `stop_when_purified`, and a work unit larger than `max_unit_trajectories`.
+alone can show: a duplicate condition, a layer table or a checkpoint table that does not cover exactly the sizes in use, a checkpoint-table entry beyond its size's
+$T_{\max}$, correlated sizes outside $[1, n-1]$, and two correlated-erasure probes with the same name. `manifest.warnings` lists what is allowed but doubtful: $n = 5$ (the complete graph),
+snapshots with `stop_when_purified`, a work unit larger than `max_unit_trajectories`, and checkpoint-list entries above $T_{\max}$ for every size (they are dropped everywhere and have no effect).
 
 ### 3.8 Conditions and their canonical factorization
 
@@ -189,17 +192,25 @@ pairs $(n,\beta)$ by their rate set $P$; within one $P$, group the sizes $n$ by 
 $\lbrace n\rbrace_{\text{group}} \times B \times P$. The factorization is a function of the set of triples alone (Proposition 9), so equivalent manifests have one
 canonical text and one digest.
 
-### 3.9 Depth: $T_{\max}$ and the checkpoint rule (v1.4 §9)
+### 3.9 Depth: $T_{\max}$, the checkpoint rule and the effective schedule (v1.4 §9; design §3, ruling R-CK)
 
 $T_{\max}(n)$ is $a n$, the fixed $T$, or the table entry; it is the same for every rate (v1.4 §1). The global checkpoints of the engine are every layer
-(`checkpoints="every_layer"`, so $k_t$ and the exact first-passage depths are observed everywhere); the **sparse checkpoints** $\mathcal T(n, \beta)$ are
-where the expensive probes run. For `{"count": N_T}` and $T = T_{\max}(n)$, with $q = N_T - 1$:
+(`checkpoints="every_layer"`, so $k_t$ and the exact first-passage depths are observed everywhere); the **sparse checkpoints** $S(n, \beta)$ of a revision
+(written $\mathcal T(n,\beta)$ in v1.4) are where the expensive probes run. The rule of a revision has three forms. In each, $T = T_{\max}(n)$ and $S$ is sorted, without repeats, contained in $[0, T]$ and contains $0, 1, T$.
 
-1. if $N_T \ge 2$, for $j = 0, \dots, q$ let $a_j = \exp(j \ln T / q) = T^{j/q}$ and $k_j = \lfloor a_j + \tfrac12\rfloor$ (nearest integer, **ties upward**), clamped to $[0, T]$;
-2. $\mathcal T = \lbrace 0, 1, T\rbrace \cup \lbrace k_j\rbrace$, sorted, without repeats. For $N_T = 1$ it is $\lbrace 0, 1, T\rbrace$.
+* **`{"count": N_T}`, the geometric rule.** With $q = N_T - 1$:
+  1. if $N_T \ge 2$, for $j = 0, \dots, q$ let $a_j = \exp(j \ln T / q) = T^{j/q}$ and $k_j = \lfloor a_j + \tfrac12\rfloor$ (nearest integer, **ties upward**), clamped to $[0, T]$;
+  2. $S = \lbrace 0, 1, T\rbrace \cup \lbrace k_j\rbrace$. For $N_T = 1$ it is $\lbrace 0, 1, T\rbrace$.
 
-The rounding is computed exactly in integers (Proposition 10, `study/manifest.py::round_half_up_power`). For `{"list": [...]}` it is the sorted union of the list and $\lbrace 0, 1, T\rbrace$.
-The manifest refuses a list that exceeds some $T_{\max}(n)$.
+  The rounding is computed exactly in integers (Proposition 10, `study/manifest.py::round_half_up_power`).
+* **`{"list": [d_1, ..., d_k]}`, one list for every size.** $S(n) = \lbrace 0, 1, T\rbrace \cup \lbrace d_i : d_i \le T\rbrace$. An entry above this size's horizon is **dropped** for this size; it is not an error, because one list has to serve sizes with different horizons. An entry above every horizon has no effect, which `manifest.warnings` says.
+* **`{"table": {"16": [...], "24": [...]}}`, one list per size.** $S(n) = \lbrace 0, 1, T\rbrace \cup \lbrace\text{the entries of the list of } n\rbrace$. The keys must be exactly the sizes in use (a missing or an extra size is refused), the list of a size may be empty (just $0, 1, T$), and every entry must lie in $[0, T_{\max}(n)]$: a list written for one size that reaches beyond its horizon is a mistake, so it is refused rather than dropped.
+
+**The effective schedule (ruling R-CK).** A study is revised (§3.11), and a revision may raise $T_{\max}$ and change the rule. If the work under revision $r$ used only its own schedule $S_r$, then raising the horizon under the geometric rule would move every checkpoint: the depths stored for the trajectories of the earlier revisions would no longer be asked for. The ruling therefore fixes the schedule **used for work** under revision $r$ as
+$$
+E_r(n,\beta) \;=\; \big(S_1(n,\beta) \cup \dots \cup S_r(n,\beta)\big) \cap [0, T_{\max,r}(n,\beta)],
+$$
+where $S_i$ is the own schedule of revision $i$ at $(n,\beta)$ and a revision that does not contain the condition contributes nothing. `manifest.checkpoints(n, beta)` is $S_r$ of one manifest; `effective_checkpoints(revisions, n, beta)` is $E_r$ for a list of revisions, oldest first (for one revision it is that revision's own schedule). Along a valid chain of revisions the intersection removes nothing, $E_r = S_1 \cup \dots \cup S_r$, and $E_r \supseteq E_{r-1}$ (Proposition 12): a depth, once scheduled, stays scheduled.
 
 ### 3.10 The engine keywords (v1.4 §8.1)
 
@@ -209,7 +220,7 @@ The manifest refuses a list that exceeds some $T_{\max}(n)$.
 `scramble_layers=0`, `periodic=True`, `checkpoints="every_layer"` and `stop_when_purified` from `dynamics`. The caller adds `edges` (the graph records of the unit,
 `[record.edges, ...]`) and `probes`.
 
-### 3.11 Revisions (design §3 "Revisions")
+### 3.11 Revisions (design §3 "Revisions" and ruling R-CK)
 
 A store keeps every revision. `check_extension(old, new)` returns `None` when `new` only extends `old`, else a message naming the **first** forbidden change, checked in this order:
 
@@ -218,11 +229,13 @@ A store keeps every revision. `check_extension(old, new)` returns `None` when `n
 3. the stride unchanged (it fixes every $u$); `dynamics` and `measurement_replicas` unchanged;
 4. `trials.graphs` and `trials.circuits_per_graph` not smaller;
 5. every old $(n, \beta, p)$ still present;
-6. $T_{\max}$ not smaller, for every old $(n, \beta)$;
-7. every old checkpoint still a checkpoint;
-8. every observable switched on stays on with its settings (a `correlated_erasure` entry is identified by its full settings; adding entries is allowed).
+6. $T_{\max}$ not smaller, for every old $(n, \beta)$ (a larger one is allowed, size by size, whatever the checkpoint rule becomes);
+7. every observable switched on stays on with its settings (a `correlated_erasure` entry is identified by its full settings; adding entries is allowed).
 
+The checkpoint rule is **not** checked: `count`, `list` and `table` may replace one another and a count may fall as well as rise, because the schedule used for work is the union of the schedules of all revisions (§3.9, Proposition 12), which never drops a depth that an earlier revision scheduled.
 Changes of `storage`, `resources` and `analysis` are allowed: they touch no recorded value.
+
+`effective_checkpoints(revisions, n, beta)` first requires a valid chain: at least one revision, every entry a manifest, and `check_extension(revisions[k-1], revisions[k])` equal to `None` for every consecutive pair. Otherwise it raises `ValueError("revision k does not extend revision k-1: <message>")` naming the first pair that fails and its first forbidden change (so a list whose horizon decreases is refused with the lowered $T_{\max}$ in the message). Pairwise validity suffices because extensions compose (Proposition 11).
 
 ## 4. Propositions and proofs
 
@@ -321,12 +334,29 @@ number rounded by the same rule. ∎ The computation in `study/manifest.py::_hal
 
 ### 4.5 Revisions
 
-**Proposition 11 (what an accepted revision guarantees).** If `check_extension(old, new)` is `None`, then for every trajectory $(n, \beta, p, g, c)$ of `old` (with $g < G_*^{\mathrm{old}}$, $c < C^{\mathrm{old}}$):
+**Proposition 11 (what an accepted revision guarantees).** (a) If `check_extension(old, new)` is `None`, then for every trajectory $(n, \beta, p, g, c)$ of `old` (with $g < G_*^{\mathrm{old}}$, $c < C^{\mathrm{old}}$):
 the graph record (same $n$, $\beta$, seed pair, generator), the stream index $u$, the run seed and the float $\operatorname{fl}(p)$ are the same in `new`; the condition still exists in `new` with $T_{\max}^{\mathrm{new}} \ge T_{\max}^{\mathrm{old}}$ and the old
-trajectory is the prefix of its extension (document 01, Proposition 13); every old checkpoint is a checkpoint of `new`; every observable recorded under `old` has the same settings in `new`.
+trajectory is the prefix of its extension (document 01, Proposition 13); every observable recorded under `old` has the same settings in `new`. (b) Extension is reflexive and transitive: `check_extension(a, a)` is `None`, and if `check_extension(a, b)` and `check_extension(b, c)` are `None` then so is `check_extension(a, c)`.
+The checkpoint rule is not part of the guarantee: it may change freely (Proposition 12 says what survives).
 
-*Proof.* Each statement is one of the checks of §3.11 in contrapositive: seeds and mode equal, stride equal (Proposition 5), `dynamics` equal (the engine keywords are those of `old`), conditions a superset, horizons not smaller, checkpoint sets supersets,
-observables unchanged. ∎ Not guaranteed: that the new trajectories have been run, and that `storage`, `resources` or `analysis` are unchanged (they are free to change).
+*Proof.* (a) Each statement is one of the checks of §3.11 in contrapositive: seeds and mode equal, stride equal (Proposition 5), `dynamics` equal (the engine keywords are those of `old`), conditions a superset, horizons not smaller,
+observables unchanged. (b) Each check is reflexive and transitive: equality of fields, $\ge$ between integers, inclusion of sets of conditions, "if on then on", "if recorded then equal" and "every old entry is among the new ones"
+are preorders; the horizon check compares one condition across the manifests and that condition is present in all three by the inclusion of conditions. ∎ Not guaranteed: that the new trajectories have been run, and that `storage`, `resources` or `analysis` are unchanged (they are free to change).
+
+**Proposition 12 (the effective schedule).** Let $m_1, \dots, m_r$ be revisions with `check_extension(`$m_{i-1}, m_i$`)` equal to `None` for $i = 2, \dots, r$, and let $(n, \beta)$ be a condition of $m_r$; write $S_i$ for the own schedule of $m_i$ at $(n,\beta)$ (`m_i.checkpoints(n, beta)`) and $T_i$ for its horizon,
+and let $m_a$ be the first revision that contains $(n,\beta)$. Then
+
+* (a) every $m_i$ with $i \ge a$ contains $(n,\beta)$ and no earlier one does, and $T_a \le T_{a+1} \le \dots \le T_r$;
+* (b) $E_r = S_a \cup \dots \cup S_r$: the intersection with $[0, T_r]$ in the definition removes nothing. It is sorted, lies in $[0, T_r]$ and contains $0, 1, T_r$;
+* (c) $E_r \supseteq S_i$ for every $i \ge a$, and for $r > a$ the effective schedule of the chain $m_1, \dots, m_{r-1}$ at $(n,\beta)$ is contained in $E_r$: $E_r = E_{r-1} \cup S_r \supseteq E_{r-1}$;
+* (d) if only $m_r$ contains $(n,\beta)$ ($a = r$, in particular for one revision), $E_r = S_r$.
+
+*Proof.* (a) Check 5 of §3.11 says that every condition $(n,\beta,p)$ of $m_i$ is a condition of $m_{i+1}$, so the presence of $(n,\beta)$ passes from each revision to the next: the revisions that contain it are $m_a, \dots, m_r$.
+Check 6 says $T_i \le T_{i+1}$ for the old condition $(n,\beta)$, for each $i \ge a$. (b) Every own schedule lies in $[0, T_i]$ by construction (§3.9: geometric points are clamped to $[0, T]$, list entries above $T$ are dropped, table entries above $T$ are refused),
+and $T_i \le T_r$ by (a), so $S_i \subseteq [0, T_r]$ and $E_r = \bigcup_{i \ge a} S_i \cap [0, T_r] = \bigcup_{i \ge a} S_i$. Since $0, 1, T_r \in S_r$, they belong to $E_r$. (c) A union contains each of its terms; and with $E_{r-1} = \bigcup_{a \le i < r} S_i$ (part (b) applied to the chain $m_1, \dots, m_{r-1}$,
+which is also valid), $E_r = E_{r-1} \cup S_r$. (d) is the definition with a single term. ∎ *Consequences.* A depth stored under any earlier revision is a depth of every later effective schedule (it is never dropped), whatever the later rule is: raising $T_{\max}$ under the geometric rule moves the own schedule but not the union.
+The set $E_r$ is also never above the latest horizon. Because of check 5 and check 6 a list that is not a valid chain is refused rather than reinterpreted: with a falling horizon, "never dropped" and "never above the latest $T_{\max}$" would contradict each other, with a removed condition the union would silently forget it,
+and with changed seeds the stored depths would belong to other trajectories. Not guaranteed: that a trajectory run under an earlier revision has been observed at the depths that only a later revision added; a trajectory is deterministic (document 01, Proposition 13), so the runner can rerun it to the longer horizon and observe it at all of $E_r$.
 
 ## 5. Algorithms
 
@@ -350,10 +380,20 @@ Cost: negligible. Exactness: exact.
 
 For $j = 0, \dots, q$: $S = 2^q T^j$; estimate $r \approx \lfloor 2 e^{j \ln T / q}\rfloor$ in floating point; decrease $r$ while $r^q > S$ and increase it while $(r+1)^q \le S$ (exact big-integer powers, usually zero steps); the checkpoint is $\lfloor (r+1)/2\rfloor$,
 clamped to $[0, T]$. Cost $O(N_T)$ big-integer powers of $O(q + j\log_2 T)$ bits; $N_T \le 1000$.
+For the list form (`CheckpointRule.resolve`) take the entries not above $T$ and add $0, 1, T$; for the table form look up the list of the size $n$ (refusing a size without an entry and an entry above $T$) and add $0, 1, T$; sort and remove repeats.
 
 ### 5.4 `check_extension`
 
-The checks of §3.11, in order, return the message of the first failure; the condition checks compare sets of $(n, \beta, p)$ and of checkpoints, cost linear in the number of conditions times $N_T$.
+The checks of §3.11, in order, return the message of the first failure; the condition checks compare sets of $(n, \beta, p)$, cost linear in the number of conditions. No checkpoint set is compared.
+
+### 5.5 `effective_checkpoints`
+
+1. Refuse an empty list of revisions and any entry that is not an `ExperimentManifest` (`TypeError`).
+2. For $k = 1, \dots, r-1$ run `check_extension(revisions[k-1], revisions[k])` and refuse a failure with `revision k does not extend revision k-1: <message>`.
+3. Read the horizon $T_r$ of the last revision at $(n, \beta)$ (a `ValueError` unless $(n,\beta)$ is one of its conditions).
+4. Collect `checkpoints(n, beta)` of every revision that contains the condition, keep the points in $[0, T_r]$ (all of them, by Proposition 12; the filter is the definition and costs nothing) and sort.
+
+Cost: $r - 1$ extension checks plus $r$ schedule computations.
 
 ## 6. From the mathematics to the code
 
@@ -371,7 +411,8 @@ The checks of §3.11, in order, return the message of the first failure; the con
 | canonical JSON, digests (§3.6) | `study/identity.py::canonical_json`, `sha256_hex`, `json_digest` |
 | the manifest (§3.7) | `study/manifest.py::ExperimentManifest` and its sections `ConditionBlock`, `Layers`, `CheckpointRule`, `Depth`, `Trials`, `Seeds`, `Dynamics`, `UniformErasure`, `CorrelatedErasure`, `Observables`, `Storage`, `Resources`, `Peak`, `Analysis` |
 | conditions, canonical factorization (§3.8) | `ExperimentManifest.conditions`, `rates`, `study/manifest.py::_canonical_blocks` |
-| $T_{\max}$, $\mathcal T$ (§3.9) | `ExperimentManifest.layers`, `checkpoints`; `study/manifest.py::geometric_checkpoints`, `round_half_up_power`, `_half_up_root` |
+| $T_{\max}$, own schedule $S$ (§3.9) | `ExperimentManifest.layers`, `checkpoints`, `study/manifest.py::CheckpointRule.resolve`; `study/manifest.py::geometric_checkpoints`, `round_half_up_power`, `_half_up_root` |
+| effective schedule $E_r$ (§3.9, §5.5) | `study/manifest.py::effective_checkpoints`, `ExperimentManifest.has_condition` |
 | engine keywords (§3.10) | `ExperimentManifest.monitored_circuit_kwargs` |
 | probes of the observables | `CorrelatedErasure.probe`; the other probes are built by the runner from `Observables` |
 | revisions (§3.11) | `study/manifest.py::check_extension` |
@@ -546,6 +587,21 @@ assert mf.geometric_checkpoints(64, 4) == (0, 1, 4, 16, 64)  # 64^(1/3) = 4 exac
 for t_max in (5, 100, 4096):  # refinement: N_T -> k (N_T - 1) + 1 keeps every old checkpoint
     assert set(mf.geometric_checkpoints(t_max, 7)) <= set(mf.geometric_checkpoints(t_max, 2 * 6 + 1))
 assert mf._half_up_root(25, 2) == 3  # a tie (x = 5/2) rounds up; python's round(2.5) would give 2
+
+# the list form serves every size: entries above a size's horizon are dropped for that size
+listed = mf.CheckpointRule.from_dict({"list": [70, 5, 20, 64, 130, 400]}, "list")
+print(listed.resolve(64, 16), listed.resolve(200, 24))
+assert listed.resolve(64, 16) == (0, 1, 5, 20, 64)  # 70, 130 and 400 dropped
+assert listed.resolve(200, 24) == (0, 1, 5, 20, 64, 70, 130, 200)  # 400 dropped, T_max added
+# the table form gives one list per size; an entry above its size's horizon is refused
+table = mf.CheckpointRule.from_dict({"table": {"16": [5, 64], "24": [3, 100]}}, "table")
+assert table.resolve(128, 16) == (0, 1, 5, 64, 128) and table.resolve(192, 24) == (0, 1, 3, 100, 192)
+try:
+    table.resolve(50, 16)
+except ValueError as error:
+    print("refused:", error)
+else:
+    raise AssertionError("a table entry above its horizon was accepted")
 ```
 
 ### (g) Revisions
@@ -564,9 +620,40 @@ def revised(**changes):
 
 assert mf.check_extension(m, revised(**{"trials.graphs": 40})) is None  # more graphs
 assert mf.check_extension(m, revised(**{"depth.checkpoints": {"count": 23}})) is None  # a refined schedule
+assert mf.check_extension(m, revised(**{"depth.checkpoints": {"list": [3, 50]}})) is None  # any other rule
+assert mf.check_extension(m, revised(**{"depth.layers": {"per_n": 16}})) is None  # a larger T_max (ruling R-CK)
 assert mf.check_extension(m, revised(**{"resources.num_threads": 4})) is None  # free to change
-for changes in ({"seeds.master_graph_seed": 18}, {"trials.graphs": 10}, {"depth.layers": {"per_n": 16}}):
+for changes in ({"seeds.master_graph_seed": 18}, {"trials.graphs": 10}, {"depth.layers": {"per_n": 4}}):
     print(mf.check_extension(m, revised(**changes)))
+```
+
+### (h) The schedule across revisions (ruling R-CK)
+
+```python
+first = revised(**{"depth.layers": {"fixed": 16}, "depth.checkpoints": {"count": 5}})  # 16^(j/4) = 2^j
+second = revised(**{"depth.layers": {"fixed": 64}, "depth.checkpoints": {"count": 4}})  # 64^(j/3) = 4^j
+third = revised(**{"depth.layers": {"fixed": 100}, "depth.checkpoints": {"list": [3, 50, 200]}})  # 200 > 100: dropped
+print([r.checkpoints(16, "0.1") for r in (first, second, third)])
+assert first.checkpoints(16, "0.1") == (0, 1, 2, 4, 8, 16)
+assert second.checkpoints(16, "0.1") == (0, 1, 4, 16, 64)
+assert third.checkpoints(16, "0.1") == (0, 1, 3, 50, 100)
+assert mf.check_extension(first, second) is None and mf.check_extension(second, third) is None
+
+after_two = mf.effective_checkpoints([first, second], 16, "0.1")
+after_three = mf.effective_checkpoints([first, second, third], 16, "0.1")
+print(after_two, after_three)
+assert after_two == (0, 1, 2, 4, 8, 16, 64)
+assert after_three == (0, 1, 2, 3, 4, 8, 16, 50, 64, 100)
+assert 8 not in second.checkpoints(16, "0.1") and 8 in after_two  # a stored depth survives a rule that skips it
+assert set(after_two) <= set(after_three) and max(after_three) == third.layers(16, "0.1")
+assert mf.effective_checkpoints([first], 16, "0.1") == first.checkpoints(16, "0.1")  # one revision: its own
+
+try:
+    mf.effective_checkpoints([second, first], 16, "0.1")  # the horizon would fall from 64 to 16
+except ValueError as error:
+    print("refused:", str(error)[:100])
+else:
+    raise AssertionError("a falling horizon was accepted")
 ```
 
 ## 8. Validation map
@@ -586,12 +673,14 @@ Files: `tests/test_study_identity.py` (identity), `tests/test_study_manifest.py`
 | Proposition 7, graph record (§3.5) | `test_build_graph_returns_the_validated_record_of_the_native_graph`, `test_the_digest_is_pinned_and_agrees_with_the_independent_reference`, `test_graph_record_identity_comes_from_the_digest_and_the_provenance`, `test_verify_detects_a_tampered_graph`, `test_edge_digest_is_strict_about_canonical_form`, `test_validate_graph_*` | the digest against `struct` and `hashlib` computed in the test and against the reference rewiring of `tests/_ws_reference.py`; a pinned vector; tampering detected |
 | Proposition 8 (canonical JSON) | `test_canonical_json_*`, `test_sha256_hex_matches_the_published_vectors` | sorted keys, tokens as strings, numpy and tuples, refusals with the path of the value, published SHA-256 vectors |
 | Proposition 9 (manifest digest) | `test_digest_is_stable_across_key_order_whitespace_and_spelling`, `test_the_canonical_blocks_group_sizes_that_share_rates_and_betas`, `test_digest_changes_with_every_scientific_setting`, `test_the_canonical_text_of_a_minimal_manifest_is_the_documented_form`, `test_the_digest_of_the_design_example_is_pinned` | 10 shuffled spellings and 4 factorizations give one digest; 13 changes give 13 new digests; a literal canonical text and a `hashlib` digest |
-| strict reading (§3.7) | `test_malformed_manifests_are_refused_naming_the_field` (117 cases), `test_bad_json_text_is_refused`, `test_duplicate_conditions_across_blocks_and_equal_floats_are_refused`, `test_from_json_reads_text_dicts_and_files` | each case refused with a message that names the field |
+| strict reading (§3.7) | `test_malformed_manifests_are_refused_naming_the_field` (130 cases), `test_bad_json_text_is_refused`, `test_duplicate_conditions_across_blocks_and_equal_floats_are_refused`, `test_from_json_reads_text_dicts_and_files` | each case refused with a message that names the field |
 | conditions, depth (§3.8, §3.9) | `test_conditions_are_resolved_in_a_stable_order`, `test_blocks_with_the_same_size_and_beta_merge_their_rates`, `test_layers_rules`, `test_unknown_conditions_are_refused` | exact |
-| Proposition 10 (checkpoints) | `test_geometric_checkpoints_hand_computed` (23 schedules), `test_geometric_checkpoints_equal_high_precision_arithmetic` (140 cases against 120-digit `Decimal`), `test_checkpoint_invariants`, `test_refining_the_count_keeps_every_old_checkpoint`, `test_round_half_up_power_is_the_nearest_integer` (properties), `test_ties_round_upward_and_never_arise_for_integer_horizons`, `test_explicit_checkpoint_lists_always_include_zero_one_and_horizon` | exact equality with hand-computed and high-precision values; sorted, unique, contains $0,1,T$, size bound, within $\tfrac12$ of $a_j$; refinement; ties |
+| Proposition 10 (checkpoints) | `test_geometric_checkpoints_hand_computed` (23 schedules), `test_geometric_checkpoints_equal_high_precision_arithmetic` (140 cases against 120-digit `Decimal`), `test_checkpoint_invariants`, `test_refining_the_count_keeps_every_old_checkpoint`, `test_round_half_up_power_is_the_nearest_integer` (properties), `test_ties_round_upward_and_never_arise_for_integer_horizons` | exact equality with hand-computed and high-precision values; sorted, unique, contains $0,1,T$, size bound, within $\tfrac12$ of $a_j$; refinement; ties |
+| list and table forms (§3.9) | `test_explicit_checkpoint_lists_always_include_zero_one_and_horizon`, `test_a_checkpoint_list_serves_every_size_and_drops_what_is_above_its_horizon`, `test_a_checkpoint_table_gives_one_list_per_size`, `test_the_list_form_is_the_list_below_the_horizon_with_zero_one_and_the_horizon` (property), `test_the_table_form_is_the_size_entry_with_zero_one_and_the_horizon` (property); the refusals are among the 130 malformed cases | exact schedules at several sizes and horizons; the list form equals the entries not above $T$ plus $0, 1, T$ for random lists and horizons; the table form equals the entries of the size plus $0, 1, T$; a missing or an extra size and an entry above $T_{\max}(n)$ are refused |
 | engine keywords (§3.10) | `test_monitored_circuit_kwargs_are_the_v14_protocol`, `test_the_kwargs_build_the_study_protocol_for_even_and_odd_sizes` | the exact dictionary; a `MonitoredCircuit` built for $n = 5, \dots, 25$ has $\lfloor n/2\rfloor$ gates per layer and every field of v1.4 §8.1 |
 | correlated-erasure entries | `test_correlated_erasure_settings_build_the_engine_probe`, `test_correlated_erasure_sizes_forms`, `test_several_correlated_erasure_probes_need_distinct_names` | the probe equals the direct `mipt.correlated_erasure` call; sizes forms; unique names |
-| Proposition 11 (revisions) | `test_allowed_revisions` (13 changes), `test_forbidden_revisions_name_the_first_forbidden_change` (21 changes), `test_the_first_forbidden_change_in_the_documented_order_is_reported`, `test_adding_observables_and_a_larger_horizon_are_extensions`, `test_a_chain_of_revisions_is_checked_pairwise` | each allowed change returns `None`; each forbidden one returns a message with the named field; the order of the checks; composition |
+| Proposition 11 (revisions) | `test_allowed_revisions` (18 changes), `test_forbidden_revisions_name_the_first_forbidden_change` (19 changes), `test_the_first_forbidden_change_in_the_documented_order_is_reported`, `test_adding_observables_and_a_larger_horizon_are_extensions`, `test_a_chain_of_revisions_is_checked_pairwise`, `test_check_extension_requires_manifests` | each allowed change (among them a larger $T_{\max}$ under the geometric rule and every change of the rule) returns `None`; each forbidden one (among them a lower $T_{\max}$) returns a message with the named field; the order of the checks; composition |
+| Proposition 12 (effective schedule) | `test_the_effective_schedule_is_the_union_of_the_schedules_of_the_revisions`, `test_a_size_or_beta_absent_from_an_earlier_revision_contributes_nothing_from_it`, `test_effective_checkpoints_refuses_what_is_not_an_extension_chain`, `test_any_change_of_the_checkpoint_rule_is_an_extension` (16 pairs of rule kinds), `test_effective_checkpoints_properties` and `test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension` (properties over random valid chains) | exact unions at three horizons; a new size or beta contributes nothing from the revisions that lack it; refusals name the pair and the first forbidden change; over random chains of 1 to 4 revisions (horizons that rise, sizes that are added, every rule kind): the effective schedule is sorted, equals the union of the own schedules, never exceeds the latest $T_{\max}$, contains $0, 1, T_{\max}$, contains every own schedule and every earlier effective schedule, equals the own schedule for one revision, and every pair of the chain is an extension |
 
 ## 9. Limitations and departures
 
@@ -604,7 +693,7 @@ Departures from v1.4 and the design (D1, D2, D4 are the design's; N1–N6 are in
 * **N2.** Seeds and graph labels are below $2^{32}$ (§3.3), so $(M, g)$ is a two-word entropy. Larger seeds are refused rather than reduced.
 * **N3.** The digest is computed from the canonical factorization of the conditions, not from the blocks as written (§3.8, Proposition 9). Two manifests that describe the same conditions have one digest; the design's example, which is a single product block, is unchanged.
 * **N4.** `label` is restricted to `exploratory` and `confirmatory` (v1.4 §9), and a revision may not change it. The manifest does not enforce v1.4's rule that the rate grid is frozen before confirmatory runs: a confirmatory manifest may still gain conditions, as for an exploratory one.
-* **N5.** A revision may only *add* checkpoints (§3.11, check 7). With the geometric rule a larger $T_{\max}$ moves the schedule, so raising the horizon needs an explicit list that keeps the old depths; the count may be refined by $N_T \to k(N_T - 1) + 1$ (Proposition 10c). An explicit list is common to all sizes, so it must fit the smallest $T_{\max}$.
+* **N5 (superseded by ruling R-CK).** The first version of this part let a revision only *add* checkpoints, which made a larger $T_{\max}$ under the geometric rule impossible without an explicit list. Ruling R-CK replaced that: a revision may raise $T_{\max}$ and change the checkpoint rule in any way, and the schedule used for work is the union of the schedules of all revisions (§3.9, Proposition 12). The costs: the union of a long chain is as large as the sum of its own schedules (the points of the geometric rule of every horizon that was ever used), and a trajectory run under an earlier revision holds only that revision's depths until the runner reruns it to the longer horizon.
 * **N6.** `monitored_circuit_kwargs` leaves out `edges` and `probes`: the graph records of a work unit and the probes are the runner's. Two tokens with the same float64 are refused as a duplicate condition (§3.8).
 
 Other limitations:
