@@ -171,9 +171,17 @@ first passages (§5).
 
 **5.1 Definition** (v1.4 §5.2): $\tau_\ell=\min\{t\ge0:k_t\le\ell\}$ for $\ell=0,\dots,n$. It
 is nonincreasing in $\ell$, and $\tau_\ell=0$ for $\ell\ge k_0$. $\tau_0$ is the purification
-time. The engine records every $\tau_\ell$ online at every layer (exact, not on the checkpoint
-grid), or $-1$ when $k_t>\ell$ through the last simulated layer: right-censored at
-$T_{\max}$.
+time. The engine reads $k$ after every layer, whatever the checkpoints, and records each drop
+(`_kernel/ensemble.py:run_ensemble`). The result:
+
+- **`res.first_passage[:, ℓ]`** is $\tau_\ell$, or $-1$ when $k_t>\ell$ through the last
+  simulated layer: right-censored at `res.final_layer`, which is $T_{\max}$ unless stopped.
+- **`res.first_passage_times()`** returns `(time, observed)`, with censored entries at
+  `final_layer`.
+
+The first passages determine the whole trace: by §5.2,
+$k_t=\sum_{\ell=0}^{n}\mathbf 1\{\tau_\ell>t\}$ for every $t\le T_{\max}$
+(`tests/test_first_passage.py`).
 
 **5.2 Event identity.** For every $t\ge0$: $\{\tau_\ell>t\}=\{k_t>\ell\}$.
 
