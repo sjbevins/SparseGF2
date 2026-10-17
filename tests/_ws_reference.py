@@ -112,10 +112,12 @@ def rewire(
 ) -> np.ndarray:
     """The sequential rewiring of $C(n, 2)$ (module docstring) as a sorted ``(2n, 2)`` array.
 
-    ``order`` replaces $L_n$ (to test the abort), ``mapping`` is ``"reject"`` or ``"index"``,
-    and ``record`` receives one :class:`Visit` per visit.
+    ``order`` replaces $L_n$ (to test the abort), ``mapping`` is ``"reject"`` (the native one),
+    ``"index"`` (the same law, another mapping) or ``"first"`` (a deliberately biased sampler:
+    always the smallest eligible vertex, a negative control for the distribution tests), and
+    ``record`` receives one :class:`Visit` per visit.
     """
-    if mapping not in ("reject", "index"):
+    if mapping not in ("reject", "index", "first"):
         raise ValueError(mapping)
     rng = ref.Xoshiro(seed_words(seed))
     edges = set(circulant_edges(n))
@@ -141,9 +143,11 @@ def rewire(
                 w = rng.next_below(n)
                 if w in allowed:
                     break
-        else:
+        elif mapping == "index":
             draws = 1
             w = eligible[rng.next_below(len(eligible))]
+        else:
+            w = eligible[0]
         edges.remove(frozenset((a, b)))
         edges.add(frozenset((a, w)))
         if record is not None:
@@ -184,11 +188,14 @@ def exact_law(
             if not eligible:
                 nxt[s] = nxt.get(s, 0) + q
                 continue
-            nxt[s] = nxt.get(s, 0) + q * (1 - b)
+            stay = q * (1 - b)
+            if stay:  # a state of probability zero is not reachable: it is not recorded
+                nxt[s] = nxt.get(s, 0) + stay
             share = q * b / len(eligible)
-            for w in eligible:
-                t = (s & ~bit(a, c)) | bit(a, w)
-                nxt[t] = nxt.get(t, 0) + share
+            if share:
+                for w in eligible:
+                    t = (s & ~bit(a, c)) | bit(a, w)
+                    nxt[t] = nxt.get(t, 0) + share
         states = nxt
     return states
 
@@ -386,3 +393,61 @@ def binomial_pmf(m: int, p: float) -> np.ndarray:
     """The pmf of Binomial(m, p) on 0..m."""
     k = np.arange(m + 1)
     return np.array([math.comb(m, int(i)) for i in k], dtype=float) * p**k * (1 - p) ** (m - k)
+
+
+MISREADINGS = ("eligible_after_deletion", "vertex_major_order", "retain_other_endpoint")
+
+
+def rewire_misreading(n: int, beta: float, seed: Any, misreading: str) -> np.ndarray:
+    r"""A plausible misreading of v1.4 §2.2, for negative controls of the exact-law test.
+
+    * ``eligible_after_deletion``: $A_j$ is taken after $\{a_j, b_j\}$ is deleted, so the old
+      endpoint $b_j$ is eligible (the text says: from the graph *before* deleting);
+    * ``vertex_major_order``: the original edges are visited vertex by vertex, $i$ outer and
+      $d = 1, 2$ inner (the text fixes the offset-major order and says not to change it);
+    * ``retain_other_endpoint``: the edge keeps $b_j$ instead of $a_j$.
+
+    Each otherwise follows the reference (the native Bernoulli and rejection draws).
+    """
+    if misreading not in MISREADINGS:
+        raise ValueError(misreading)
+    rng = ref.Xoshiro(seed_words(seed))
+    edges = set(circulant_edges(n))
+    if misreading == "vertex_major_order":
+        order = [(i, (i + d) % n) for i in range(n) for d in (1, 2)]
+    else:
+        order = original_edge_list(n)
+    for a, b in order:
+        attempted = rng.next_double() < beta
+        if misreading == "retain_other_endpoint":
+            a, b = b, a
+        if not attempted:
+            continue
+        if misreading == "eligible_after_deletion":
+            edges.discard(frozenset((a, b)))
+        neighbors = {v for v in range(n) if v != a and frozenset((a, v)) in edges}
+        eligible = {v for v in range(n) if v != a and v not in neighbors}
+        if misreading == "eligible_after_deletion":
+            edges.add(frozenset((a, b)))
+        if not eligible:
+            continue
+        while True:
+            w = rng.next_below(n)
+            if w in eligible:
+                break
+        edges.discard(frozenset((a, b)))
+        edges.add(frozenset((a, w)))
+    return np.array(sorted(tuple(sorted(e)) for e in edges), dtype=np.int64).reshape(-1, 2)
+
+
+def law_p(masks: list[int], law: dict[int, Any]) -> float:
+    """p-value of the graphs ``masks`` against the exact ``law``; 0 if one lies outside its support."""
+    counts: dict[int, int] = {}
+    for m in masks:
+        counts[m] = counts.get(m, 0) + 1
+    if not set(counts) <= set(law):
+        return 0.0
+    keys = sorted(law)
+    observed = np.array([counts.get(k, 0) for k in keys])
+    expected = np.array([len(masks) * float(law[k]) for k in keys])
+    return chi2_p(observed, expected)[2]
