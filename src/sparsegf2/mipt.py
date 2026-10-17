@@ -108,7 +108,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numba
 import numpy as np
@@ -125,6 +125,10 @@ from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
 from sparsegf2.graphs import edge_coloring, from_edges
+
+if TYPE_CHECKING:  # imported where used at run time (sparsegf2.tableau needs sparsegf2.codes)
+    from sparsegf2.codes import StabilizerCode
+    from sparsegf2.tableau import PhaseFreeTableau
 
 __all__ = [
     "EnsembleResult",
@@ -2350,7 +2354,7 @@ class EnsembleResult:
                 return p
         raise KeyError(f"no {' or '.join(kinds)} probe named {name!r}; it is {found[0].name!r}")
 
-    def code(self, trajectory: int, evaluation: int, name: str | None = None):
+    def code(self, trajectory: int, evaluation: int, name: str | None = None) -> StabilizerCode:
         """The saved code of row ``trajectory`` at evaluation ``evaluation`` of a snapshot probe.
 
         Returns a :class:`~sparsegf2.codes.StabilizerCode`; ``trajectory`` is a
@@ -2378,7 +2382,9 @@ class EnsembleResult:
             generators[trajectory, evaluation, :rows], self.spec.num_system
         )
 
-    def tableau(self, trajectory: int, evaluation: int, name: str | None = None):
+    def tableau(
+        self, trajectory: int, evaluation: int, name: str | None = None
+    ) -> PhaseFreeTableau:
         """The joint state of row ``trajectory`` at evaluation ``evaluation`` of a tableau_snapshot.
 
         Returns a :class:`~sparsegf2.tableau.PhaseFreeTableau` on all ``N`` qubits
@@ -2405,6 +2411,32 @@ class EnsembleResult:
             )
         return PhaseFreeTableau.from_words(
             generators[trajectory, evaluation, :rows], self.spec.num_qubits
+        )
+
+    def tableaux(
+        self, evaluation: int, name: str | None = None, *, num_threads: int | None = None
+    ) -> list[PhaseFreeTableau | None]:
+        """Every row's joint state at evaluation ``evaluation`` of a tableau_snapshot, at once.
+
+        Entry ``t`` is ``tableau(t, evaluation, name)``, or ``None`` where row ``t`` had
+        stopped (``stop_when_purified``) and saved nothing. The canonical forms are computed
+        in parallel on ``num_threads`` threads (default: Numba's current count) by
+        :meth:`~sparsegf2.tableau.PhaseFreeTableau.from_words_batch`, and are exactly
+        those of :meth:`tableau`; this is the way to canonicalize many snapshots.
+        :func:`sparsegf2.tableau.physical_tableaux` gives their physical codes the same way.
+        """
+        from sparsegf2.tableau import PhaseFreeTableau
+
+        probe = self._snapshot(name, ("tableau_snapshot",))
+        generators, counts = self.snapshots[probe.name]
+        e = operator.index(evaluation)
+        if not -counts.shape[1] <= e < counts.shape[1]:
+            raise IndexError(
+                f"evaluation {e} is out of range: probe {probe.name!r} has "
+                f"{counts.shape[1]} evaluations"
+            )
+        return PhaseFreeTableau.from_words_batch(
+            generators[:, e], counts[:, e], self.spec.num_qubits, num_threads=num_threads
         )
 
     def replay(self, trajectory: int, *, probes=None, checkpoints=None) -> EnsembleResult:

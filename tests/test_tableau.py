@@ -10,7 +10,9 @@ check is exact.
 import hashlib
 import itertools
 import struct
+import tracemalloc
 
+import numba
 import numpy as np
 import pytest
 import stim
@@ -34,9 +36,10 @@ from _rowspace_oracle import (
     symplectic,
     unpack,
 )
-from sparsegf2 import Circuit, PhaseFreeTableau, Simulator
+from sparsegf2 import Circuit, PhaseFreeTableau, Simulator, tableau
+from sparsegf2._kernel import entropy as kernel_entropy
 from sparsegf2._kernel import rowspace
-from sparsegf2.tableau import MAGIC
+from sparsegf2.tableau import MAGIC, physical_tableaux, to_bytes_batch
 
 # -- the canonical form ------------------------------------------------------------------------
 
@@ -144,14 +147,37 @@ def reference_bytes(n: int, rows: list[int]) -> bytes:
 def test_byte_format_and_digest(rng):
     bell = PhaseFreeTableau(["XX", "ZZ"])
     assert bell.to_bytes() == b"SGF2RS1\x00" + b"\x02\x00\x00\x00" * 2 + bytes([0xC0, 0x30])
-    for n in (1, 3, 5, 64, 67):  # rows of 1, 1, 2, 16 and 17 bytes (ceil(2N / 8))
+    # every N mod 8 (where the Z half starts inside a byte), one to three words per half;
+    # rows of 1, 1, 2, ..., 16, 17, 18, 32 and 33 bytes (ceil(2N / 8))
+    for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 63, 64, 65, 67, 70, 127, 130):
         rows = random_rows(rng, n, 2 * n)
         tab = PhaseFreeTableau(rows, num_qubits=n)
         data = reference_bytes(n, rref(int_rows(rows), range(2 * n)))
         assert tab.to_bytes() == data
         assert tab.digest() == hashlib.sha256(data).hexdigest()
+        body = np.packbits(tab.canonical(), axis=1, bitorder="big").tobytes()
+        assert data[16:] == body  # the numpy statement of the format
         back = PhaseFreeTableau.from_bytes(data)
         assert back == tab and back.to_bytes() == data and back.digest() == tab.digest()
+
+
+@pytest.mark.parametrize("n", [1, 5, 8, 13, 64, 70, 130])
+def test_batch_bytes_equal_one_at_a_time(n, rng, monkeypatch):
+    spaces = [PhaseFreeTableau(random_rows(rng, n, s), num_qubits=n) for s in (0, 1, n, 2 * n)]
+    spaces += [None, PhaseFreeTableau(stim_state(n, rng))]
+    expected = [None if t is None else reference_bytes(n, int_rows(t.canonical())) for t in spaces]
+    for chunk_bytes, threads in ((1 << 26, None), (1, 1)):
+        monkeypatch.setattr(tableau, "_BATCH_BYTES", chunk_bytes)
+        fresh = [None if t is None else PhaseFreeTableau.from_words(t.words, n) for t in spaces]
+        got = to_bytes_batch(fresh, num_threads=threads)
+        assert got == expected
+        for t, data in zip(fresh, got, strict=True):
+            if t is not None:
+                assert t._bytes is data  # kept: digest() does not pack again
+                assert t.digest() == hashlib.sha256(data).hexdigest()
+    assert to_bytes_batch([None]) == [None] and to_bytes_batch([]) == []
+    with pytest.raises(ValueError, match="same number of qubits"):
+        to_bytes_batch([PhaseFreeTableau(["XX"]), PhaseFreeTableau(["XXX"])])
 
 
 def test_from_bytes_refuses_anything_but_canonical_bytes(rng):
@@ -177,6 +203,27 @@ def test_from_bytes_refuses_anything_but_canonical_bytes(rng):
             assert "canonical row space" in str(exc), name
         else:
             pytest.fail(f"{name}: accepted")
+
+
+def test_a_rank_zero_header_costs_nothing_in_proportion_to_its_N():
+    """A rank-0 space (the physical code at layer 0) is 16 bytes for any N, so the length
+    check does not bound N: a corrupted N must not make reading it allocate memory in
+    proportion to N (this one allocated 32 N bytes, 537 MB, before; any N up to 2^32 - 1
+    would be accepted the same way). The result is the rank-0 space on that N, whose bytes
+    and digest then differ from those stored."""
+    big = 2**24
+    data = MAGIC + struct.pack("<II", big, 0)
+    PhaseFreeTableau.from_bytes(MAGIC + struct.pack("<II", 5, 0))  # anything loaded on first use
+    tracemalloc.start()
+    try:
+        tab = PhaseFreeTableau.from_bytes(data)
+        assert tab.to_bytes() == data
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert tab.rank == 0 and tab.num_qubits == big
+    assert peak < 1 << 20, peak  # numpy's arrays are traced: no O(N) array was made
+    assert tab.digest() != PhaseFreeTableau([], num_qubits=5).digest()
 
 
 def test_from_words_checks_its_input():
@@ -211,6 +258,115 @@ def test_rref_kernel_for_any_column_order(n, rng):
         assert not words[rank:].any()  # every column is listed: the other rows are zero
         firsts = [next(i for i, c in enumerate(order) if (r >> int(c)) & 1) for r in expected]
         assert pivots[:rank].tolist() == firsts
+
+
+def test_the_kernels_release_the_gil():
+    """The one-row-space kernels run on other threads while Python runs (a thread pool, or
+    the store's hashing and compression): compiled with nogil. The batch kernels run on every
+    Numba thread (parallel) and keep the GIL, so that two Python threads calling them take
+    turns (concurrent parallel launches abort under Numba's workqueue threading layer)."""
+    if numba.config.DISABLE_JIT:
+        pytest.skip("the kernels run as Python without the JIT")
+    for kernel in (
+        rowspace.rref,
+        rowspace._rank_in_place,
+        rowspace.rank_of_columns,
+        rowspace.pack_msb_first,
+        kernel_entropy.generators_commute,
+    ):
+        assert kernel.targetoptions.get("nogil") is True, kernel.__name__
+    for kernel in (
+        rowspace.rref_batch,
+        rowspace.physical_rows_batch,
+        rowspace.pack_msb_first_batch,
+    ):
+        assert kernel.targetoptions.get("parallel") is True, kernel.__name__
+        assert not kernel.targetoptions.get("nogil"), kernel.__name__
+
+
+def random_items(rng, n: int, items: int, rows: int):
+    """``items`` generator sets of ``rows`` packed rows on n qubits, with counts that cover
+    no rows, all rows, some rows and a negative count (not saved)."""
+    words = np.stack([pack(random_rows(rng, n, rows)[:rows], n) for _ in range(items)])
+    counts = rng.integers(0, rows + 1, size=items)
+    counts[: min(items, 4)] = [0, rows, -1, rows // 2][: min(items, 4)]
+    return words, counts
+
+
+@pytest.mark.parametrize("n", [1, 5, 64, 70, 130])
+def test_batch_canonicalization_equals_one_at_a_time(n, rng, monkeypatch):
+    rows = 2 * n + 3
+    words, counts = random_items(rng, n, 11, rows)
+    garbage = words.copy()
+    garbage[np.arange(rows)[None, :] >= np.maximum(counts, 0)[:, None]] = np.uint64(1)  # unused
+    before = garbage.copy()
+    expected = [
+        None if c < 0 else PhaseFreeTableau.from_words(w[:c], n)
+        for w, c in zip(words, counts, strict=True)
+    ]
+    for chunk_bytes, threads in ((1 << 26, None), (1, 1), (3 * rows * 16 * 8, 2)):
+        monkeypatch.setattr(tableau, "_BATCH_BYTES", chunk_bytes)  # one chunk, one item each, ...
+        got = PhaseFreeTableau.from_words_batch(garbage, counts, n, num_threads=threads)
+        assert len(got) == len(expected)
+        for a, b in zip(got, expected, strict=True):
+            assert (a is None) == (b is None)
+            if a is not None:
+                assert a.num_qubits == n and a.rank == b.rank
+                np.testing.assert_array_equal(a.words, b.words)
+                assert a.to_bytes() == b.to_bytes() and a == b
+    np.testing.assert_array_equal(garbage, before)  # the input is not touched
+    assert PhaseFreeTableau.from_words_batch(np.zeros((0, 4, 2), np.uint64), [], 5) == []
+
+
+def test_batch_canonicalization_checks_its_input():
+    good = np.zeros((2, 3, 2), dtype=np.uint64)
+    with pytest.raises(ValueError, match=r"shape \(items, rows, 2\)"):
+        PhaseFreeTableau.from_words_batch(good[0], [1, 1], 5)
+    with pytest.raises(ValueError, match="counts must be 2 integers"):
+        PhaseFreeTableau.from_words_batch(good, [1], 5)
+    with pytest.raises(ValueError, match="counts must be 2 integers"):
+        PhaseFreeTableau.from_words_batch(good, [1.0, 2.0], 5)
+    with pytest.raises(ValueError, match="at most the 3 rows"):
+        PhaseFreeTableau.from_words_batch(good, [1, 4], 5)
+    with pytest.raises(ValueError, match="non-negative"):
+        PhaseFreeTableau.from_words_batch(good.astype(np.int64) - 1, [1, 1], 5)
+    bad = good.copy()
+    bad[1, 0, 1] = np.uint64(1) << np.uint64(5)  # z_5 on 5 qubits: padding
+    with pytest.raises(ValueError, match="beyond qubit 4"):
+        PhaseFreeTableau.from_words_batch(bad, [1, 1], 5)
+    assert PhaseFreeTableau.from_words_batch(bad, [1, 0], 5)[1].rank == 0  # an unused row
+
+
+def test_batch_physical_tableaux_equal_one_at_a_time(rng, monkeypatch):
+    for n, pairs in ((3, None), (33, None), (70, None), (64, [5])):
+        joint = [
+            PhaseFreeTableau(stim_joint_state(n, rng, rng.permutation(n)[:k], pairs))
+            for k in (0, 1, n // 2, n)
+        ]
+        big = joint[0].num_qubits
+        # also spaces that are no stabilizer group (physical_tableau does not need one)
+        joint += [
+            PhaseFreeTableau(rng.integers(0, 2, (s, 2 * big), dtype=np.uint8)) for s in (1, big + 5)
+        ]
+        joint += [None, PhaseFreeTableau([], num_qubits=big)]
+        expected = [None if t is None else t.physical_tableau(n) for t in joint]
+        for chunk_bytes, threads in ((1 << 26, None), (1, 1)):
+            monkeypatch.setattr(tableau, "_BATCH_BYTES", chunk_bytes)
+            got = physical_tableaux(joint, n, num_threads=threads)
+            for a, b in zip(got, expected, strict=True):
+                assert (a is None) == (b is None)
+                if a is not None:
+                    assert a.num_qubits == n and a.rank == b.rank
+                    np.testing.assert_array_equal(a.words, b.words)
+                    assert a.to_bytes() == b.to_bytes()
+        assert physical_tableaux(joint, big) == joint  # no reference: the tableaux themselves
+    assert physical_tableaux([None, None], 3) == [None, None]
+    with pytest.raises(ValueError, match="same number of qubits"):
+        physical_tableaux([PhaseFreeTableau(["XX"]), PhaseFreeTableau(["XXX"])], 1)
+    with pytest.raises(ValueError, match=r"in \[1, 2\]"):
+        physical_tableaux([PhaseFreeTableau(["XX"])], 3)
+    with pytest.raises(TypeError, match="PhaseFreeTableau or None"):
+        physical_tableaux(["XX"], 1)
 
 
 @pytest.mark.parametrize("n", [3, 33, 80])

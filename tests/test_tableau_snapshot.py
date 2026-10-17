@@ -28,6 +28,7 @@ from _rowspace_oracle import (
 )
 from sparsegf2 import PhaseFreeTableau, Simulator, api, graphs, mipt
 from sparsegf2._kernel import entropy as kernel_entropy
+from sparsegf2.tableau import physical_tableaux
 
 
 def ws_spec(n, layers, rate, probes, *, beta=0.2, graph_seed=1, **kwargs):
@@ -464,6 +465,43 @@ def test_after_a_stop_nothing_is_saved():
                 assert tab.is_pure()
                 k = n - tab.physical_tableau(n).rank
                 assert k == res.values["code_dimension"][t, layer]
+
+
+@pytest.mark.parametrize("n", [6, 40])
+def test_tableaux_of_an_evaluation_are_the_tableaux_one_by_one(n):
+    """EnsembleResult.tableaux and physical_tableaux (in parallel, without the GIL) give
+    exactly tableau(t, e) and its physical code, None where a stopped row saved nothing."""
+    spec = mipt.MonitoredCircuit(
+        num_system=n,
+        edges=graphs.cycle(n),
+        layers=3 * n,
+        measurement_rate=0.5,
+        reference="purification",
+        checkpoints="every_layer",
+        probes=[mipt.code_dimension(), mipt.tableau_snapshot(checkpoints=[0, 2, n, 3 * n])],
+        stop_when_purified=True,
+    )
+    res = spec.run(12, seed=5)
+    counts = res.snapshots["tableau_snapshot"][1]
+    assert (counts < 0).any() and (counts >= 0).any()  # stopped rows and saved rows
+    for e in range(4):
+        batch = res.tableaux(e)
+        assert batch == res.tableaux(e, "tableau_snapshot", num_threads=1)
+        physical = physical_tableaux(batch, n)
+        for t in range(12):
+            if counts[t, e] < 0:
+                assert batch[t] is None and physical[t] is None
+                continue
+            one = res.tableau(t, e)
+            assert batch[t] == one and batch[t].to_bytes() == one.to_bytes()
+            assert physical[t].to_bytes() == one.physical_tableau(n).to_bytes()
+            np.testing.assert_array_equal(
+                physical[t].canonical(), canonical(res.code(t, e).stabilizer_matrix())
+            )
+    with pytest.raises(IndexError, match="4 evaluations"):
+        res.tableaux(4)
+    with pytest.raises(ValueError, match="no tableau_snapshot probe"):
+        ws_spec(6, 2, 0.1, [mipt.code_snapshot()]).run(1, seed=1).tableaux(0)
 
 
 def test_save_load_concatenate_and_replay(tmp_path):

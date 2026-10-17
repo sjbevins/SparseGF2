@@ -1053,9 +1053,9 @@ def columns_from_rows(rows, num_qubits, out):
                 out[2 * q + 1, rw] |= rb
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def generators_commute(rows):
-    """Whether all packed rows (X words, then Z words) commute pairwise."""
+    """Whether all packed rows (X words, then Z words) commute pairwise (releases the GIL)."""
     s = rows.shape[0]
     wsys = rows.shape[1] // 2
     for i in range(s):

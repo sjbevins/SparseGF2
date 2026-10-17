@@ -36,7 +36,11 @@ Conventions
   (the signs do not change them): ``S(A) = |A| - dim S_A`` with ``S_A`` the elements supported
   in ``A``, which is ``rank(S|_A) - |A|`` for a pure state.
 
-The eliminations are compiled (:mod:`sparsegf2._kernel.rowspace`) and exact.
+The eliminations are compiled (:mod:`sparsegf2._kernel.rowspace`), exact, and release the GIL.
+Many row spaces are canonicalized at once, in parallel over them, by
+:meth:`PhaseFreeTableau.from_words_batch` (which :meth:`sparsegf2.mipt.EnsembleResult.tableaux`
+uses for a whole evaluation of snapshots) and :func:`physical_tableaux`, and serialized at once
+by :func:`to_bytes_batch`; they give exactly the objects and bytes of the one-at-a-time methods.
 """
 
 from __future__ import annotations
@@ -44,20 +48,25 @@ from __future__ import annotations
 import hashlib
 import operator
 import struct
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
 from sparsegf2._kernel import entropy as _ent
 from sparsegf2._kernel import rowspace as _rs
+from sparsegf2._parallel import threads
 from sparsegf2.codes import StabilizerCode, _bit_rows
 
-__all__ = ["MAGIC", "PhaseFreeTableau"]
+__all__ = ["MAGIC", "PhaseFreeTableau", "physical_tableaux", "to_bytes_batch"]
 
 MAGIC = b"SGF2RS1\x00"
 """The first 8 bytes of :meth:`PhaseFreeTableau.to_bytes` (format 1 of the canonical row space)."""
 
 _HEADER = struct.Struct("<II")  # N, rank
+
+# The batch constructors copy their input in chunks of at most this many bytes (one item at
+# least), so canonicalizing a whole evaluation of snapshots needs little memory beyond the result.
+_BATCH_BYTES = 1 << 26
 
 
 def _words_per_half(n: int) -> int:
@@ -162,13 +171,27 @@ class PhaseFreeTableau:
 
     def _init(self, words: np.ndarray, n: int) -> None:
         """Canonicalize ``words`` (writable, C-contiguous uint64 of shape ``(s, 2 wq)``) in place."""
-        pivots = np.empty(max(words.shape[0], 1), dtype=np.int64)
-        rank = int(_rs.rref(words, _canonical_columns(n), pivots))
+        rank = 0
+        if words.shape[0]:  # no rows is rank 0 without the O(N) column order: a 16-byte rank-0
+            # header with a corrupted N then costs nothing in proportion to that N
+            pivots = np.empty(words.shape[0], dtype=np.int64)
+            rank = int(_rs.rref(words, _canonical_columns(n), pivots))
+        self._set(words[:rank].copy(), n)
+
+    def _set(self, words: np.ndarray, n: int) -> None:
+        """Hold ``words``: canonical rows (owned, C-contiguous, never modified) on ``n`` qubits."""
         self._n = n
         self._wq = _words_per_half(n)
-        self._words = words[:rank].copy()  # never modified after this
+        self._words = words
         self._bytes: bytes | None = None
         self._isotropic: bool | None = None
+
+    @classmethod
+    def _from_canonical(cls, words: np.ndarray, n: int) -> PhaseFreeTableau:
+        """A tableau holding ``words``, rows already in canonical form (not checked or copied)."""
+        tab = cls.__new__(cls)
+        tab._set(words, n)
+        return tab
 
     # -- constructors ----------------------------------------------------------------------
 
@@ -183,6 +206,64 @@ class PhaseFreeTableau:
         tab = cls.__new__(cls)
         tab._init(_checked_words(words, n), n)
         return tab
+
+    @classmethod
+    def from_words_batch(
+        cls, words, counts, num_qubits: int, *, num_threads: int | None = None
+    ) -> list[PhaseFreeTableau | None]:
+        """:meth:`from_words` of many generator sets at once, the eliminations in parallel.
+
+        ``words`` is ``(B, R, 2 ceil(N / 64))`` in the packing of :meth:`from_words` (a
+        ``tableau_snapshot``'s ``generators[:, e]``, for instance); item ``b`` is
+        ``words[b, :counts[b]]``, with ``counts`` ``B`` integers at most ``R``. A negative count
+        (an evaluation a stopped trajectory did not save) gives ``None``. The result is exactly
+        ``[from_words(words[b, :counts[b]], N) for b ...]`` (``None`` where the count is
+        negative): the same compiled elimination runs on each item, here in parallel on
+        ``num_threads`` threads (default: Numba's current count). The input is not modified;
+        it is copied in chunks of at most 64 MB.
+        """
+        n = _qubit_count(num_qubits)
+        wq = _words_per_half(n)
+        raw = np.asarray(words)
+        if raw.ndim != 3 or raw.shape[2] != 2 * wq:
+            raise ValueError(
+                f"words need shape (items, rows, {2 * wq}) for {n} qubits (X words, then Z "
+                f"words), got {raw.shape}"
+            )
+        if (
+            raw.size
+            and raw.dtype != np.uint64
+            and (not np.issubdtype(raw.dtype, np.integer) or np.any(raw < 0))
+        ):
+            raise ValueError(f"words must be uint64 (non-negative integers), got {raw.dtype}")
+        items, rows = raw.shape[0], raw.shape[1]
+        number = np.asarray(counts)
+        if number.shape != (items,) or (
+            number.size and not np.issubdtype(number.dtype, np.integer)
+        ):
+            raise ValueError(f"counts must be {items} integers (one per item), got {number!r}")
+        number = number.astype(np.int64)
+        if np.any(number > rows):
+            raise ValueError(f"counts must be at most the {rows} rows of each item")
+        cols = _canonical_columns(n) if rows else np.zeros(0, dtype=np.int64)
+        pad = ~((np.uint64(1) << np.uint64(n % 64)) - np.uint64(1)) if n % 64 else None
+        step = max(1, _BATCH_BYTES // max(1, rows * 2 * wq * 8))
+        out: list[PhaseFreeTableau | None] = []
+        with threads(num_threads):
+            for lo in range(0, items, step):
+                hi = min(items, lo + step)
+                buf = np.array(raw[lo:hi], dtype=np.uint64, order="C")  # rref works in place
+                used = number[lo:hi]
+                buf[np.arange(rows)[None, :] >= used[:, None]] = 0  # rows beyond each count
+                if pad is not None and np.any(buf[:, :, [wq - 1, 2 * wq - 1]] & pad):
+                    raise ValueError(f"words have bits beyond qubit {n - 1}")
+                ranks = np.empty(hi - lo, dtype=np.int64)
+                pivots = np.empty((hi - lo, max(rows, 1)), dtype=np.int64)
+                _rs.rref_batch(buf, used, cols, ranks, pivots)
+                for b in range(hi - lo):
+                    r = int(ranks[b])
+                    out.append(None if r < 0 else cls._from_canonical(buf[b, :r].copy(), n))
+        return out
 
     @classmethod
     def from_simulator(cls, sim) -> PhaseFreeTableau:
@@ -258,7 +339,8 @@ class PhaseFreeTableau:
     def to_bytes(self) -> bytes:
         """The canonical serialization (module docstring, Bytes): header, ``N``, rank, rows."""
         if self._bytes is None:
-            body = np.packbits(self.canonical(), axis=1, bitorder="big")
+            body = np.empty((self.rank, (2 * self._n + 7) // 8), dtype=np.uint8)
+            _rs.pack_msb_first(self._words, self.rank, self._n, body)
             self._bytes = MAGIC + _HEADER.pack(self._n, self.rank) + body.tobytes()
         return self._bytes
 
@@ -364,9 +446,7 @@ class PhaseFreeTableau:
         if ns == self._n:
             return self
         wq = self._wq
-        ref = np.arange(ns, self._n, dtype=np.int64)
-        system = np.arange(ns, dtype=np.int64)
-        cols = np.concatenate([ref, ref + 64 * wq, system, system + 64 * wq])
+        cols = _reference_first_columns(self._n, ns)
         rows = self._words.copy()
         pivots = np.empty(max(rows.shape[0], 1), dtype=np.int64)
         rank = int(_rs.rref(rows, cols, pivots))
@@ -388,3 +468,123 @@ class PhaseFreeTableau:
         self._require_group("physical_code")
         physical = self.physical_tableau(num_system)
         return StabilizerCode.from_packed(np.array(physical._words), physical.num_qubits)
+
+
+def _reference_first_columns(n: int, num_system: int) -> np.ndarray:
+    """The packed positions of the reference X, reference Z, system X and system Z columns."""
+    wq = _words_per_half(n)
+    ref = np.arange(num_system, n, dtype=np.int64)
+    system = np.arange(num_system, dtype=np.int64)
+    return np.concatenate([ref, ref + 64 * wq, system, system + 64 * wq])
+
+
+def physical_tableaux(
+    tableaux: Sequence[PhaseFreeTableau | None],
+    num_system: int,
+    *,
+    num_threads: int | None = None,
+) -> list[PhaseFreeTableau | None]:
+    """:meth:`PhaseFreeTableau.physical_tableau` of many joint states at once, in parallel.
+
+    Every entry is a tableau on the same ``N`` qubits, or ``None`` (kept as ``None``). The
+    result is exactly ``[t.physical_tableau(num_system) for t in tableaux]``: the same two
+    compiled eliminations (reference columns first, then the canonical order of the system)
+    run on each tableau, here in parallel on ``num_threads`` threads (default: Numba's current
+    count), in chunks of at most 64 MB.
+    """
+    items = list(tableaux)
+    present = [t for t in items if t is not None]
+    for t in present:
+        if not isinstance(t, PhaseFreeTableau):
+            raise TypeError(f"expected PhaseFreeTableau or None entries, got {type(t).__name__}")
+    if not present:
+        return [None] * len(items)
+    n = present[0].num_qubits
+    if any(t.num_qubits != n for t in present):
+        found = sorted({t.num_qubits for t in present})
+        raise ValueError(f"the tableaux must all have the same number of qubits, got {found}")
+    ns = operator.index(num_system)
+    if not 1 <= ns <= n:
+        raise ValueError(f"num_system must be in [1, {n}], got {ns}")
+    if ns == n:
+        return items
+    wq, wsys = _words_per_half(n), _words_per_half(ns)
+    ref_first = _reference_first_columns(n, ns)
+    system_cols = _canonical_columns(ns)
+    widest = max(t.rank for t in present)
+    step = max(1, _BATCH_BYTES // max(1, widest * 2 * wq * 8))
+    out: list[PhaseFreeTableau | None] = []
+    with threads(num_threads):
+        for lo in range(0, len(items), step):
+            chunk = items[lo : lo + step]
+            rows = max((t.rank for t in chunk if t is not None), default=0)
+            buf = np.zeros((len(chunk), rows, 2 * wq), dtype=np.uint64)
+            ranks = np.full(len(chunk), -1, dtype=np.int64)
+            for b, item in enumerate(chunk):
+                if item is not None:
+                    buf[b, : item.rank] = item._words
+                    ranks[b] = item.rank
+            room = max(1, min(rows, 2 * ns))  # independent rows that vanish on the reference
+            physical = np.zeros((len(chunk), room, 2 * wsys), dtype=np.uint64)
+            physical_ranks = np.empty(len(chunk), dtype=np.int64)
+            pivots = np.empty((len(chunk), max(rows, 1)), dtype=np.int64)
+            _rs.physical_rows_batch(
+                buf,
+                ranks,
+                ref_first,
+                2 * (n - ns),
+                wq,
+                wsys,
+                system_cols,
+                physical,
+                physical_ranks,
+                pivots,
+            )
+            for b in range(len(chunk)):
+                r = int(physical_ranks[b])
+                out.append(
+                    None if r < 0 else PhaseFreeTableau._from_canonical(physical[b, :r].copy(), ns)
+                )
+    return out
+
+
+def to_bytes_batch(
+    tableaux: Sequence[PhaseFreeTableau | None], *, num_threads: int | None = None
+) -> list[bytes | None]:
+    """:meth:`PhaseFreeTableau.to_bytes` of many tableaux at once, the packing in parallel.
+
+    Every entry is a tableau on the same ``N`` qubits, or ``None`` (kept as ``None``). The
+    result is exactly ``[t.to_bytes() for t in tableaux]``, made by the same compiled packing
+    in parallel on ``num_threads`` threads (default: Numba's current count), in chunks of at
+    most 64 MB; each tableau keeps its bytes, so a later
+    :meth:`~PhaseFreeTableau.to_bytes` or :meth:`~PhaseFreeTableau.digest` does not pack again.
+    """
+    items = list(tableaux)
+    present = [t for t in items if t is not None]
+    for t in present:
+        if not isinstance(t, PhaseFreeTableau):
+            raise TypeError(f"expected PhaseFreeTableau or None entries, got {type(t).__name__}")
+    if not present:
+        return [None] * len(items)
+    n = present[0].num_qubits
+    if any(t.num_qubits != n for t in present):
+        found = sorted({t.num_qubits for t in present})
+        raise ValueError(f"the tableaux must all have the same number of qubits, got {found}")
+    wq, width = _words_per_half(n), (2 * n + 7) // 8
+    step = max(1, _BATCH_BYTES // max(1, max(t.rank for t in present) * 2 * wq * 8))
+    with threads(num_threads):
+        for lo in range(0, len(items), step):
+            chunk = [t for t in items[lo : lo + step] if t is not None and t._bytes is None]
+            if not chunk:
+                continue
+            rows = max(t.rank for t in chunk)
+            words = np.zeros((len(chunk), rows, 2 * wq), dtype=np.uint64)
+            counts = np.empty(len(chunk), dtype=np.int64)
+            for b, item in enumerate(chunk):
+                words[b, : item.rank] = item._words
+                counts[b] = item.rank
+            body = np.empty((len(chunk), rows, width), dtype=np.uint8)
+            _rs.pack_msb_first_batch(words, counts, n, body)
+            for b, item in enumerate(chunk):
+                item._bytes = MAGIC + _HEADER.pack(n, item.rank) + body[b, : item.rank].tobytes()
+    return [None if t is None else t.to_bytes() for t in items]
