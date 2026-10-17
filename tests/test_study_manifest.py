@@ -12,6 +12,7 @@ gives one list per size, any change of the rule and any larger horizon is an ext
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import itertools
 import json
@@ -270,6 +271,24 @@ def test_from_json_reads_text_dicts_and_files(manifest, tmp_path):
         ExperimentManifest.from_json(tmp_path / "missing.json")
 
 
+def test_a_file_with_a_utf8_byte_order_mark_is_read(manifest, tmp_path):
+    # Windows PowerShell 5.1 writes UTF-8 with a byte-order mark (Set-Content -Encoding utf8)
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf" + EXAMPLE_TEXT.encode("utf-8"))
+    assert ExperimentManifest.from_json(path) == manifest
+    assert ExperimentManifest.from_json(path).digest() == manifest.digest()
+    # a file that is not a JSON object is named as such, not as a string to be read as a path
+    other = tmp_path / "list.json"
+    other.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"list.json does not contain a JSON object") as error:
+        ExperimentManifest.from_json(other)
+    assert "pathlib.Path" not in str(error.value)
+    latin = tmp_path / "latin.json"
+    latin.write_bytes(b'{"experiment_id": "caf\xe9"}')
+    with pytest.raises(ValueError, match="manifest: cannot read .*latin.json"):
+        ExperimentManifest.from_json(latin)
+
+
 @pytest.mark.parametrize(
     "text, fragment",
     [
@@ -479,6 +498,16 @@ MALFORMED = [
         r"correlated_erasure\[0\].couplings: give at least one entry",
     ),
     ("observables.correlated_erasure.0.couplings", ["a"], r"couplings\[0\]: must be a number"),
+    (
+        "observables.correlated_erasure.0.couplings",
+        [-1],
+        r"couplings\[0\]: must be at least 0, got -1: v1.4 section 5.7 defines .* for J >= 0",
+    ),
+    (
+        "observables.correlated_erasure.0.couplings",
+        [0, 2, -0.5],
+        r"correlated_erasure\[0\].couplings\[2\]: must be at least 0, got -0.5",
+    ),
     ("observables.correlated_erasure.0.couplings", [True], r"couplings\[0\]: must be a number"),
     (
         "observables.correlated_erasure.0.couplings",
@@ -499,7 +528,10 @@ MALFORMED = [
     ),
     ("observables.correlated_erasure.0.sizes", [24], r"sizes must lie in \[1, 15\] for n = 16"),
     ("observables.correlated_erasure.0.sizes", "1:40", r"sizes must lie in \[1, 15\] for n = 16"),
-    ("observables.correlated_erasure.0.sizes", "5:5", "sizes: give at least one size"),
+    ("observables.correlated_erasure.0.sizes", "5:5", r"sizes: the range '5:5' is empty"),
+    ("observables.correlated_erasure.0.sizes", "9:3", r"sizes: the range '9:3' is empty"),
+    ("observables.correlated_erasure.0.sizes", "1:9:0", "sizes: a range step must be positive"),
+    ("observables.correlated_erasure.0.sizes", "1:5:2:1", r"sizes: expected null, a list"),
     (
         "observables.correlated_erasure.0.geometry",
         "torus",
@@ -526,6 +558,14 @@ MALFORMED = [
         1,
         r"correlated_erasure\[0\]: unknown key\(s\) \['extra'\]",
     ),
+    *[
+        (
+            "observables.correlated_erasure.0.name",
+            reserved,
+            rf"correlated_erasure\[0\].name: '{reserved}' is the name of a probe the runner adds",
+        )
+        for reserved in mf.RESERVED_PROBE_NAMES
+    ],
     # storage, resources, analysis
     ("storage.graphs_per_unit", 0, r"storage.graphs_per_unit: must be at least 1"),
     ("storage.compression_level", 10, r"storage.compression_level: must be at most 9"),
@@ -564,18 +604,20 @@ def test_duplicate_conditions_across_blocks_and_equal_floats_are_refused():
     )
     with pytest.raises(ValueError, match=r"\(n = 16, beta = 0, p = 0.2\) appears twice"):
         ExperimentManifest.from_json(data)
-    near = mutated(
-        "conditions",
-        [{"n": [16], "beta": ["0.1", "0.1000000000000000055511151231257827"], "p": ["0.1"]}],
-    )
-    with pytest.raises(ValueError, match="same float64"):
+    twin = "0.1000000000000000055511151231257827"  # the exact value of the double nearest 0.1
+    near = mutated("conditions", [{"n": [16], "beta": ["0.1", twin], "p": ["0.1"]}])
+    with pytest.raises(
+        ValueError, match="two tokens of one float64 .* one rewiring probability under two names"
+    ):
         ExperimentManifest.from_json(near)
-    rates = mutated(
-        "conditions",
-        [{"n": [16], "beta": ["0"], "p": ["0.1", "0.1000000000000000055511151231257827"]}],
-    )
-    with pytest.raises(ValueError, match="same float64"):
+    rates = mutated("conditions", [{"n": [16], "beta": ["0"], "p": ["0.1", twin]}])
+    with pytest.raises(ValueError, match="two tokens of one float64 .* one rate under two names"):
         ExperimentManifest.from_json(rates)
+    # the reason is the shared float, not shared seeds: under ruling R-SEED the seeds hash the
+    # token, so the two betas would even build different graphs from different seeds
+    assert Token.parse(twin).float64 == Token.parse("0.1").float64
+    a, b = ident.build_graph(16, "0.1", 0, 17), ident.build_graph(16, twin, 0, 17)
+    assert a.seed != b.seed and not np.array_equal(a.edges, b.edges)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,8 +1044,9 @@ def test_equal_master_seeds_are_accepted_because_the_seed_domains_are_disjoint()
 
 def test_two_tokens_with_one_seed_hash_are_refused(monkeypatch):
     # The words of beta name the condition in every seed, so two different beta tokens with equal
-    # 64-bit hashes (probability 2**-64 per pair) are refused; likewise two rates in independent
-    # mode, where the words of the rate enter the run seed (in shared mode they do not).
+    # 64-bit hashes (probability 2**-64 per pair) are refused; likewise two rates, in both gate
+    # modes: the words of the rate enter the run seed in independent mode and the region seeds of
+    # the sampled observables (study/observables.py::region_seed) in both.
     real = mf.token_words
     same = {Token.parse("0.3"): real("0.1")}  # beta = 0.3 gets the words of beta = 0.1
     monkeypatch.setattr(mf, "token_words", lambda t: same.get(Token.parse(t), real(t)))
@@ -1011,9 +1054,11 @@ def test_two_tokens_with_one_seed_hash_are_refused(monkeypatch):
         ExperimentManifest.from_json(mutated("conditions.0.beta", ["0.1", "0.3"]))
     ExperimentManifest.from_json(EXAMPLE_TEXT)  # the example has no such pair
     same[Token.parse("0.2")] = real("0.15")  # rate 0.2 gets the words of rate 0.15
-    ExperimentManifest.from_json(EXAMPLE_TEXT)  # shared mode: the rates' words are in no seed
-    with pytest.raises(ValueError, match="p values 0.15 and 0.2 have the same 64-bit seed hash"):
-        ExperimentManifest.from_json(mutated("seeds.gate_mode", "independent"))
+    for mode in ("shared", "independent"):
+        with pytest.raises(ValueError, match="p values 0.15 and 0.2 have the same 64-bit seed"):
+            ExperimentManifest.from_json(mutated("seeds.gate_mode", mode))
+    # one rate token used at several conditions is one token, not a collision
+    ExperimentManifest.from_json(mutated("conditions.0.p", ["0.1", "0.15"]))
     # the real hash has no collision among the tokens of a fine grid (checked, not proved)
     monkeypatch.undo()
     grid = [f"{k}/{d}" for d in (997, 1000) for k in range(d + 1)]
@@ -1044,6 +1089,123 @@ def test_the_manifest_is_immutable_hashable_and_compared_by_value(manifest):
     assert manifest != ExperimentManifest.from_json(mutated("trials.graphs", 21))
 
 
+def test_direct_construction_and_replace_obey_the_rules_of_reading(manifest):
+    # Every section is read back through its from_dict when a manifest is built, so a manifest
+    # made in code (dataclasses.replace, direct construction) is refused exactly where reading
+    # its canonical JSON would refuse it, and an accepted one reads back as itself.
+    replace = dataclasses.replace
+    Trials, Seeds = mf.Trials, mf.Seeds
+    cases = [
+        (
+            {"trials": replace(manifest.trials, circuits_per_graph=9)},
+            r"manifest.trials.circuit_index_stride: must be at least circuits_per_graph \(9\)",
+        ),
+        ({"trials": Trials(0, 4, 8, 1)}, r"manifest.trials.graphs: must be at least 1, got 0"),
+        (
+            {"trials": Trials(20, 2, 8, 3)},
+            r"manifest.trials.measurement_replicas: must be 1, got 3: the native engine",
+        ),
+        ({"seeds": Seeds(2**40, 29)}, r"manifest.seeds.master_graph_seed: must be at most"),
+        ({"seeds": Seeds(17, 29, "coupled")}, r"manifest.seeds.gate_mode: must be one of"),
+        (
+            {"blocks": (mf.ConditionBlock((4,), (Token.parse("0.1"),), (Token.parse("0.1"),)),)},
+            r"manifest.conditions\[0\].n\[0\]: must be at least 5, got 4",
+        ),
+        (
+            {"blocks": (mf.ConditionBlock((16,), ("0.1",), (Token.parse("0.1"),)),)},  # type: ignore[arg-type]
+            r"manifest.conditions\[0\]: a field of this ConditionBlock has the wrong type",
+        ),
+        ({"blocks": ()}, r"manifest.conditions: give a non-empty tuple"),
+        (
+            {"depth": mf.Depth(mf.Layers("per_n", 0), manifest.depth.checkpoints)},
+            r"manifest.depth.layers.per_n: must be at least 1, got 0",
+        ),
+        (
+            {"depth": mf.Depth(mf.Layers("per_n", 8, ((16, 3),)), manifest.depth.checkpoints)},
+            r"manifest.depth: .* is not in the canonical form that reading it gives",
+        ),
+        (
+            {"depth": mf.Depth(manifest.depth.layers, mf.CheckpointRule("count", count=0))},
+            r"manifest.depth.checkpoints.count: must be at least 1, got 0",
+        ),
+        (
+            {"depth": mf.Depth(manifest.depth.layers, mf.CheckpointRule("list", depths=(9, 3)))},
+            r"manifest.depth: .* is not in the canonical form",  # an unsorted list
+        ),
+        (
+            {"observables": mf.Observables(uniform_erasure=mf.UniformErasure(0, 5000))},
+            r"manifest.observables.uniform_erasure.samples: must be at least 1",
+        ),
+        (
+            {"observables": mf.Observables(correlated_erasure=(mf.CorrelatedErasure((-1.0,)),))},
+            r"manifest.observables.correlated_erasure\[0\].couplings\[0\]: must be at least 0",
+        ),
+        (
+            {
+                "observables": mf.Observables(
+                    correlated_erasure=(mf.CorrelatedErasure((1.0,), name="code_dimension"),)
+                )
+            },
+            r"name: 'code_dimension' is the name of a probe the runner adds",
+        ),
+        ({"storage": mf.Storage(8, 10)}, r"manifest.storage.compression_level: must be at most 9"),
+        ({"resources": mf.Resources(0)}, r"manifest.resources.num_threads: must be at least 1"),
+        (
+            {"analysis": mf.Analysis(mf.Peak(z=-1.0))},
+            r"manifest.analysis.peak.z: must be at least 0",
+        ),
+        ({"trials": {"graphs": 20}}, r"manifest.trials: expected a Trials, got dict"),
+        ({"label": "pilot"}, r"manifest.label: must be one of"),
+    ]
+    for changes, fragment in cases:
+        with pytest.raises(ValueError, match=fragment):
+            replace(manifest, **changes)
+    # what replace may change is checked like a revision read from JSON, and reads back as itself
+    more = replace(manifest, trials=replace(manifest.trials, graphs=40, circuits_per_graph=8))
+    assert ExperimentManifest.from_json(more.to_json()) == more
+    assert check_extension(manifest, more) is None and more.trajectories_per_condition == 320
+    # direct construction of the whole manifest
+    built = ExperimentManifest(
+        "built",
+        manifest.blocks,
+        manifest.depth,
+        manifest.trials,
+        manifest.seeds,
+        observables=mf.Observables(uniform_erasure=None),
+    )
+    assert ExperimentManifest.from_json(built.to_json()) == built
+
+
+def test_the_conditions_are_resolved_once_per_manifest(monkeypatch, manifest):
+    calls = []
+    real = mf._resolve_conditions
+
+    def counting(blocks):
+        calls.append(1)
+        return real(blocks)
+
+    monkeypatch.setattr(mf, "_resolve_conditions", counting)
+    m = ExperimentManifest.from_json(EXAMPLE_TEXT)
+    assert len(calls) == 1  # the constructor resolves them, for its checks
+    for g in range(50):
+        m.trajectory_key(24, "0.1", "0.2", g, 1)
+        m.graph_seed(16, "0", g)
+        m.run_seed(24, "0", "0.15")
+        m.layers(16, "0.1")
+        m.checkpoints(24, "0.1")
+        m.rates(16, "0")
+        m.has_condition(24, "0.1")
+        m.monitored_circuit_kwargs(16, "0.1", "0.1")
+    assert check_extension(m, m) is None and effective_checkpoints([m, m], 16, "0.1")
+    assert len(calls) == 1  # every later question is a look-up
+    # the result is a fresh list each time, and the cache is not part of equality or hashing
+    first = m.conditions()
+    first.clear()
+    assert len(m.conditions()) == 4
+    assert m == manifest and hash(m) == hash(manifest)
+    assert "_resolved_conditions" not in repr(m)
+
+
 # ---------------------------------------------------------------------------
 # correlated-erasure settings
 # ---------------------------------------------------------------------------
@@ -1061,7 +1223,7 @@ def test_correlated_erasure_settings_build_the_engine_probe(manifest):
         "observables.correlated_erasure",
         [
             dict(
-                couplings=[0.5, -1],
+                couplings=[0.5, 1.5],
                 sizes="2:10:4",
                 samples=7,
                 thin=3,
@@ -1077,7 +1239,7 @@ def test_correlated_erasure_settings_build_the_engine_probe(manifest):
     )
     e = ExperimentManifest.from_json(full).observables.correlated_erasure[0]
     expected = mipt.correlated_erasure(
-        [0.5, -1.0],
+        [0.5, 1.5],
         "2:10:4",
         7,
         "ce",
@@ -1089,8 +1251,8 @@ def test_correlated_erasure_settings_build_the_engine_probe(manifest):
         max_step=0.5,
         geometry="cycle",
     )
-    assert e.probe() == expected
-    assert e.expand_sizes(16) == (2, 6) and e.expand_sizes(24) == (2, 6)
+    assert e.probe() == expected  # the stored expansion builds the probe of the range string
+    assert e.sizes == (2, 6) and e.expand_sizes(16) == (2, 6) and e.expand_sizes(24) == (2, 6)
 
 
 def test_correlated_erasure_sizes_forms():
@@ -1106,12 +1268,43 @@ def test_correlated_erasure_sizes_forms():
     ranged = ExperimentManifest.from_json(
         mutated("observables.correlated_erasure.0.sizes", " 1 : 31 : 2 ", base=big)
     ).observables.correlated_erasure[0]
-    assert ranged.sizes == "1 : 31 : 2"  # stripped, kept as written
+    assert ranged.sizes == tuple(range(1, 31, 2))  # a range is stored as its expansion
     assert ranged.expand_sizes(40) == tuple(range(1, 31, 2))
+    assert ranged.to_dict()["sizes"] == list(range(1, 31, 2))
     with pytest.raises(ValueError, match=r"sizes must lie in \[1, 15\] for n = 16"):
         ExperimentManifest.from_json(
             mutated("observables.correlated_erasure.0.sizes", "1:31:2", base=base)
         )
+
+
+def test_equivalent_spellings_of_correlated_sizes_are_one_setting():
+    # a range string does not depend on n, so every spelling of the same sizes is one canonical
+    # form: one digest, one engine probe, and a respelling is not a change of a recorded setting
+    big = mutated("conditions", [{"n": [40], "beta": ["0.1"], "p": ["0.1"]}])
+    spellings = ["1:31:2", " 1 : 31 : 2 ", "01:31:2", "1:30:2", list(range(1, 31, 2))]
+    manifests = [
+        ExperimentManifest.from_json(
+            mutated("observables.correlated_erasure.0.sizes", sizes, base=big)
+        )
+        for sizes in spellings
+    ]
+    assert len({m.digest() for m in manifests}) == 1
+    assert len({m.observables.correlated_erasure[0] for m in manifests}) == 1
+    probes = [m.observables.correlated_probes()[0] for m in manifests]
+    assert all(probe == probes[0] for probe in probes)
+    assert probes[0].sizes == tuple(range(1, 31, 2))
+    assert all(check_extension(manifests[0], m) is None for m in manifests)
+    # the order of a list is kept: it is the order of the stored values
+    reordered = ExperimentManifest.from_json(
+        mutated("observables.correlated_erasure.0.sizes", [3, 1, 5], base=big)
+    )
+    assert reordered.observables.correlated_erasure[0].sizes == (3, 1, 5)
+    assert (
+        reordered.digest()
+        != ExperimentManifest.from_json(
+            mutated("observables.correlated_erasure.0.sizes", "1:7:2", base=big)
+        ).digest()
+    )
 
 
 def test_several_correlated_erasure_probes_need_distinct_names():
@@ -1121,15 +1314,73 @@ def test_several_correlated_erasure_probes_need_distinct_names():
         {"couplings": [2], "name": "mine"},
     ]
     m = ExperimentManifest.from_json(mutated("observables.correlated_erasure", entries))
-    assert m.observables.probe_names() == ("correlated_erasure_0", "correlated_erasure_1", "mine")
+    # an unnamed entry is named by its position alone: the first keeps the engine's default name
+    assert m.observables.probe_names() == ("correlated_erasure", "correlated_erasure_1", "mine")
     single = ExperimentManifest.from_json(mutated("observables.correlated_erasure", entries[:1]))
     assert single.observables.probe_names() == ("correlated_erasure",)
+    assert [mf.Observables.default_probe_name(i) for i in range(3)] == [
+        "correlated_erasure",
+        "correlated_erasure_1",
+        "correlated_erasure_2",
+    ]
     clash = entries + [{"couplings": [3], "name": "mine"}]
     with pytest.raises(ValueError, match="the probe name 'mine' is used twice"):
         ExperimentManifest.from_json(mutated("observables.correlated_erasure", clash))
-    clash2 = [{"couplings": [0]}, {"couplings": [1], "name": "correlated_erasure_0"}]
-    with pytest.raises(ValueError, match="used twice"):
+    clash2 = [{"couplings": [0]}, {"couplings": [1], "name": "correlated_erasure"}]
+    with pytest.raises(ValueError, match="the probe name 'correlated_erasure' is used twice"):
         ExperimentManifest.from_json(mutated("observables.correlated_erasure", clash2))
+    clash3 = [
+        {"couplings": [0]},
+        {"couplings": [1]},
+        {"couplings": [2], "name": "correlated_erasure_1"},
+    ]
+    with pytest.raises(ValueError, match="'correlated_erasure_1' is used twice"):
+        ExperimentManifest.from_json(mutated("observables.correlated_erasure", clash3))
+
+
+def test_the_correlated_probes_carry_the_resolved_names_and_fit_beside_the_runners_probes():
+    entries = [
+        {"couplings": [0]},
+        {"couplings": [1], "sizes": [2]},
+        {"couplings": [2], "name": "x"},
+    ]
+    m = ExperimentManifest.from_json(mutated("observables.correlated_erasure", entries))
+    probes = m.observables.correlated_probes(checkpoints=[0, 8])
+    assert tuple(p.name for p in probes) == m.observables.probe_names()
+    assert all(p.checkpoints == (0, 8) for p in probes)
+    for probe, entry, name in zip(
+        probes, m.observables.correlated_erasure, m.observables.probe_names(), strict=True
+    ):
+        assert probe == entry.probe(name=name, checkpoints=[0, 8])
+    # entry.probe() alone falls back to the engine default: two unnamed entries would clash
+    assert [e.probe().name for e in m.observables.correlated_erasure[:2]] == [
+        "correlated_erasure",
+        "correlated_erasure",
+    ]
+    # the runner's own probes keep the reserved names, so the engine accepts the whole set
+    cps = list(m.checkpoints(16, "0.1"))
+    fixed = [
+        mipt.code_dimension(),
+        mipt.tableau_snapshot("tableau_snapshot", checkpoints=cps),
+        mipt.contiguous_distance(checkpoints=cps),
+        mipt.erasure_first_failure(10, "erasure_first_failure", checkpoints=cps),
+        mipt.uncorrectable_region_counts(
+            name="uncorrectable_region_counts", budget=5000, checkpoints=cps
+        ),
+    ]
+    assert {p.name for p in fixed} <= set(mf.RESERVED_PROBE_NAMES)
+    assert mipt.code_snapshot("code_snapshot").name in mf.RESERVED_PROBE_NAMES
+    edges = [ident.build_graph(16, "0.1", 0, 17).edges]
+    spec = mipt.MonitoredCircuit(
+        **m.monitored_circuit_kwargs(16, "0.1", "0.1"),
+        edges=edges,
+        probes=[*fixed, *m.observables.correlated_probes(checkpoints=cps)],
+    )
+    assert len({p.name for p in spec.probes}) == len(spec.probes) == 8
+    # a correlated entry may not take one of those names (the engine would refuse the set)
+    for reserved in mf.RESERVED_PROBE_NAMES:
+        with pytest.raises(ValueError, match="is the name of a probe the runner adds"):
+            ExperimentManifest.from_json(mutated("observables.correlated_erasure.0.name", reserved))
 
 
 def test_uniform_erasure_can_be_switched_off_or_left_without_exact_counts():
@@ -1189,6 +1440,16 @@ ALLOWED = {
             "observables.correlated_erasure",
             EXAMPLE["observables"]["correlated_erasure"] + [{"couplings": [3], "name": "second"}],
         )
+    ],
+    # appending renames nothing: the recorded entry stays 'correlated_erasure'
+    "a second unnamed correlated entry": [
+        (
+            "observables.correlated_erasure",
+            EXAMPLE["observables"]["correlated_erasure"] + [{"couplings": [3]}],
+        )
+    ],
+    "the recorded correlated entry named by its own name": [
+        ("observables.correlated_erasure.0.name", "correlated_erasure")
     ],
     "storage": [("storage", {"graphs_per_unit": 4, "compression_level": 9})],
     "resources": [("resources", {"num_threads": 4, "max_unit_trajectories": 100})],
@@ -1280,6 +1541,11 @@ FORBIDDEN = {
         [("depth.layers", {"per_n": 4}), ("depth.checkpoints", {"list": [3]})],
         "T_max for n = 16 changed from 128 to 64: a revision may raise T_max",
     ),
+    # the horizon is checked size by size: n = 16 keeps its 128, n = 24 falls from 192
+    "lower T_max for one size only": (
+        [("depth.layers", {"table": {"16": 128, "24": 100}})],
+        "T_max for n = 24 changed from 192 to 100: a revision may raise T_max, not lower it",
+    ),
     "snapshots off": (
         [("observables.tableau_snapshots", False)],
         "observables.tableau_snapshots was recorded and cannot be switched off",
@@ -1298,11 +1564,27 @@ FORBIDDEN = {
     ),
     "correlated changed": (
         [("observables.correlated_erasure.0.couplings", [0, 1, 3])],
-        "observables.correlated_erasure[0] ('correlated_erasure') was recorded",
+        "observables.correlated_erasure[0] ('correlated_erasure') was recorded and the new "
+        "manifest gives this name other settings",
     ),
     "correlated removed": (
         [("observables.correlated_erasure", [])],
-        "was recorded and is missing or changed",
+        "was recorded and the new manifest has no probe of this name",
+    ),
+    # a new entry in front takes the position, and so the name, of the recorded one
+    "correlated entry inserted in front": (
+        [
+            (
+                "observables.correlated_erasure",
+                [{"couplings": [3]}] + EXAMPLE["observables"]["correlated_erasure"],
+            )
+        ],
+        "('correlated_erasure') was recorded and the new manifest names these settings "
+        "'correlated_erasure_1'",
+    ),
+    "correlated entry renamed": (
+        [("observables.correlated_erasure.0.name", "renamed")],
+        "('correlated_erasure') was recorded and the new manifest names these settings 'renamed'",
     ),
 }
 
@@ -1331,6 +1613,114 @@ def test_the_first_forbidden_change_in_the_documented_order_is_reported(manifest
 def test_check_extension_requires_manifests(manifest):
     with pytest.raises(TypeError, match="two ExperimentManifest"):
         check_extension(manifest, EXAMPLE)  # type: ignore[arg-type]
+
+
+def correlated(*entries) -> ExperimentManifest:
+    return with_changes(("observables.correlated_erasure", list(entries)))
+
+
+A_ENTRY = {"couplings": [0, 1], "sizes": [2, 4], "samples": 50}
+B_ENTRY = {"couplings": [0, 2], "sizes": [2, 4], "samples": 80}
+
+
+def test_a_recorded_correlated_probe_keeps_its_resolved_name():
+    # The resolved name keys a probe's random stream (mipt hashes it) and its stored values
+    # (v1.4 section 7.3: preserve probe names and versioned settings). Comparing settings alone
+    # would accept every case below that renames a recorded probe.
+    one = correlated(A_ENTRY)
+    two = correlated(A_ENTRY, B_ENTRY)
+    swapped = correlated(B_ENTRY, A_ENTRY)
+    assert one.observables.probe_names() == ("correlated_erasure",)
+    assert two.observables.probe_names() == ("correlated_erasure", "correlated_erasure_1")
+    # appending renames nothing, in any number
+    assert check_extension(one, two) is None
+    assert check_extension(one, correlated(A_ENTRY, B_ENTRY, {"couplings": [5]})) is None
+    assert check_extension(two, correlated(A_ENTRY, B_ENTRY, {"couplings": [5]})) is None
+    # naming an entry by the name it already has is not a change
+    assert check_extension(one, correlated({**A_ENTRY, "name": "correlated_erasure"})) is None
+    assert check_extension(correlated({**A_ENTRY, "name": "correlated_erasure"}), one) is None
+    # a swap of two unnamed entries swaps their names between different settings
+    message = check_extension(two, swapped)
+    assert message is not None
+    assert "observables.correlated_erasure[0] ('correlated_erasure') was recorded" in message
+    assert "names these settings 'correlated_erasure_1'" in message
+    # inserting in front, or naming a recorded entry otherwise, renames it
+    assert "names these settings 'correlated_erasure_1'" in check_extension(one, swapped)
+    assert "names these settings 'mine'" in check_extension(
+        one, correlated({**A_ENTRY, "name": "mine"})
+    )
+    assert "names these settings 'correlated_erasure'" in check_extension(
+        correlated({**A_ENTRY, "name": "mine"}), one
+    )
+    # the same name with other settings, and a removed entry
+    assert "gives this name other settings" in check_extension(one, correlated(B_ENTRY))
+    assert "('correlated_erasure_1') was recorded and the new manifest has no probe" in (
+        check_extension(two, one)
+    )
+    # moving a recorded entry is possible by naming it (an unnamed first entry would take the
+    # default name, so the entry in front is named too): 'correlated_erasure' stays A's
+    moved = correlated({**B_ENTRY, "name": "b"}, {**A_ENTRY, "name": "correlated_erasure"})
+    assert moved.observables.probe_names() == ("b", "correlated_erasure")
+    assert check_extension(one, moved) is None
+    assert (
+        "('correlated_erasure_1') was recorded and the new manifest names these settings 'b'"
+        in (check_extension(two, moved))
+    )
+    with pytest.raises(ValueError, match="the probe name 'correlated_erasure' is used twice"):
+        correlated(B_ENTRY, {**A_ENTRY, "name": "correlated_erasure"})
+
+
+def test_a_confirmatory_manifest_freezes_its_conditions_and_analysis():
+    # v1.4 section 9: the rate grid P(n, beta) is frozen before confirmatory runs; section 5.8:
+    # the peak rule is predeclared. An exploratory manifest may gain conditions (ALLOWED above).
+    base = [("label", "confirmatory")]
+    confirmed = with_changes(*base)
+    for changes, fragment in [
+        (
+            [("conditions.0.p", ["0.1", "0.15", "0.2", "0.25"])],
+            "condition (n = 16, beta = 0, p = 0.25) is new, but the manifest is labeled "
+            "'confirmatory': v1.4 section 9 freezes the rate grid",
+        ),
+        ([("conditions.0.n", [16, 24, 32])], "condition (n = 32, beta = 0, p = 0.1) is new"),
+        ([("conditions.0.beta", ["0", "0.1", "0.3"])], "(n = 16, beta = 0.3, p = 0.1) is new"),
+        (
+            [("analysis.peak.z", 2.0)],
+            "analysis changed from {'peak': {'rule': 'plateau', 'z': 1.0",
+        ),
+        ([("analysis.peak.sensitivity_z", [0, 1])], "a confirmatory manifest freezes its analysis"),
+        ([("analysis.bootstrap", 10)], "a confirmatory manifest freezes its analysis rules"),
+    ]:
+        message = check_extension(confirmed, with_changes(*base, *changes))
+        assert message is not None and fragment in message, message
+        # the same change is an extension of the exploratory manifest
+        assert check_extension(with_changes(), with_changes(*changes)) is None
+    # what does not touch the grid or the analysis rules stays allowed
+    for changes in [
+        [("trials.graphs", 40)],
+        [("trials.circuits_per_graph", 8)],
+        [("depth.layers", {"per_n": 16})],
+        [("depth.checkpoints", {"count": 23})],
+        [("storage", {"graphs_per_unit": 4, "compression_level": 9})],
+        [("resources", {"num_threads": 4, "max_unit_trajectories": 100})],
+        [
+            (
+                "observables.correlated_erasure",
+                EXAMPLE["observables"]["correlated_erasure"] + [{"couplings": [3]}],
+            )
+        ],
+    ]:
+        assert check_extension(confirmed, with_changes(*base, *changes)) is None, changes
+    # and a valid confirmatory chain has its effective schedule
+    longer = with_changes(*base, ("depth.layers", {"per_n": 16}))
+    assert set(confirmed.checkpoints(16, "0.1")) <= set(
+        effective_checkpoints([confirmed, longer], 16, "0.1")
+    )
+    with pytest.raises(ValueError, match="revision 1 does not extend revision 0: condition"):
+        effective_checkpoints(
+            [confirmed, with_changes(*base, ("conditions.0.p", ["0.1", "0.15", "0.2", "0.3"]))],
+            16,
+            "0.1",
+        )
 
 
 def test_a_chain_of_revisions_is_checked_pairwise(manifest):
@@ -1498,13 +1888,16 @@ def checkpoint_rules(draw, sizes, t_max):
 
 
 @st.composite
-def revision_chains(draw):
-    """Valid chains of 1 to 4 revisions: horizons never fall, sizes may be added, any rule."""
+def revision_drafts(draw):
+    """Valid chains of 1 to 4 revisions, with what each was drawn from: ``(manifest, sizes,
+    horizons)``. Horizons never fall (each size's rises by 0 to 30, independently of the other
+    sizes), sizes may be added, any rule."""
     sizes = draw(st.lists(st.sampled_from(POOL), min_size=1, max_size=3, unique=True))
     t_max = {n: draw(st.integers(1, 40)) for n in sizes}
     chain = []
     for _ in range(draw(st.integers(1, 4))):
-        chain.append(chain_manifest(sizes, t_max, draw(checkpoint_rules(sizes, t_max))))
+        rule = draw(checkpoint_rules(sizes, t_max))
+        chain.append((chain_manifest(sizes, t_max, rule), tuple(sizes), dict(t_max)))
         t_max = {n: t + draw(st.integers(0, 30)) for n, t in t_max.items()}
         spare = [n for n in POOL if n not in sizes]
         if spare and draw(st.booleans()):
@@ -1512,6 +1905,11 @@ def revision_chains(draw):
             sizes = sorted([*sizes, added])
             t_max[added] = draw(st.integers(1, 40))
     return chain
+
+
+def revision_chains():
+    """The manifests of :func:`revision_drafts`."""
+    return revision_drafts().map(lambda drafts: [m for m, _, _ in drafts])
 
 
 @PROPERTY
@@ -1541,16 +1939,34 @@ def test_effective_checkpoints_properties(chain):
 
 
 @PROPERTY
-@given(revision_chains())
-def test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension(chain):
-    if len(chain) < 2:
+@given(revision_drafts())
+def test_a_chain_in_the_wrong_order_is_refused_exactly_when_it_is_not_an_extension(drafts):
+    # The oracle is computed from what the revisions were drawn from, not by check_extension:
+    # read backward, the second revision extends the first exactly when the first has every
+    # size of the second and no size's horizon falls. Every other field is the same in both.
+    if len(drafts) < 2:
         return
-    first, second = chain[0], chain[1]
-    n = first.conditions()[0].n
-    if check_extension(second, first) is None:  # equal horizons and conditions: either order
-        assert effective_checkpoints([second, first], n, "0.1") == tuple(
-            sorted(set(first.checkpoints(n, "0.1")) | set(second.checkpoints(n, "0.1")))
+    (first, first_sizes, first_t), (second, second_sizes, second_t) = drafts[0], drafts[1]
+    extends = set(second_sizes) <= set(first_sizes) and all(
+        first_t[n] >= second_t[n] for n in second_sizes
+    )
+    message = check_extension(second, first)
+    assert (message is None) == extends, message
+    if not extends:
+        lowered = [n for n in second_sizes if n in first_sizes and first_t[n] < second_t[n]]
+        missing = [n for n in second_sizes if n not in first_sizes]
+        expected = (  # check_extension reports the smallest size, conditions before horizons
+            f"condition (n = {min(missing)},"
+            if missing
+            else f"T_max for n = {min(lowered)} changed"
         )
-    else:
-        with pytest.raises(ValueError, match="revision 1 does not extend revision 0"):
-            effective_checkpoints([second, first], n, "0.1")
+        assert message is not None and expected in message, message
+    for n in first_sizes:  # every size of the last revision, not only the first
+        if extends:
+            own = [m.checkpoints(n, "0.1") for m in (second, first) if m.has_condition(n, "0.1")]
+            assert effective_checkpoints([second, first], n, "0.1") == tuple(
+                sorted(set().union(*own))
+            )
+        else:
+            with pytest.raises(ValueError, match="revision 1 does not extend revision 0"):
+                effective_checkpoints([second, first], n, "0.1")

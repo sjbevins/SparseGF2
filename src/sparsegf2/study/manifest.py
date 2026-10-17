@@ -19,8 +19,8 @@ Sections (all keys are listed in ``docs/study/02-identity-seeds-and-manifest.md`
   every size covered, every entry within $[0, T_{\\max}]$). The sparse checkpoints
   $S(n, \\beta)$ of a revision always include $0, 1, T_{\\max}$; the global checkpoints of the
   engine are every layer.
-* ``trials``: graphs $G_*$, circuits per graph $C$, the frozen circuit index stride $s \\ge C$
-  and the measurement replicas $R = 1$ (design D1).
+* ``trials``: graphs $N_{\\mathrm{graphs}}$, circuits per graph $C$, the frozen circuit index
+  stride $\\bar C \\ge C$ and the measurement replicas $R = 1$ (design D1).
 * ``seeds``: ``master_graph_seed``, ``master_circuit_seed``, ``gate_mode``. The seeds of
   graphs and runs are domain-tagged tuples that name the condition (ruling R-SEED,
   :func:`~sparsegf2.study.identity.graph_seed` and ``run_seed``), so the two master seeds may
@@ -42,18 +42,24 @@ manifest                              probe
 ``observables.contiguous_distance``   ``contiguous_distance(checkpoints=checkpoints(n, beta))``
 ``uniform_erasure.samples``           ``erasure_first_failure(samples, checkpoints=...)``
 ``uniform_erasure.exact_budget``      ``uncorrectable_region_counts(budget=..., checkpoints=...)``
-``correlated_erasure[i]``             ``correlated_erasure(couplings, sizes, samples, ...)``
+``correlated_erasure``                ``observables.correlated_probes(checkpoints=...)``
 ====================================  ==========================================================
 
 ``checkpoints(n, beta)`` in the table stands for the schedule used for work: while there is
 one revision it is :meth:`ExperimentManifest.checkpoints`, and across revisions it is
-:func:`effective_checkpoints` (below).
+:func:`effective_checkpoints` (below). The probes of the first five rows keep the names in
+:data:`RESERVED_PROBE_NAMES`, which no ``correlated_erasure`` entry may take. Each correlated
+entry's probe is named by :meth:`Observables.probe_names` (its ``name``, or a default fixed by
+its position that appending entries never changes); the name keys the probe's random stream
+and its stored values, so a revision keeps the name of every recorded probe.
 
 Revisions. A store keeps every manifest revision. :func:`check_extension` says whether a new
 manifest only extends an old one (more conditions, rates, graphs, circuits, a larger $T_{\\max}$,
 any other checkpoint rule, more observables) or changes something that would make the recorded
 data inconsistent (seeds, ``gate_mode``, the stride, the protocol, a lower $T_{\\max}$, the
-settings of a recorded observable). Ruling R-CK (design §3): revision $r$ has its own schedule
+settings or the name of a recorded observable). A manifest labeled ``"confirmatory"`` also
+freezes its conditions and its ``analysis`` rules (v1.4 §5.8, §9: the rate grid is frozen and
+the peak rule predeclared before confirmatory runs). Ruling R-CK (design §3): revision $r$ has its own schedule
 $S_r(n, \\beta)$ from its own rule and $T_{\\max}$, and the schedule used for work under it is the
 union $E_r = (S_1 \\cup \\dots \\cup S_r) \\cap [0, T_{\\max,r}]$, computed by
 :func:`effective_checkpoints`. Because $T_{\\max}$ never decreases along a valid chain,
@@ -89,6 +95,7 @@ from sparsegf2.study.identity import (
 
 __all__ = [
     "MANIFEST_SCHEMA",
+    "RESERVED_PROBE_NAMES",
     "Analysis",
     "CheckpointRule",
     "Condition",
@@ -119,6 +126,19 @@ LABELS = ("exploratory", "confirmatory")
 
 #: Most checkpoints the geometric rule is asked for (it is exact big-integer arithmetic).
 MAX_CHECKPOINT_COUNT = 1000
+
+#: The names of the probes the runner adds beside the ``correlated_erasure`` entries (the table
+#: of the module docstring; ``code_snapshot`` replaces ``tableau_snapshot`` when snapshots are
+#: off). A ``correlated_erasure`` entry may not take one of them: the engine refuses two probes
+#: with one name, and only when a work unit runs.
+RESERVED_PROBE_NAMES = (
+    "code_dimension",
+    "code_snapshot",
+    "contiguous_distance",
+    "erasure_first_failure",
+    "tableau_snapshot",
+    "uncorrectable_region_counts",
+)
 
 _SIZE_RANGE = re.compile(r"\s*([0-9]+)\s*:\s*([0-9]+)\s*(?::\s*([0-9]+)\s*)?")
 
@@ -473,7 +493,7 @@ class Depth:
 
 @dataclass(frozen=True)
 class Trials:
-    """Graphs $G_*$, circuits per graph $C$, the circuit index stride $s$ and replicas $R$."""
+    """Graphs $N_{\\mathrm{graphs}}$, circuits per graph $C$, the stride $\\bar C$ and replicas $R$."""
 
     graphs: int
     circuits_per_graph: int
@@ -600,14 +620,18 @@ class UniformErasure:
 class CorrelatedErasure:
     """One ``correlated_erasure`` probe (v1.4 §5.7): the arguments of ``mipt.correlated_erasure``.
 
-    ``sizes`` is ``None`` (every $m = 1..n-1$), a list of sizes or a range string
-    ``"a:b[:step]"`` (Python slice semantics). ``name`` is the probe name; with several
-    entries the unnamed ones are ``correlated_erasure_0``, ``correlated_erasure_1``, ... (see
-    :meth:`Observables.probe_names`).
+    ``couplings`` are $J \\ge 0$: v1.4 §5.7 defines the region law
+    $Q_{G,J}(A \\mid m) \\propto e^{-J\\,\\lvert\\partial A\\rvert}$ for $J \\ge 0$ only (the engine
+    also samples $J < 0$, which the study does not define). ``sizes`` is ``None`` (every
+    $m = 1..n-1$) or the tuple of sizes in the order given; :meth:`from_dict` also reads a range
+    string ``"a:b[:step]"`` (Python slice semantics) and stores its expansion, so every spelling
+    of the same sizes has one canonical form and one digest (a range does not depend on $n$).
+    ``name`` is the probe name, which may not be one of :data:`RESERVED_PROBE_NAMES`; an unnamed
+    entry is named by its position (:meth:`Observables.probe_names`).
     """
 
     couplings: tuple[float, ...]
-    sizes: tuple[int, ...] | str | None = None
+    sizes: tuple[int, ...] | None = None
     samples: int = 100
     thin: int = 1
     geometry: str = "interaction"
@@ -639,16 +663,31 @@ class CorrelatedErasure:
             _real(v, f"{where}.couplings[{i}]")
             for i, v in enumerate(_list(d["couplings"], f"{where}.couplings"))
         )
-        sizes: tuple[int, ...] | str | None
+        for i, j in enumerate(couplings):
+            if j < 0:
+                raise ValueError(
+                    f"{where}.couplings[{i}]: must be at least 0, got {j:g}: v1.4 section 5.7 "
+                    "defines the correlated erasure law Q_(G,J) for J >= 0 only"
+                )
+        sizes: tuple[int, ...] | None
         raw_sizes = d.get("sizes")
         if raw_sizes is None:
             sizes = None
         elif isinstance(raw_sizes, str):
-            if not _SIZE_RANGE.fullmatch(raw_sizes):
+            match = _SIZE_RANGE.fullmatch(raw_sizes)
+            if not match:
                 raise ValueError(
                     f"{where}.sizes: expected null, a list or a range such as '1:33', got {raw_sizes!r}"
                 )
-            sizes = raw_sizes.strip()
+            step = int(match.group(3) or 1)
+            if step < 1:
+                raise ValueError(f"{where}.sizes: a range step must be positive, got {raw_sizes!r}")
+            sizes = tuple(range(int(match.group(1)), int(match.group(2)), step))
+            if not sizes:
+                raise ValueError(
+                    f"{where}.sizes: the range {raw_sizes!r} is empty: give at least one size "
+                    "(or null for every size 1..n-1)"
+                )
         else:
             sizes = tuple(
                 _int(v, f"{where}.sizes[{i}]", minimum=1)
@@ -666,6 +705,11 @@ class CorrelatedErasure:
         name = d.get("name")
         if name is not None:
             name = check_experiment_id(name, f"{where}.name")
+            if name in RESERVED_PROBE_NAMES:
+                raise ValueError(
+                    f"{where}.name: {name!r} is the name of a probe the runner adds itself "
+                    f"(the reserved names are {list(RESERVED_PROBE_NAMES)}); choose another name"
+                )
         entry = cls(
             couplings=couplings,
             sizes=sizes,
@@ -692,25 +736,22 @@ class CorrelatedErasure:
         return entry
 
     def expand_sizes(self, n: int) -> tuple[int, ...]:
-        """The erasure sizes for ``n`` qubits: ``None`` is $1..n-1$, a range string is expanded."""
+        """The erasure sizes for ``n`` qubits: ``None`` is $1..n-1$, else the stored sizes."""
         if self.sizes is None:
             return tuple(range(1, n))
-        if isinstance(self.sizes, str):
-            match = _SIZE_RANGE.fullmatch(self.sizes)
-            assert match is not None, "validated at parse time"
-            step = int(match.group(3) or 1)
-            if step < 1:
-                raise ValueError(f"sizes {self.sizes!r}: a range step must be positive")
-            return tuple(range(int(match.group(1)), int(match.group(2)), step))
-        return self.sizes
+        return tuple(self.sizes)
 
     def probe(self, *, name: str | None = None, checkpoints: Any = None) -> mipt.Probe:
-        """The ``mipt.correlated_erasure`` probe these settings describe (the runner's call)."""
+        """The ``mipt.correlated_erasure`` probe these settings describe, named ``name``.
+
+        Without ``name`` the probe takes the entry's own ``name``, or the engine default
+        ``"correlated_erasure"``, which is the manifest's name only for the first entry: the
+        runner builds the probes of a manifest with :meth:`Observables.correlated_probes`, which
+        passes each entry's resolved name (:meth:`Observables.probe_names`).
+        """
         return mipt.correlated_erasure(
             list(self.couplings),
-            None
-            if self.sizes is None
-            else (self.sizes if isinstance(self.sizes, str) else list(self.sizes)),
+            None if self.sizes is None else list(self.sizes),
             self.samples,
             name or self.name,
             burn_in=self.burn_in,
@@ -726,7 +767,7 @@ class CorrelatedErasure:
     def to_dict(self) -> dict[str, Any]:
         return {
             "couplings": list(self.couplings),
-            "sizes": list(self.sizes) if isinstance(self.sizes, tuple) else self.sizes,
+            "sizes": None if self.sizes is None else list(self.sizes),
             "samples": self.samples,
             "thin": self.thin,
             "geometry": self.geometry,
@@ -793,13 +834,29 @@ class Observables:
             )
         return observables
 
+    @staticmethod
+    def default_probe_name(position: int) -> str:
+        """The name of an unnamed ``correlated_erasure`` entry at ``position``:
+        ``correlated_erasure`` for the first (the engine's default name) and
+        ``correlated_erasure_<i>`` for the entry at position $i \\ge 1$. It depends on the position
+        alone, not on the number of entries, so appending entries renames nothing."""
+        return "correlated_erasure" if position == 0 else f"correlated_erasure_{position}"
+
     def probe_names(self) -> tuple[str, ...]:
-        """The names of the ``correlated_erasure`` probes: ``name``, else ``correlated_erasure``
-        for a single entry or ``correlated_erasure_<i>`` among several."""
-        count = len(self.correlated_erasure)
+        """The resolved names of the ``correlated_erasure`` probes: each entry's ``name``, else
+        :meth:`default_probe_name` of its position. The name keys the probe's random stream
+        (``mipt``: the hash of the name) and its stored values, so it is part of what a revision
+        must keep (:func:`check_extension`)."""
         return tuple(
-            e.name or ("correlated_erasure" if count == 1 else f"correlated_erasure_{i}")
-            for i, e in enumerate(self.correlated_erasure)
+            e.name or self.default_probe_name(i) for i, e in enumerate(self.correlated_erasure)
+        )
+
+    def correlated_probes(self, checkpoints: Any = None) -> tuple[mipt.Probe, ...]:
+        """The engine probes of the ``correlated_erasure`` entries, each under its resolved name
+        (:meth:`probe_names`) and with ``checkpoints`` (the runner's call)."""
+        return tuple(
+            entry.probe(name=name, checkpoints=checkpoints)
+            for entry, name in zip(self.correlated_erasure, self.probe_names(), strict=True)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -953,10 +1010,12 @@ def _refuse_constant(name: str) -> Any:
 def _distinct_seed_words(tokens: Iterable[Token], what: str) -> None:
     """Refuse two different tokens whose seed words (:func:`token_words`) coincide.
 
-    The words of $\\beta$ (and, with ``gate_mode="independent"``, of $p$) name the condition
-    inside every seed, so a collision of two 64-bit hashes would give two conditions one seed.
-    It has probability $2^{-64}$ for a given pair; refusing it makes "different conditions have
-    different seeds" a fact about every accepted manifest and not a likelihood.
+    The words of $\\beta$ name the condition inside every graph and run seed, and those of $p$
+    inside the run seeds of ``gate_mode="independent"`` and the region seeds of the sampled
+    observables (``study/observables.py``, in both modes), so a collision of two 64-bit hashes
+    would give two conditions one seed. It has probability $2^{-64}$ for a given pair; refusing
+    it makes "different conditions have different seeds" a fact about every accepted manifest
+    and not a likelihood.
     """
     seen: dict[tuple[int, int], Token] = {}
     for token in tokens:
@@ -969,17 +1028,119 @@ def _distinct_seed_words(tokens: Iterable[Token], what: str) -> None:
             )
 
 
+def _reparsed(value: Any, cls: Any, where: str, *, compare: bool = True) -> Any:
+    """``value``, a section of class ``cls``, read back by ``cls.from_dict`` from its own
+    ``to_dict()``: every rule of strict reading (types, ranges, $n \\ge 5$, the stride, the
+    replicas of design D1, seed ranges, ...) then also holds for a section built directly or
+    with ``dataclasses.replace``. With ``compare`` the section must also be in the canonical
+    form reading gives (sorted, deduplicated, defaults filled in), so that its canonical JSON
+    reads back as the same manifest."""
+    if not isinstance(value, cls):
+        raise ValueError(f"{where}: expected a {cls.__name__}, got {_kind(value)}")
+    try:
+        data = value.to_dict()
+    except (AttributeError, TypeError) as exc:
+        raise ValueError(
+            f"{where}: a field of this {cls.__name__} has the wrong type ({exc})"
+        ) from None
+    again = cls.from_dict(data, where)
+    if compare and again != value:
+        raise ValueError(
+            f"{where}: {value!r} is not in the canonical form that reading it gives ({again!r}); "
+            "build the manifest with ExperimentManifest.from_json"
+        )
+    return again
+
+
+def _check_sections(manifest: ExperimentManifest) -> None:
+    """Apply the rules of each section's ``from_dict`` to the sections of ``manifest`` (the
+    constructor's first step), and replace its blocks by their validated form."""
+    blocks = manifest.blocks
+    if isinstance(blocks, (str, bytes)) or not isinstance(blocks, Sequence) or not blocks:
+        raise ValueError("manifest.conditions: give a non-empty tuple of ConditionBlock objects")
+    object.__setattr__(
+        manifest,
+        "blocks",
+        tuple(
+            _reparsed(b, ConditionBlock, f"manifest.conditions[{i}]", compare=False)
+            for i, b in enumerate(blocks)
+        ),
+    )
+    sections: tuple[tuple[str, Any], ...] = (
+        ("depth", Depth),
+        ("trials", Trials),
+        ("seeds", Seeds),
+        ("dynamics", Dynamics),
+        ("observables", Observables),
+        ("storage", Storage),
+        ("resources", Resources),
+        ("analysis", Analysis),
+    )
+    for name, cls in sections:
+        _reparsed(getattr(manifest, name), cls, f"manifest.{name}")
+
+
+class _Resolved(NamedTuple):
+    """The resolved conditions of a manifest and their index by $(n, \\beta)$ (computed once)."""
+
+    conditions: tuple[Condition, ...]
+    by_pair: dict[tuple[int, Token], Condition]
+
+
+def _resolve_conditions(blocks: Sequence[ConditionBlock]) -> _Resolved:
+    """The conditions of ``blocks``: sorted by $n$, then $\\beta$, the rates of each pair the
+    sorted union over the blocks; a repeated $(n, \\beta, p)$ and two tokens with one float64
+    are refused."""
+    rates: dict[tuple[int, Token], dict[Token, None]] = {}
+    floats: dict[tuple[int, float], Token] = {}
+    for block in blocks:
+        for n in block.n:
+            for beta in block.beta:
+                seen = floats.setdefault((n, beta.float64), beta)
+                if seen != beta:
+                    raise ValueError(
+                        f"manifest.conditions: beta = {seen} and beta = {beta} are two tokens of "
+                        f"one float64 ({beta.hex}), the value the generator receives: they would "
+                        f"be one rewiring probability under two names at n = {n}; keep one of them"
+                    )
+                bucket = rates.setdefault((n, beta), {})
+                for p in block.p:
+                    if p in bucket:
+                        raise ValueError(
+                            f"manifest.conditions: (n = {n}, beta = {beta}, p = {p}) appears twice"
+                        )
+                    bucket[p] = None
+    out = []
+    for (n, beta), bucket in sorted(rates.items()):
+        by_float: dict[float, Token] = {}
+        for p in bucket:
+            other = by_float.setdefault(p.float64, p)
+            if other != p:
+                raise ValueError(
+                    f"manifest.conditions: p = {other} and p = {p} are two tokens of one float64 "
+                    f"({p.hex}), the measurement threshold the engine receives: they would be one "
+                    f"rate under two names (n = {n}, beta = {beta}), and in gate_mode 'shared' "
+                    "the very same trajectories; keep one of them"
+                )
+        out.append(Condition(n, beta, tuple(sorted(bucket))))
+    return _Resolved(tuple(out), {(c.n, c.beta): c for c in out})
+
+
 @dataclass(frozen=True)
 class ExperimentManifest:
     """The immutable description of one study (see the module docstring).
 
     Build it with :meth:`from_json` (a dict, JSON text or a ``Path``). ``to_json()`` is the
-    canonical text and ``digest()`` its SHA-256. The constructor validates the cross-field
-    rules: no duplicate condition, a layer table and a checkpoint table that cover exactly the
-    sizes in use, table entries within $[0, T_{\\max}(n)]$, correlated-erasure sizes within
-    $[1, n - 1]$, an exact-count budget of at least $n$, and tokens whose 64-bit seed hashes are
-    all different (so that different conditions have different seeds; see ``graph_seed``). The
-    two master seeds may be equal: graph seeds and run seeds carry different domain tags.
+    canonical text and ``digest()`` its SHA-256. The constructor first reads every section back
+    through its ``from_dict`` (so a manifest built directly or with ``dataclasses.replace`` obeys
+    the same rules as one read from JSON, and its canonical JSON reads back as itself), then
+    validates the cross-field rules: no duplicate condition, a layer table and a checkpoint
+    table that cover exactly the sizes in use, table entries within $[0, T_{\\max}(n)]$,
+    correlated-erasure sizes within $[1, n - 1]$, an exact-count budget of at least $n$, and
+    tokens ($\\beta$ and $p$) whose 64-bit seed hashes are all different (so that different
+    conditions have different seeds; see ``graph_seed``). The two master seeds may be equal:
+    graph seeds and run seeds carry different domain tags. The resolved conditions are computed
+    once and indexed by $(n, \\beta)$.
     """
 
     experiment_id: str
@@ -996,6 +1157,7 @@ class ExperimentManifest:
     schema: str = MANIFEST_SCHEMA
 
     def __post_init__(self) -> None:
+        _check_sections(self)  # the rules of from_dict, also for direct construction and replace
         if self.schema != MANIFEST_SCHEMA:
             raise ValueError(
                 f"manifest.schema: this version reads {MANIFEST_SCHEMA!r}, got {self.schema!r}"
@@ -1005,8 +1167,7 @@ class ExperimentManifest:
         conditions = self.conditions()  # refuses duplicates
         object.__setattr__(self, "blocks", _canonical_blocks(conditions))
         _distinct_seed_words((c.beta for c in conditions), "beta")
-        if self.seeds.gate_mode == "independent":
-            _distinct_seed_words((p for c in conditions for p in c.rates), "p")
+        _distinct_seed_words((p for c in conditions for p in c.rates), "p")
         sizes = sorted({c.n for c in conditions})
         if self.depth.layers.kind == "table":
             listed = [n for n, _ in self.depth.layers.table]
@@ -1060,13 +1221,21 @@ class ExperimentManifest:
         """Read a manifest from a dict, from JSON text or from a file (a ``pathlib.Path``).
 
         Unknown keys, duplicate keys, wrong types and out-of-range values are refused with a
-        message that names the field (``manifest.trials.graphs: ...``).
+        message that names the field (``manifest.trials.graphs: ...``). A file is read as UTF-8,
+        with or without a byte-order mark (Windows PowerShell 5.1 writes one).
         """
         if isinstance(source, Path):
             try:
-                text = source.read_text(encoding="utf-8")
-            except OSError as exc:
-                raise ValueError(f"manifest: cannot read {source}: {exc.strerror or exc}") from None
+                text = source.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeDecodeError) as exc:
+                reason = exc.strerror if isinstance(exc, OSError) else None
+                raise ValueError(f"manifest: cannot read {source}: {reason or exc}") from None
+            if not text.lstrip().startswith("{"):
+                start = text.lstrip()[:20]
+                raise ValueError(
+                    f"manifest: the file {source} does not contain a JSON object (it starts "
+                    f"with {start!r}, not '{{')"
+                )
             return cls.from_json(text)
         if isinstance(source, str):
             if not source.lstrip().startswith("{"):
@@ -1163,54 +1332,36 @@ class ExperimentManifest:
         """The resolved conditions $(n, \\beta, [p, \\ldots])$ in a stable order.
 
         Sorted by $n$, then $\\beta$; the rates of each pair are the sorted union over the
-        blocks. A repeated $(n, \\beta, p)$, and two tokens with the same float64, are refused:
-        they would run identical trajectories under two names.
+        blocks. A repeated $(n, \\beta, p)$ is refused, and so are two tokens of one float64:
+        the engine receives only the float, so they would be one condition under two names (in
+        ``gate_mode="shared"`` two rates of one float64 would even run the same trajectories).
+        Computed once per manifest (a new list is returned).
         """
-        rates: dict[tuple[int, Token], dict[Token, None]] = {}
-        floats: dict[tuple[int, float], Token] = {}
-        for block in self.blocks:
-            for n in block.n:
-                for beta in block.beta:
-                    seen = floats.setdefault((n, beta.float64), beta)
-                    if seen != beta:
-                        raise ValueError(
-                            f"manifest.conditions: beta = {seen} and beta = {beta} are the same "
-                            f"float64 ({beta.hex}) and would build identical graphs for n = {n}"
-                        )
-                    bucket = rates.setdefault((n, beta), {})
-                    for p in block.p:
-                        if p in bucket:
-                            raise ValueError(
-                                f"manifest.conditions: (n = {n}, beta = {beta}, p = {p}) appears twice"
-                            )
-                        bucket[p] = None
-        out = []
-        for (n, beta), bucket in sorted(rates.items()):
-            by_float: dict[float, Token] = {}
-            for p in bucket:
-                other = by_float.setdefault(p.float64, p)
-                if other != p:
-                    raise ValueError(
-                        f"manifest.conditions: p = {other} and p = {p} are the same float64 "
-                        f"({p.hex}) and would run identical trajectories (n = {n}, beta = {beta})"
-                    )
-            out.append(Condition(n, beta, tuple(sorted(bucket))))
-        return out
+        return list(self._resolved().conditions)
+
+    def _resolved(self) -> _Resolved:
+        """The conditions and their index, resolved at the first call and kept (the manifest is
+        frozen, so they never change; the cache is not a field and plays no part in equality)."""
+        cached = self.__dict__.get("_resolved_conditions")
+        if cached is None:
+            cached = _resolve_conditions(self.blocks)
+            object.__setattr__(self, "_resolved_conditions", cached)
+        return cached
 
     def _condition(self, n: Any, beta: Any, p: Any = None) -> tuple[int, Token, Token | None]:
         n = _int(n, "n")
         beta_t = _token(beta, "beta")
         p_t = None if p is None else _token(p, "p")
-        for c in self.conditions():
-            if c.n == n and c.beta == beta_t and (p_t is None or p_t in c.rates):
-                return n, beta_t, p_t
+        c = self._resolved().by_pair.get((n, beta_t))
+        if c is not None and (p_t is None or p_t in c.rates):
+            return n, beta_t, p_t
         what = f"n = {n}, beta = {beta_t}" + ("" if p_t is None else f", p = {p_t}")
         raise ValueError(f"({what}) is not a condition of experiment {self.experiment_id!r}")
 
     def rates(self, n: int, beta: Token | str | float) -> tuple[Token, ...]:
         """The sorted rates run at $(n, \\beta)$."""
         n, beta_t, _ = self._condition(n, beta)
-        return next(c.rates for c in self.conditions() if c.n == n and c.beta == beta_t)
+        return self._resolved().by_pair[(n, beta_t)].rates
 
     def layers(self, n: int, beta: Token | str | float) -> int:
         """The horizon $T_{\\max}(n, \\beta)$ in layers (the same for every rate; v1.4 §1)."""
@@ -1234,18 +1385,18 @@ class ExperimentManifest:
         """Whether $(n, \\beta)$ is a condition of this manifest (with at least one rate)."""
         n = _int(n, "n")
         beta_t = _token(beta, "beta")
-        return any(c.n == n and c.beta == beta_t for c in self.conditions())
+        return (n, beta_t) in self._resolved().by_pair
 
     # -- seeds and keys -----------------------------------------------------------------
 
     @property
     def stride(self) -> int:
-        """The frozen circuit index stride $s$."""
+        """The frozen circuit index stride $\\bar C$ (trajectory $u = g \\bar C + c$)."""
         return self.trials.circuit_index_stride
 
     @property
     def trajectories_per_condition(self) -> int:
-        """$G_* C$ trajectories at every $(n, \\beta, p)$."""
+        """$N_{\\mathrm{graphs}}\\, C$ trajectories at every $(n, \\beta, p)$."""
         return self.trials.graphs * self.trials.circuits_per_graph
 
     def graph_seed(self, n: int, beta: Token | str | float, g: int) -> tuple[int, ...]:
@@ -1343,6 +1494,15 @@ class ExperimentManifest:
 def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | None:
     """``None`` if ``new`` only extends ``old``, else a message naming the first forbidden change.
 
+    Two rules sharpen the list of design §3 below. A ``correlated_erasure`` entry is identified by
+    its resolved name (:meth:`Observables.probe_names`) together with its settings: the name keys
+    the probe's random stream and its stored values (v1.4 §7.3: "preserve probe names and
+    versioned settings"), so a revision that renames a recorded probe, or gives its name to other
+    settings, is refused, whether it does so by reordering or by naming entries. And a manifest
+    labeled ``"confirmatory"`` freezes its conditions and its ``analysis`` section: v1.4 §9
+    freezes the rate grid $\\mathcal P(n, \\beta)$ before confirmatory runs and v1.4 §5.8
+    predeclares the peak rule (to change them, start a new experiment).
+
     Allowed (design §3, "Revisions" and ruling R-CK): more conditions and rates (every old
     $(n, \\beta, p)$ stays), more graphs, more circuits per graph (up to the frozen stride), a
     larger $T_{\\max}$ (per size; a lower one is forbidden), **any** change of the checkpoint
@@ -1419,6 +1579,24 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
                     f"condition (n = {c.n}, beta = {c.beta}, p = {p}) of the old manifest is missing "
                     "from the new one: a revision may add conditions and rates, not remove them"
                 )
+    if old.label == "confirmatory":
+        old_rates = {(c.n, c.beta): set(c.rates) for c in old_conditions}
+        for c in new.conditions():
+            for p in c.rates:
+                if p not in old_rates.get((c.n, c.beta), ()):
+                    return (
+                        f"condition (n = {c.n}, beta = {c.beta}, p = {p}) is new, but the manifest "
+                        "is labeled 'confirmatory': v1.4 section 9 freezes the rate grid P(n, beta) "
+                        "before confirmatory runs (start a new experiment to change it)"
+                    )
+        if old.analysis != new.analysis:
+            return changed(
+                "analysis",
+                old.analysis.to_dict(),
+                new.analysis.to_dict(),
+                "a confirmatory manifest freezes its analysis rules (v1.4 sections 5.8 and 9: the "
+                "peak rule is predeclared)",
+            )
     for c in old_conditions:
         before, after = old.layers(c.n, c.beta), new.layers(c.n, c.beta)
         if after < before:
@@ -1436,14 +1614,27 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
             None if b.uniform_erasure is None else b.uniform_erasure.to_dict(),
             "the settings of a recorded observable are frozen (add a new observable instead)",
         )
-    new_entries = {canonical_json(e.to_dict()) for e in b.correlated_erasure}
-    for i, entry in enumerate(a.correlated_erasure):
-        if canonical_json(entry.to_dict()) not in new_entries:
-            return (
-                f"observables.correlated_erasure[{i}] ({a.probe_names()[i]!r}) was recorded and is "
-                "missing or changed in the new manifest: the settings of a recorded observable are "
-                "frozen (add a new entry with another name instead)"
-            )
+
+    def settings(entry: CorrelatedErasure, name: str | None) -> str:
+        return canonical_json({**entry.to_dict(), "name": name})
+
+    new_named = dict(zip(b.probe_names(), b.correlated_erasure, strict=True))
+    for i, (name, entry) in enumerate(zip(a.probe_names(), a.correlated_erasure, strict=True)):
+        if name in new_named and settings(new_named[name], name) == settings(entry, name):
+            continue
+        moved = [m for m, e in new_named.items() if settings(e, None) == settings(entry, None)]
+        if moved:
+            detail = f"names these settings {moved[0]!r}"
+        elif name in new_named:
+            detail = "gives this name other settings"
+        else:
+            detail = "has no probe of this name"
+        return (
+            f"observables.correlated_erasure[{i}] ({name!r}) was recorded and the new manifest "
+            f"{detail}: the settings and the name of a recorded probe are frozen (the name keys "
+            "its random stream and its stored values; an unnamed entry is named by its position, "
+            f"so give it 'name': {name!r} to keep its name; add other settings as a new entry)"
+        )
     return None
 
 
