@@ -59,6 +59,10 @@ follow):
    ``stop_when_purified`` ends the trajectory there, and later evaluations
    record each probe's exact value for a pure reference (k = 0, nothing lost,
    first failure n + 1), or NaN for entanglement probes, which keep changing.
+5. **First passages.** With a reference, the code dimension k is also read
+   after every layer, whatever the checkpoints, and
+   ``result.first_passage[t, ell]`` records the exact first layer with
+   ``k <= ell`` (``ell = 0 .. n``; -1 if not reached by ``final_layer``).
 
 A "layer" is exactly one step 3, never rescaled. Everything runs phase-free:
 entanglement does not depend on measurement outcomes.
@@ -79,12 +83,15 @@ failure probability Phi_C(e) under independent erasure, and e_delta),
 ``correlated_erasure`` (P_{C,G,J}(m): erasures of m qubits that cluster on a
 graph, drawn with probability proportional to exp(-J b_G(A)), per coupling J)
 and ``code_snapshot`` (the code itself, for
-:class:`sparsegf2.codes.StabilizerCode`).
+:class:`sparsegf2.codes.StabilizerCode`). ``tableau_snapshot`` saves the whole
+joint state instead: every phase-free stabilizer generator over the system and
+the reference qubits, as a :class:`sparsegf2.tableau.PhaseFreeTableau`.
 
 Randomness: trajectory ``t`` of ``run(..., seed=s)`` is a deterministic function
 of ``(spec, s, t)``, independent of the thread count and of the other
-trajectories, so ensembles can be split into chunks (``first_trajectory``) and
-merged without changing any result. The measurement mask uses one uniform draw per
+trajectories, so ensembles can be split into chunks (``first_trajectory``, or
+any list of trajectories with ``indices``) and merged without changing any
+result. The measurement mask uses one uniform draw per
 qubit per layer whatever the rate, so runs at different ``measurement_rate``
 with the same seed share their random numbers (the measured set at a lower rate
 is a subset of that at a higher rate). The sampled probes draw their orderings
@@ -102,10 +109,11 @@ import operator
 import re
 import time
 import warnings
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numba
 import numpy as np
@@ -122,6 +130,10 @@ from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
 from sparsegf2.graphs import edge_coloring, from_edges
+
+if TYPE_CHECKING:  # imported where used at run time (sparsegf2.tableau needs sparsegf2.codes)
+    from sparsegf2.codes import StabilizerCode
+    from sparsegf2.tableau import PhaseFreeTableau
 
 __all__ = [
     "EnsembleResult",
@@ -141,6 +153,7 @@ __all__ = [
     "half_cut_entropy",
     "lost_information",
     "mutual_information",
+    "tableau_snapshot",
     "tripartite_information",
     "uncorrectable_region_counts",
 ]
@@ -202,6 +215,13 @@ _CX_INDEX = _CX_CLIFFORD.index()
 #: rule never changes a saved run: its replay reproduces it and a resume under
 #: the new rule is refused as another protocol.
 RANDOMNESS_CONTRACT = 2
+
+#: The ``compression`` options of :meth:`EnsembleResult.save`: zip method and zlib level.
+SAVE_COMPRESSIONS = {
+    "none": (zipfile.ZIP_STORED, None),
+    "fast": (zipfile.ZIP_DEFLATED, 1),
+    "default": (zipfile.ZIP_DEFLATED, None),
+}
 
 #: Most working memory, in bytes, that the :func:`correlated_erasure` probes may hold in
 #: all running threads at once (one size's regions per thread, ``8 c S (m + 1)`` bytes):
@@ -845,10 +865,30 @@ def code_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
     The recorded value is the number of generators (n - k); the generators
     are in ``EnsembleResult.snapshots`` and ``EnsembleResult.code(...)`` returns
     a :class:`~sparsegf2.codes.StabilizerCode`. Without a reference this is
-    the stabilizer group of the (pure) system state. One snapshot probe per
-    spec.
+    the stabilizer group of the (pure) system state. One snapshot probe
+    (this or :func:`tableau_snapshot`) per spec.
     """
     return Probe("code_snapshot", name or "code_snapshot", checkpoints=_schedule(checkpoints))
+
+
+def tableau_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
+    """The joint state itself: every phase-free stabilizer generator over every qubit, saved.
+
+    At each evaluation the engine writes all ``N`` generators of the pure joint state
+    over all ``N = num_system + num_reference`` qubits (system ``0 .. n-1``, then the
+    references), so the state can be analyzed after the run: entropies of any region,
+    ``I(A:R)``, the physical code, digests (``docs/SWEEPS.md`` §2).
+    The recorded value is the number of generators, ``N``. The generators are in
+    ``EnsembleResult.snapshots`` (row ``i``: X bits of the ``N`` qubits in the first
+    ``ceil(N / 64)`` words, Z bits in the next as many), and
+    ``EnsembleResult.tableau(...)`` returns them as a
+    :class:`~sparsegf2.tableau.PhaseFreeTableau`. It draws no random numbers. After a
+    ``stop_when_purified`` stop the state is not evolved, so later evaluations save
+    nothing (their row count is -1; the value stays ``N``). Memory: ``N * 2 ceil(N / 64)``
+    words of 8 bytes per evaluation and trajectory (64 KiB at ``N = 512``), so give it
+    checkpoints of its own. One snapshot probe (this or :func:`code_snapshot`) per spec.
+    """
+    return Probe("tableau_snapshot", name or "tableau_snapshot", checkpoints=_schedule(checkpoints))
 
 
 @dataclass(frozen=True)
@@ -861,7 +901,9 @@ class _Kind:
     # values per evaluation: "one", "profile" (n + 1), "samples", "size", "correlated"
     # (couplings x sizes)
     length: str
-    after_purification: str  # value once the reference is pure: "nan", "zero", "n", "n+1"
+    # value once the reference is pure: "nan", "zero", "n", "n+1", "qubits" (system plus
+    # reference qubits)
+    after_purification: str
     sampled: bool = False  # draws random orderings: Probe.samples must be at least 1
 
 
@@ -879,7 +921,12 @@ _KINDS = {
     "uncorrectable_counts": _Kind(_ens.PROBE_UNCORRECTABLE_COUNTS, True, "size", "zero"),
     "code_snapshot": _Kind(_ens.PROBE_CODE_SNAPSHOT, False, "one", "n"),
     "correlated_erasure": _Kind(_ens.PROBE_CORRELATED_ERASURE, True, "correlated", "zero", True),
+    # the number of generators of the pure joint state: N, whatever the state
+    "tableau_snapshot": _Kind(_ens.PROBE_TABLEAU_SNAPSHOT, False, "one", "qubits"),
 }
+
+# The probes that write generators into the engine's one snapshot buffer (at most one per spec).
+_SNAPSHOT_KINDS = ("code_snapshot", "tableau_snapshot")
 
 
 def _probe_length(p: Probe, n: int) -> int:
@@ -889,10 +936,31 @@ def _probe_length(p: Probe, n: int) -> int:
     return {"one": 1, "profile": n + 1, "samples": p.samples, "size": p.size}[rule]
 
 
-def _probe_fill(p: Probe, n: int) -> float:
-    """The probe's exact value once the reference is pure (k = 0), or NaN if not determined."""
+def _probe_fill(p: Probe, n: int, num_qubits: int | None = None) -> float:
+    """The probe's exact value once the reference is pure (k = 0), or NaN if not determined.
+
+    ``n`` is the number of system qubits; ``num_qubits``, the system plus reference qubits,
+    is needed by the rule "qubits" (``tableau_snapshot``).
+    """
     rule = _KINDS[p.kind].after_purification
+    if rule == "qubits":
+        if num_qubits is None:
+            raise ValueError(f"the value of probe {p.name!r} after a stop needs num_qubits")
+        return float(num_qubits)
     return {"nan": np.nan, "zero": 0.0, "n": float(n), "n+1": float(n + 1)}[rule]
+
+
+def _snapshot_shape(spec: MonitoredCircuit, p: Probe, trajectories: int) -> tuple[int, ...]:
+    """The shape of the generator array of the snapshot probe ``p`` in a run of ``trajectories``.
+
+    ``(trajectories, evaluations, rows, words)``: a ``code_snapshot`` has room for the at most
+    ``n`` generators of the code over the ``n`` system qubits (``2 ceil(n / 64)`` words), a
+    ``tableau_snapshot`` holds all ``N`` generators of the joint state over all ``N`` qubits
+    (``2 ceil(N / 64)`` words).
+    """
+    qubits = spec.num_qubits if p.kind == "tableau_snapshot" else spec.num_system
+    evaluations = len(spec.probe_layers(p.name))
+    return (trajectories, evaluations, qubits, 2 * ((qubits + 63) // 64))
 
 
 @dataclass(frozen=True, eq=False)
@@ -1111,8 +1179,12 @@ class MonitoredCircuit:
         names = [p.name for p in self.probes]
         if len(set(names)) != len(names):
             raise ValueError(f"probe names must be unique, got {names}")
-        if sum(p.kind == "code_snapshot" for p in self.probes) > 1:
-            raise ValueError("use at most one code_snapshot probe (give it all the checkpoints)")
+        if sum(p.kind in _SNAPSHOT_KINDS for p in self.probes) > 1:
+            raise ValueError(
+                "use at most one snapshot probe, code_snapshot or tableau_snapshot (give it all "
+                "the checkpoints; the physical code of a tableau snapshot is "
+                "EnsembleResult.code(...))"
+            )
         object.__setattr__(
             self,
             "_probe_layers",
@@ -1459,7 +1531,7 @@ class MonitoredCircuit:
             poff = np.concatenate([[0], np.cumsum(counts * plen)]).astype(np.int64)
             pck_ptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
             union = np.unique(np.concatenate([self.checkpoint_layers, *self._probe_layers]))
-            snapshot = [j for j, p in enumerate(self.probes) if p.kind == "code_snapshot"]
+            snapshot = [j for j, p in enumerate(self.probes) if p.kind in _SNAPSHOT_KINDS]
             self._compiled.update(
                 pkind=np.array([_KINDS[p.kind].code for p in self.probes], dtype=np.int64),
                 plen=plen,
@@ -1467,7 +1539,9 @@ class MonitoredCircuit:
                 total_len=int(poff[-1]),
                 pck_ptr=pck_ptr,
                 pck=np.concatenate([np.zeros(0, np.int64), *self._probe_layers]).astype(np.int64),
-                pfill=np.array([_probe_fill(p, n) for p in self.probes], dtype=np.float64),
+                pfill=np.array(
+                    [_probe_fill(p, n, self.num_qubits) for p in self.probes], dtype=np.float64
+                ),
                 gck=union.astype(np.int64),
                 detect=np.isin(union, self.checkpoint_layers),
                 ptr=np.array(ptr, dtype=np.int64),
@@ -1496,29 +1570,83 @@ class MonitoredCircuit:
                 f"has {total} trajectories (raise circuits_per_graph for more circuits per graph)"
             )
 
+    def _trajectory_indices(self, indices) -> np.ndarray:
+        """``indices`` checked: a new 1-D int64 array of distinct, existing trajectory indices."""
+        try:
+            raw = indices if isinstance(indices, np.ndarray) else np.array(list(indices))
+        except TypeError:
+            raise ValueError(
+                f"indices must be a 1-D list of trajectory indices, got {indices!r}"
+            ) from None
+        if raw.ndim != 1:
+            raise ValueError(
+                f"indices must be a 1-D list of trajectory indices, got an array of shape "
+                f"{raw.shape}"
+            )
+        index = np.array(_int_array(raw, "indices"))  # writable: the kernel's own copy
+        if index.size and index.min() < 0:
+            raise ValueError(f"indices must be non-negative, got {int(index.min())}")
+        values, counts = np.unique(index, return_counts=True)
+        if np.any(counts > 1):
+            twice = int(values[np.argmax(counts > 1)])
+            raise ValueError(
+                f"indices must be distinct: trajectory {twice} appears "
+                f"{int(counts[values == twice][0])} times (each would be simulated and counted "
+                "again)"
+            )
+        total = self.num_trajectories
+        if total is not None and index.size and index.max() >= total:
+            raise ValueError(
+                f"trajectory {int(index.max())} does not exist: this collection of "
+                f"{len(self.edges)} graphs with circuits_per_graph={self.circuits_per_graph} "
+                f"has {total} trajectories, 0..{total - 1}"
+            )
+        return index
+
     def run(
         self,
         trajectories: int | None = None,
         *,
         seed,
-        first_trajectory: int = 0,
+        first_trajectory: int | None = None,
+        indices: Sequence[int] | np.ndarray | None = None,
         num_threads: int | None = None,
     ) -> EnsembleResult:
-        """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``.
+        """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``,
+        or exactly the trajectories listed in ``indices``.
 
         With a collection of graphs, ``trajectories`` defaults to every
         remaining trajectory (all ``len(edges) * circuits_per_graph`` of them
-        for ``first_trajectory=0``); with a single graph it is required. Runs in
-        parallel over CPU cores (``num_threads`` limits that). Returns an
-        :class:`EnsembleResult`.
+        for ``first_trajectory=0``, the default); with a single graph it is
+        required. ``indices`` instead lists distinct non-negative trajectory
+        indices in any order (each below ``len(edges) * circuits_per_graph``
+        for a collection; give it without ``trajectories`` and
+        ``first_trajectory``): row ``i`` of the result is trajectory
+        ``indices[i]``, exactly what a range run gives it (graph
+        ``indices[i] // circuits_per_graph``, circuit stream ``indices[i]``,
+        probe streams keyed by it), and ``result.trajectories`` is ``indices``
+        in the given order. Runs in parallel over CPU cores (``num_threads``
+        limits that). Returns an :class:`EnsembleResult`.
         """
-        first_trajectory = _integer(first_trajectory, "first_trajectory")
-        if trajectories is None:
-            if self.num_trajectories is None:
-                raise ValueError("with a single graph, give the number of trajectories")
-            trajectories = self.num_trajectories - first_trajectory
-        trajectories = _integer(trajectories, "trajectories")
-        self._check_trajectories(first_trajectory, trajectories)
+        if indices is not None:
+            if trajectories is not None or first_trajectory is not None:
+                raise ValueError(
+                    "give either indices (the trajectories to run) or trajectories and "
+                    "first_trajectory (a range of them), not both"
+                )
+            index = self._trajectory_indices(indices)
+        else:
+            first = (
+                0 if first_trajectory is None else _integer(first_trajectory, "first_trajectory")
+            )
+            if trajectories is None:
+                if self.num_trajectories is None:
+                    raise ValueError("with a single graph, give the number of trajectories")
+                trajectories = self.num_trajectories - first
+            count = _integer(trajectories, "trajectories")
+            self._check_trajectories(first, count)
+            index = np.arange(first, first + count, dtype=np.int64)
+        trajectories = int(index.size)
         if trajectories:
             with threads(num_threads):
                 running = min(numba.get_num_threads(), trajectories)
@@ -1532,16 +1660,19 @@ class MonitoredCircuit:
         out = np.full((trajectories, a["total_len"]), np.nan, dtype=np.float64)
         n = self.num_system
         if a["snapshot"] >= 0:
-            wsys = (n + 63) // 64
-            evaluations = len(self._probe_layers[a["snapshot"]])
-            snap = np.zeros((trajectories, evaluations, n, 2 * wsys), dtype=np.uint64)
-            snap_rows = np.zeros((trajectories, evaluations), dtype=np.int64)
+            # a code snapshot holds at most n generators over the system qubits; a tableau
+            # snapshot all N generators over all N qubits (_snapshot_shape)
+            shape = _snapshot_shape(self, self.probes[a["snapshot"]], trajectories)
+            snap = np.zeros(shape, dtype=np.uint64)
+            snap_rows = np.zeros(shape[:2], dtype=np.int64)
         else:  # one dummy slot: the kernel always has somewhere to point
             snap = np.zeros((trajectories, 1, 1, 2), dtype=np.uint64)
             snap_rows = np.zeros((trajectories, 1), dtype=np.int64)
         tau = np.zeros(trajectories, dtype=np.int64)
         final = np.zeros(trajectories, dtype=np.int64)
         meas = np.zeros(trajectories, dtype=np.int64)
+        thresholds = n + 1 if self.reference != "none" else 0  # tau_ell for ell = 0 .. n
+        passages = np.full((trajectories, thresholds), -1, dtype=np.int64)
         if trajectories:
             with threads(num_threads):
                 _ens.run_ensemble(
@@ -1556,9 +1687,9 @@ class MonitoredCircuit:
                     a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
                     key_probe, a["phash"], a["ce_param"], a["ce_int"], a["ce_float"],
                     a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
-                    bool(a["ce_need_graph"]), first_trajectory, out, snap, snap_rows, tau,
-                    final, meas,
-                    _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
+                    bool(a["ce_need_graph"]), index, out, snap, snap_rows, tau, final, meas,
+                    passages, _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2,
+                    IDENTITY_SYM2,
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
         values, snapshots = {}, {}
@@ -1574,9 +1705,7 @@ class MonitoredCircuit:
             seed_entropy=ss.entropy,
             seed_spawn_key=ss.spawn_key,
             seed_pool_size=ss.pool_size,
-            trajectories=np.arange(
-                first_trajectory, first_trajectory + trajectories, dtype=np.int64
-            ),
+            trajectories=index.copy(),
             checkpoint_layers=self.checkpoint_layers.copy(),
             values=values,
             purification_layer=tau if self.reference != "none" else None,
@@ -1585,6 +1714,7 @@ class MonitoredCircuit:
             elapsed_seconds=elapsed,
             snapshots=snapshots,
             randomness_contract=RANDOMNESS_CONTRACT,
+            first_passage=passages if self.reference != "none" else None,
         )
 
     def correlated_bytes_per_thread(self) -> int:
@@ -2121,10 +2251,26 @@ class EnsembleResult:
         ``c`` of trajectory ``t`` (X bits of the system qubits in the first half
         of the words, Z bits in the second) and ``counts[t, c]`` how many rows
         are used (-1 for evaluations after a stop). :meth:`code` decodes one.
+        For a :func:`tableau_snapshot` probe the same pair holds every
+        generator of the joint state over all ``N`` qubits (``generators`` is
+        ``(trajectories, evaluations, N, 2 ceil(N / 64))``, ``counts`` is ``N``,
+        or -1 after a stop); :meth:`tableau` decodes one, and :meth:`code`
+        gives its physical code.
     purification_layer
         First checkpoint layer at which the reference was pure, or -1 if it
         never was (right-censored at the last checkpoint). ``None`` without a
         reference.
+    first_passage
+        int64 ``(trajectories, n + 1)``: ``first_passage[t, ell]`` is the exact
+        first-passage depth ``tau_ell = min{L : k_L <= ell}`` of row ``t``, the
+        first layer (0 = after setup and scramble) after which the code
+        dimension ``k = S(R)`` was at most ``ell``, read after every layer
+        whatever the checkpoints; -1 where ``k`` stayed above ``ell`` through
+        :attr:`final_layer`, the censoring depth (:meth:`first_passage_times`).
+        ``tau_n = 0``, and ``tau_ell = 0`` for every ``ell >= k_0``.
+        ``first_passage[:, 0]`` is the exact purification time; it equals
+        :attr:`purification_layer` when every layer is a checkpoint. ``None``
+        without a reference, and for files saved before it was recorded.
     final_layer
         Last layer simulated for each trajectory.
     num_measurements
@@ -2157,6 +2303,7 @@ class EnsembleResult:
     version: str | None = __version__
     snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     randomness_contract: int = RANDOMNESS_CONTRACT
+    first_passage: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -2222,20 +2369,37 @@ class EnsembleResult:
         flat = np.asarray(self.values[probe.name])
         return couplings, sizes, flat.reshape(*flat.shape[:2], couplings.size, sizes.size)
 
-    def code(self, trajectory: int, evaluation: int, name: str | None = None):
+    def _snapshot(self, name: str | None, kinds: tuple[str, ...]) -> Probe:
+        """The snapshot probe ``name`` (by default the run's one snapshot probe) of ``kinds``."""
+        found = [p for p in self.spec.probes if p.kind in kinds and p.name in self.snapshots]
+        if not found:
+            wanted = " or ".join(f"mipt.{kind}()" for kind in kinds)
+            raise ValueError(f"this result has no {' or '.join(kinds)} probe (add {wanted})")
+        if name is None:
+            return found[0]  # a spec has at most one snapshot probe
+        for p in found:
+            if p.name == name:
+                return p
+        raise KeyError(f"no {' or '.join(kinds)} probe named {name!r}; it is {found[0].name!r}")
+
+    def code(self, trajectory: int, evaluation: int, name: str | None = None) -> StabilizerCode:
         """The saved code of row ``trajectory`` at evaluation ``evaluation`` of a snapshot probe.
 
         Returns a :class:`~sparsegf2.codes.StabilizerCode`; ``trajectory`` is a
         row index into this result (see :attr:`trajectories` for the global
-        index) and ``evaluation`` indexes ``layers(name)``.
+        index) and ``evaluation`` indexes ``layers(name)``. For a
+        :func:`tableau_snapshot` probe it is the physical code of the joint
+        state (``tableau(...).physical_code(num_system)``): the same group a
+        :func:`code_snapshot` of the state saves, in canonical generators.
         """
         from sparsegf2.codes import StabilizerCode
 
-        if not self.snapshots:
-            raise ValueError("this result has no code snapshots (add mipt.code_snapshot())")
-        if name is None:
-            (name,) = self.snapshots
-        generators, counts = self.snapshots[name]
+        probe = self._snapshot(name, _SNAPSHOT_KINDS)
+        if probe.kind == "tableau_snapshot":
+            return self.tableau(trajectory, evaluation, probe.name).physical_code(
+                self.spec.num_system
+            )
+        generators, counts = self.snapshots[probe.name]
         rows = int(counts[trajectory, evaluation])
         if rows < 0:
             raise ValueError(
@@ -2244,6 +2408,63 @@ class EnsembleResult:
             )
         return StabilizerCode.from_packed(
             generators[trajectory, evaluation, :rows], self.spec.num_system
+        )
+
+    def tableau(
+        self, trajectory: int, evaluation: int, name: str | None = None
+    ) -> PhaseFreeTableau:
+        """The joint state of row ``trajectory`` at evaluation ``evaluation`` of a tableau_snapshot.
+
+        Returns a :class:`~sparsegf2.tableau.PhaseFreeTableau` on all ``N`` qubits
+        (system ``0 .. n-1``, then the references), in canonical form: its
+        :meth:`~sparsegf2.tableau.PhaseFreeTableau.digest` identifies the state's
+        phase-free stabilizer group, :meth:`~sparsegf2.tableau.PhaseFreeTableau.entropy`
+        and :meth:`~sparsegf2.tableau.PhaseFreeTableau.mutual_information` give
+        entropies and ``I(A:R)``, and ``physical_code(num_system)`` the code.
+        ``trajectory`` is a row index into this result (see :attr:`trajectories`
+        for the trajectory index) and ``evaluation`` indexes ``layers(name)``.
+        Raises ``ValueError`` for an evaluation after a ``stop_when_purified`` stop,
+        where the state was not evolved and nothing was saved.
+        """
+        from sparsegf2.tableau import PhaseFreeTableau
+
+        probe = self._snapshot(name, ("tableau_snapshot",))
+        generators, counts = self.snapshots[probe.name]
+        rows = int(counts[trajectory, evaluation])
+        if rows < 0:
+            raise ValueError(
+                f"trajectory row {trajectory} had stopped (reference pure) before evaluation "
+                f"{evaluation}: its joint state was not evolved further, so there is no "
+                "tableau to return"
+            )
+        return PhaseFreeTableau.from_words(
+            generators[trajectory, evaluation, :rows], self.spec.num_qubits
+        )
+
+    def tableaux(
+        self, evaluation: int, name: str | None = None, *, num_threads: int | None = None
+    ) -> list[PhaseFreeTableau | None]:
+        """Every row's joint state at evaluation ``evaluation`` of a tableau_snapshot, at once.
+
+        Entry ``t`` is ``tableau(t, evaluation, name)``, or ``None`` where row ``t`` had
+        stopped (``stop_when_purified``) and saved nothing. The canonical forms are computed
+        in parallel on ``num_threads`` threads (default: Numba's current count) by
+        :meth:`~sparsegf2.tableau.PhaseFreeTableau.from_words_batch`, and are exactly
+        those of :meth:`tableau`; this is the way to canonicalize many snapshots.
+        :func:`sparsegf2.tableau.physical_tableaux` gives their physical codes the same way.
+        """
+        from sparsegf2.tableau import PhaseFreeTableau
+
+        probe = self._snapshot(name, ("tableau_snapshot",))
+        generators, counts = self.snapshots[probe.name]
+        e = operator.index(evaluation)
+        if not -counts.shape[1] <= e < counts.shape[1]:
+            raise IndexError(
+                f"evaluation {e} is out of range: probe {probe.name!r} has "
+                f"{counts.shape[1]} evaluations"
+            )
+        return PhaseFreeTableau.from_words_batch(
+            generators[:, e], counts[:, e], self.spec.num_qubits, num_threads=num_threads
         )
 
     def replay(self, trajectory: int, *, probes=None, checkpoints=None) -> EnsembleResult:
@@ -2361,6 +2582,24 @@ class EnsembleResult:
         observed = tau >= 0
         return np.where(observed, tau, self.censoring_layer), observed
 
+    def first_passage_times(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(time, observed)``, each ``(trajectories, n + 1)``, from :attr:`first_passage`.
+
+        ``time[t, ell]`` is ``tau_ell`` where it was reached (``observed``) and otherwise
+        the censoring depth :attr:`final_layer` of row ``t``, the last layer through which
+        ``k`` was read; ``analysis.kaplan_meier(time[:, ell], observed[:, ell])`` is the
+        survival curve of ``tau_ell``. Raises ``ValueError`` without first passages (no
+        reference, or a file saved before they were recorded).
+        """
+        if self.first_passage is None:
+            raise ValueError(
+                "this result has no first passages: they need a reference (purification or "
+                "single), and files saved before they were recorded have none (replay a "
+                "trajectory, result.replay(u), to get its first passages)"
+            )
+        observed = self.first_passage >= 0
+        return np.where(observed, self.first_passage, self.final_layer[:, None]), observed
+
     def __repr__(self) -> str:
         return (
             f"EnsembleResult(trajectories={self.num_trajectories}, checkpoints={len(self.checkpoint_layers)}, "
@@ -2369,8 +2608,18 @@ class EnsembleResult:
 
     # -- persistence --------------------------------------------------------------------
 
-    def save(self, path: str | Path) -> None:
-        """Write the arrays and run metadata (spec, seed, package version) to a compressed ``.npz`` file."""
+    def save(self, path: str | Path, *, compression: str = "default") -> None:
+        """Write the arrays and run metadata (spec, seed, package version) to a ``.npz`` file.
+
+        ``compression``: ``"default"`` (``numpy.savez_compressed``, zlib's default level),
+        ``"fast"`` (zlib level 1: a few times faster, somewhat larger) or ``"none"`` (stored
+        uncompressed: fastest, largest). :meth:`load` reads all three; ``"fast"`` and
+        ``"none"`` write to ``path`` exactly as given.
+        """
+        if compression not in SAVE_COMPRESSIONS:
+            raise ValueError(
+                f"compression must be one of {list(SAVE_COMPRESSIONS)}, got {compression!r}"
+            )
         spec = self.spec
         meta = {
             "format": "sparsegf2.EnsembleResult/1",
@@ -2426,8 +2675,17 @@ class EnsembleResult:
             arrays[f"snapshot_counts::{name}"] = counts
         if self.purification_layer is not None:
             arrays["purification_layer"] = self.purification_layer
+        if self.first_passage is not None:
+            arrays["first_passage"] = self.first_passage
         text = json.dumps(meta, default=_json_default)
-        np.savez_compressed(path, __meta__=np.array(text), **arrays)
+        if compression == "default":
+            np.savez_compressed(path, __meta__=np.array(text), **arrays)
+            return
+        method, level = SAVE_COMPRESSIONS[compression]
+        with zipfile.ZipFile(path, "w", compression=method, compresslevel=level) as z:
+            for name, value in {"__meta__": np.array(text), **arrays}.items():
+                with z.open(f"{name}.npy", "w", force_zip64=True) as fh:
+                    np.lib.format.write_array(fh, np.asanyarray(value), allow_pickle=False)
 
     @classmethod
     def load(cls, path: str | Path) -> EnsembleResult:
@@ -2503,16 +2761,25 @@ class EnsembleResult:
                     for p in probes
                     if f"snapshot::{p.name}" in z.files
                 },
+                first_passage=z["first_passage"] if "first_passage" in z.files else None,
             )
 
     @staticmethod
-    def concatenate(results: Sequence[EnsembleResult]) -> EnsembleResult:
+    def concatenate(
+        results: Sequence[EnsembleResult], *, same_version: bool = True
+    ) -> EnsembleResult:
         """Merge chunks of the same protocol and seed (e.g. from separate jobs).
 
         The chunks must have identical specs, seeds, package versions and
         randomness contracts and cover different trajectories
         (``first_trajectory=``); anything else raises ``ValueError`` rather
         than mixing protocols or counting a trajectory twice.
+
+        ``same_version=False`` drops the package-version check (the merged
+        result reports the first chunk's version). Only a caller that has
+        checked by other means that the versions draw the same trajectories may
+        pass it: ``sparsegf2.study.sweep`` does, after replaying saved
+        trajectories with the current code.
         """
         if not results:
             raise ValueError("nothing to concatenate")
@@ -2537,7 +2804,7 @@ class EnsembleResult:
                 raise ValueError(f"{refuse}: the probes differ")
             if not np.array_equal(r.checkpoint_layers, first.checkpoint_layers):
                 raise ValueError("checkpoint layers differ")
-            if r.version != first.version:
+            if same_version and r.version != first.version:
                 raise ValueError(
                     f"{refuse}: they come from different sparsegf2 versions ({first.version} "
                     f"vs {r.version}), whose trajectories need not agree; rerun with one version"
@@ -2551,7 +2818,7 @@ class EnsembleResult:
 
         def cat(get):
             parts = [get(r) for r in results]
-            return None if parts[0] is None else np.concatenate(parts)
+            return None if any(p is None for p in parts) else np.concatenate(parts)
 
         return EnsembleResult(
             spec=first.spec,
@@ -2574,4 +2841,6 @@ class EnsembleResult:
                 )
                 for name in first.snapshots
             },
+            # None as soon as one chunk lacks them (saved before they were recorded)
+            first_passage=cat(lambda r: r.first_passage),
         )

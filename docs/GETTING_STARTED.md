@@ -121,7 +121,8 @@ right setting on a machine you have to yourself. On a shared machine, or
 when running several jobs side by side, set `NUMBA_NUM_THREADS` to each job's
 share of the logical processors. The `omp` and `tbb` layers are safe to call
 from several Python threads at once (as the MCP server's background jobs do);
-`workqueue` is not.
+`workqueue` is not: it cannot run two parallel regions at once, so under it
+the package's parallel kernels, called from several threads, take turns.
 
 ---
 
@@ -380,6 +381,7 @@ each trajectory simulated.
 | `checkpoint_layers` | the spec's checkpoint layers |
 | `purification_layer`, `censored` | τ per trajectory (−1 = censored), and the censoring mask (`None` without a reference) |
 | `final_layer`, `num_measurements` | last layer simulated and number of measurements, per trajectory |
+| `first_passage`, `first_passage_times()` | exact first layer with k ≤ ℓ for ℓ = 0..n, read at every layer (−1 = not reached by `final_layer`; `None` without a reference), and `(time, observed)` for Kaplan–Meier |
 | `trajectories`, `graph_index` | global trajectory indices of the rows, and each one's graph |
 | `snapshots[name]` | `(generators, counts)` of the `code_snapshot` probe |
 | `code(t, c)` | the code of row `t` at evaluation `c` of the snapshot probe, as a `StabilizerCode` |

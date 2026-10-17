@@ -152,6 +152,10 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
         ({"kind": counts, "max_size": 2}, "purification", 2),
         ({"kind": counts, "max_size": 3}, "monitored", 1),
         ({"kind": "code_snapshot"}, "single", 4),
+        # the joint tableau: costliest in all in the purification picture (N = 2n), costliest
+        # per N^2 where every column is dense (the single reference)
+        ({"kind": "tableau_snapshot"}, "purification", 8),
+        ({"kind": "tableau_snapshot"}, "single", 16),
         # the swap chain on the Watts-Strogatz graph, and the exact ring sampler in the
         # costliest state of each picture
         ({**correlated, "burn_in": 100}, "monitored", 1),

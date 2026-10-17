@@ -1919,6 +1919,17 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
         return 5.0 + _code_columns_us(n, words) + math.exp(min(log_us, 400.0))
     if p.kind == "code_snapshot":  # a bit test per generator (at most n) and system qubit
         return 2.0 + 0.022 * n * n + 1e-3 * num_qubits
+    if p.kind == "tableau_snapshot":
+        # all N rows over all N qubits, a transpose of the tableau: O(N^2 / 32 + set bits).
+        # Measured on one thread of an AMD Ryzen 9 9950X3D (2026-10-17, scrambled states,
+        # tests/test_estimates.py's method): 0.0005 us per N^2 in the purification picture
+        # (its reference columns stay sparse) and 0.001 in the single and no-reference
+        # pictures (dense: twice the set bits) for N up to 3072; above N = 2048 the scattered
+        # writes of a power-of-two N alias in the cache: 0.0027 at N = 4096, 0.0047 at 8192
+        # (0.0013 at 6144). Priced at 4 times the dense cost up to N = 2048, growing as
+        # (N / 2048)^1.5 above it: 3 times or more at every measured point
+        growth = max(1.0, num_qubits / 2048) ** 1.5
+        return 2.0 + 0.004 * num_qubits * num_qubits * growth
     if p.kind == "correlated_erasure":
         return _correlated_us(p, mc, words)
     # any newer probe: priced as a pass over every qubit
@@ -2093,15 +2104,18 @@ def _estimate_seconds(
 
 
 def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
-    """Memory of the run's result: every probe value (float64) plus the saved codes."""
+    """Memory of the run's result: every probe value (float64) plus the saved codes or tableaux
+    (uint64 words: ``n x 2 ceil(n / 64)`` per code, ``N x 2 ceil(N / 64)`` per joint tableau)
+    and, with a reference, the ``n + 1`` first passages (int64)."""
     n = mc.num_system
     values = sum(len(mc.probe_layers(p.name)) * mipt._probe_length(p, n) for p in mc.probes)
-    codes = sum(
-        len(mc.probe_layers(p.name)) * n * 2 * ((n + 63) // 64)
-        for p in mc.probes
-        if p.kind == "code_snapshot"
-    )
-    return trajectories * 8 * (values + codes + 4)
+    snapshots = 0
+    for p in mc.probes:
+        if p.kind in mipt._SNAPSHOT_KINDS:
+            _, evaluations, rows, words = mipt._snapshot_shape(mc, p, 1)
+            snapshots += evaluations * rows * words
+    first = n + 1 if mc.reference != "none" else 0
+    return trajectories * 8 * (values + snapshots + first + 4)
 
 
 def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
@@ -2129,9 +2143,9 @@ def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
     if gigabytes > MAX_RESULT_GB:
         raise ValueError(
             f"the result would take about {gigabytes:.1f} GB of memory (limit {MAX_RESULT_GB:g} "
-            "GB): give the large probes (erasure_first_failure samples, code_snapshot, vector "
-            "probes) fewer checkpoints of their own, or split the trajectories into several "
-            "output directories"
+            "GB): give the large probes (erasure_first_failure samples, code_snapshot, "
+            "tableau_snapshot, vector probes) fewer checkpoints of their own, or split the "
+            "trajectories into several output directories"
         )
     return trajectories
 
@@ -2158,7 +2172,6 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     Mirrors :meth:`sparsegf2.mipt.EnsembleResult.save`; sizes are uncompressed.
     """
     n = mc.num_system
-    wsys = (n + 63) // 64
     edges = sum(len(g) for g in mc.graphs)
     gate_set, order = np.asarray(mc.gate_set), np.asarray(mc.system_order)  # resolved by the spec
     rows = [
@@ -2173,18 +2186,19 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     ]
     if mc.edge_weights is not None:
         rows.append(_array_row("edge_weights", (edges,), np.float64))
-    snapshots = False
+    snapshots = tableaux = False
     for p in mc.probes:
         evaluations = len(mc.probe_layers(p.name))
         shape = [trajectories, evaluations]
         if p.is_vector:
             shape.append(mipt._probe_length(p, n))
         rows.append(_array_row(f"value::{p.name}", shape, np.float64))
-        if p.kind == "code_snapshot":
-            snapshots = True
+        if p.kind in mipt._SNAPSHOT_KINDS:
+            snapshots = snapshots or p.kind == "code_snapshot"
+            tableaux = tableaux or p.kind == "tableau_snapshot"
             rows.append(
                 _array_row(
-                    f"snapshot::{p.name}", (trajectories, evaluations, n, 2 * wsys), np.uint64
+                    f"snapshot::{p.name}", mipt._snapshot_shape(mc, p, trajectories), np.uint64
                 )
             )
             rows.append(
@@ -2192,6 +2206,7 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
             )
     if mc.reference != "none":
         rows.append(_array_row("purification_layer", (trajectories,), np.int64))
+        rows.append(_array_row("first_passage", (trajectories, n + 1), np.int64))
     note = (
         "Sizes are uncompressed. The file is saved with np.savez_compressed, so the disk use "
         "is lower (benchmark_ensemble measures it), and a small __meta__ record holds the "
@@ -2202,6 +2217,12 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
             " A snapshot:: array is stored at its full shape, an upper bound: each code "
             "fills only its first generator rows (snapshot_counts:: says how many), the rest "
             "is zero."
+        )
+    if tableaux:
+        note += (
+            " A tableau_snapshot's snapshot:: array holds every generator of the joint state "
+            "over all system and reference qubits at each evaluation (snapshot_counts:: is "
+            "their number, or -1 where a stopped trajectory saved nothing)."
         )
     return {
         "arrays": rows,
@@ -2994,6 +3015,12 @@ def _summarize_ensemble(
                     f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
                     "themselves are saved with output_dir (EnsembleResult.code(t, c) in Python)"
                 )
+            if probe.kind == "tableau_snapshot":
+                notes.append(
+                    f"{keys[name]}: the number of generators of the joint state (system plus "
+                    "reference qubits); the tableaux themselves are saved with output_dir "
+                    "(EnsembleResult.tableau(t, c) in Python: a PhaseFreeTableau)"
+                )
             if probe.kind == "lost_information":
                 notes.append(_loses_nothing_note(keys[name]))
         elif probe.kind == "correlated_erasure":
@@ -3529,6 +3556,7 @@ def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
         num_measurements=result.num_measurements[keep],
         elapsed_seconds=result.elapsed_seconds * share,
         snapshots={name: (g[keep], c[keep]) for name, (g, c) in result.snapshots.items()},
+        first_passage=None if result.first_passage is None else result.first_passage[keep],
     )
 
 
@@ -4039,6 +4067,11 @@ def run_ensemble(
 def load_results(path: str) -> dict[str, Any]:
     """Summarize a saved ensemble: a ``.npz`` written by ``EnsembleResult.save`` or an output directory.
 
+    A sweep's directory (``sweep.json``, ``docs/SWEEPS.md``) gives its index: every
+    condition's saved and target trajectories, the versions and the spec. One of its condition
+    folders gives the summary of all its saved parts together (``sparsegf2.study.sweep.load``);
+    one above the memory limit is refused with a message naming ``sweep.parts``.
+
     For a directory (from :func:`run_ensemble` or a job), every saved chunk is
     included, so this also reads partial results of a running or canceled
     job. The chunks of a finished run that its job could not merge (a reader
@@ -4056,6 +4089,10 @@ def load_results(path: str) -> dict[str, Any]:
     p = Path(path).expanduser().resolve()
     if not p.exists():
         raise ValueError(f"no such file or directory: {str(p)!r}")
+    if p.is_dir() and (p / "sweep.json").is_file():
+        return _sweep_index_summary(p)
+    if p.is_dir() and (p.parent / "sweep.json").is_file():
+        return _sweep_condition_summary(p)
     parts: list[Path] = [p]
     try:
         if p.is_dir():
@@ -4080,6 +4117,69 @@ def load_results(path: str) -> dict[str, Any]:
         root = p if p.is_dir() else p.parent
         everything = [q for q in p.rglob("*") if q.is_file()] if p.is_dir() else [p]
         extra["storage"] = _storage_summary(parts, root, everything)
+    return _bounded_summary(result, extra)
+
+
+def _sweep_index_summary(root: Path) -> dict[str, Any]:
+    """``load_results`` of a sweep's directory: its index and every condition's counts."""
+    from sparsegf2.study import sweep
+
+    index = sweep._read_index(root)
+    assert index is not None, "the caller found sweep.json"
+    status = sweep.status(root)
+    out = {
+        "path": str(root),
+        "kind": "sweep",
+        "digest": index["digest"],
+        "complete": status["complete"],
+        "trajectories": status["trajectories"],
+        "saved": status["saved"],
+        "versions": index["versions"],
+        "conditions": status["conditions"],
+        "spec": index["spec"],
+        "notes": [
+            "a sweep (docs/SWEEPS.md): load_results(<this path>/<conditions[i].path>) summarizes "
+            "one condition; in Python sparsegf2.study.sweep.load(path, n, beta, p)"
+        ],
+    }
+    return _bounded(out, exact=("spec",))
+
+
+def _sweep_condition_summary(folder: Path) -> dict[str, Any]:
+    """``load_results`` of one condition of a sweep: every saved part, as one result."""
+    from sparsegf2.study import sweep
+
+    root = folder.parent
+    index = sweep._read_index(root)
+    assert index is not None, "the caller found sweep.json"
+    entry = next((c for c in index["conditions"] if c["path"] == folder.name), None)
+    if entry is None:
+        raise ValueError(f"{str(folder)!r} is not a condition of the sweep in {str(root)!r}")
+    files = sweep._part_paths(folder)
+    if not files:
+        raise ValueError(f"nothing saved yet in {str(folder)!r}")
+    size = 0
+    for path in files:
+        try:
+            with zipfile.ZipFile(path) as z:
+                size += sum(info.file_size for info in z.infolist())
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise sweep.unreadable_part(path, exc) from None
+    n, beta, p = entry["n"], entry["beta"], entry["p"]
+    if size > MAX_RESULT_GB * 2**30:
+        raise ValueError(
+            f"condition {folder.name} holds {size / 2**30:.1f} GB of results, above the "
+            f"{MAX_RESULT_GB:g} GB memory limit: read its parts one at a time in Python with "
+            f"sparsegf2.study.sweep.parts({str(root)!r}, {n}, {beta!r}, {p!r})"
+        )
+    result = sweep.load(root, n, beta, p)
+    everything = [q for q in folder.iterdir() if q.is_file()]
+    extra = {
+        "path": str(folder),
+        "sweep": {"root": str(root), "n": n, "beta": beta, "p": p},
+        "trajectories_requested": entry["trajectories"],
+        "storage": _storage_summary(files, folder, everything),
+    }
     return _bounded_summary(result, extra)
 
 
