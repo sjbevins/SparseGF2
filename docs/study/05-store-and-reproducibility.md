@@ -922,9 +922,9 @@ from sparsegf2.study import stats
 
 out = store.export(root / "export")
 folder = out / "F_n6_beta0.25_p0.1"
-obs = np.load(folder / "observations.npz")
-sel = (obs["observable"] == "D") & (obs["t"] == 5)
-estimate = stats.nested_mean(obs["g"][sel], obs["c"][sel], obs["r"][sel], obs["value"][sel])
+with np.load(folder / "observations.npz") as obs:  # closed at once: no file left open
+    sel = (obs["observable"] == "D") & (obs["t"] == 5)
+    estimate = stats.nested_mean(obs["g"][sel], obs["c"][sel], obs["r"][sel], obs["value"][sel])
 with open(folder / "aggregates.csv", newline="") as f:
     row = next(r for r in csv.DictReader(f) if r["observable"] == "D" and r["t"] == "5")
 assert float(row["mean"]) == float(estimate.mean)
