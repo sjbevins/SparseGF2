@@ -1,6 +1,6 @@
 """Conformance of the Watts–Strogatz study's graph, gate and measurement sampling (v1.4 §2–§4, §7).
 
-Two kinds of checks, on the exact study protocol (the engine keywords of a sweep's condition):
+Two kinds of checks, on the exact study protocol (``SweepSpec.engine_spec``, what a sweep runs):
 
 * **Exact** (deterministic): the native generator equals an independent reference rewiring
   trace for trace; the exported circuits equal both the protocol oracle and a direct
@@ -66,6 +66,7 @@ from sparsegf2 import graphs, mipt
 from sparsegf2.clifford import Clifford, symplectic_group
 from sparsegf2.study import identity as ident
 from sparsegf2.study.identity import Token, build_graph
+from sparsegf2.study.sweep import SweepSpec
 
 ALPHA = 1e-6  # chi-square tests: p must exceed this
 SIGMAS = 4.5  # z-tests: |z| must stay below this
@@ -81,32 +82,24 @@ def graph_seed(n: int, beta, g: int) -> tuple[int, ...]:
 
 
 class Protocol:
-    """The study protocol at one size: the ``MonitoredCircuit`` keywords of a sweep's condition
-    (purification picture, ``n // 2`` uniform edge draws per layer, no scramble, low endpoint
-    first, every layer a checkpoint) and its seeds."""
+    """A one-size sweep (``SweepSpec``) and its seeds: in ``gate_mode="shared"`` (the sweep's)
+    the run seed is ``SweepSpec.run_seed``; ``"independent"`` names the rate as well."""
 
-    def __init__(self, n, layers, stride, graphs_count, gate_mode):
-        self.n, self.layers, self.stride, self.graphs = n, layers, stride, graphs_count
-        self.gate_mode = gate_mode
+    def __init__(self, sweep: SweepSpec, gate_mode: str):
+        self.sweep, self.gate_mode, self.stride = sweep, gate_mode, sweep.stride
+        self.graphs = sweep.graphs[sweep.sizes[0]]
 
     def run_seed(self, n, beta, p):
+        if self.gate_mode == "shared":
+            return self.sweep.run_seed(n, beta)
         return ident.run_seed(MASTER_CIRCUIT, n, beta, self.gate_mode, p)
 
     def stream_index(self, g, c):
         return ident.stream_index(g, c, self.stride)
 
     def monitored_circuit_kwargs(self, n, beta, p):
-        return {
-            "num_system": n,
-            "circuits_per_graph": self.stride,
-            "layers": self.layers,
-            "measurement_rate": Token.parse(p).float64,
-            "reference": "purification",
-            "schedule": "random_edges",
-            "gates_per_layer": n // 2,
-            "random_orientation": False,
-            "checkpoints": "every_layer",
-        }
+        """The engine keywords of the sweep's condition (its probes aside)."""
+        return {k: v for k, v in self.sweep.engine_spec(n, beta, p).items() if k != "probes"}
 
 
 def make_manifest(
@@ -119,8 +112,22 @@ def make_manifest(
     graphs_count: int = 1,
     gate_mode: str = "shared",
 ) -> Protocol:
-    """The study protocol at size ``n`` with ``graphs_count`` graphs and the circuit stride."""
-    return Protocol(n, layers, stride, graphs_count, gate_mode)
+    """The sweep of one size and one ``beta`` with the given rates, horizon and stride."""
+    sweep = SweepSpec.from_json(
+        {
+            "sizes": [n],
+            "betas": [beta],
+            "rates": ps,
+            "graphs": graphs_count,
+            "circuits_per_graph": stride,
+            "stride": stride,
+            "layers": {str(n): layers},
+            "master_graph_seed": MASTER_GRAPH,
+            "master_circuit_seed": MASTER_CIRCUIT,
+            "probes": [],
+        }
+    )
+    return Protocol(sweep, gate_mode)
 
 
 def make_spec(

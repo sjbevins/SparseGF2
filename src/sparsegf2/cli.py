@@ -37,6 +37,7 @@ examples:
   sparsegf2 regions --family watts_strogatz --n 64 --k 4 --beta 0.1 --graph-seed 1 --size 16 \\
       --couplings 0 0.5 1 2
   sparsegf2 curves runs/erasure --eps 0.05 0.1 0.2 --delta 0.01
+  sparsegf2 sweep run sweep.json runs/ws   # a Watts-Strogatz sweep (docs/SWEEPS.md)
   sparsegf2 mcp                   # MCP server over stdio (for Claude and other agents)
 
 Every command accepts --json: one JSON object on stdout, logs on stderr.
@@ -138,6 +139,15 @@ examples:
   sparsegf2 mcp                          # serve over stdio
   claude mcp add sparsegf2 -- sparsegf2 mcp
 Needs the optional extra: pip install 'sparsegf2[mcp]'.
+"""
+
+_SWEEP_HELP = """examples:
+  sparsegf2 sweep run sweep.json runs/ws --threads 32   # generate, resume or grow
+  sparsegf2 sweep status runs/ws --json
+  sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # trajectory u = 3, rerun and compared
+
+docs/SWEEPS.md describes the spec, the files and the seeds. Ctrl-C keeps every saved part;
+running again resumes.
 """
 
 
@@ -345,6 +355,22 @@ def _build_parser() -> _Parser:
     p.add_argument(
         "--layer", type=int, default=None, help="layer to read (default: each probe's last)"
     )
+
+    p = add("sweep", "Generate, resume, inspect or replay a Watts-Strogatz sweep.", _SWEEP_HELP)
+    actions = p.add_subparsers(dest="action", metavar="ACTION", parser_class=_Parser)
+    actions.required = True
+    q = actions.add_parser("run", help="generate the sweep SPEC in DIR (resumes, grows)")
+    q.add_argument("spec", metavar="SPEC", help="sweep spec JSON file")
+    q.add_argument("directory", metavar="DIR")
+    q.add_argument("--threads", type=int, default=None, help="threads (default: all)")
+    q.add_argument("--chunk-size", type=int, default=None, help="trajectories per saved part")
+    q = actions.add_parser("status", help="saved and target trajectories per condition")
+    q.add_argument("directory", metavar="DIR")
+    q = actions.add_parser("replay", help="rerun one trajectory and compare it with the saved one")
+    for name in ("directory", "n", "beta", "p", "u"):
+        q.add_argument(name, metavar=name.upper() if name != "directory" else "DIR")
+    for q in actions.choices.values():
+        q.add_argument("--json", action="store_true", help="print one JSON object on stdout")
 
     add("mcp", "Start the MCP server over stdio.", _MCP_HELP)
     return parser
@@ -704,6 +730,35 @@ def _cmd_regions(args: argparse.Namespace) -> _Outcome:
     return result, EXIT_OK
 
 
+def _cmd_sweep(args: argparse.Namespace) -> _Outcome:
+    from sparsegf2.study import sweep
+
+    if args.action == "run":
+        spec = _read_json(_read_text(args.spec), "the sweep spec")
+        result = sweep.run(
+            spec,
+            args.directory,
+            num_threads=args.threads,
+            chunk_size=args.chunk_size,
+            log=_log,
+            command=_command_line(),
+        )
+        return result, EXIT_OK
+    if args.action == "status":
+        return sweep.status(args.directory), EXIT_OK
+    result = sweep.verify(
+        args.directory, _integer_arg(args.n, "N"), args.beta, args.p, _integer_arg(args.u, "U")
+    )
+    return result, EXIT_OK if result["identical"] else EXIT_INTERNAL
+
+
+def _integer_arg(text: str, what: str) -> int:
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"{what} must be an integer, got {text!r}") from None
+
+
 def _cmd_curves(args: argparse.Namespace) -> _Outcome:
     from sparsegf2 import api
 
@@ -884,6 +939,7 @@ _COMMANDS = {
     "results": _cmd_results,
     "regions": _cmd_regions,
     "curves": _cmd_curves,
+    "sweep": _cmd_sweep,
 }
 
 # Commands whose result is shown as a table rather than as the generic listing.
