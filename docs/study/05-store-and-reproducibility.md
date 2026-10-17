@@ -44,8 +44,10 @@ This part implements:
   integrity checks, a logical digest and an export;
 * `study/runner.py`: the work units still to do (`plan`), their execution through the native
   engine with every record of a unit written in one transaction (`run`), revisions (`extend`),
-  the replay of one trajectory (`replay`, `replay_signed`, `circuit`), retrospective
-  observables (`compute`) and verification (`verify`);
+  the replay of one trajectory (`replay`, `replay_signed` with its recorded outcome seed,
+  `circuit`), retrospective observables (`compute`), verification (`verify`), aggregate records
+  (`TableauStore.aggregate`) and the graph-side diagnostics of the correlated samplers
+  (`diagnose_samplers`);
 * the protocol dimension of design §12 (protocol F, the full reference of v1.4; protocol P, the
   pure product state of the queued MIPT study v0.3) in the trajectory key, the manifest
   (`study/manifest.py::ProtocolSettings`), the runner and the retrieval.
@@ -100,9 +102,10 @@ random stream and no observable definition: every trajectory is simulated by
 | `purification_trace` | (trajectory key, dynamics version) | `traces`, one row per horizon | `(tid, layers)` |
 | `observable_snapshot` | (snapshot key, id, version) | `observations` with $t \ge 0$ | `(tid, t, observable, version, params, context)` |
 | `observable_trajectory` | (trajectory key, id, version, params) | `observations` with $t = -1$ | same, `context` = requirements digest |
-| `region_sample` | (trajectory key, $t$, $m$, trial) | not stored (§9) | — |
+| `region_sample` | (trajectory key, $t$, $m$, trial) | not stored (§9); the samplers' graph-side diagnostics are in `sampler_diagnostics` | `(n, beta, g, probe, config, m, coupling)` |
 | `geometry_erasure_profile` | (trajectory key, $t$, $J$, version) | `observations` `correlated_failure` and `D_J` | as `observable_snapshot` |
-| `aggregate` | ($n, \beta, p$, id, ...) | written by `TableauStore.export` (`aggregates.csv`), not stored | — |
+| `aggregate` | ($n, \beta, p$, id, ...) | `aggregates` (`TableauStore.aggregate`), and `aggregates.csv` of the export | `(protocol, n, beta, p, observable, version, params, selection, t, estimator, policy, sample_set)` |
+| (outcome-aware replay) | — | `signed_runs`: outcomes, random flags and signed digests of `runner.replay_signed(..., record=True)` | `(tid, outcome_seed, layers, depths)` |
 | `rng_validation` | (experiment, protocol, version) | not this part (the demonstration task) | — |
 
 `tid` is the row id of a trajectory; every child row refers to it, and the natural key of the
@@ -125,10 +128,15 @@ deeper horizon, a recomputation) **compares** the content with what is stored:
 
 Equal content is a no-op; any difference raises `ValueError` naming the identity, and the
 transaction rolls back. The only `UPDATE` statements of the store are the finish time of the
-unit being written and one fill-in: a snapshot stored with its physical code only (a revision
-had `tableau_snapshots = false`) receives its joint row space when a later revision switches the
-joint snapshots on, after the physical code computed from the new joint state is found equal to
-the stored one (`WHERE joint IS NULL`, so it can never replace a joint state).
+unit being written and one fill-in: a snapshot stored with its physical code only (status
+`phys_only`: a revision had `tableau_snapshots = false`) receives its joint row space and the
+status `stored` when a later revision switches the joint snapshots on, after the physical code
+of the new joint state is found equal to the stored one. SQLite triggers (`study/store.py::_TRIGGERS`)
+enforce this inside the database: every `UPDATE` and `DELETE` of `manifests`, `graphs`,
+`requirements`, `trajectories`, `traces`, `completions`, `observable_defs`, `observations`,
+`aggregates`, `signed_runs` and `sampler_diagnostics`, every `DELETE` of `snapshots` and
+`units`, and every `UPDATE` of a snapshot other than that fill-in abort with "never updated" or
+"never deleted".
 
 ### 3.3 The schema
 
@@ -137,9 +145,17 @@ writer, `query_only = ON` for a reader. Tokens are canonical strings (`identity.
 
 **`meta`** (`key`, `value`): `store_schema` (`identity.STORE_SCHEMA_VERSION`,
 `"sparsegf2.study.store/1"`), `experiment_id`, `created_utc`, `versions` (canonical JSON of
-`identity.version_record()`: graph generator, Clifford numbering, dynamics, row-space format,
-store schema, the two seed tags, `RANDOMNESS_CONTRACT`, the package version), and
-`graph_measures_version`.
+`study/store.py::store_versions()`: `identity.version_record()` with the graph generator, Clifford
+numbering, dynamics, row-space format, store schema, the graph and run seed tags,
+`RANDOMNESS_CONTRACT` and the package version, and in addition the region seed's tag and length
+(`0x5753524F`, 19 words), the outcome seed tag (`0x57534F31`, WSO1), the diagnostics seed tag
+(`0x57535344`, WSSD), the token format, the qubit order, the graph-measures version, the
+signed-group format and the aggregate estimator), `graph_measures_version`, `qubit_order`
+(`store.QUBIT_ORDER`: system $0..n-1$, then reference $n..2n-1$, reference $n+i$ Bell-paired with
+system $i$ at $t = 0$; protocol P: system only) and `environment` (of the creating process).
+Writing needs every algorithm version of `versions` to equal the code's (the package version may
+differ); reading needs only the schema; replay, verification and runs need the randomness
+contract (`TableauStore.check_contract`).
 
 **`manifests`**: `revision` (1, 2, ...), `digest` ($H$ of the canonical JSON, unique), `json`
 (the canonical JSON), `created_utc`, `sparsegf2_version`, `git_commit` (of the writing process,
@@ -155,9 +171,14 @@ or NULL).
 **`units`**: `unit_id`, `protocol`, `n`, `beta`, `p`, `graphs` (JSON $[g_0, g_1)$), `circuits`
 (JSON $[c_0, c_1)$), `layers`, `requirements` (digest), `status` (`"done"` or `"failed"`),
 `revision`, `started_utc`, `finished_utc`, `elapsed_seconds`, `threads` (Numba threads of the
-engine call), `trajectories`, `error` (the exception of a failed unit), `sparsegf2_version`,
-`git_commit`. A unit row is bookkeeping: it is written with the unit's data, or alone with
-`status = "failed"` when the unit raised (then no data of it exists).
+engine call), `trajectories`, `error` (the exception of a failed unit), and its provenance
+(G-RUN-3): `sparsegf2_version`, `git_commit`, `git_dirty` (uncommitted changes to tracked files
+of the checkout, NULL if unknown), `randomness_contract`, `environment` (canonical JSON of
+`store.environment()`: Python, numpy, numba, llvmlite, the package, the platform) and
+`environment_digest`. A unit row is bookkeeping: it is written with the unit's data, or alone
+with `status = "failed"` when the unit raised (then no data of it exists). Under the label
+`confirmatory` a unit whose environment differs from the units already done is refused (the
+message names the differing packages); an exploratory study records it.
 
 **`trajectories`** (natural key `(protocol, n, beta, p, g, c, r)`): `tid`, `u`, `p_float_hex`
 (`float.hex` of the double the engine received), `run_seed` (JSON words of `identity.run_seed`),
@@ -176,8 +197,10 @@ requirements `requirements` ask for; `unit_id`, `revision`.
 
 **`snapshots`** (key `(tid, t)`): `num_qubits` ($N$), `rank` (of the joint space, $N$ when
 stored, NULL otherwise), `k` ($k_t$; NULL for P; 0 for an absent snapshot), `joint`,
-`joint_digest`, `phys`, `phys_digest` (§3.4), `status` (`"stored"` or
-`"absent_after_purification"`), `unit_id`.
+`joint_digest`, `phys`, `phys_digest` (§3.4), `status` (`"stored"`: the joint state and, for F,
+its physical code; `"phys_only"`: the physical code from the engine's native `code_snapshot`,
+when `tableau_snapshots` is false, at every probe depth; `"absent_after_purification"`),
+`unit_id`.
 
 **`observable_defs`** (key `(observable, version, params)`): `params_json` (the same canonical
 text), `level`, `inputs` (JSON), `definition` (the catalog's formula, `observables.get(id).row()`),
@@ -185,9 +208,33 @@ text), `level`, `inputs` (JSON), `definition` (the catalog's formula, `observabl
 
 **`observations`** (key `(tid, t, observable, version, params, context)`): `t` (the depth, or
 $-1$ for a trajectory-level value), `params` (`observables.params_key`: canonical JSON of the
-resolved parameters), `context` (§3.6), `value` (float; SQL NULL stands for NaN, infinities are
-kept), `se` (its standard error), `data` (blob, §3.4), `method`, `unit_id` (NULL for a
-retrospective value). Index `observations_by_observable (observable, version, params, tid, t)`.
+resolved parameters), `context` (§3.6), `status` (`store.OBSERVATION_STATUSES`: `ok` a finite
+value; `infinite`; `undefined_no_code` a quantity without meaning at $k = 0$, such as the raw
+$d_{\mathrm{cyc}}$; `missing` a peak with $d^* = 0$ or an invalid trace; `censored` a first
+passage beyond the horizon; `vector` the value is in the data; `absent_after_purification`
+no state after a stop; `undefined` any other NaN), `value` (float; SQL NULL stands for NaN,
+infinities are kept), `se` (its standard error), `data` (blob, §3.4), `method`, `unit_id` (NULL
+for a retrospective value). Index `observations_by_observable (observable, version, params,
+tid, t)`.
+
+**`aggregates`** (G-STO-4; key `(protocol, n, beta, p, observable, version, params, selection, t,
+estimator, policy, sample_set)`): `selection` (canonical JSON of the data field and index read,
+or nulls for `value`), `estimator` (`store.ESTIMATOR_VERSION`, `"stats.nested_mean-1"`),
+`policy` (`raise` or `omit`), `sample_set` ($H$ of the canonical JSON of the sorted $(g, c, r)$ of
+the rows used), `mean`, `se`, `graphs`, `contributing_graphs`, `trajectories`,
+`contributing_trajectories`, `data` (the graph means), `created_utc`. A new sample (more graphs)
+is a new record; none is replaced.
+
+**`signed_runs`** (G-TAB-2; key `(tid, outcome_seed, layers, depths)`): the outcome seed
+(canonical JSON), the horizon of the replay, the depths, `outcomes` (zlib of one byte 0/1 per
+measured site, in circuit order), `random` (zlib of one byte per measurement: 1 when the outcome
+was random), `signed_digests` (canonical JSON $t \mapsto$ `runner.signed_digest` of the signed
+group at $t$), `format` (`"SGF2SG1"`). Never mixed into the phase-free tables.
+
+**`sampler_diagnostics`** (G-OBS-4; key `(n, beta, g, probe, config, m, coupling)`; `g = -1` for
+the cycle and path geometries): `config` ($H$ of the probe's settings), `method`, `chains`,
+`samples`, `seed`, `ess`, `tau_int`, `acceptance`, `exchange_acceptance`, `r_hat`,
+`r_hat_limit`, `notes` (the `mixing` list of `api.sample_erasure_regions`), `data`.
 
 ### 3.4 Byte layouts of the blobs
 
@@ -208,6 +255,9 @@ Every blob is a zlib stream of the bytes below; the compression level
   these uncompressed bytes.
 * `observations.data`: canonical JSON (sorted keys, no spaces, ASCII) of the value's details,
   NaN and infinities written as `null`, `-0.0` as `0.0`.
+* A signed group (`runner.signed_digest`): `b"SGF2SG1\0"`, $N$ as uint32 little-endian, then
+  per generator of Stim's canonical form its $2N$ bits (X then Z) packed most significant bit
+  first and one sign byte (1 for $-$); the digest is $H$ of these bytes.
 
 ### 3.5 Requirements, completions and work units
 
@@ -219,7 +269,9 @@ $(n, \beta)$, the **requirements** $R(\pi, n, \beta)$ (`runner.requirements`) ar
 * for F: `stop_when_purified`, `snapshot` (`"tableau_snapshot"`, the joint state and its
   physical code, or `"code_snapshot"`, the physical code only), `contiguous_distance`,
   `uniform_erasure` (samples and exact budget, or null), `correlated_erasure` (each entry's
-  settings with its probe name), `peak` (`analysis.peak`, the predeclared peak rule);
+  settings with its probe name), `peak` (`analysis.peak`, the predeclared peak rule), `domain`
+  (the last revision's own schedule $S_r(n, \beta)$, over which peaks and the checkpoint bounds
+  of the first passages are taken; $S_r \subseteq E_r$);
 * for P: `snapshot = "tableau_snapshot"`.
 
 The rate is not part of it: every rate of a condition records the same things. Its digest is
@@ -228,7 +280,11 @@ $\rho(R) = H(\text{canonical JSON of } R)$. A trajectory is **complete** under $
 every record $R$ asks for. The **target set** of the latest revision is every
 $(\pi, n, \beta, p, g, c)$ with $\pi$ a protocol, $(n, \beta, p)$ a condition, $g < G_*$, $c < C$.
 A **work unit** is a rectangle $[g_0, g_1) \times [c_0, c_1)$ of target trajectories of one
-$(\pi, n, \beta, p)$ that are not complete; it runs in one engine call on the indices
+$(\pi, n, \beta, p)$ that are not complete, either all stored already (a *rerun*, for what a
+revision added: a deeper horizon, new depths, a new observable) or all new; reruns are planned
+first, so the stored trajectories receive the new depths before new trajectories are added and
+every trajectory of a condition ends with the same schedule (`TableauStore.schedule`). A unit
+runs in one engine call on the indices
 $u = g s + c$ with the graph collection $0, \ldots, g_1 - 1$ (the engine reads trajectory $u$'s
 graph as `edges[u // s]`; design §3).
 
@@ -247,16 +303,16 @@ For protocol F, from the engine's arrays of row $i$ (all functions of `study/obs
   nonincreasing), $\tau$ = `first_passage(k)`, checked against the engine's
   `purification_layer` ($\tau_0$ with every layer a checkpoint), and the final layer
   ($\tau_0$ if the trajectory stopped, else $T$);
-* at every $t \in E_r$: the snapshot (joint canonical row space and physical code, or
-  `absent_after_purification` with $k = 0$ after a stop) and the snapshot-level observations,
-  `context = ""`:
+* at every $t \in E_r$: the snapshot (joint canonical row space and physical code, or the
+  physical code only as `phys_only`, or `absent_after_purification` with $k = 0$ after a stop)
+  and the snapshot-level observations, `context = ""`, each with its status:
 
 | observable | params | value, se | data | method |
 |---|---|---|---|---|
 | `k` | `{}` | $k_t$, 0 | — | `k-trace` |
-| `d_cyc` | `{}` | raw $d_{\mathrm{cyc}}$ (NaN at $k = 0$), 0 | `has_code`, `zero_extended` | `engine-probe` |
+| `d_cyc` | `{}` | raw $d_{\mathrm{cyc}}$, 0; at $k = 0$ NaN with status `undefined_no_code` (SI-08: the engine's NaN kept raw, and from a stored code the same) | `has_code`, `zero_extended` (0 at $k = 0$) | `engine-probe` |
 | `uniform_failure` | `samples`, `exact_budget` | — | `first_failure` (the $S$ sizes), `exact_counts` ($m \le w$), `curve` $P_C(m)$, `se`, `max_exact`, `samples` | `hybrid` or `orderings` |
-| `D` | as above | $D(0)$, its error | `has_code`, `samples`, `max_exact` | as above |
+| `D` | as above | $D(0)$, its error; 0 at $k = 0$ (SI-07: the engine records $n + 1$ for every ordering of a code without logical qubits; the raw sizes stay in `uniform_failure`, and $D$ takes the defined 0) | `has_code`, `samples`, `max_exact` | as above |
 | `correlated_failure` | the entry's settings and name | — | `couplings`, `sizes`, `failure` $(c \times s)$, `se`, `interpolated_sizes`, `sampler` | the sampler's method |
 | `D_J` | as above | — | `couplings`, `robustness` $D(J)$ per coupling, `robustness_se`, `complete`, `has_code` | as above |
 
@@ -265,14 +321,26 @@ For protocol F, from the engine's arrays of row $i$ (all functions of `study/obs
 
 | observable | params | value | data |
 |---|---|---|---|
-| `first_passage` | `{}` | $\tau_0$ (NaN if censored) | `FirstPassage.to_dict()` with the checkpoint bounds $\widehat\tau^{\mathrm{chk}}_\ell$ over $E_r$ |
-| `peak_d_cyc` | `rule = "exact"` | $T^*$ of the zero-extended $d_{\mathrm{cyc}}$ | `Peak.to_dict()` (maximizing set, $k_t$ on it, horizon flag) |
+| `first_passage` | `{}` | $\tau_0$ (status `censored` and NaN if not reached) | `FirstPassage.to_dict()` with the checkpoint bounds $\widehat\tau^{\mathrm{chk}}_\ell$ over the domain $S_r$, the domain and its digest |
+| `peak_d_cyc` | `rule = "exact"` | $T^*$ of the zero-extended $d_{\mathrm{cyc}}$ over the domain (status `missing` when $d^* = 0$) | `Peak.to_dict()` (maximizing set, $k_t$ on it, horizon flag), the domain and its digest |
 | `peak_D` | `analysis.peak` | $T^*$ of $D(0)$ by the plateau rule | the peak, one peak per `sensitivity_z`, the bootstrap of $T^*$ (`bootstrap` replicates; seed `observables.region_seed(key, T, 0, 0, "peak_D", version)`) |
 | `peak_D_J` | `analysis.peak` and `J` | $T^*$ of $D(J)$ | the peak, the sensitivity, the probe name |
 
 For protocol P: the trace row (no $k$, status `no_reference`, final layer $T$) and the snapshot
 of the pure $n$-qubit state at every $t \in E_r$ of P. A retrospective value
-(`runner.compute`) is a snapshot-level row with `context = ""` and `unit_id` NULL.
+(`runner.compute`) is a snapshot-level row with `context = ""` and `unit_id` NULL; at a depth
+after a stop it is a row of status `absent_after_purification` with no value (SI-05: the
+system state there was not evolved, so an entanglement value is missing, never zero), unless
+the run stored a value there already.
+
+**Estimator randomness (G-ID-2).** The engine's sampled probes draw from streams keyed by the
+run seed's probe key, the trajectory index $u$, the probe name and the layer (and, for
+correlated erasures, the size): neither the rate nor the protocol enters. In `gate_mode =
+"shared"` the run seed is the same at every rate, so trajectory $(g, c)$ draws **the same**
+first-failure orderings and correlated regions at every rate of its condition: the sampling
+errors of a rate difference are correlated (the graph-level paired error of `stats` carries
+them). The retrospective samplers (`observables.region_seed`) put $p$ into their seed, so their
+regions differ between rates.
 
 ### 3.7 The logical digest
 
@@ -330,7 +398,25 @@ with:
   policies.
 
 The files are written in a temporary sibling directory renamed to `directory` when complete;
-`directory` must not exist.
+`directory` must not exist. `graph_aggregates.csv` gives, per $(n, \beta)$ and measurement, the
+equal-weight mean over the stored graphs with its standard error and the connected fraction
+(the reachable-pair mean distance of a disconnected graph averages within its components, so
+it is read beside the connected fraction).
+
+### 3.10 The outcome-aware replay and its seed (v1.4 §4, validation 5; G-TAB-2, SI-24)
+
+`runner.replay_signed(store, key, depths)` runs the trajectory's exported circuit on a
+phase-tracking `Simulator`. Its Born outcomes come from the simulator's stream, seeded by
+default with
+
+$$\mathrm{outcome\_seed}(\xi) = (\texttt{0x57534F31}, w(\text{experiment}), \mathrm{index}(\pi), n,
+w(\beta), w(p), g, c, r),$$
+
+twelve 32-bit words (`runner.outcome_seed_of`), $w(x)$ the two words of the 8-byte BLAKE2b of
+the text read little-endian (`identity.token_words` for the tokens), $\mathrm{index}(\pi)$ 0
+for F and 1 for P. The seed is a function of the stored identity alone, so the replay is
+reproducible from the store; `record=True` keeps the outcomes, the random flags and the
+signed digests in `signed_runs`.
 
 ## 4. Propositions and proofs
 
@@ -496,6 +582,32 @@ the components are a basis of these $x$. So the eigenvalue 0 has multiplicity eq
 number of components, and $\lambda_2 = 0$ iff there are two or more. The code sets it to 0
 exactly in that case instead of using the floating-point eigenvalue, which is only near 0. ∎
 
+**Proposition 14 (the outcome seed).** (a) Distinct trajectory keys have distinct outcome
+seeds unless two texts of one field share a 64-bit BLAKE2b digest. (b) No outcome seed equals a
+graph, run or region seed as a `SeedSequence` entropy. (c) The same seed gives the same outcomes
+and signed groups.
+
+*Proof (derived here).* (a) Every field of the key sits at a fixed position of a fixed-length
+tuple, the integers one word each (refused at $2^{32}$) and the texts two words each, so the map
+is injective up to a collision of the text hashes. (b) The first word is `0x57534F31`; graph,
+run and region seeds start with `0x57534731`, `0x57534331` and `0x5753524F`, and every tuple has
+more than four words, so `SeedSequence`'s zero padding never applies. (c) The simulator's
+random outcomes are drawn from its stream in circuit order, and the circuit is a function of
+the stored identity (Proposition 2). ∎
+
+**Proposition 15 (peaks do not depend on the revision history).** The peaks and checkpoint
+bounds of a trajectory complete under the requirements of revision $r$ are the same in a store
+built through revisions $1..r$ and in a store made directly under $M_r$.
+
+*Proof.* They are computed over the domain $S_r(n, \beta)$, the last revision's own schedule,
+which is part of $R_r$ in both stores and contained in the stored depths $E_r$; the values of
+the traces at those depths are equal in both stores (Propositions 4 and 5). ∎
+
+The Born law of the outcome-aware replay (v1.4 §4: a measured $Z_i$ whose value the state
+determines gives that value; otherwise each outcome has probability 1/2) is checked by the tests
+against Stim, measurement by measurement, rather than proved here: the simulator's measurement
+update is the one of doc 03 Proposition 4.
+
 ## 5. Algorithms
 
 ### 5.1 `runner.plan(store)`
@@ -510,7 +622,8 @@ exactly in that case instead of using the floating-point eigenvalue, which is on
    \cdot 2\lceil N/64\rceil$ bytes of snapshot rows plus 8 bytes per probe value).
 4. Group the graphs with the same piece into runs of consecutive labels, cut into units of at
    most $\min(\text{graphs\_per\_unit}, \lfloor\text{cap}/(c_1 - c_0)\rfloor)$ graphs.
-5. Sort the units by (protocol, $n$, $\beta$, $p$, $g_0$, $c_0$).
+   Missing trajectories that are stored already (reruns) and new ones never share a unit.
+5. Sort the units: reruns first, then by (protocol, $n$, $\beta$, $p$, $g_0$, $c_0$).
 
 Cost: one query per condition and rate, $O(G_* C)$ work. A complete store gives an empty plan.
 
@@ -610,7 +723,12 @@ The latency does not grow with the store beyond the first cache effects (Proposi
 | revisions | `study/runner.py::extend`, `TableauStore.add_revision`, `study/manifest.py::check_extension`, `effective_checkpoints` |
 | replay, signed replay, circuit | `study/runner.py::replay`, `replay_signed`, `circuit` |
 | retrospective observables | `study/runner.py::compute`, `study/observables.py::compute` |
-| verification | `study/runner.py::verify` |
+| verification | `study/runner.py::verify`, `study/runner.py::_native_codes` |
+| outcome seed, signed digest | `study/runner.py::outcome_seed_of`, `study/runner.py::signed_digest`, `study/store.py::_Transaction.put_signed_run`, `TableauStore.signed_runs` |
+| aggregates | `TableauStore.aggregate`, `TableauStore.aggregates`, `study/store.py::_Transaction.put_aggregate` |
+| sampler diagnostics | `study/runner.py::diagnose_samplers`, `TableauStore.sampler_diagnostics` |
+| provenance, versions | `study/store.py::store_versions`, `study/store.py::environment`, `study/runner.py::_provenance`, `study/runner.py::_check_environment`, `TableauStore.check_contract` |
+| append-only | `study/store.py::_TRIGGERS` |
 | protocols | `study/identity.py::PROTOCOLS`, `TrajectoryKey.protocol`, `dynamics_version`; `study/manifest.py::ProtocolSettings`, `ExperimentManifest.protocol_settings`, `monitored_circuit_kwargs(..., protocol)` |
 
 | Stored field | Formula |
@@ -769,6 +887,29 @@ assert math.isclose(m["degree_variance"], deg.var(), rel_tol=1e-12) and m["compo
 print({k_: round(v, 4) if isinstance(v, float) else v for k_, v in m.items()})
 ```
 
+### (i) Statuses, an aggregate record, a recorded signed replay, append-only rows
+
+```python
+import sqlite3
+
+from sparsegf2.study.store import STORE_FILE
+
+d = store.observations("d_cyc", p="0.3")
+print(sorted(set(d["status"])))  # "ok", and "undefined_no_code" where k = 0
+record = store.aggregate("D", t=5, n=6, beta="0.25", p="0.3",
+                         params={"samples": 12, "exact_budget": 6})
+print(round(record["mean"], 4), round(record["se"], 4), record["graphs"], record["sample_set"][:12])
+signed = runner.replay_signed(store, key, [5], record=True)  # the seed of the key itself
+assert signed.outcome_seed == runner.outcome_seed_of(key)
+assert store.signed_runs(key)[0]["outcome_seed"] == list(signed.outcome_seed)
+raw = sqlite3.connect(store.path / STORE_FILE)
+try:
+    raw.execute("UPDATE snapshots SET k = 0")
+except sqlite3.IntegrityError as exc:
+    print("refused:", exc)
+raw.close()
+```
+
 ### (h) Export, and an aggregate recomputed from the exported rows
 
 ```python
@@ -791,8 +932,8 @@ store.close()
 ## 8. Validation map
 
 `tests/test_study_store.py` (S), `tests/test_study_runner.py` (R),
-`tests/test_study_reproducibility.py` (P); every check is exact (equality of bytes, digests,
-arrays or decoded records) unless it says otherwise.
+`tests/test_study_reproducibility.py` (P), `tests/test_study_records.py` (G); every check is
+exact (equality of bytes, digests, arrays or decoded records) unless it says otherwise.
 
 | Property | Test | What is checked |
 |---|---|---|
@@ -826,6 +967,20 @@ arrays or decoded records) unless it says otherwise.
 | extension (Prop. 6) | P::test_an_extension_leaves_every_record_unchanged_and_equals_a_fresh_run, P::test_a_deeper_horizon_fails_loudly_on_a_stored_prefix_that_does_not_reproduce | a rate, a size, a beta, graphs, circuits, protocol P, a deeper horizon and a depth: every record kept, current state equals a fresh store; a forged prefix refused |
 | schedules (Props. 4, 5) | P::test_a_checkpoint_rule_change_cannot_change_a_circuit_or_a_stored_value, P::test_engine_probes_and_schedules_never_change_the_trajectory | exported circuits and stored values unchanged by a new rule; replays at other depth lists agree |
 
+| graphs once, checked (G-GR-1) | G::test_graphs_are_generated_once_and_checked_in_every_unit | one generator call per $(n, \beta, g)$ over a multi-unit, multi-rate run reopened between units; a forged graph refused by the next unit, nothing changed |
+| graph measurements (G-GR-2) | G::test_graph_measures_conventions_on_hand_cases_and_by_bfs | two $K_5$: 2 components, $\lambda_2 = 0$, distance 1 over 20 pairs; an isolated vertex; reachable pairs, components and mean distance against a BFS written in the test on 12 random graphs |
+| the engine call (G-ENG-1) | G::test_every_unit_runs_exactly_the_v14_engine_call | every keyword of v1.4 §8.1, the gate set, the order and every probe's kind, name and schedule, F and P |
+| versions, qubit order (G-TAB-1, G-ID-1) | G::test_the_versions_the_qubit_order_and_the_bell_pairs_are_recorded, G::test_a_store_of_another_randomness_contract_is_refused | the recorded tags and formats; $t = 0$ equals the golden digest of $\mathrm{span}\lbrace X_iX_{n+i}, Z_iZ_{n+i}\rbrace$ written out; another contract refused to write, replay and verify |
+| outcome seed, Born law (G-TAB-2, SI-24; Prop. 14) | G::test_the_outcome_seed_is_a_tagged_function_of_the_whole_key, G::test_the_signed_replay_is_recorded_and_reproduced_from_the_identity, G::test_the_signed_replay_follows_the_born_law | the seed against hashlib and struct, distinct over every key field; recorded and compared; Stim follows the outcomes: determined ones equal the state's eigenvalue, random ones are fair (binomial $\lvert z\rvert < 4.5$, false alarm $6.8 \times 10^{-6}$) |
+| statuses and $k = 0$ (G-STO-2, SI-05, SI-07, SI-08) | G::test_statuses_and_the_conventions_at_k_zero, G::test_the_store_says_why_a_value_is_missing | raw $d_{\mathrm{cyc}}$ undefined with zero extension, $n + 1$ kept raw and $D = 0$, censored and missing statuses, absent retrospective rows; refusals |
+| append-only (G-RUN-1) | G::test_stored_records_cannot_be_updated_or_deleted | twelve `UPDATE` and `DELETE` statements through SQLite refused by the triggers |
+| one schedule, reruns first (G-RUN-2) | G::test_reruns_come_first_and_every_trajectory_holds_one_schedule | a rate and depths added: reruns planned first, identical depth sets and schedules for old and new rates |
+| provenance (G-RUN-3) | G::test_units_record_their_provenance, G::test_a_confirmatory_study_keeps_its_environment | contract, environment and its digest per unit; a changed numpy refused under `confirmatory`, recorded under `exploratory` |
+| peak domain (G-OBS-2; Prop. 15) | G::test_peaks_do_not_depend_on_the_revision_history | peaks and first passages equal in a revised and a fresh store |
+| aggregates (G-STO-4) | G::test_aggregates_are_recorded_with_their_sample_set | the record against a direct computation; recompared; more graphs give a new record; refusal and `omit` on undefined values |
+| sampler diagnostics (G-OBS-4) | G::test_the_correlated_samplers_diagnostics_are_archived | one row per graph, size and coupling; idempotent; equal to the graph-side tool with the recorded seed |
+| probe streams across rates (G-ID-2) | G::test_probe_streams_are_shared_across_rates_unlike_the_retrospective_regions | the oracle's transcription of the probe stream reproduces both rates' first-failure samples from their stored codes; region seeds differ |
+
 A mutation check (scratchpad `t3_mutate.py`): 11 single faults in `store.py` and `runner.py`
 (prefix not compared, $g$ and $c$ swapped, values left out of the digest, snapshot identity not
 compared, replay not verifying, a circuit dropped from the plan, unbounded reads, a value not
@@ -851,8 +1006,33 @@ Refinements of the design §4 schema (its interfaces are kept; the tables are in
 * **S4. `requirements` and `completions`** (not in the design) make "done" a property of a
   trajectory under explicit requirements, which is what a revision changes.
 * **S5. The joint fill-in** (§3.2) is the one update of a data column.
-* **S6. Recomputing a value the run stored** compares the value and its error only (the run's
-  method and details may differ).
+* **S6. Recomputing a value the run stored** compares the value, its error and its status only
+  (the run's method and details may differ).
+* **S7. Append-only by triggers** (G-RUN-1). Changes from outside SQLite are not prevented, only
+  detected (digests on read, `check`, `verify`, the logical digest).
+* **S8. Observation statuses** (G-STO-2) are a column the design did not have.
+* **S9. The peak domain** (G-OBS-2): v1.4 §5.8 takes peaks over $\mathcal T(n, \beta)$; under the
+  R-CK unions the store holds $E_r$, and peaks and checkpoint bounds are taken over the last
+  revision's own schedule $S_r$, recorded with its digest. A different domain (the union) would
+  be another parameter, not computed here.
+* **S10. A new seed domain**, WSO1 (`0x57534F31`), for the outcome-aware replay (Proposition 14),
+  and WSSD (`0x57535344`) for the sampler diagnostics; both recorded in `meta.versions`.
+* **S11. Graph measurements** are a versioned JSON record per graph, not one column each.
+
+Not done here (the requirements review proposed them; they belong to other parts or need a
+decision):
+
+* the environment of a confirmatory study is compared with the units already run, not with a
+  lock pinned in the manifest beforehand (G-RUN-3), and there is no script that clones the
+  recorded commit into a fresh environment;
+* the sampler diagnostics are archived on request (`diagnose_samplers`), not before every unit,
+  and a unit is not flagged when their notes fire (G-OBS-4: their cost grows with graphs times
+  sizes); the error of $D(J > 0)$ remains the binomial one of doc 04 (an underestimate for the
+  chain);
+* golden seed tuples in a data file and the protocol arguments of `stats` and `fss` (identity,
+  statistics); the CLI forms of export (`--tableaux`) and the reproduction script;
+* comparison of the graph collections' statistics with the exact law and networkx samples
+  (graph conformance, doc 01).
 
 Not stored, or not this part:
 
