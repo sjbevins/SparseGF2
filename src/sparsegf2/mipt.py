@@ -131,7 +131,6 @@ from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
 from sparsegf2.graphs import edge_coloring, from_edges
-from sparsegf2.performance import PerformanceSettings
 
 if TYPE_CHECKING:  # imported where used at run time (sparsegf2.tableau needs sparsegf2.codes)
     from sparsegf2.codes import StabilizerCode
@@ -1613,7 +1612,7 @@ class MonitoredCircuit:
         first_trajectory: int | None = None,
         indices: Sequence[int] | np.ndarray | None = None,
         num_threads: int | None = None,
-        performance: str | PerformanceSettings | None = None,
+        physical_cores: bool = False,
     ) -> EnsembleResult:
         """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``,
         or exactly the trajectories listed in ``indices``.
@@ -1629,11 +1628,10 @@ class MonitoredCircuit:
         ``indices[i] // circuits_per_graph``, circuit stream ``indices[i]``,
         probe streams keyed by it), and ``result.trajectories`` is ``indices``
         in the given order. Runs in parallel over CPU cores (``num_threads``
-        limits that). ``performance``, a preset name of
-        :data:`sparsegf2.performance.PRESETS` or
-        :class:`~sparsegf2.performance.PerformanceSettings`, places the threads for this run
-        (process-wide, restored afterwards; ``num_threads``, when given, sets their number).
-        Neither changes a result. Returns an :class:`EnsembleResult`.
+        limits that). ``physical_cores=True`` runs one thread per physical core
+        (:func:`sparsegf2.performance.physical_cores`: process-wide, restored afterwards;
+        measured faster only from about n = 1800). Neither changes a result. Returns an
+        :class:`EnsembleResult`.
         """
         if indices is not None:
             if trajectories is not None or first_trajectory is not None:
@@ -1654,11 +1652,10 @@ class MonitoredCircuit:
             self._check_trajectories(first, count)
             index = np.arange(first, first + count, dtype=np.int64)
         trajectories = int(index.size)
-        settings = _performance.resolve(performance, self.num_qubits)
-        if settings is not None and num_threads is not None:
-            settings = replace(settings, threads=num_threads)
-        with _performance.applied(settings):
-            return self._run(index, seed, num_threads)
+        if physical_cores:
+            with _performance.physical_cores(num_threads):
+                return self._run(index, seed, num_threads)
+        return self._run(index, seed, num_threads)
 
     def _run(self, index: np.ndarray, seed, num_threads: int | None) -> EnsembleResult:
         trajectories = int(index.size)

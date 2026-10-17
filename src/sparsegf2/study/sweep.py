@@ -35,7 +35,6 @@ import numpy as np
 from sparsegf2 import api, graphs, mipt
 from sparsegf2 import performance as _performance
 from sparsegf2._version import __version__
-from sparsegf2.performance import PerformanceSettings
 from sparsegf2.study import identity
 from sparsegf2.study.identity import Token
 
@@ -591,7 +590,7 @@ def run(
     chunk_size: int | None = None,
     compression: str = DEFAULT_COMPRESSION,
     writers: int = DEFAULT_WRITERS,
-    performance: str | PerformanceSettings | None = None,
+    physical_cores: bool = False,
     log: Callable[[str], None] | None = None,
     command: str = "sweep.run",
 ) -> dict[str, Any]:
@@ -608,12 +607,11 @@ def run(
     threads while the next one computes, with ``compression`` ``"fast"``, ``"none"`` or
     ``"default"`` (``EnsembleResult.save``; not part of the sweep's identity), and listed with
     this package version and its compression under ``parts`` in the condition's
-    ``provenance.json``. ``performance`` (a preset of :data:`sparsegf2.performance.PRESETS` or
-    :class:`~sparsegf2.performance.PerformanceSettings`) places the engine's threads per size
-    and may set the writers. A computed chunk is a whole number of rounds of the running
-    threads, at least one (a part may then exceed :data:`PART_BYTES`). Results do not depend
-    on ``num_threads``, ``chunk_size``, ``compression``, ``writers`` or ``performance``. The
-    directory's lock admits one writer.
+    ``provenance.json``. ``physical_cores=True`` runs one engine thread per physical core
+    (:func:`sparsegf2.performance.physical_cores`; measured faster only from about n = 1800). A
+    computed chunk is a whole number of rounds of the running threads, at least one (a part may
+    then exceed :data:`PART_BYTES`). Results do not depend on ``num_threads``, ``chunk_size``,
+    ``compression``, ``writers`` or ``physical_cores``. The directory's lock admits one writer.
     """
     sweep = spec if isinstance(spec, SweepSpec) else SweepSpec.from_json(spec)
     if num_threads is not None:
@@ -655,11 +653,10 @@ def run(
             "log": log,
             "command": command,
         }
-        for n, beta, p in sweep.conditions():
-            qubits = n + {"purification": n, "single": 1, "none": 0}[sweep.picture]
-            settings = _performance.resolve(performance, qubits)
-            with _performance.applied(settings):
-                ran += _run_condition(root, sweep, n, beta, p, options, settings)
+        placed = _performance.physical_cores(num_threads) if physical_cores else None
+        with placed or contextlib.nullcontext():
+            for n, beta, p in sweep.conditions():
+                ran += _run_condition(root, sweep, n, beta, p, options)
     finally:
         lock.release()
     out = status(root)
@@ -750,7 +747,6 @@ def _run_condition(
     beta: Token,
     p: Token,
     options: dict[str, Any],
-    settings: PerformanceSettings | None = None,
 ) -> int:
     folder = root / _name(n, beta, p)
     folder.mkdir(exist_ok=True)
@@ -780,10 +776,7 @@ def _run_condition(
     size = min(
         cap, chosen or _rounds(api._default_chunk_size(mc, int(todo.size), running), cap, running)
     )
-    writers = (
-        options["writers"] if settings is None or settings.writers is None else settings.writers
-    )
-    seed, log = list(sweep.run_seed(n, beta)), options["log"]
+    seed, writers, log = list(sweep.run_seed(n, beta)), options["writers"], options["log"]
     start = 0
     # Each part is saved on a writer thread while the next one computes (the kernels and
     # zlib release the GIL); at most ``writers`` saves wait, so at most writers + 1 parts

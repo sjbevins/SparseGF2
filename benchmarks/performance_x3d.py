@@ -10,17 +10,22 @@ beta = 0.1), the purification picture, ``n // 2`` random-edge gates per layer, T
   snapshots, without measurements (p = 0: the gates alone) and with ``code_dimension`` at the
   last layer only, and the fixed cost of one ``MonitoredCircuit.run`` call;
 * ``placements``: trajectories per second at 1, 8, 16 and 32 threads, on every logical
-  processor, one per physical core, the V-Cache CCD only and the other CCD only
-  (``sparsegf2.performance.applied``), and at n = 1280 to 2048 (T = 256) for the
-  preset's rule; every configuration's common trajectories must be identical;
+  processor (the default) and one per physical core (``physical_cores=True``), and at
+  n = 1280 to 2048 (T = 256) where one per core starts to pay; every configuration's common
+  trajectories must be identical;
 * ``padding``: the engine with and without the tableau padding of ``mipt._row_padding``;
 * ``gates``: a compiled micro-benchmark of ``apply_2q`` and of its linear part with the masks
   read before the word loop (as now), inside it (as before) and from a compact 16-bit table;
 * ``scheduling``: Numba's parallel chunk size with ``stop_when_purified``;
 * ``small_batches``: runs of 1 to 32 trajectories on 1 thread and on all of them;
 * ``end_to_end``: ``sweep.run`` (``sweep_throughput.measure``) with 2, 4 and 8 writer threads,
-  with the engine pinned to the V-Cache CCD and the writers to the other one (Windows), and at
-  n = 1024 with parts of 18 trajectories (the cap before chunks became whole thread rounds).
+  and at n = 1024 with parts of 19 trajectories (the cap before chunks became whole thread
+  rounds).
+
+The committed results also hold rows this script no longer measures: placements on the V-Cache
+CCD and on the other CCD, and the engine on the V-Cache CCD with the writers pinned to the other
+one. They gave no gain, so they are not offered (docs/SWEEPS.md section 12); ``--from-json``
+renders them.
 
 Before each measurement the script records the CPU load of other processes (percent of all
 logical processors, over 0.5 s after a 0.2 s settle). Usage, from the repository root, on an
@@ -39,7 +44,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import dataclasses
 import json
 import os
 import platform
@@ -50,7 +54,7 @@ from pathlib import Path
 
 import numba
 import numpy as np
-from numba import njit, prange
+from numba import njit
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -62,7 +66,6 @@ import sparsegf2 as sg  # noqa: E402
 from sparsegf2 import mipt, performance  # noqa: E402
 from sparsegf2._kernel.tableau import apply_2q  # noqa: E402
 from sparsegf2._kernel.tables import ANF2, IDENTITY_SYM2, LIN2  # noqa: E402
-from sparsegf2.performance import PerformanceSettings  # noqa: E402
 from sparsegf2.study import identity, sweep  # noqa: E402
 from sparsegf2.study.sweep import SweepSpec  # noqa: E402
 
@@ -223,32 +226,20 @@ def breakdown(plan) -> tuple[list, float]:
     return rows, round(float(np.median(calls)) * 1e3, 3)
 
 
-def placement_configs(topo, counts):
-    configs = [("all", t) for t in counts]
-    if topo.known:
-        configs += [("physical", t) for t in counts if 1 < t <= len(topo.cores)]
-    if topo.x3d:
-        half = len(topo.vcache.processors)
-        configs += [(name, t) for name in ("vcache", "other_ccd") for t in counts if 1 < t <= half]
-    return configs
-
-
 def run_config(mc, seed, count, placement, threads):
-    settings = PerformanceSettings(threads=threads, placement=placement)
     load = LOAD()
     start = time.perf_counter()
-    result = mc.run(count, seed=seed, performance=settings)
+    result = mc.run(count, seed=seed, num_threads=threads, physical_cores=placement == "physical")
     return time.perf_counter() - start, result, load
 
 
-def placements(plan, topo) -> tuple[list, bool]:
+def placements(plan, cores) -> tuple[list, bool]:
     rows, identical = [], True
-    full = placement_configs(topo, plan["threads"])
-    top = max(plan["threads"])
-    short = [("all", top)] + ([("physical", len(topo.cores))] if topo.known else [])
+    counts = plan["threads"]
+    full = [("all", t) for t in counts] + [("physical", t) for t in counts if 1 < t <= len(cores)]
+    short = [("all", max(counts))] + ([("physical", len(cores))] if cores else [])
     sizes = [(n, p, None, full if p == "0.2" else short) for n in plan["sizes"] for p in RATES]
-    ccds = [c for c in full if c[0] in ("vcache", "other_ccd") and c[1] == len(topo.cores)]
-    sizes += [(n, "0.2", 256, short + ccds) for n in plan["large"]]
+    sizes += [(n, "0.2", 256, short) for n in plan["large"]]
     for n, p, layers, configs in sizes:
         mc, seed = circuit(n, p, layers=layers, trajectories=65536)
         per = plan["per_thread"].get(n, 2)
@@ -459,49 +450,7 @@ def small_batches(plan) -> list:
     return rows
 
 
-# Windows only: pin Numba's worker threads to one set of logical processors and the sweep's
-# writers to another (process affinity cannot: it binds every thread of the process alike).
-if sys.platform == "win32":
-    _K32 = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
-    _thread_handle = _K32.GetCurrentThread
-    _thread_handle.restype = ctypes.c_void_p
-    _thread_handle.argtypes = []
-    _set_thread_mask = _K32.SetThreadAffinityMask
-    _set_thread_mask.restype = ctypes.c_size_t
-    _set_thread_mask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-
-    @njit(parallel=True, cache=False)
-    def _pin_workers(masks, out):
-        for i in prange(masks.shape[0]):  # one iteration per thread: Numba's static schedule
-            out[i] = _set_thread_mask(_thread_handle(), masks[i])
-
-
-def _pinned_sweep(n, p, count, scratch, engine, writers, writer_count):
-    """sweep.run with the engine's threads on ``engine`` and its writers on ``writers``."""
-    engine_mask = sum(1 << q for q in engine)
-    writer_mask = sum(1 << q for q in writers)
-    every = sum(1 << q for q in range(64) if q < (os.cpu_count() or 1))
-    threads = len(engine)
-    out = np.zeros(threads, dtype=np.uint64)
-    original = sweep._save_part
-
-    def save(*args):
-        _set_thread_mask(_thread_handle(), writer_mask)
-        return original(*args)
-
-    numba.set_num_threads(threads)
-    _pin_workers(np.full(threads, engine_mask, dtype=np.uint64), out)
-    sweep._save_part = save
-    try:
-        row = sweep_measure(n, p, True, count, scratch, num_threads=threads, writers=writer_count)
-    finally:
-        sweep._save_part = original
-        _pin_workers(np.full(threads, every, dtype=np.uint64), out)
-        numba.set_num_threads(numba.config.NUMBA_NUM_THREADS)
-    return row
-
-
-def end_to_end(plan, topo, scratch) -> list:
+def end_to_end(plan, scratch) -> list:
     rows = []
     sizes = list(plan["end_to_end"].items())
     for n, count in sizes[:2]:
@@ -512,19 +461,6 @@ def end_to_end(plan, topo, scratch) -> list:
             row.update(setting=f"all processors, {writers} writers", load=load)
             rows.append(row)
             print("end to end", row, flush=True)
-        if sys.platform == "win32" and topo.x3d:
-            big = topo.vcache.processors
-            other = topo.placement("other_ccd")
-            for writer_count in (4, 8):
-                load = LOAD()
-                row = _pinned_sweep(n, p, count, scratch, big, other, writer_count)
-                row.update(
-                    setting=f"engine on the V-Cache CCD ({len(big)} threads), "
-                    f"{writer_count} writers on the other CCD",
-                    load=load,
-                )
-                rows.append(row)
-                print("end to end", row, flush=True)
     n, count = sizes[-1]
     probe = SweepSpec.from_json(
         {"sizes": [n], "betas": ["0.1"], "rates": ["0.2"], "graphs": 1, "circuits_per_graph": 1,
@@ -552,22 +488,20 @@ def end_to_end(plan, topo, scratch) -> list:
 # ---------------------------------------------------------------------------
 
 
-def _topology_record(topo) -> dict:
-    record = dataclasses.asdict(topo)
-    record["l3"] = [{"bytes": d.size, "processors": list(d.processors)} for d in topo.l3]
-    record["cores"] = [list(c) for c in topo.cores]
-    record["processors"] = list(topo.processors)
-    record["x3d"] = topo.x3d
-    return record
-
-
 def render_markdown(results: dict) -> str:
     env, topo = results["environment"], results["topology"]
-    l3 = ", ".join(
-        f"{d['bytes'] // 2**20} MiB shared by logical processors "
-        f"{d['processors'][0]}-{d['processors'][-1]}"
-        for d in topo["l3"]
-    )
+    cores = topo["cores"]
+    caches = ""
+    if "l3" in topo:  # recorded by the runs that measured the CCD placements
+        l3 = ", ".join(
+            f"{d['bytes'] // 2**20} MiB shared by logical processors "
+            f"{d['processors'][0]}-{d['processors'][-1]}"
+            for d in topo["l3"]
+        )
+        caches = (
+            f"; L1d {topo['l1d_bytes']} bytes and L2 {topo['l2_bytes']} bytes per core; "
+            f"L3: {l3 or 'unknown'}"
+        )
     lines = [
         "# Performance on this CPU",
         "",
@@ -577,10 +511,8 @@ def render_markdown(results: dict) -> str:
         f"{env['numba_num_threads']}, threading layer `{env['threading_layer']}`), sparsegf2 "
         f"{env['sparsegf2']}.",
         "",
-        f"Topology (`sparsegf2.performance.cpu_topology`, source `{topo['source']}`): "
-        f"{len(topo['cores'])} cores of {len(topo['cores'][0]) if topo['cores'] else '?'} "
-        f"logical processors; L1d {topo['l1d_bytes']} bytes and L2 {topo['l2_bytes']} bytes "
-        f"per core; L3: {l3 or 'unknown'}.",
+        f"Topology, as the operating system reports it: {len(cores)} cores of "
+        f"{len(cores[0]) if cores else '?'} logical processors{caches}.",
         "",
         "Workload: the sweep's (Watts–Strogatz k = 4, beta = 0.1, purification picture, "
         "n // 2 random-edge gates per layer, T = 4n unless stated, `code_dimension` every "
@@ -613,9 +545,18 @@ def render_markdown(results: dict) -> str:
             f"| {r['n']} | {r['p']} | {r['layers']} | {r['placement']} | {r['threads']} | "
             f"{r['trajectories']} | {r['trajectories_per_second']:.4g} | {r['load']} |"
         )
+    dropped = {r["placement"] for r in results["placements"]} & {"vcache", "other_ccd"}
+    note = (
+        " The `vcache` and `other_ccd` rows (16 or 8 threads on one CCD) and the pinned writers "
+        "below measure placements that gave no gain and are not offered; the script no longer "
+        "measures them."
+        if dropped
+        else ""
+    )
     lines += [
         "",
-        f"Common trajectories identical in every configuration: {results['placements_identical']}.",
+        f"Common trajectories identical in every configuration: "
+        f"{results['placements_identical']}.{note}",
         "",
         "## Tableau padding (all threads, p = 0.2, snapshots included)",
         "",
@@ -726,7 +667,7 @@ def main() -> None:
         LOAD.settle, LOAD.window = 0.0, 0.05
     top = min(numba.config.NUMBA_NUM_THREADS, max(plan["threads"]))
     plan["threads"] = tuple(sorted({t for t in plan["threads"] if t <= top} | {top}))
-    topo = performance.cpu_topology()
+    cores = performance.cpu_cores()
     start = time.perf_counter()
     mc, seed = circuit(8, "0.1", trajectories=4)
     mc.run(4, seed=seed)  # compiles
@@ -742,7 +683,7 @@ def main() -> None:
         "sparsegf2": sg.__version__,
     }
     print(env, flush=True)
-    results: dict = {"environment": env, "topology": _topology_record(topo)}
+    results: dict = {"environment": env, "topology": {"cores": [list(c) for c in cores]}}
     results["quick"] = args.quick
     results["plan_threads"] = list(plan["threads"])
     chosen = args.sections or SECTIONS
@@ -752,7 +693,7 @@ def main() -> None:
     if "breakdown" in chosen:
         results["breakdown"], results["call_ms"] = breakdown(plan)
     if "placements" in chosen:
-        results["placements"], results["placements_identical"] = placements(plan, topo)
+        results["placements"], results["placements_identical"] = placements(plan, cores)
     if "padding" in chosen:
         results["padding"], results["padding_identical"] = padding(plan)
     if "gates" in chosen:
@@ -763,7 +704,7 @@ def main() -> None:
         results["small_batches"] = small_batches(plan)
     if "end_to_end" in chosen:
         with tempfile.TemporaryDirectory(prefix="performance_x3d_") as tmp:
-            results["end_to_end"] = end_to_end(plan, topo, Path(tmp))
+            results["end_to_end"] = end_to_end(plan, Path(tmp))
     seconds = round(time.perf_counter() - start, 1)
     results["total_seconds"] = seconds + (results.get("total_seconds", 0) if args.sections else 0)
     if not (

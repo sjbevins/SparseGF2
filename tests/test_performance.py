@@ -1,5 +1,5 @@
-"""The 720 symplectic classes of the phase-free gates, and CPU-specific settings that change no
-result: threads, placements, presets, the tableau padding and the sweep's chunk rounds.
+"""The 720 symplectic classes of the phase-free gates, and settings that change no result:
+threads, one thread per physical core, the tableau padding and the sweep's chunk rounds.
 
 Statistics: one chi-square test at ``ALPHA = 1e-6``; a correct sampler at a fresh seed fails
 it with probability 1e-6 (at the fixed seed here the outcome is deterministic).
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 
 import numba
@@ -21,13 +22,15 @@ from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel.tableau import apply_2q
 from sparsegf2._kernel.tables import ANF2, IDENTITY_SYM2, LIN2
 from sparsegf2.clifford import symplectic_group
-from sparsegf2.performance import CacheDomain, CpuTopology, PerformanceSettings
 from sparsegf2.study import identity, sweep
 from sparsegf2.study.sweep import SweepSpec
 
 ALPHA = 1e-6
-TOPOLOGY = performance.cpu_topology()
-PLACEABLE = TOPOLOGY.known and sys.platform in ("win32", "linux")
+CORES = performance.cpu_cores()
+PLACEABLE = bool(CORES) and sys.platform in ("win32", "linux")
+NEEDS_CORES = pytest.mark.skipif(
+    not PLACEABLE, reason="one thread per physical core needs the cores (Windows or Linux)"
+)
 
 
 def condition(n=12, p="0.2", graphs=3, **changes):
@@ -127,41 +130,23 @@ def test_the_engine_draws_the_720_classes_uniformly():
 # ---------------------------------------------------------------------------
 
 
-def _available(setting):
-    if isinstance(setting, PerformanceSettings) and setting.placement != "all":
-        if not PLACEABLE:
-            pytest.skip("thread placement needs a known topology on Windows or Linux")
-        if setting.placement in ("vcache", "other_ccd") and not TOPOLOGY.x3d:
-            pytest.skip("not a 3D V-Cache part: no L3 domains of different sizes")
-    if setting == "9950x3d" and not performance._is_9950x3d(TOPOLOGY):
-        pytest.skip(f"not a Ryzen 9 9950X3D: {performance._describe(TOPOLOGY)}")
-    return setting
-
-
-SETTINGS = [
-    PerformanceSettings(threads=1),
-    PerformanceSettings(threads=2),
-    PerformanceSettings(),
-    PerformanceSettings(placement="physical"),
-    PerformanceSettings(placement="physical", threads=3),
-    PerformanceSettings(placement="vcache"),
-    PerformanceSettings(placement="other_ccd", threads=5),
-    PerformanceSettings(placement=TOPOLOGY.processors[:2] or (0,)),
-    "auto",
-    "9950x3d",
-]
-
-
 @pytest.fixture(scope="module")
 def default_run():
     mc, seed = condition()
     return mc, seed, mc.run(12, seed=seed)
 
 
-@pytest.mark.parametrize("setting", SETTINGS, ids=str)
-def test_every_setting_gives_identical_results(default_run, setting):
+@pytest.mark.parametrize("threads", [1, 2, 3, None])
+def test_every_thread_count_gives_identical_results(default_run, threads):
     mc, seed, expected = default_run
-    assert_same(mc.run(12, seed=seed, performance=_available(setting)), expected)
+    assert_same(mc.run(12, seed=seed, num_threads=threads), expected)
+
+
+@NEEDS_CORES
+@pytest.mark.parametrize("threads", [None, 1, 3])
+def test_one_thread_per_physical_core_gives_identical_results(default_run, threads):
+    mc, seed, expected = default_run
+    assert_same(mc.run(12, seed=seed, num_threads=threads, physical_cores=True), expected)
 
 
 @pytest.mark.parametrize("pad", [0, 1, 3])
@@ -182,7 +167,8 @@ def test_the_padding_used_from_16_words_changes_no_result(monkeypatch):
     assert_same(mc.run(4, seed=seed), padded)
 
 
-def test_a_sweep_with_a_preset_and_whole_rounds_equals_the_default(tmp_path):
+@NEEDS_CORES
+def test_a_sweep_on_physical_cores_and_in_whole_rounds_equals_the_default(tmp_path):
     spec = {
         "sizes": [6, 8],
         "betas": ["0.1"],
@@ -196,17 +182,16 @@ def test_a_sweep_with_a_preset_and_whole_rounds_equals_the_default(tmp_path):
         "master_circuit_seed": 29,
     }
     sweep.run(spec, tmp_path / "default", chunk_size=4)
-    sweep.run(spec, tmp_path / "auto", performance="auto")
-    settings = PerformanceSettings(threads=2, writers=1)
-    sweep.run(spec, tmp_path / "two", performance=settings)
+    sweep.run(spec, tmp_path / "rounds")  # computed chunks: whole rounds of the threads
+    sweep.run(spec, tmp_path / "physical", num_threads=2, physical_cores=True)
     for n in (6, 8):
         expected = sweep.load(tmp_path / "default", n, "0.1", "0.2")
-        for name in ("auto", "two"):
+        for name in ("rounds", "physical"):
             assert_same(sweep.load(tmp_path / name, n, "0.1", "0.2"), expected)
     spec_file = tmp_path / "spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
-    argv = ["sweep", "run", str(spec_file), str(tmp_path / "cli"), "--performance", "auto"]
-    assert cli.main([*argv, "--json"]) == 0
+    argv = ["sweep", "run", str(spec_file), str(tmp_path / "cli"), "--physical-cores", "--json"]
+    assert cli.main(argv) == 0
     assert_same(sweep.load(tmp_path / "cli", 8, "0.1", "0.2"), expected)
 
 
@@ -218,66 +203,34 @@ def test_chunks_are_whole_rounds_of_the_running_threads():
 
 
 # ---------------------------------------------------------------------------
-# presets, topology and affinity
+# cores and affinity
 # ---------------------------------------------------------------------------
 
 
-def x3d_like() -> CpuTopology:
-    cores = tuple((2 * i, 2 * i + 1) for i in range(16))
-    l3 = (CacheDomain(96 * 2**20, tuple(range(16))), CacheDomain(32 * 2**20, tuple(range(16, 32))))
-    return CpuTopology("windows", tuple(range(32)), cores, l3, 2**20, 48 * 2**10)
+def test_the_cores_of_this_machine():
+    assert performance.cpu_cores() == CORES  # never raises; the same answer again
+    if not CORES:
+        pytest.skip("the operating system's cores cannot be read here")
+    flat = [p for core in CORES for p in core]  # each logical processor in one core
+    assert len(flat) == len(set(flat)) and all(core == tuple(sorted(core)) for core in CORES)
+    assert len(CORES) <= len(flat) <= (os.cpu_count() or len(flat))
 
 
-def test_the_presets_follow_the_cache_rule():
-    topo = x3d_like()
-    assert performance._is_9950x3d(topo) and topo.x3d and topo.vcache == topo.l3[0]
-    # one thread per core once 32 tableaux exceed the largest L3, 96 MiB: from N = 3521 qubits
-    largest = 96 * 2**20
-    assert 32 * performance.tableau_bytes(3520) <= largest < 32 * performance.tableau_bytes(3521)
-    for name in ("9950x3d", "auto"):
-        for qubits, placement in ((128, "all"), (3072, "all"), (3520, "all"), (3521, "physical")):
-            assert performance.preset(name, qubits, topo).placement == placement
-    assert topo.placement("physical") == tuple(range(0, 32, 2))
-    assert topo.placement("other_ccd") == tuple(range(16, 32))
-    single = CpuTopology("linux", tuple(range(8)), tuple((i,) for i in range(8)),
-                         (CacheDomain(32 * 2**20, tuple(range(8))),))  # fmt: skip
-    with pytest.raises(ValueError, match="use 'auto'"):
-        performance.preset("9950x3d", 128, single)
-    assert performance.preset("auto", 64000, single).placement == "physical"
-    with pytest.raises(ValueError, match="an X3D part"):
-        single.placement("vcache")
-    unknown = CpuTopology("unknown")
-    assert performance.preset("auto", 10**6, unknown) == PerformanceSettings()
-    with pytest.raises(ValueError, match="preset must be one of"):
-        performance.preset("fastest", 128, topo)
-    with pytest.raises(ValueError, match="threads must be a positive integer"):
-        PerformanceSettings(threads=0)
-
-
-def test_the_topology_of_this_machine():
-    assert performance.cpu_topology() == TOPOLOGY  # never raises; the same answer again
-    if not TOPOLOGY.x3d:
-        pytest.skip(f"not a 3D V-Cache part (two L3 sizes): {performance._describe(TOPOLOGY)}")
-    big, small = sorted(TOPOLOGY.l3, key=lambda d: -d.size)
-    assert len(TOPOLOGY.l3) == 2 and big.size > small.size  # the V-Cache CCD and the other
-    assert set(big.processors).isdisjoint(small.processors)
-    assert set(big.processors) | set(small.processors) == set(TOPOLOGY.processors)
-    assert TOPOLOGY.l2_bytes and TOPOLOGY.l1d_bytes
-    assert len(TOPOLOGY.placement("physical")) == len(TOPOLOGY.cores)
-
-
-@pytest.mark.skipif(
-    not PLACEABLE, reason="thread placement needs a known topology on Windows or Linux"
-)
+@NEEDS_CORES
 def test_the_affinity_and_thread_count_are_restored_also_on_an_exception():
     before, threads = performance._get_affinity(), numba.get_num_threads()
-    physical = TOPOLOGY.placement("physical")
-    with performance.applied(PerformanceSettings(placement="physical")):
-        assert performance._get_affinity() == physical
+    physical = tuple(sorted(core[0] for core in CORES))
+    with performance.physical_cores() as chosen:
+        assert chosen == physical and performance._get_affinity() == physical
         assert numba.get_num_threads() == min(len(physical), numba.config.NUMBA_NUM_THREADS)
     assert performance._get_affinity() == before and numba.get_num_threads() == threads
-    one = PerformanceSettings(placement=physical[:1], threads=1)
-    with pytest.raises(RuntimeError, match="inside"), performance.applied(one):
-        assert performance._get_affinity() == physical[:1]
+    with pytest.raises(RuntimeError, match="inside"), performance.physical_cores(1):
+        assert performance._get_affinity() == physical and numba.get_num_threads() == 1
         raise RuntimeError("inside")
     assert performance._get_affinity() == before and numba.get_num_threads() == threads
+
+
+def test_without_cores_one_thread_per_core_is_refused(monkeypatch):
+    monkeypatch.setattr(performance, "cpu_cores", lambda: ())
+    with pytest.raises(ValueError, match="needs the CPU's cores"), performance.physical_cores():
+        pass

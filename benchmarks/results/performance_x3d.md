@@ -2,7 +2,7 @@
 
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor (16 physical cores, 32 logical processors), Windows-11-10.0.26200-SP0. Python 3.14.7, NumPy 2.5.4, Numba 0.68.0 (`NUMBA_NUM_THREADS` = 32, threading layer `omp`), sparsegf2 3.0.0.dev12.
 
-Topology (`sparsegf2.performance.cpu_topology`, source `windows`): 16 cores of 2 logical processors; L1d 49152 bytes and L2 1048576 bytes per core; L3: 96 MiB shared by logical processors 0-15, 32 MiB shared by logical processors 16-31.
+Topology, as the operating system reports it: 16 cores of 2 logical processors; L1d 49152 bytes and L2 1048576 bytes per core; L3: 96 MiB shared by logical processors 0-15, 32 MiB shared by logical processors 16-31.
 
 Workload: the sweep's (Watts–Strogatz k = 4, beta = 0.1, purification picture, n // 2 random-edge gates per layer, T = 4n unless stated, `code_dimension` every layer, `tableau_snapshot` on 12 geometric checkpoints). `load` is the CPU load of other processes, in percent of all logical processors, just before the measurement.
 
@@ -76,7 +76,7 @@ One `MonitoredCircuit.run` call of one trajectory and one layer: 0.272 ms (the f
 | 2048 | 0.2 | 256 | vcache | 16 | 32 | 17.27 | 8.4 |
 | 2048 | 0.2 | 256 | other_ccd | 16 | 32 | 7.629 | 2.9 |
 
-Common trajectories identical in every configuration: True.
+Common trajectories identical in every configuration: True. The `vcache` and `other_ccd` rows (16 or 8 threads on one CCD) and the pinned writers below measure placements that gave no gain and are not offered; the script no longer measures them.
 
 ## Tableau padding (all threads, p = 0.2, snapshots included)
 
