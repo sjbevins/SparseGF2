@@ -10,6 +10,7 @@ measurements against networkx; the writer lock; export.
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import math
 import sqlite3
@@ -23,7 +24,7 @@ import pytest
 
 import _study_store_support as sup
 import _ws_reference as wsref
-from _rowspace_oracle import dense_rows, int_rows, physical_rows
+from _rowspace_oracle import dense_rows, int_rows, physical_rows, rank, restrict
 from sparsegf2 import graphs, mipt
 from sparsegf2.study import observables as ob
 from sparsegf2.study import runner, stats
@@ -223,6 +224,51 @@ def test_stored_observations_reproduce_from_the_stored_codes(built):
             # every ordering fails within n exactly when the code has a logical qubit
             ff = np.array(uniform["first_failure"])
             assert np.all(ff <= n) if code.num_logical else np.all(ff == n + 1)
+            # D(0) and its error from the stored samples and from exact counts made here by
+            # brute force on the stored joint state (T3-F17)
+            counts = _failing_regions(built.tableau(key, t), n, w)
+            assert uniform["exact_counts"] == counts
+            D = built.observation(key, t, "D", params={"samples": 12, "exact_budget": 6})
+            assert D["method"] == "hybrid" and D["data"]["max_exact"] == w
+            value, se = _integrated_robustness(ff, counts, n, code.num_logical)
+            assert D["value"] == pytest.approx(value, rel=1e-12, abs=1e-12)
+            assert D["se"] == pytest.approx(se, rel=1e-12, abs=1e-12)
+
+
+def _failing_regions(joint: PhaseFreeTableau, n: int, w: int) -> list[int]:
+    """The number of uncorrectable m-qubit erasures for m = 1..w, by enumeration: a region A
+    of the system fails when I(A:R) > 0, with S(X) = rank(rows restricted to X) - |X| for a
+    pure state (computed with the oracle's own rank, on Python ints)."""
+    rows = int_rows(joint.canonical())
+    reference = list(range(n, 2 * n))
+
+    def entropy(qubits: list[int]) -> int:
+        return rank([restrict(r, qubits, 2 * n) for r in rows]) - len(qubits)
+
+    s_ref = entropy(reference)
+    counts = []
+    for m in range(1, w + 1):
+        fails = 0
+        for region in itertools.combinations(range(n), m):
+            region = list(region)
+            if entropy(region) + s_ref - entropy(region + reference) > 0:
+                fails += 1
+        counts.append(fails)
+    return counts
+
+
+def _integrated_robustness(
+    ff: np.ndarray, counts: list[int], n: int, k: int
+) -> tuple[float, float]:
+    """D(0) of v1.4 §5.7 from first-failure sizes and exact counts for m = 1..w (doc 04):
+    0 when k = 0; else 1 + sum_{m <= w} (1 - c_m / C(n, m)) + mean_j Y_j with
+    Y_j = max(D_j, w + 1) - (w + 1), and the error s_Y / sqrt(S)."""
+    if k == 0:
+        return 0.0, 0.0
+    w = len(counts)
+    exact = sum(1.0 - c / math.comb(n, m) for m, c in enumerate(counts, start=1))
+    y = [max(int(d), w + 1) - (w + 1) for d in ff]
+    return 1.0 + exact + statistics.fmean(y), statistics.stdev(y) / math.sqrt(len(y))
 
 
 def test_k_trace_and_first_passage_by_the_parameter_tuple(built):

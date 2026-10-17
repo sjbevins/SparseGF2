@@ -16,7 +16,8 @@ machine is taken over). Readers need no lock and may read while a writer writes.
 **Identities.** A trajectory is ``(protocol, n, beta, p, g, c, r)`` (the
 :class:`~sparsegf2.study.identity.TrajectoryKey` of the store's experiment, tokens as their
 canonical strings); a snapshot adds the depth ``t``; an observation adds ``(observable, version,
-params, context)``; a graph is ``(n, beta, g)``. Each identity is stored once and never
+params, context)`` (the context is empty for a snapshot value, and for a trajectory-level value
+the digest of the horizon and the peak domain it was derived over); a graph is ``(n, beta, g)``. Each identity is stored once and never
 overwritten: meeting it again compares the content (digests, decoded traces, values) and raises
 ``ValueError`` naming the identity on any difference. The single exception fills a missing joint
 tableau into a snapshot that held only the physical code (a revision switched
@@ -37,7 +38,9 @@ tableau into a snapshot that held only the physical code (a revision switched
 
 **Transactions.** Every write runs in one ``BEGIN IMMEDIATE`` ... ``COMMIT`` transaction
 (:meth:`TableauStore.transaction`); an exception rolls it back, a killed process leaves it
-uncommitted (WAL recovery discards it), so a reader sees a unit completely or not at all.
+uncommitted (WAL recovery discards it), so a reader sees a unit completely or not at all. A
+read of many tables (export, the logical digest, ``check``) runs in one read transaction
+(:meth:`TableauStore.reading`), so it sees one committed state while a writer commits.
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ STORE_FILE = "study.sqlite"
 GRAPH_MEASURES_VERSION = "ws-graph-measures-1"
 
 #: The layout written by :meth:`TableauStore.export`.
-EXPORT_FORMAT = "sparsegf2.study.export/1"
+EXPORT_FORMAT = "sparsegf2.study.export/2"
 
 #: The qubit order of every stored row space (design §2.1; ``identity.ROWSPACE_FORMAT_VERSION``
 #: says how the rows are written, this says what the columns are).
@@ -250,6 +253,13 @@ CREATE TABLE completions (
     revision INTEGER NOT NULL REFERENCES manifests (revision),
     PRIMARY KEY (tid, requirements)
 ) WITHOUT ROWID;
+CREATE TABLE derivations (
+    tid INTEGER NOT NULL REFERENCES trajectories (tid),
+    derivation TEXT NOT NULL REFERENCES requirements (digest),
+    unit_id INTEGER REFERENCES units (unit_id),
+    revision INTEGER NOT NULL REFERENCES manifests (revision),
+    PRIMARY KEY (tid, derivation)
+) WITHOUT ROWID;
 CREATE TABLE snapshots (
     tid INTEGER NOT NULL REFERENCES trajectories (tid),
     t INTEGER NOT NULL,
@@ -303,6 +313,7 @@ CREATE TABLE aggregates (
     params TEXT NOT NULL,
     selection TEXT NOT NULL,
     t INTEGER NOT NULL,
+    context TEXT NOT NULL,
     estimator TEXT NOT NULL,
     policy TEXT NOT NULL,
     sample_set TEXT NOT NULL,
@@ -314,8 +325,8 @@ CREATE TABLE aggregates (
     contributing_trajectories INTEGER NOT NULL,
     data BLOB,
     created_utc TEXT NOT NULL,
-    PRIMARY KEY (protocol, n, beta, p, observable, version, params, selection, t, estimator,
-        policy, sample_set)
+    PRIMARY KEY (protocol, n, beta, p, observable, version, params, selection, t, context,
+        estimator, policy, sample_set)
 ) WITHOUT ROWID;
 CREATE TABLE signed_runs (
     tid INTEGER NOT NULL REFERENCES trajectories (tid),
@@ -365,6 +376,7 @@ _KEPT_TABLES = (
     "trajectories",
     "traces",
     "completions",
+    "derivations",
     "observable_defs",
     "observations",
     "aggregates",
@@ -607,6 +619,200 @@ def _decode_rowspace(blob: bytes | None, digest: str | None, what: str) -> Phase
         return PhaseFreeTableau.from_bytes(raw)
     except ValueError as exc:
         raise ValueError(f"{what}: {exc}") from None
+
+
+# ---------------------------------------------------------------------------------------------
+# rows ready to store (validated and encoded outside a transaction)
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=False)
+class SnapshotRow:
+    """One snapshot ready to be written: its depth, status, ``N``, rank, ``k`` and the
+    compressed canonical bytes with their digests (:func:`snapshot_row`)."""
+
+    t: int
+    status: str
+    num_qubits: int
+    rank: int | None
+    k: int | None
+    joint: bytes | None
+    joint_digest: str | None
+    phys: bytes | None
+    phys_digest: str | None
+
+
+def snapshot_row(
+    key: TrajectoryKey,
+    t: int,
+    *,
+    status: str,
+    num_qubits: int,
+    k: int | None,
+    joint: PhaseFreeTableau | None,
+    phys: PhaseFreeTableau | None,
+    level: int,
+    check_physical: bool = True,
+) -> SnapshotRow:
+    """Validate one snapshot and encode it (zlib at ``level``, SHA-256 of the canonical bytes).
+
+    Checked: a stored joint state is pure (rank ``N``, isotropic); a protocol-F physical code
+    has rank ``n - k`` and commutes; with ``check_physical`` the physical code is recomputed from
+    the joint state and must equal it (the runner derives one from the other and skips it). A
+    pure function of its arguments that touches no database: the runner prepares the rows of a
+    unit on several threads (the isotropy kernel, zlib and SHA-256 release the GIL).
+    """
+    what = f"snapshot of {key} at t = {t}"
+    if status not in SNAPSHOT_STATUSES:
+        raise ValueError(f"{what}: unknown status {status!r}")
+    jb = jd = pb = pd = None
+    rank = None
+    if status == SNAPSHOT_PHYS_ONLY and (joint is not None or key.protocol != "F"):
+        raise ValueError(f"{what}: a phys_only snapshot holds a protocol-F physical code only")
+    if status == SNAPSHOT_STORED and key.protocol == "F" and joint is None:
+        raise ValueError(f"{what}: a stored protocol-F snapshot holds its joint state")
+    if status in (SNAPSHOT_STORED, SNAPSHOT_PHYS_ONLY):
+        if joint is not None:
+            if joint.num_qubits != num_qubits or not joint.is_pure():
+                raise ValueError(
+                    f"{what}: the joint state must be pure on {num_qubits} qubits (rank N and "
+                    f"isotropic), got rank {joint.rank} on {joint.num_qubits}"
+                )
+            jb, jd = _rowspace_blob(joint, level)
+            rank = joint.rank
+        if key.protocol == "F":
+            if phys is None or k is None:
+                raise ValueError(f"{what}: a protocol-F snapshot needs its physical code and k")
+            if phys.rank != key.n - k or phys.num_qubits != key.n or not phys.is_isotropic():
+                raise ValueError(
+                    f"{what}: the physical code must have rank n - k = {key.n - k} on "
+                    f"{key.n} qubits and commute, got rank {phys.rank}"
+                )
+            if (
+                check_physical
+                and joint is not None
+                and not joint.physical_tableau(key.n).same_space(phys)
+            ):
+                raise ValueError(f"{what}: the physical code is not that of the joint state")
+            pb, pd = _rowspace_blob(phys, level)
+        elif joint is None:
+            raise ValueError(f"{what}: a protocol-{key.protocol} snapshot needs its joint state")
+    elif joint is not None or phys is not None:
+        raise ValueError(f"{what}: an absent snapshot stores nothing")
+    return SnapshotRow(
+        t=int(t),
+        status=status,
+        num_qubits=int(num_qubits),
+        rank=rank,
+        k=None if k is None else int(k),
+        joint=jb,
+        joint_digest=jd,
+        phys=pb,
+        phys_digest=pd,
+    )
+
+
+def _compare_snapshot(what: str, stored: Sequence[Any], row: SnapshotRow) -> None:
+    """Raise unless the stored ``(status, num_qubits, rank, k, joint_digest, phys_digest)``
+    holds the content of ``row`` (a code-only row meets a stored joint row by its code)."""
+    status = row.status
+    if stored[0] == SNAPSHOT_STORED and status == SNAPSHOT_PHYS_ONLY:
+        status = SNAPSHOT_STORED  # a code-only rerun of a stored row: compare the code
+    new = (status, row.num_qubits, row.k, row.phys_digest)
+    old = (stored[0], stored[1], stored[3], stored[5])
+    for name, a, b in zip(("status", "num_qubits", "k", "phys_digest"), old, new, strict=True):
+        if a != b:
+            raise _differs(what, name, a, b)
+    if stored[4] is not None and row.joint_digest is not None and stored[4] != row.joint_digest:
+        raise _differs(what, "joint_digest", stored[4], row.joint_digest)
+
+
+@dataclass(frozen=True, eq=False)
+class ObservationRow:
+    """One observation ready to be written (:func:`observation_row`): its key part
+    ``(t, observable, version, params, context)``, status, value and error in their SQL form
+    (NaN as None), the compressed canonical JSON data and the method."""
+
+    t: int
+    observable: str
+    version: str
+    params: str
+    context: str
+    status: str
+    value: float | None
+    se: float | None
+    data: bytes | None
+    method: str
+
+
+def observation_row(
+    t: int,
+    observable: str,
+    params: Mapping[str, Any] | str | None,
+    *,
+    value: Any,
+    se: Any,
+    data: Any,
+    method: str,
+    level: int,
+    context: str = "",
+    version: str | None = None,
+    status: str | None = None,
+) -> ObservationRow:
+    """One value under its key, encoded for the store (:meth:`_Transaction.put_observation`).
+
+    ``params`` is a dict (resolved with the catalog's defaults, :func:`observables.params_key`)
+    or the canonical text :func:`observables.params_key` returned. ``status``
+    (:data:`OBSERVATION_STATUSES`) says what the value is; by default ``ok`` for a finite value,
+    ``infinite`` for an infinite one and ``undefined`` for NaN. Touches no database.
+    """
+    entry = ob.get(observable, version)
+    text = (
+        params
+        if isinstance(params, str)
+        else ob.params_key(observable, params, version=entry.version)
+    )
+    v, s = _sql_float(value), _sql_float(se)
+    if status is None:
+        status = "undefined" if v is None else ("infinite" if math.isinf(v) else "ok")
+    if status not in OBSERVATION_STATUSES:
+        raise ValueError(f"status must be one of {list(OBSERVATION_STATUSES)}, got {status!r}")
+    if status == "ok" and (v is None or math.isinf(v)):
+        raise ValueError(f"an observation with status 'ok' has a finite value, got {value!r}")
+    return ObservationRow(
+        t=int(t),
+        observable=observable,
+        version=entry.version,
+        params=text,
+        context=context,
+        status=status,
+        value=v,
+        se=s,
+        data=_data_blob(data, level),
+        method=method,
+    )
+
+
+def _compare_observation(
+    what: str, stored: Sequence[Any], row: ObservationRow, compare: str = "all"
+) -> None:
+    """Raise unless the stored ``(value, se, method, data, status)`` equals ``row``: the value and
+    error bit for bit (NaN equal to NaN) and the status, and with ``compare="all"`` also the
+    method and the decoded data."""
+    if not _same_float(stored[0], row.value):
+        raise _differs(what, "value", stored[0], row.value)
+    if not _same_float(stored[1], row.se):
+        raise _differs(what, "standard error", stored[1], row.se)
+    if stored[4] != row.status:
+        raise _differs(what, "status", stored[4], row.status)
+    if compare == "value":
+        return
+    if stored[2] != row.method:
+        raise _differs(what, "method", stored[2], row.method)
+    old_text = _data_text(stored[3], what)
+    new_text = _data_text(row.data, what)
+    if old_text != new_text:
+        raise _differs(what, "data", old_text, new_text)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -882,6 +1088,9 @@ class TableauStore:
                 with contextlib.suppress(sqlite3.Error):
                     conn.execute("ROLLBACK")
                 conn.close()
+                for suffix in ("", "-wal", "-shm", "-journal"):  # nothing was committed
+                    with contextlib.suppress(OSError):
+                        (directory / (STORE_FILE + suffix)).unlink()
                 raise
         except BaseException:
             lock.release()
@@ -906,6 +1115,13 @@ class TableauStore:
         try:
             conn = cls._connect(db, writable=write)
             try:
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+                if "meta" not in tables:
+                    raise ValueError(
+                        f"{str(directory)!r} holds a {STORE_FILE} without the store's tables: its "
+                        "creation never completed (the process ended inside TableauStore.create). "
+                        "Nothing was stored in it: remove the directory and create the store again"
+                    )
                 store = cls(directory, conn, lock, write)
                 store._check_versions(write)
             except BaseException:
@@ -1012,6 +1228,26 @@ class TableauStore:
         finally:
             self._in_transaction = False
 
+    @contextlib.contextmanager
+    def reading(self) -> Iterator[sqlite3.Connection]:
+        """One read transaction: every statement inside it sees the same committed state.
+
+        ``BEGIN`` (deferred: the snapshot is taken at the first read) ... ``COMMIT``. In WAL mode
+        a writer may commit meanwhile (a reader is never blocked) without changing what the
+        block reads. Used by :meth:`export`, :meth:`logical_digest` and :meth:`check`, which
+        read many tables; inside an open transaction of this connection that one is used.
+        """
+        conn = self._db()
+        if conn.in_transaction:
+            yield conn
+            return
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        finally:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("COMMIT")
+
     # -- manifests -----------------------------------------------------------------------------
 
     def revisions(self) -> list[ExperimentManifest]:
@@ -1050,6 +1286,19 @@ class TableauStore:
         latest = self.manifest
         if new.digest() == latest.digest():
             return self.revision
+        earlier = (
+            self._db()
+            .execute("SELECT revision FROM manifests WHERE digest = ?", (new.digest(),))
+            .fetchone()
+        )
+        if earlier is not None:
+            raise ValueError(
+                f"the new manifest is revision {int(earlier[0])} again (digest "
+                f"{new.digest()[:16]}...): a revision differs from every earlier one, since each "
+                "manifest is stored once under its digest. The settings it returns to are in "
+                "effect again through a revision that also records the return, for example a "
+                "changed storage.graphs_per_unit or resources field (they change no stored value)"
+            )
         message = check_extension(latest, new)
         if message is not None:
             raise ValueError(
@@ -1350,21 +1599,29 @@ class TableauStore:
         key: TrajectoryKey | str | None = None,
         *,
         layers: int | None = None,
-        checkpoints: Any = "stored",
+        checkpoints: Any = "current",
         **parts: Any,
     ) -> ob.FirstPassage:
         """The exact first passages ``tau_ell``, ``ell = 0..n``, with censoring (v1.4 §5.2).
 
         Rebuilt from the stored trace by :func:`~sparsegf2.study.observables.first_passage` and
-        checked against the stored ``tau``. ``checkpoints="stored"`` (default) adds the
-        checkpoint bounds ``tau_chk`` over the trajectory's stored snapshot depths up to the
-        horizon; ``None`` leaves them out; a list uses those depths.
+        checked against the stored ``tau``. The checkpoint bounds ``tau_chk`` are taken over
+        ``checkpoints``: ``"current"`` (default) the latest revision's own schedule $S_r$ of the
+        condition up to the horizon, the domain of the stored ``first_passage`` value (G-OBS-2,
+        Proposition 15 of doc 05: the same in a revised store and in one made directly under the
+        latest manifest); ``"stored"`` every stored snapshot depth up to the horizon (the union
+        $E_r$ of every revision's schedule, which depends on the revision history); ``None``
+        leaves them out; a list uses those depths.
         """
         rec = self.trace(key, layers=layers, **parts)
         if rec.k is None:
             raise ValueError(f"trajectory {rec.key} (protocol {rec.key.protocol}) has no k trace")
         if isinstance(checkpoints, str) and checkpoints == "stored":
             cps = [t for t in self.depths(rec.key) if t <= rec.layers] or None
+        elif isinstance(checkpoints, str) and checkpoints == "current":
+            k = rec.key
+            domain = self.manifest.checkpoints(k.n, k.beta, k.protocol)
+            cps = [int(t) for t in domain if int(t) <= rec.layers] or None
         else:
             cps = checkpoints
         fp = ob.first_passage(rec.k, cps, num_system=rec.key.n)
@@ -1457,12 +1714,15 @@ class TableauStore:
     ) -> Iterator[SnapshotRecord]:
         """Every snapshot matching the filters, in natural order, ``batch_size`` rows at a time.
 
-        A keyset cursor over the snapshot index ``(tid, t)``: each batch is one query that
-        resumes after the last row read, so memory holds at most ``batch_size`` compressed
-        snapshots and nothing is decoded until :meth:`SnapshotRecord.tableau` or ``code`` is
-        called. ``status`` is a status of :data:`SNAPSHOT_STATUSES` or a list of them (default:
-        the snapshots that hold a row space, ``stored`` and ``phys_only``); ``None`` includes
-        absent snapshots.
+        A keyset cursor: each batch is one query that resumes after the last ``(tid, t)`` read,
+        walking the trajectories in row-id order from the last one (the integer primary key)
+        and each trajectory's snapshots through the unique index ``(tid, t)``, so no batch
+        sorts or revisits earlier rows (the plan has no ``TEMP B-TREE``; the tests check the
+        store's own query) and a whole iteration costs time linear in the store. Memory holds
+        at most ``batch_size`` compressed snapshots, and nothing is decoded until
+        :meth:`SnapshotRecord.tableau` or ``code`` is called. ``status`` is a status of
+        :data:`SNAPSHOT_STATUSES` or a list of them (default: the snapshots that hold a row
+        space, ``stored`` and ``phys_only``); ``None`` includes absent snapshots.
         """
         if not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
@@ -1482,14 +1742,18 @@ class TableauStore:
             extra_args.extend(wanted)
         more = "".join(f" AND {e}" for e in extra)
         sql = (
-            f"SELECT s.tid, {_KEY_COLUMNS}, {_SNAPSHOT_COLUMNS} FROM snapshots s "
-            "JOIN trajectories tr ON tr.tid = s.tid "
-            f"WHERE (s.tid, s.t) > (?, ?) AND s.tid IN (SELECT tr.tid FROM trajectories tr "
-            f"WHERE {where}){more} ORDER BY s.tid, s.t LIMIT ?"
+            f"SELECT s.tid, {_KEY_COLUMNS}, {_SNAPSHOT_COLUMNS} FROM trajectories tr "
+            "CROSS JOIN snapshots s ON s.tid = tr.tid "
+            f"WHERE tr.tid >= ? AND (tr.tid > ? OR s.t > ?) AND {where}{more} "
+            "ORDER BY tr.tid, s.t LIMIT ?"
         )
         last = (-1, -1)
         while True:
-            rows = self._db().execute(sql, (*last, *args, *extra_args, batch_size)).fetchall()
+            rows = (
+                self._db()
+                .execute(sql, (last[0], last[0], last[1], *args, *extra_args, batch_size))
+                .fetchall()
+            )
             if not rows:
                 return
             for row in rows:
@@ -1500,6 +1764,78 @@ class TableauStore:
                 return
 
     # -- observations --------------------------------------------------------------------------
+
+    def _current(self, protocol: str, n: int, beta: Any, revisions: Any = None) -> Any:
+        """What the latest revision asks of the trajectories of ``(protocol, n, beta)``:
+        :func:`sparsegf2.study.runner.current` (its requirements, derivation and the context of
+        its trajectory-level values)."""
+        from sparsegf2.study import runner as _runner
+
+        chain = self.revisions() if revisions is None else revisions
+        return _runner.current(chain, protocol, n, beta)
+
+    def _currents(self) -> Any:
+        """A per-call cache of :meth:`_current`, keyed by ``(protocol, n, beta token)``."""
+        revisions = self.revisions()
+        cache: dict[tuple[str, int, str], Any] = {}
+
+        def get(protocol: str, n: int, beta: Any) -> Any:
+            ck = (protocol, int(n), Token.parse(beta, what="beta").token)
+            if ck not in cache:
+                cache[ck] = self._current(protocol, n, beta, revisions)
+            return cache[ck]
+
+        return get
+
+    def _select(
+        self,
+        observable: str,
+        version: str | None,
+        params: Mapping[str, Any] | str | None,
+        *,
+        prefer_current: bool = False,
+    ) -> tuple[str, str]:
+        """The stored ``(version, params)`` of ``observable`` that ``version`` and ``params`` name.
+
+        The choices are the stored definitions (``observable_defs``: one row per key of a stored
+        value). ``params`` is a dict (resolved with the registry's defaults) or the canonical
+        text; left out, the store must hold one choice, or, with ``prefer_current``, one among
+        the trajectory-level values the latest revision derives.
+        """
+        choices = [
+            (str(v), str(p))
+            for v, p in self._db().execute(
+                "SELECT version, params FROM observable_defs WHERE observable = ? "
+                "ORDER BY version, params",
+                (observable,),
+            )
+        ]
+        if version is not None:
+            choices = [ch for ch in choices if ch[0] == version]
+        if params is not None:
+            text = (
+                params
+                if isinstance(params, str)
+                else ob.params_key(observable, params, version=version)
+            )
+            choices = [ch for ch in choices if ch[1] == text]
+        if not choices:
+            raise KeyError(f"no stored values of observable {observable!r} with these settings")
+        if len(choices) > 1 and prefer_current:
+            latest = self.manifest
+            wanted: set[tuple[str, str]] = set()
+            for protocol in latest.protocol_names:
+                for cond in latest.conditions():
+                    cur = self._current(protocol, cond.n, cond.beta)
+                    wanted |= {(v, p) for o, v, p in cur.derived if o == observable}
+            if wanted:
+                choices = [ch for ch in choices if ch in wanted] or choices
+        if len(choices) > 1:
+            raise ValueError(
+                f"observable {observable!r} is stored under several versions or parameter sets; "
+                f"choose one with version= and params=: {sorted(choices)}"
+            )
+        return choices[0]
 
     def observations(
         self,
@@ -1521,38 +1857,25 @@ class TableauStore:
         ``g``, ``c``, ``r``, ``t`` (``-1`` for trajectory-level values), ``value`` (float64,
         NaN where undefined), ``se``, ``method``, ``context``, ``status`` (one of
         :data:`OBSERVATION_STATUSES`: why a value is NaN, infinite or a vector), and, with
-        ``field``, that entry
-        of each row's data (a float64 array, stacked when it is a list). ``version`` and
-        ``params`` may be left out when the store holds one choice of them (``params`` is a
-        dict, resolved with the registry's defaults, or the stored canonical text).
-        ``context="current"`` keeps, for trajectory-level values, those derived under each
-        trajectory's latest requirements (its latest horizon and schedule); ``None`` keeps all.
+        ``field``, that entry of each row's data (a float64 array, stacked when it is a list;
+        the data are read only then). ``version`` and ``params`` may be left out when the store
+        holds one choice of them (``params`` is a dict, resolved with the registry's defaults,
+        or the stored canonical text); for a trajectory-level observable stored under several
+        parameter sets (a revision changed the peak rule) the one the latest revision derives
+        is taken. ``context="current"`` keeps, for trajectory-level values, those of the latest
+        revision's horizon and peak domain of each condition (:func:`runner.derivation`: the
+        same rows a store made directly under the latest manifest holds); a trajectory not yet
+        run or derived under it has none. ``None`` keeps every context; any other string keeps
+        that one.
         """
         db = self._db()
-        choices = db.execute(
-            "SELECT DISTINCT version, params FROM observations WHERE observable = ?",
-            (observable,),
-        ).fetchall()
-        if version is not None:
-            choices = [ch for ch in choices if ch[0] == version]
-        if params is not None:
-            text = (
-                params
-                if isinstance(params, str)
-                else ob.params_key(observable, params, version=version)
-            )
-            choices = [ch for ch in choices if ch[1] == text]
-        if not choices:
-            raise KeyError(f"no stored values of observable {observable!r} with these settings")
-        if len(choices) > 1:
-            raise ValueError(
-                f"observable {observable!r} is stored under several versions or parameter sets; "
-                f"choose one with version= and params=: {sorted(choices)}"
-            )
-        version_, params_ = choices[0]
+        version_, params_ = self._select(
+            observable, version, params, prefer_current=context == "current"
+        )
         where, args = self._filters(protocol=protocol, n=n, beta=beta, p=p)
+        blob = "o.data" if field is not None else "NULL"
         sql = (
-            f"SELECT tr.tid, {_KEY_COLUMNS}, o.t, o.value, o.se, o.method, o.context, o.data, "
+            f"SELECT tr.tid, {_KEY_COLUMNS}, o.t, o.value, o.se, o.method, o.context, {blob}, "
             "o.status FROM observations o JOIN trajectories tr ON tr.tid = o.tid "
             f"WHERE o.observable = ? AND o.version = ? AND o.params = ? AND {where}"
         )
@@ -1563,10 +1886,8 @@ class TableauStore:
         sql += " ORDER BY tr.protocol, tr.n, tr.beta, tr.p, tr.g, tr.c, tr.r, o.t, o.context"
         rows = db.execute(sql, sql_args).fetchall()
         if context == "current":
-            latest = self._latest_requirements({int(r[0]) for r in rows if r[8] == -1})
-            rows = [
-                r for r in rows if r[8] != -1 or r[12].split("/")[0] == latest.get(int(r[0]), "")
-            ]
+            currents = self._currents()
+            rows = [r for r in rows if r[8] != -1 or r[12] == currents(r[1], r[2], r[3]).context]
         elif context is not None:
             rows = [r for r in rows if r[12] == context]
         out: dict[str, np.ndarray] = {
@@ -1583,6 +1904,8 @@ class TableauStore:
             "context": np.array([r[12] for r in rows], dtype=object),
             "status": np.array([r[14] for r in rows], dtype=object),
         }
+        out["version"] = np.array([version_] * len(rows), dtype=object)
+        out["params"] = np.array([params_] * len(rows), dtype=object)
         if field is not None:
             values = []
             for r in rows:
@@ -1592,22 +1915,6 @@ class TableauStore:
                     raise KeyError(f"observation {observable!r} has no data field {field!r}")
                 values.append(data[field])
             out[field] = _float_array(values)
-        return out
-
-    def _latest_requirements(self, tids: set[int]) -> dict[int, str]:
-        """For each trajectory, the requirements digest of its latest completion (the one of
-        the highest revision; a trajectory has one completion per revision at most)."""
-        out: dict[int, str] = {}
-        ordered = sorted(tids)
-        for lo in range(0, len(ordered), 500):
-            chunk = ordered[lo : lo + 500]
-            rows = self._db().execute(
-                "SELECT tid, requirements FROM completions WHERE tid IN "
-                f"({', '.join('?' * len(chunk))}) ORDER BY tid, revision, unit_id",
-                chunk,
-            )
-            for tid, req in rows.fetchall():
-                out[int(tid)] = req
         return out
 
     def observation(
@@ -1621,7 +1928,12 @@ class TableauStore:
         context: str = "",
         **parts: Any,
     ) -> dict[str, Any]:
-        """One stored value: ``{"value", "se", "status", "method", "data"}`` (``KeyError`` if absent)."""
+        """One stored value: ``{"value", "se", "status", "method", "data"}`` (``KeyError`` if absent).
+
+        A trajectory-level value (``t = -1``) is taken under the current context of the
+        trajectory's condition (the latest revision's horizon and peak domain) unless
+        ``context`` names another one.
+        """
         k = self.key(key, **parts)
         tid = self._require_tid(k)
         entry = ob.get(observable, version)
@@ -1631,32 +1943,26 @@ class TableauStore:
             else ob.params_key(observable, params, version=entry.version)
         )
         if t == -1 and context == "":
-            latest = self._latest_requirements({tid}).get(tid, "")
-            rows = (
-                self._db()
-                .execute(
-                    "SELECT value, se, method, data, context, status FROM observations WHERE tid = ? "
-                    "AND t = -1 "
-                    "AND observable = ? AND version = ? AND params = ?",
-                    (tid, observable, entry.version, text),
-                )
-                .fetchall()
+            context = self._current(k.protocol, k.n, k.beta).context
+        row = (
+            self._db()
+            .execute(
+                "SELECT value, se, method, data, context, status FROM observations WHERE tid = ? "
+                "AND t = ? AND observable = ? AND version = ? AND params = ? AND context = ?",
+                (tid, int(t), observable, entry.version, text, context),
             )
-            rows = [r for r in rows if r[4].split("/")[0] == latest]
-            row = rows[0] if len(rows) == 1 else None
-        else:
-            row = (
-                self._db()
-                .execute(
-                    "SELECT value, se, method, data, context, status FROM observations WHERE tid = ? "
-                    "AND t = ? "
-                    "AND observable = ? AND version = ? AND params = ? AND context = ?",
-                    (tid, int(t), observable, entry.version, text, context),
-                )
-                .fetchone()
-            )
+            .fetchone()
+        )
         if row is None:
-            raise KeyError(f"no value of {observable!r} for {k} at t = {t} with these settings")
+            more = (
+                " under the current context (the latest revision's horizon and peak domain: run "
+                "runner.run or runner.derive, or pass the context of an earlier one)"
+                if t == -1
+                else ""
+            )
+            raise KeyError(
+                f"no value of {observable!r} for {k} at t = {t} with these settings{more}"
+            )
         value, se, method, data, _, status = row
         body = _data_text(data, f"observation {observable!r} of {k}")
         return {
@@ -1687,6 +1993,25 @@ class TableauStore:
         )
         return {(int(g), int(c)) for g, c in rows.fetchall()}
 
+    def derived_pairs(
+        self, protocol: str, n: int, beta: Any, p: Any, derivation: str
+    ) -> set[tuple[int, int]]:
+        """The ``(g, c)`` of the trajectories of a condition derived under ``derivation`` (every
+        trajectory-level value of :func:`runner.derivation` stored)."""
+        rows = self._db().execute(
+            "SELECT tr.g, tr.c FROM trajectories tr JOIN derivations d ON d.tid = tr.tid "
+            "WHERE tr.protocol = ? AND tr.n = ? AND tr.beta = ? AND tr.p = ? AND tr.r = 0 "
+            "AND d.derivation = ?",
+            (
+                check_protocol(protocol),
+                int(n),
+                Token.parse(beta).token,
+                Token.parse(p).token,
+                derivation,
+            ),
+        )
+        return {(int(g), int(c)) for g, c in rows.fetchall()}
+
     def _has_observation(
         self, tid: int, t: int, observable: str, version: str, params: str, context: str = ""
     ) -> bool:
@@ -1711,20 +2036,35 @@ class TableauStore:
         return {(int(g), int(c)) for g, c in rows.fetchall()}
 
     def schedule(self, key: TrajectoryKey | str | None = None, **parts: Any) -> dict[str, Any]:
-        """The schedule a trajectory holds (G-RUN-2): its latest requirements' horizon
-        (``layers``), checkpoints (``checkpoints``, the depths of its dictionary and of its
-        snapshot values), peak domain (``domain``) and the requirements digest."""
+        """The schedule a trajectory holds under the latest revision (G-RUN-2): the current
+        requirements' horizon (``layers``) and checkpoints (``checkpoints``, the depths of its
+        dictionary and of its snapshot values), the peak domain (``domain``, the latest
+        revision's own schedule; protocol P: the checkpoints), the requirements digest and the
+        context of its trajectory-level values. ``KeyError`` when the trajectory is not
+        complete under the current requirements (a rerun is pending: ``runner.run``)."""
         k = self.key(key, **parts)
         tid = self._require_tid(k)
-        digest = self._latest_requirements({tid}).get(tid)
-        if digest is None:
-            raise KeyError(f"trajectory {k} has no completion")
-        req = self.requirements(digest)
+        cur = self._current(k.protocol, k.n, k.beta)
+        row = (
+            self._db()
+            .execute(
+                "SELECT 1 FROM completions WHERE tid = ? AND requirements = ?", (tid, cur.digest)
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise KeyError(
+                f"trajectory {k} is not complete under the latest revision's requirements (a "
+                "rerun is pending: runner.run)"
+            )
+        req = cur.requirements
+        domain = req["checkpoints"] if cur.derivation is None else cur.derivation["domain"]
         return {
-            "requirements": digest,
+            "requirements": cur.digest,
             "layers": req["layers"],
             "checkpoints": list(req["checkpoints"]),
-            "domain": list(req.get("domain", req["checkpoints"])),
+            "domain": list(domain),
+            "context": cur.context,
         }
 
     def signed_runs(
@@ -1793,28 +2133,52 @@ class TableauStore:
         field: str | None = None,
         index: int | None = None,
         nan_policy: str = "raise",
+        context: str = "current",
+        partial: bool = False,
         record: bool = True,
     ) -> dict[str, Any]:
         """The nested equal-graph-weight mean of one observable at one depth, with its
         graph-cluster error (v1.4 §6.3, §6.4; ``stats.nested_mean``), recorded (G-STO-4).
 
         The rows are the stored values at depth ``t`` of the condition (for ``t = -1`` the
-        trajectory-level values of each trajectory's latest requirements), the ``value`` column
-        or the data ``field`` (entry ``index`` of it when it is a list). Rows whose status is
-        not ``ok`` (NaN, missing, censored, ...) are refused under ``nan_policy="raise"`` and
-        left out under ``"omit"`` (the estimand then changes: ``stats.NestedMean``). The record
-        is keyed by the condition, the observable's key, the selection (field and index), the
-        depth, the estimator version (:data:`ESTIMATOR_VERSION`), the policy and the
-        ``sample_set``: the SHA-256 of the sorted ``(g, c, r)`` of the rows used, so a new
-        sample (more graphs) is a new record and no record is replaced. With ``record`` (a
-        writer store) it is inserted, or compared with the stored one.
+        trajectory-level values of ``context``: by default the current one, the latest
+        revision's horizon and peak domain), the ``value`` column or the data ``field`` (entry
+        ``index`` of it when it is a list). Every stored trajectory of the condition must have a
+        row, unless ``partial`` (a rerun or a derivation pending after a revision would
+        otherwise give a mean over a subset, or over two horizons). Rows whose status is not
+        ``ok`` (NaN, missing, censored, ...) are refused under ``nan_policy="raise"`` and left
+        out under ``"omit"`` (the estimand then changes: ``stats.NestedMean``; the record's data
+        count the rows left out per status). The record is keyed by the condition, the
+        observable's stored key (the ``(version, params)`` the rows were read under), the
+        selection (field and index), the depth, the context of the rows (empty for snapshot
+        values), the estimator version (:data:`ESTIMATOR_VERSION`), the policy and the
+        ``sample_set``: the SHA-256 of the sorted ``(g, c, r)`` of the rows used, so a new sample
+        (more graphs) or another horizon is a new record and no record is replaced. With
+        ``record`` (a writer store) it is inserted, or compared with the stored one.
         """
+        if context is None:
+            raise ValueError("an aggregate reads one context: give 'current' or a context")
+        version_, params_ = self._select(
+            observable, version, params, prefer_current=context == "current"
+        )
         rows = self.observations(
-            observable, version=version, params=params, protocol=protocol, n=n, beta=beta, p=p,
-            t=t, field=field,
+            observable, version=version_, params=params_, protocol=protocol, n=n, beta=beta,
+            p=p, t=t, field=field, context=context,
         )  # fmt: skip
         if rows["g"].size == 0:
             raise KeyError(f"no stored values of {observable!r} at t = {t} for this condition")
+        used = "" if int(t) >= 0 else str(rows["context"][0])
+        stored = len(self.trajectory_keys(protocol=protocol, n=n, beta=beta, p=p))
+        have = len(set(zip(rows["g"].tolist(), rows["c"].tolist(), rows["r"].tolist(),
+                           strict=True)))  # fmt: skip
+        if have < stored and not partial:
+            raise ValueError(
+                f"{have} of the {stored} stored trajectories of this condition have a value of "
+                f"{observable!r} at t = {t}"
+                + (" under the current context" if t == -1 and context == "current" else "")
+                + ": a rerun or a derivation is pending (runner.run), or the observable was "
+                "computed for part of them; partial=True aggregates the ones that have it"
+            )
         values = rows[field] if field is not None else rows["value"]
         if values.ndim > 1:
             if index is None:
@@ -1834,12 +2198,11 @@ class TableauStore:
         est = stats.nested_mean(rows["g"], rows["c"], rows["r"], clean, nan_policy=nan_policy)  # type: ignore[arg-type]
         keys = sorted(zip(rows["g"].tolist(), rows["c"].tolist(), rows["r"].tolist(), strict=True))
         sample_set = sha256_hex(canonical_json(keys).encode("utf-8"))
-        entry = ob.get(observable, version)
-        text = (
-            params
-            if isinstance(params, str)
-            else ob.params_key(observable, params, version=entry.version)
-        )
+        omitted: dict[str, int] = {}
+        for status, flag in zip(rows["status"].tolist(), bad.tolist(), strict=True):
+            if flag:
+                name = "nonfinite" if status == "ok" else str(status)
+                omitted[name] = omitted.get(name, 0) + 1
         selection = canonical_json({"field": field, "index": index})
         out = {
             "protocol": check_protocol(protocol),
@@ -1847,10 +2210,11 @@ class TableauStore:
             "beta": Token.parse(beta).token,
             "p": Token.parse(p).token,
             "observable": observable,
-            "version": entry.version,
-            "params": text,
+            "version": version_,
+            "params": params_,
             "selection": selection,
             "t": int(t),
+            "context": used,
             "estimator": ESTIMATOR_VERSION,
             "policy": nan_policy,
             "sample_set": sample_set,
@@ -1860,28 +2224,36 @@ class TableauStore:
             "contributing_graphs": int(est.contributing_graphs),
             "trajectories": int(est.num_trajectories),
             "contributing_trajectories": int(est.contributing_trajectories),
+            "omitted": dict(sorted(omitted.items())),
         }
         if record:
             self._require_writer()
             with self.transaction() as tx:
-                tx.put_aggregate(out, {"graph_means": est.graph_means, "graphs": est.graphs})
+                tx.put_aggregate(
+                    out,
+                    {
+                        "graph_means": est.graph_means,
+                        "graphs": est.graphs,
+                        "omitted": out["omitted"],
+                    },
+                )
         return out
 
     def aggregates(self, observable: str | None = None) -> list[dict[str, Any]]:
         """The recorded aggregates (of one observable, or all)."""
         cols = [
             "protocol", "n", "beta", "p", "observable", "version", "params", "selection", "t",
-            "estimator", "policy", "sample_set", "mean", "se", "graphs", "contributing_graphs",
-            "trajectories", "contributing_trajectories",
+            "context", "estimator", "policy", "sample_set", "mean", "se", "graphs",
+            "contributing_graphs", "trajectories", "contributing_trajectories",
         ]  # fmt: skip
         sql = f"SELECT {', '.join(cols)} FROM aggregates"
         args: list[Any] = []
         if observable is not None:
             sql += " WHERE observable = ?"
             args.append(observable)
-        rows = self._db().execute(sql + f" ORDER BY {', '.join(cols[:12])}", args).fetchall()
+        rows = self._db().execute(sql + f" ORDER BY {', '.join(cols[:13])}", args).fetchall()
         return [
-            {**dict(zip(cols, row, strict=True)), "mean": _nan(row[12]), "se": _nan(row[13])}
+            {**dict(zip(cols, row, strict=True)), "mean": _nan(row[13]), "se": _nan(row[14])}
             for row in rows
         ]
 
@@ -1946,6 +2318,7 @@ class TableauStore:
             "trajectories",
             "traces",
             "completions",
+            "derivations",
             "snapshots",
             "observations",
             "observable_defs",
@@ -1960,9 +2333,16 @@ class TableauStore:
 
         SQLite's ``integrity_check`` and ``foreign_key_check``; every manifest's digest; every
         graph's digest and invariants; every trajectory's graph digest against its graph record;
-        with ``blobs``, every trace and every stored row space decoded and checked against its
-        digest (in batches of ``batch_size``), and every snapshot's rank and ``k``.
+        with ``blobs``, every trace (read one row at a time) and every stored row space (in
+        batches of ``batch_size``) decoded and checked against its digest, and every snapshot's
+        rank and ``k``. One read snapshot (:meth:`reading`): a writer committing meanwhile does
+        not change what is checked. The stored values are not recomputed here
+        (:func:`runner.verify` runs trajectories again and compares every record).
         """
+        with self.reading():
+            return self._check(blobs=blobs, batch_size=batch_size)
+
+    def _check(self, *, blobs: bool, batch_size: int) -> list[str]:
         db = self._db()
         problems: list[str] = []
         result = db.execute("PRAGMA integrity_check").fetchall()
@@ -1997,7 +2377,7 @@ class TableauStore:
             f"SELECT {_KEY_COLUMNS}, t.layers, t.final_layer, t.k_points, t.tau, t.tau0, t.tau1, "
             "t.censored0, t.status, t.num_measurements, t.unit_id, t.revision FROM traces t "
             "JOIN trajectories tr ON tr.tid = t.tid"
-        ).fetchall():
+        ):
             key = self._row_key(self.experiment_id, row[:7])
             try:
                 rec = self._trace_record(key, row[7:])
@@ -2026,25 +2406,37 @@ class TableauStore:
     def logical_digest(self, *, history: bool = True, manifests: bool = True) -> str:
         """The SHA-256 of the store's logical content: equal content, equal digest.
 
-        Every record is written as canonical JSON in natural-key order and hashed: the manifest
-        digests, the graph records (identity, seed, generator, digest, measurements), the
-        trajectories (key, ``u``, rate hex, run seed, graph digest, dynamics), the traces (the
-        decoded ``k`` and ``tau``), the snapshots (status, ``k``, rank and the two row-space
-        digests), the observable definitions and the observations (value, error, method and the
-        decoded data). Row ids, unit numbers, revisions of creation, timestamps, threads,
-        elapsed times, code versions and the compression of blobs are left out: they describe
-        how the content was produced, not the content, so stores made with other unit sizes,
-        thread counts, unit orders or after an interruption have the same digest.
+        Every record is written as one line, a tag and the canonical JSON of its logical
+        fields, in natural-key order, and the lines are hashed (one read snapshot,
+        :meth:`reading`): the manifest digests (``M``), the graph records (``G``: identity,
+        seed, generator, edge order and count, edge digest and the measurements' version; the
+        measurements themselves are a function of the edges, and ``lambda2`` is a LAPACK
+        eigenvalue whose last bits may differ between machines, so they are left out), the
+        trajectories (``T``: key, ``u``, rate hex, run seed, graph digest, dynamics), the traces
+        (``R``: the decoded ``k`` and ``tau``, final layer, status, measurement count), the
+        completions (``C``) and derivations (``Z``), the snapshots (``S``: status, ``N``,
+        rank, ``k`` and both row-space digests), the observations (``O``: value and error as
+        ``float.hex``, method, decoded data and status), the definitions of the observables
+        (``D``) and the recorded outcome-aware replays (``X``). Row ids, unit numbers, revisions
+        of creation, timestamps, threads, elapsed times, code versions and the compression of
+        blobs are left out: they describe how the content was produced, not the content, so
+        stores made with other unit sizes, thread counts, unit orders or after an interruption
+        have the same digest. Aggregate records and sampler diagnostics (summaries computed on
+        request) are not part of it.
 
-        ``history=False`` keeps only the current state, as a store made directly under the
-        latest revision would hold it: the latest manifest, each trajectory's trace at its
-        largest horizon, its completion and trajectory-level values under its latest
-        requirements. With ``history=True`` (default) everything is included.
-        ``manifests=False`` leaves the manifest digests out: they also change with settings that
-        never change a recorded value (``storage``, ``resources``), so stores made with other
-        unit sizes or compression levels compare equal without them.
+        ``history=False`` digests the **current state**: the records a store made directly
+        under the latest revision by :func:`runner.run` holds. For each trajectory its trace at
+        the latest horizon, its snapshots and snapshot-level values at the depths of the latest
+        revision's own schedule $S_r$, and its trajectory-level values of the current context
+        and parameters (:func:`runner.derivation`), the definitions those values use and the
+        latest manifest digest; no completions, derivations or replays. So a store extended to
+        the latest revision and run to the end has the digest of a store made directly under it
+        (doc 05 Proposition 6(b)), whatever the earlier schedules, horizons and peak rules.
+        With ``history=True`` (default) everything is included. ``manifests=False`` leaves the
+        manifest digests out: they also change with settings that never change a recorded value
+        (``storage``, ``resources``), so stores made with other unit sizes or compression levels
+        compare equal without them.
         """
-        db = self._db()
         h = hashlib.sha256()
 
         def put(tag: str, row: Any) -> None:
@@ -2052,80 +2444,106 @@ class TableauStore:
             h.update(canonical_json(_plain(row)).encode("utf-8"))
             h.update(b"\n")
 
-        revisions = db.execute(
-            "SELECT revision, digest FROM manifests ORDER BY revision"
-        ).fetchall()
-        for revision, digest in (revisions if history else revisions[-1:]) if manifests else []:
-            put("M", [revision if history else 0, digest])
-        for row in db.execute(
-            "SELECT n, beta, g, seed, generator, edge_order, num_edges, digest, measures, "
-            "measures_version FROM graphs ORDER BY n, beta, g"
-        ):
-            put("G", row)
         order = "tr.protocol, tr.n, tr.beta, tr.p, tr.g, tr.c, tr.r"
-        for row in db.execute(
-            f"SELECT {_KEY_COLUMNS}, tr.u, tr.p_float_hex, tr.run_seed, tr.graph_digest, "
-            f"tr.dynamics_version FROM trajectories tr ORDER BY {order}"
-        ):
-            put("T", row)
-        latest_layers: dict[int, int] = {
-            int(tid): int(layers)
-            for tid, layers in db.execute("SELECT tid, max(layers) FROM traces GROUP BY tid")
-        }
-        for row in db.execute(
-            f"SELECT tr.tid, {_KEY_COLUMNS}, t.layers, t.final_layer, t.k_points, t.tau, t.tau0, "
-            f"t.tau1, t.censored0, t.status, t.num_measurements FROM traces t JOIN trajectories tr "
-            f"ON tr.tid = t.tid ORDER BY {order}, t.layers"
-        ):
-            if not history and row[8] != latest_layers[int(row[0])]:
-                continue
-            what = f"trace {row[1:8]}"
-            kp = None if row[10] is None else _int32_array(row[10], what).tolist()
-            tau = None if row[11] is None else _int32_array(row[11], what).tolist()
-            put("R", [*row[1:10], kp, tau, *row[12:]])
-        latest = self._latest_requirements(set(latest_layers) | self._all_tids())
-        for row in db.execute(
-            f"SELECT tr.tid, {_KEY_COLUMNS}, co.requirements FROM completions co JOIN trajectories "
-            f"tr ON tr.tid = co.tid ORDER BY {order}, co.requirements"
-        ):
-            if not history and row[8] != latest.get(int(row[0])):
-                continue
-            put("C", row[1:])
-        for row in db.execute(
-            f"SELECT {_KEY_COLUMNS}, s.t, s.status, s.num_qubits, s.rank, s.k, s.joint_digest, "
-            f"s.phys_digest FROM snapshots s JOIN trajectories tr ON tr.tid = s.tid "
-            f"ORDER BY {order}, s.t"
-        ):
-            put("S", row)
-        for row in db.execute(
-            "SELECT observable, version, params, params_json, level, inputs, definition "
-            "FROM observable_defs ORDER BY observable, version, params"
-        ):
-            put("D", row)
-        for row in db.execute(
-            f"SELECT tr.tid, {_KEY_COLUMNS}, o.t, o.observable, o.version, o.params, o.context, "
-            f"o.value, o.se, o.method, o.data, o.status FROM observations o JOIN trajectories tr "
-            f"ON tr.tid = o.tid ORDER BY {order}, o.t, o.observable, o.version, o.params, o.context"
-        ):
-            if not history and row[8] == -1 and row[12].split("/")[0] != latest.get(int(row[0])):
-                continue
-            text = _data_text(row[16], "observation")
-            put(
-                "O",
-                [*row[1:13], _float_text(row[13]), _float_text(row[14]), row[15], text, row[17]],
-            )
-        for row in db.execute(
-            f"SELECT {_KEY_COLUMNS}, sr.outcome_seed, sr.layers, sr.depths, sr.outcomes, "
-            f"sr.random, sr.signed_digests, sr.format FROM signed_runs sr JOIN trajectories tr "
-            f"ON tr.tid = sr.tid ORDER BY {order}, sr.outcome_seed, sr.layers, sr.depths"
-        ):
-            outcomes = zlib.decompress(row[10]).hex()
-            flags = zlib.decompress(row[11]).hex()
-            put("X", [*row[:10], outcomes, flags, *row[12:]])
-        return h.hexdigest()
+        with self.reading() as db:
+            # the current state needs the latest revision; the whole history reads no manifest
+            currents = None if history else self._currents()
+            latest = None if history else self.manifest
+            schedules: dict[tuple[str, int, str], set[int]] = {}
 
-    def _all_tids(self) -> set[int]:
-        return {int(r[0]) for r in self._db().execute("SELECT tid FROM trajectories")}
+            def schedule(protocol: str, n: int, beta: str) -> set[int]:
+                ck = (protocol, int(n), beta)
+                if ck not in schedules:
+                    assert latest is not None
+                    schedules[ck] = {int(t) for t in latest.checkpoints(n, beta, protocol)}
+                return schedules[ck]
+
+            revisions = db.execute(
+                "SELECT revision, digest FROM manifests ORDER BY revision"
+            ).fetchall()
+            for revision, digest in (revisions if history else revisions[-1:]) if manifests else []:
+                put("M", [revision if history else 0, digest])
+            for row in db.execute(
+                "SELECT n, beta, g, seed, generator, edge_order, num_edges, digest, "
+                "measures_version FROM graphs ORDER BY n, beta, g"
+            ):
+                put("G", row)
+            for row in db.execute(
+                f"SELECT {_KEY_COLUMNS}, tr.u, tr.p_float_hex, tr.run_seed, tr.graph_digest, "
+                f"tr.dynamics_version FROM trajectories tr ORDER BY {order}"
+            ):
+                put("T", row)
+            for row in db.execute(
+                f"SELECT tr.tid, {_KEY_COLUMNS}, t.layers, t.final_layer, t.k_points, t.tau, "
+                f"t.tau0, t.tau1, t.censored0, t.status, t.num_measurements FROM traces t JOIN "
+                f"trajectories tr ON tr.tid = t.tid ORDER BY {order}, t.layers"
+            ):
+                if currents is not None:
+                    layers = currents(row[1], row[2], row[3]).requirements["layers"]
+                    if int(row[8]) != int(layers):
+                        continue
+                what = f"trace {row[1:8]}"
+                kp = None if row[10] is None else _int32_array(row[10], what).tolist()
+                tau = None if row[11] is None else _int32_array(row[11], what).tolist()
+                put("R", [*row[1:10], kp, tau, *row[12:]])
+            if history:
+                for row in db.execute(
+                    f"SELECT {_KEY_COLUMNS}, co.requirements FROM completions co JOIN "
+                    f"trajectories tr ON tr.tid = co.tid ORDER BY {order}, co.requirements"
+                ):
+                    put("C", row)
+                for row in db.execute(
+                    f"SELECT {_KEY_COLUMNS}, d.derivation FROM derivations d JOIN trajectories "
+                    f"tr ON tr.tid = d.tid ORDER BY {order}, d.derivation"
+                ):
+                    put("Z", row)
+            for row in db.execute(
+                f"SELECT {_KEY_COLUMNS}, s.t, s.status, s.num_qubits, s.rank, s.k, "
+                f"s.joint_digest, s.phys_digest FROM snapshots s JOIN trajectories tr ON "
+                f"tr.tid = s.tid ORDER BY {order}, s.t"
+            ):
+                if not history and int(row[7]) not in schedule(row[0], row[1], row[2]):
+                    continue
+                put("S", row)
+            used: set[tuple[str, str, str]] = set()
+            for row in db.execute(
+                f"SELECT tr.tid, {_KEY_COLUMNS}, o.t, o.observable, o.version, o.params, "
+                f"o.context, o.value, o.se, o.method, o.data, o.status FROM observations o JOIN "
+                f"trajectories tr ON tr.tid = o.tid ORDER BY {order}, o.t, o.observable, "
+                f"o.version, o.params, o.context"
+            ):
+                ident = (row[9], row[10], row[11])
+                if currents is not None:
+                    if int(row[8]) == -1:
+                        cur = currents(row[1], row[2], row[3])
+                        if row[12] != cur.context or ident not in cur.derived:
+                            continue
+                    elif int(row[8]) not in schedule(row[1], row[2], row[3]):
+                        continue
+                used.add(ident)
+                text = _data_text(row[16], "observation")
+                put(
+                    "O",
+                    [*row[1:13], _float_text(row[13]), _float_text(row[14]), row[15], text,
+                     row[17]],
+                )  # fmt: skip
+            for row in db.execute(
+                "SELECT observable, version, params, params_json, level, inputs, definition "
+                "FROM observable_defs ORDER BY observable, version, params"
+            ):
+                if history or (row[0], row[1], row[2]) in used:
+                    put("D", row)
+            if history:
+                for row in db.execute(
+                    f"SELECT {_KEY_COLUMNS}, sr.outcome_seed, sr.layers, sr.depths, sr.outcomes, "
+                    f"sr.random, sr.signed_digests, sr.format FROM signed_runs sr JOIN "
+                    f"trajectories tr ON tr.tid = sr.tid ORDER BY {order}, sr.outcome_seed, "
+                    f"sr.layers, sr.depths"
+                ):
+                    outcomes = zlib.decompress(row[10]).hex()
+                    flags = zlib.decompress(row[11]).hex()
+                    put("X", [*row[:10], outcomes, flags, *row[12:]])
+        return h.hexdigest()
 
     # -- status and export ---------------------------------------------------------------------
 
@@ -2137,6 +2555,15 @@ class TableauStore:
         counts = self.counts()
         units = self.units()
         plan = _plan(self)
+        pending = 0
+        latest = self.manifest
+        if "F" in latest.protocol_names:
+            for cond in latest.conditions():
+                cur = self._current("F", cond.n, cond.beta)
+                for p in cond.rates:
+                    complete = self.completed("F", cond.n, cond.beta, p, cur.digest)
+                    derived = self.derived_pairs("F", cond.n, cond.beta, p, cur.derivation_digest)
+                    pending += len(complete - derived)
         return {
             "experiment_id": self.experiment_id,
             "revision": self.revision,
@@ -2145,23 +2572,30 @@ class TableauStore:
             "units_failed": sum(u["status"] == "failed" for u in units),
             "units_remaining": len(plan),
             "trajectories_remaining": sum(u.trajectories for u in plan),
+            "derivations_remaining": pending,
         }
 
     def export(self, directory: str | os.PathLike[str]) -> Path:
         """Write the store's data as open tables (CSV and NPZ) under ``directory`` (design §4).
 
-        Layout (format :data:`EXPORT_FORMAT`): ``manifest.json`` (the latest revision),
-        ``revisions.json``, ``versions.json``, ``graphs.csv`` (records and measurements),
-        ``conditions.csv``, and one directory per condition ``<protocol>_n<n>_beta<b>_p<p>``
-        (a ``/`` of a rational token written ``over``) with ``trajectories.csv`` (the latest
-        trace of each trajectory), ``first_passage.npz`` (``g, c, r, tau, observed``),
-        ``observations.csv`` and ``observations.npz`` (every stored scalar value with ``g, c,
-        r, t``), ``aggregates.csv`` (the nested equal-graph-weight mean and graph-cluster error
-        of every scalar snapshot observable at every depth, :func:`~sparsegf2.study.stats.nested_mean`)
-        and ``censoring.csv`` (per threshold ``ell``: :func:`~sparsegf2.study.stats.censoring_summary`
-        and the graph-weighted Kaplan-Meier median and restricted mean of ``tau_ell``). The files
-        are written in a temporary directory that is renamed to ``directory`` when complete,
-        so an interrupted export leaves no partial result; ``directory`` must not exist.
+        Layout (format :data:`EXPORT_FORMAT`; doc 05 §3.9): ``manifest.json`` (the latest
+        revision), ``revisions.json``, ``versions.json`` (the versions and both logical
+        digests), ``requirements.json`` (every requirements, derivation and context record by
+        its digest), ``graphs.csv`` and ``graph_aggregates.csv``, ``conditions.csv``, and one
+        directory per condition ``<protocol>_n<n>_beta<b>_p<p>`` (a ``/`` of a rational token
+        written ``over``) with ``trajectories.csv`` (the latest trace of each trajectory, the
+        current requirements and derivation it is complete under), ``first_passage.npz``,
+        ``censoring.csv``, ``observations.csv`` and ``observations.npz`` (every snapshot value
+        and every current trajectory-level value, with its ``status``; the CSV also has the
+        data as canonical JSON), ``history.csv`` (every trajectory-level value with a
+        ``current`` flag), ``peaks.csv`` (each trajectory's current peaks: ``T*``, ``d*``, the
+        horizon flag, the maximizing set and ``k`` on it), ``peaks.json`` (the peak-time
+        statistics) and ``aggregates.csv`` (the nested equal-graph-weight mean and
+        graph-cluster error of every scalar snapshot observable at every depth, with the rows
+        left out per status). Everything is read in one committed state (:meth:`reading`) and
+        the observations are streamed. The files are written in a temporary directory that is
+        renamed to ``directory`` when complete, so an interrupted export leaves no partial
+        result; ``directory`` must not exist.
         """
         return _export(self, Path(directory))
 
@@ -2206,6 +2640,8 @@ class _Transaction:
         self.level = int(store.manifest.storage.compression_level)
         self._keys: dict[tuple[str, str | None, str], tuple[str, str]] = {}
         self._defs: set[tuple[str, str, str]] = set()
+        #: the trajectories inserted in this transaction: nothing of them can be stored before
+        self.inserted: set[int] = set()
 
     # graphs
     def put_graph(self, record: GraphRecord, measures: Mapping[str, Any] | None = None) -> None:
@@ -2346,6 +2782,7 @@ class _Transaction:
             ),  # fmt: skip
         )
         assert cur.lastrowid is not None
+        self.inserted.add(int(cur.lastrowid))
         return int(cur.lastrowid)
 
     def put_trace(
@@ -2470,84 +2907,53 @@ class _Transaction:
     ) -> None:
         """Insert one snapshot, or compare it with the stored one (see the module docstring).
 
-        Checked before anything is written: a stored joint state is pure (rank ``N``,
-        isotropic); a protocol-F physical code has rank ``n - k`` and commutes; with
-        ``check_physical`` the physical code is recomputed from the joint state and must equal
-        it (the runner derives one from the other and skips the recomputation).
+        Validated and encoded by :func:`snapshot_row` before anything is written (purity,
+        rank ``n - k``, isotropy and, with ``check_physical``, the physical code of the joint
+        state), then written by :meth:`put_snapshot_row`.
         """
-        what = f"snapshot of {key} at t = {t}"
-        if status not in SNAPSHOT_STATUSES:
-            raise ValueError(f"{what}: unknown status {status!r}")
-        jb = jd = pb = pd = None
-        rank = None
-        if status == SNAPSHOT_PHYS_ONLY and (joint is not None or key.protocol != "F"):
-            raise ValueError(f"{what}: a phys_only snapshot holds a protocol-F physical code only")
-        if status == SNAPSHOT_STORED and key.protocol == "F" and joint is None:
-            raise ValueError(f"{what}: a stored protocol-F snapshot holds its joint state")
-        if status in (SNAPSHOT_STORED, SNAPSHOT_PHYS_ONLY):
-            if joint is not None:
-                if joint.num_qubits != num_qubits or not joint.is_pure():
-                    raise ValueError(
-                        f"{what}: the joint state must be pure on {num_qubits} qubits (rank N and "
-                        f"isotropic), got rank {joint.rank} on {joint.num_qubits}"
-                    )
-                jb, jd = _rowspace_blob(joint, self.level)
-                rank = joint.rank
-            if key.protocol == "F":
-                if phys is None or k is None:
-                    raise ValueError(f"{what}: a protocol-F snapshot needs its physical code and k")
-                if phys.rank != key.n - k or phys.num_qubits != key.n or not phys.is_isotropic():
-                    raise ValueError(
-                        f"{what}: the physical code must have rank n - k = {key.n - k} on "
-                        f"{key.n} qubits and commute, got rank {phys.rank}"
-                    )
-                if (
-                    check_physical
-                    and joint is not None
-                    and not joint.physical_tableau(key.n).same_space(phys)
-                ):
-                    raise ValueError(f"{what}: the physical code is not the joint state's")
-                pb, pd = _rowspace_blob(phys, self.level)
-            elif joint is None:
-                raise ValueError(
-                    f"{what}: a protocol-{key.protocol} snapshot needs its joint state"
-                )
-        elif joint is not None or phys is not None:
-            raise ValueError(f"{what}: an absent snapshot stores nothing")
-        row = self._conn.execute(
-            "SELECT status, num_qubits, rank, k, joint_digest, phys_digest FROM snapshots "
-            "WHERE tid = ? AND t = ?",
-            (tid, int(t)),
-        ).fetchone()
-        if row is not None:
-            if row[0] == SNAPSHOT_PHYS_ONLY and status == SNAPSHOT_STORED:
-                # the one fill-in: the joint state of a row that kept the physical code only
-                if (row[1], row[3], row[5]) != (int(num_qubits), k, pd):
-                    raise _differs(
-                        what, "physical code", (row[1], row[3], row[5]), (num_qubits, k, pd)
-                    )
-                self._conn.execute(
-                    "UPDATE snapshots SET joint = ?, joint_digest = ?, rank = ?, status = ? "
-                    "WHERE tid = ? AND t = ? AND joint IS NULL AND status = ?",
-                    (jb, jd, rank, SNAPSHOT_STORED, tid, int(t), SNAPSHOT_PHYS_ONLY),
-                )
+        row = snapshot_row(
+            key, t, status=status, num_qubits=num_qubits, k=k, joint=joint, phys=phys,
+            level=self.level, check_physical=check_physical,
+        )  # fmt: skip
+        self.put_snapshot_row(tid, key, row, unit_id)
+
+    def put_snapshot_row(
+        self, tid: int, key: TrajectoryKey, row: SnapshotRow, unit_id: int, *, fresh: bool = False
+    ) -> None:
+        """Write a validated snapshot row: insert it, or compare it with the stored one (the one
+        fill-in: the joint state of a row that kept its physical code only). ``fresh`` (the
+        trajectory was inserted in this transaction, so nothing of it can be stored) skips the
+        lookup."""
+        what = f"snapshot of {key} at t = {row.t}"
+        if not fresh:
+            stored = self._conn.execute(
+                "SELECT status, num_qubits, rank, k, joint_digest, phys_digest FROM snapshots "
+                "WHERE tid = ? AND t = ?",
+                (tid, row.t),
+            ).fetchone()
+            if stored is not None:
+                if stored[0] == SNAPSHOT_PHYS_ONLY and row.status == SNAPSHOT_STORED:
+                    # the one fill-in: the joint state of a row that kept the physical code only
+                    new = (row.num_qubits, row.k, row.phys_digest)
+                    if (stored[1], stored[3], stored[5]) != new:
+                        raise _differs(
+                            what, "physical code", (stored[1], stored[3], stored[5]), new
+                        )
+                    self._conn.execute(
+                        "UPDATE snapshots SET joint = ?, joint_digest = ?, rank = ?, status = ? "
+                        "WHERE tid = ? AND t = ? AND joint IS NULL AND status = ?",
+                        (row.joint, row.joint_digest, row.rank, SNAPSHOT_STORED, tid, row.t,
+                         SNAPSHOT_PHYS_ONLY),
+                    )  # fmt: skip
+                    return
+                _compare_snapshot(what, stored, row)
                 return
-            if row[0] == SNAPSHOT_STORED and status == SNAPSHOT_PHYS_ONLY:
-                status = SNAPSHOT_STORED  # a code-only rerun of a stored row: compare the code
-            new = (status, int(num_qubits), k, pd)
-            old = (row[0], row[1], row[3], row[5])
-            names = ("status", "num_qubits", "k", "phys_digest")
-            for name, a, b in zip(names, old, new, strict=True):
-                if a != b:
-                    raise _differs(what, name, a, b)
-            if row[4] is not None and jd is not None and row[4] != jd:
-                raise _differs(what, "joint_digest", row[4], jd)
-            return
         self._conn.execute(
             "INSERT INTO snapshots (tid, t, num_qubits, rank, k, joint, joint_digest, phys, "
             "phys_digest, status, unit_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (tid, int(t), int(num_qubits), rank, k, jb, jd, pb, pd, status, int(unit_id)),
-        )
+            (tid, row.t, row.num_qubits, row.rank, row.k, row.joint, row.joint_digest, row.phys,
+             row.phys_digest, row.status, int(unit_id)),
+        )  # fmt: skip
 
     # observations
     def put_observation(
@@ -2574,74 +2980,85 @@ class _Transaction:
         a finite value, ``infinite`` for an infinite one and ``undefined`` for NaN (the runner
         names ``undefined_no_code``, ``missing``, ``censored``, ``vector`` itself).
 
-        ``compare="all"`` requires an equal value, error, method and data; ``"value"`` (a
-        retrospective recomputation of a value the run stored, possibly by another method)
-        requires an equal value and error only. A difference raises ``ValueError``.
+        ``compare="all"`` requires an equal value, error, status, method and data; ``"value"``
+        (a retrospective recomputation of a value the run stored, possibly by another method)
+        requires an equal value, error and status. A difference raises ``ValueError``.
         """
-        if compare not in ("all", "value"):
-            raise ValueError(f"compare must be 'all' or 'value', got {compare!r}")
         cache_key = (observable, version, canonical_json(_plain(params or {})))
         if cache_key not in self._keys:
             entry = ob.get(observable, version)
             text = ob.params_key(observable, params, version=entry.version)
             self._keys[cache_key] = (entry.version, text)
         resolved_version, text = self._keys[cache_key]
-        self.put_observable_def(observable, resolved_version, text)
-        v, s = _sql_float(value), _sql_float(se)
-        if status is None:
-            status = "undefined" if v is None else ("infinite" if math.isinf(v) else "ok")
-        if status not in OBSERVATION_STATUSES:
-            raise ValueError(f"status must be one of {list(OBSERVATION_STATUSES)}, got {status!r}")
-        if status == "ok" and (v is None or math.isinf(v)):
-            raise ValueError(f"an observation with status 'ok' has a finite value, got {value!r}")
-        blob = _data_blob(data, self.level)
-        row = self._conn.execute(
-            "SELECT value, se, method, data, status FROM observations WHERE tid = ? AND t = ? AND "
-            "observable = ? AND version = ? AND params = ? AND context = ?",
-            (tid, int(t), observable, resolved_version, text, context),
-        ).fetchone()
-        what = f"observation {observable!r} (version {resolved_version}) of {key} at t = {t}"
-        if row is not None:
-            if not _same_float(row[0], v):
-                raise _differs(what, "value", row[0], v)
-            if not _same_float(row[1], s):
-                raise _differs(what, "standard error", row[1], s)
-            if row[4] != status:
-                raise _differs(what, "status", row[4], status)
-            if compare == "value":
+        row = observation_row(
+            t, observable, text, value=value, se=se, data=data, method=method, level=self.level,
+            context=context, version=resolved_version, status=status,
+        )  # fmt: skip
+        return self.put_observation_row(tid, key, row, unit_id, compare=compare)
+
+    def put_observation_row(
+        self,
+        tid: int,
+        key: TrajectoryKey,
+        row: ObservationRow,
+        unit_id: int | None,
+        *,
+        compare: str = "all",
+        fresh: bool = False,
+    ) -> bool:
+        """Write an encoded observation row: insert it (``True``) or compare it with the stored one
+        (``False``; :func:`_compare_observation`). ``fresh`` skips the lookup (the trajectory was
+        inserted in this transaction)."""
+        if compare not in ("all", "value"):
+            raise ValueError(f"compare must be 'all' or 'value', got {compare!r}")
+        self.put_observable_def(row.observable, row.version, row.params)
+        if not fresh:
+            stored = self._conn.execute(
+                "SELECT value, se, method, data, status FROM observations WHERE tid = ? AND t = ? "
+                "AND observable = ? AND version = ? AND params = ? AND context = ?",
+                (tid, row.t, row.observable, row.version, row.params, row.context),
+            ).fetchone()
+            if stored is not None:
+                what = (
+                    f"observation {row.observable!r} (version {row.version}) of {key} at "
+                    f"t = {row.t}"
+                )
+                _compare_observation(what, stored, row, compare)
                 return False
-            if row[2] != method:
-                raise _differs(what, "method", row[2], method)
-            old_text = _data_text(row[3], what)
-            new_text = _data_text(blob, what)
-            if old_text != new_text:
-                raise _differs(what, "data", old_text, new_text)
-            return False
         self._conn.execute(
             "INSERT INTO observations (tid, t, observable, version, params, context, status, "
             "value, se, data, method, unit_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                tid,
-                int(t),
-                observable,
-                resolved_version,
-                text,
-                context,
-                status,
-                v,
-                s,
-                blob,
-                method,
-                unit_id,
-            ),  # fmt: skip
+            _observation_values(tid, row, unit_id),
         )
         return True
+
+    def put_fresh_observations(
+        self, tid: int, rows: Sequence[ObservationRow], unit_id: int | None
+    ) -> None:
+        """Insert the observation rows of a trajectory inserted in this transaction (nothing of
+        it can be stored yet, so nothing is looked up or compared); one statement for all."""
+        for row in rows:
+            self.put_observable_def(row.observable, row.version, row.params)
+        self._conn.executemany(
+            "INSERT INTO observations (tid, t, observable, version, params, context, status, "
+            "value, se, data, method, unit_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [_observation_values(tid, row, unit_id) for row in rows],
+        )
+
+    def put_derivation(self, tid: int, derivation: str, unit_id: int | None, revision: int) -> None:
+        """Mark trajectory ``tid`` derived under ``derivation`` (every trajectory-level value it
+        asks for is stored), unless it is marked already."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO derivations (tid, derivation, unit_id, revision) "
+            "VALUES (?, ?, ?, ?)",
+            (tid, derivation, unit_id, int(revision)),
+        )
 
     # aggregates (G-STO-4)
     def put_aggregate(self, record: Mapping[str, Any], data: Any = None) -> bool:
         """Insert one aggregate record (``True``), or compare it with the stored one."""
         keys = ("protocol", "n", "beta", "p", "observable", "version", "params", "selection", "t",
-                "estimator", "policy", "sample_set")  # fmt: skip
+                "context", "estimator", "policy", "sample_set")  # fmt: skip
         values = ("mean", "se", "graphs", "contributing_graphs", "trajectories",
                   "contributing_trajectories")  # fmt: skip
         old = self._conn.execute(
@@ -2733,6 +3150,12 @@ class _Transaction:
         return True
 
 
+def _observation_values(tid: int, row: ObservationRow, unit_id: int | None) -> tuple[Any, ...]:
+    """The values of an ``INSERT INTO observations`` of ``row`` (the column order of the store)."""
+    return (tid, row.t, row.observable, row.version, row.params, row.context, row.status,
+            row.value, row.se, row.data, row.method, unit_id)  # fmt: skip
+
+
 def _same_ints(a: np.ndarray | None, b: np.ndarray | None) -> bool:
     if a is None or b is None:
         return a is None and b is None
@@ -2805,60 +3228,71 @@ _MEASURES = (
 
 
 def _export_into(store: TableauStore, out: Path) -> None:
-    db = store._db()
-    revisions = store.revisions()
-    (out / "manifest.json").write_text(revisions[-1].to_json(indent=2) + "\n", encoding="utf-8")
-    _write_json(
-        out / "revisions.json",
-        [
-            {"revision": i + 1, "digest": m.digest(), "manifest": m.to_dict()}
-            for i, m in enumerate(revisions)
-        ],
-    )
-    _write_json(
-        out / "versions.json",
-        {
-            "export_format": EXPORT_FORMAT,
-            "store": store.meta(),
-            "randomness_contract": mipt.RANDOMNESS_CONTRACT,
-            "logical_digest": store.logical_digest(),
-            "logical_digest_current": store.logical_digest(history=False),
-        },
-    )
-    graph_rows = []
-    for n, beta, g, seed, generator, order, count, digest, measures, mversion in db.execute(
-        "SELECT n, beta, g, seed, generator, edge_order, num_edges, digest, measures, "
-        "measures_version FROM graphs ORDER BY n, beta, g"
-    ):
-        m = json.loads(measures)
-        graph_rows.append(
-            [n, beta, g, seed, generator, order, count, digest, mversion]
-            + [m.get(name) for name in _MEASURES]
+    with store.reading() as db:
+        revisions = store.revisions()
+        (out / "manifest.json").write_text(revisions[-1].to_json(indent=2) + "\n", encoding="utf-8")
+        _write_json(
+            out / "revisions.json",
+            [
+                {"revision": i + 1, "digest": m.digest(), "manifest": m.to_dict()}
+                for i, m in enumerate(revisions)
+            ],
         )
-    _write_csv(
-        out / "graphs.csv",
-        ["n", "beta", "g", "seed", "generator", "edge_order", "num_edges", "edge_digest"]
-        + ["measures_version", *_MEASURES],
-        graph_rows,
-    )
-    _write_csv(
-        out / "graph_aggregates.csv",
-        ["n", "beta", "measure", "graphs", "defined", "mean", "se", "connected_fraction"],
-        _graph_aggregates(graph_rows),
-    )
-    conditions = db.execute(
-        "SELECT DISTINCT protocol, n, beta, p FROM trajectories ORDER BY protocol, n, beta, p"
-    ).fetchall()
-    condition_rows = []
-    for protocol, n, beta, p in conditions:
-        name = _condition_dir(protocol, n, beta, p)
-        count = _export_condition(store, out / name, protocol, int(n), beta, p)
-        condition_rows.append([protocol, n, beta, p, name, count])
-    _write_csv(
-        out / "conditions.csv",
-        ["protocol", "n", "beta", "p", "directory", "trajectories"],
-        condition_rows,
-    )
+        _write_json(
+            out / "versions.json",
+            {
+                "export_format": EXPORT_FORMAT,
+                "store": store.meta(),
+                "randomness_contract": mipt.RANDOMNESS_CONTRACT,
+                "logical_digest": store.logical_digest(),
+                "logical_digest_current": store.logical_digest(history=False),
+            },
+        )
+        _write_json(
+            out / "requirements.json",
+            {
+                str(digest): json.loads(text)
+                for digest, text in db.execute(
+                    "SELECT digest, json FROM requirements ORDER BY digest"
+                )
+            },
+        )
+        graph_rows = []
+        for n, beta, g, seed, generator, order, count, digest, measures, mversion in db.execute(
+            "SELECT n, beta, g, seed, generator, edge_order, num_edges, digest, measures, "
+            "measures_version FROM graphs ORDER BY n, beta, g"
+        ):
+            m = json.loads(measures)
+            graph_rows.append(
+                [n, beta, g, seed, generator, order, count, digest, mversion]
+                + [m.get(name) for name in _MEASURES]
+            )
+        _write_csv(
+            out / "graphs.csv",
+            ["n", "beta", "g", "seed", "generator", "edge_order", "num_edges", "edge_digest"]
+            + ["measures_version", *_MEASURES],
+            graph_rows,
+        )
+        _write_csv(
+            out / "graph_aggregates.csv",
+            ["n", "beta", "measure", "graphs", "defined", "mean", "se", "connected_fraction"],
+            _graph_aggregates(graph_rows),
+        )
+        conditions = db.execute(
+            "SELECT DISTINCT protocol, n, beta, p FROM trajectories ORDER BY protocol, n, beta, p"
+        ).fetchall()
+        currents = store._currents()
+        condition_rows = []
+        for protocol, n, beta, p in conditions:
+            name = _condition_dir(protocol, n, beta, p)
+            cur = currents(protocol, int(n), beta)
+            count = _export_condition(store, out / name, protocol, int(n), beta, p, cur)
+            condition_rows.append([protocol, n, beta, p, name, count])
+        _write_csv(
+            out / "conditions.csv",
+            ["protocol", "n", "beta", "p", "directory", "trajectories"],
+            condition_rows,
+        )
 
 
 def _graph_aggregates(graph_rows: Sequence[Sequence[Any]]) -> list[list[Any]]:
@@ -2890,12 +3324,44 @@ def _data_dict(blob: bytes | None, what: str) -> dict[str, Any]:
     return {} if text is None else dict(json.loads(text))
 
 
+_OBSERVATION_COLUMNS = (
+    "g", "c", "r", "t", "observable", "version", "params", "context", "status", "value", "se",
+    "method",
+)  # fmt: skip
+
+_PEAK_COLUMNS = (
+    "observable", "version", "params", "context", "g", "c", "r", "status", "t_star", "d_star",
+    "at_horizon", "horizon", "set_size", "set_min", "set_max", "maximizing_set", "k_on_set",
+    "se_exact",
+)  # fmt: skip
+
+
 def _export_condition(
-    store: TableauStore, out: Path, protocol: str, n: int, beta: str, p: str
+    store: TableauStore, out: Path, protocol: str, n: int, beta: str, p: str, cur: Any
 ) -> int:
+    """The tables of one condition (see :meth:`TableauStore.export`), read in the export's
+    snapshot. The observations are streamed in key order: each row is written as it is read
+    (its data decoded only where a table needs them), and the aggregates of one key are made
+    when its rows end, so memory holds one group and the columns of ``observations.npz``."""
     out.mkdir()
     db = store._db()
     args = (protocol, n, beta, p)
+    complete = {
+        int(r[0])
+        for r in db.execute(
+            "SELECT co.tid FROM completions co JOIN trajectories tr ON tr.tid = co.tid WHERE "
+            "tr.protocol = ? AND tr.n = ? AND tr.beta = ? AND tr.p = ? AND co.requirements = ?",
+            (*args, cur.digest),
+        )
+    }
+    derived = {
+        int(r[0])
+        for r in db.execute(
+            "SELECT d.tid FROM derivations d JOIN trajectories tr ON tr.tid = d.tid WHERE "
+            "tr.protocol = ? AND tr.n = ? AND tr.beta = ? AND tr.p = ? AND d.derivation = ?",
+            (*args, cur.derivation_digest),
+        )
+    }
     rows = db.execute(
         "SELECT tr.tid, tr.g, tr.c, tr.r, tr.u, t.layers, t.final_layer, t.status, t.tau0, "
         "t.tau1, t.censored0, t.num_measurements, t.tau FROM trajectories tr JOIN traces t "
@@ -2907,8 +3373,14 @@ def _export_condition(
     _write_csv(
         out / "trajectories.csv",
         ["g", "c", "r", "u", "layers", "final_layer", "status", "tau0", "tau1", "censored0"]
-        + ["num_measurements"],
-        [list(row[1:12]) for row in rows],
+        + ["num_measurements", "requirements", "derivation", "context"],
+        [
+            list(row[1:12])
+            + [cur.digest if int(row[0]) in complete else ""]
+            + [cur.derivation_digest if int(row[0]) in derived else ""]
+            + [cur.context if int(row[0]) in derived else ""]
+            for row in rows
+        ],
     )
     g = np.array([row[1] for row in rows], dtype=np.int64)
     c = np.array([row[2] for row in rows], dtype=np.int64)
@@ -2938,82 +3410,145 @@ def _export_condition(
             + ["restricted_horizon", "restricted_mean", "restricted_mean_se"],
             censoring,
         )
-    obs = db.execute(
-        "SELECT tr.g, tr.c, tr.r, o.t, o.observable, o.version, o.params, o.context, o.value, "
-        "o.se, o.method, o.data FROM observations o JOIN trajectories tr ON tr.tid = o.tid "
-        "WHERE tr.protocol = ? AND tr.n = ? AND tr.beta = ? AND tr.p = ? "
-        "ORDER BY o.observable, o.version, o.params, o.context, o.t, tr.g, tr.c, tr.r",
-        args,
-    ).fetchall()
-    header = ["g", "c", "r", "t", "observable", "version", "params", "context", "value", "se"]
-    _write_csv(out / "observations.csv", [*header, "method"], [list(o[:11]) for o in obs])
+    current_keys = set(cur.derived)
+    columns: dict[str, list[Any]] = {name: [] for name in _OBSERVATION_COLUMNS}
+    aggregates: list[list[Any]] = []
+    peaks: dict[tuple[str, str, str, str], list[tuple[Any, ...]]] = {}
+    group: list[tuple[Any, ...]] = []
+    group_key: tuple[Any, ...] | None = None
+    with (
+        open(out / "observations.csv", "w", newline="", encoding="utf-8") as obs_file,
+        open(out / "history.csv", "w", newline="", encoding="utf-8") as history_file,
+        open(out / "peaks.csv", "w", newline="", encoding="utf-8") as peak_file,
+    ):
+        obs_csv = csv.writer(obs_file, lineterminator="\n")
+        obs_csv.writerow([*_OBSERVATION_COLUMNS, "data"])
+        history_csv = csv.writer(history_file, lineterminator="\n")
+        history_csv.writerow([*_OBSERVATION_COLUMNS, "current", "data"])
+        peak_csv = csv.writer(peak_file, lineterminator="\n")
+        peak_csv.writerow(_PEAK_COLUMNS)
+        cursor = db.execute(
+            "SELECT tr.g, tr.c, tr.r, o.t, o.observable, o.version, o.params, o.context, "
+            "o.status, o.value, o.se, o.method, o.data FROM observations o JOIN trajectories tr "
+            "ON tr.tid = o.tid WHERE tr.protocol = ? AND tr.n = ? AND tr.beta = ? AND tr.p = ? "
+            "ORDER BY o.observable, o.version, o.params, o.context, o.t, tr.g, tr.c, tr.r",
+            args,
+        )
+        for o in cursor:
+            t = int(o[3])
+            current = t >= 0 or (o[7] == cur.context and (o[4], o[5], o[6]) in current_keys)
+            cells = [_csv_cell(v) for v in o[:12]]
+            text = _data_text(o[12], f"observation {o[4]!r}")
+            if t == -1:
+                history_csv.writerow([*cells, "1" if current else "0", text or ""])
+            if not current:
+                continue
+            obs_csv.writerow([*cells, text or ""])
+            for name, value in zip(_OBSERVATION_COLUMNS, o[:12], strict=True):
+                columns[name].append(value)
+            if t >= 0:
+                ident = (o[4], o[5], o[6], t)
+                if ident != group_key:
+                    if group_key is not None:
+                        aggregates.extend(_aggregates(group_key, group))
+                    group_key, group = ident, []
+                group.append(o)
+            elif str(o[4]).startswith("peak_"):
+                data = {} if text is None else json.loads(text)
+                peaks.setdefault((o[4], o[5], o[6], o[7]), []).append(
+                    (int(o[0]), int(o[1]), int(o[2]), _nan(o[9]), bool(data.get("at_horizon")))
+                )
+                peak_csv.writerow([_csv_cell(v) for v in _peak_row(o, data)])
+        if group_key is not None:
+            aggregates.extend(_aggregates(group_key, group))
     np.savez_compressed(
         out / "observations.npz",
-        g=np.array([o[0] for o in obs], dtype=np.int64),
-        c=np.array([o[1] for o in obs], dtype=np.int64),
-        r=np.array([o[2] for o in obs], dtype=np.int64),
-        t=np.array([o[3] for o in obs], dtype=np.int64),
-        observable=np.array([o[4] for o in obs], dtype=str),
-        version=np.array([o[5] for o in obs], dtype=str),
-        params=np.array([o[6] for o in obs], dtype=str),
-        context=np.array([o[7] for o in obs], dtype=str),
-        value=np.array([np.nan if o[8] is None else o[8] for o in obs], dtype=np.float64),
-        se=np.array([np.nan if o[9] is None else o[9] for o in obs], dtype=np.float64),
-        method=np.array([o[10] for o in obs], dtype=str),
+        g=np.array(columns["g"], dtype=np.int64),
+        c=np.array(columns["c"], dtype=np.int64),
+        r=np.array(columns["r"], dtype=np.int64),
+        t=np.array(columns["t"], dtype=np.int64),
+        observable=np.array(columns["observable"], dtype=str),
+        version=np.array(columns["version"], dtype=str),
+        params=np.array(columns["params"], dtype=str),
+        context=np.array(columns["context"], dtype=str),
+        status=np.array(columns["status"], dtype=str),
+        value=np.array([_nan(v) for v in columns["value"]], dtype=np.float64),
+        se=np.array([_nan(v) for v in columns["se"]], dtype=np.float64),
+        method=np.array(columns["method"], dtype=str),
     )
-    aggregates = _aggregates(obs)
     _write_csv(
         out / "aggregates.csv",
         ["observable", "version", "params", "t", "mean", "se", "graphs", "contributing_graphs"]
-        + ["trajectories", "contributing_trajectories", "nan_policy"],
+        + ["trajectories", "contributing_trajectories", "nan_policy", "omitted"],
         aggregates,
     )
-    peaks = _peak_summaries(obs)
-    if peaks:
-        _write_json(out / "peaks.json", peaks)
+    summaries = _peak_summaries(peaks)
+    if summaries:
+        _write_json(out / "peaks.json", summaries)
     return len(rows)
 
 
-def _aggregates(obs: Sequence[Sequence[Any]]) -> list[list[Any]]:
-    """The nested mean (v1.4 §6.3) and graph-cluster error (§6.4) of every scalar snapshot
-    observable at every depth: the stored value, plus ``d_cyc``'s zero extension and ``D(J)`` at
-    each coupling from the stored data. Rows whose value is undefined (NaN) are left out
-    (``nan_policy = omit``: the mean is then over the graphs with a defined value)."""
-    groups: dict[tuple[str, str, str, int], list[Sequence[Any]]] = {}
-    for o in obs:
-        if o[3] >= 0:
-            groups.setdefault((o[4], o[5], o[6], int(o[3])), []).append(o)
+def _peak_row(o: Sequence[Any], data: Mapping[str, Any]) -> list[Any]:
+    """One row of ``peaks.csv``: the peak record of one trajectory (v1.4 §5.8): ``T*``,
+    ``d*``, the horizon flag, the maximizing set (its size, ends and members) and ``k`` on it."""
+    members = list(data.get("maximizing_set") or [])
+    k_on = data.get("k_on_set")
+    return [
+        o[4], o[5], o[6], o[7], o[0], o[1], o[2], o[8], _nan(o[9]),
+        _nan(data.get("d_star")), bool(data.get("at_horizon")), data.get("horizon"),
+        len(members), min(members) if members else None, max(members) if members else None,
+        json.dumps(members), None if k_on is None else json.dumps(k_on), data.get("se_exact"),
+    ]  # fmt: skip
+
+
+def _aggregates(ident: tuple[Any, ...], items: Sequence[Sequence[Any]]) -> list[list[Any]]:
+    """The nested mean (v1.4 §6.3) and graph-cluster error (§6.4) of one scalar snapshot
+    observable at one depth: the stored value, plus ``d_cyc``'s zero extension and ``D(J)`` at
+    each coupling from the stored data. A row whose status is not ``ok`` (undefined, infinite,
+    absent after a stop, ...) is left out; the row then says ``nan_policy = omit`` and counts
+    the rows left out per status in ``omitted`` (the mean is over the rows with a value)."""
+    name, version, params, t = ident
     out: list[list[Any]] = []
 
-    def add(name: str, version: str, params: str, t: int, items: list[tuple[Any, ...]]) -> None:
-        gg = np.array([i[0] for i in items], dtype=np.int64)
-        cc = np.array([i[1] for i in items], dtype=np.int64)
-        rr = np.array([i[2] for i in items], dtype=np.int64)
-        vv = np.array([i[3] for i in items], dtype=np.float64)
-        vv = np.where(np.isinf(vv), np.nan, vv)
-        if not np.isfinite(vv).any():
+    def add(label: str, values: list[tuple[int, int, int, float, str]]) -> None:
+        gg = np.array([v[0] for v in values], dtype=np.int64)
+        cc = np.array([v[1] for v in values], dtype=np.int64)
+        rr = np.array([v[2] for v in values], dtype=np.int64)
+        kept = np.array([v[4] == "ok" and math.isfinite(v[3]) for v in values], dtype=bool)
+        if not kept.any():
             return
-        policy = "omit" if np.isnan(vv).any() else "raise"
+        omitted: dict[str, int] = {}
+        for v, keep in zip(values, kept.tolist(), strict=True):
+            if not keep:
+                omitted[v[4]] = omitted.get(v[4], 0) + 1
+        vv = np.where(kept, np.array([v[3] for v in values], dtype=np.float64), np.nan)
+        policy = "omit" if omitted else "raise"
         est = stats.nested_mean(gg, cc, rr, vv, nan_policy=policy)  # type: ignore[arg-type]
         out.append(
-            [name, version, params, t, float(est.mean), float(est.se), est.num_graphs]
+            [label, version, params, t, float(est.mean), float(est.se), est.num_graphs]
             + [int(est.contributing_graphs), est.num_trajectories]
             + [int(est.contributing_trajectories), policy]
+            + [json.dumps(dict(sorted(omitted.items())), sort_keys=True)]
         )
 
-    for (name, version, params, t), items in sorted(groups.items()):
-        if any(o[8] is not None for o in items):
-            add(name, version, params, t, [(*o[:3], _nan(o[8])) for o in items])
-        if name == "d_cyc":
-            zero = [(*o[:3], float(_data_dict(o[11], name)["zero_extended"])) for o in items]
-            add("d_cyc:zero_extended", version, params, t, zero)
-        if name == "D_J":
-            datas = [_data_dict(o[11], name) for o in items]
-            for j, coupling in enumerate(datas[0]["couplings"]):
-                vals = [
-                    (*o[:3], _nan(d["robustness"][j])) for o, d in zip(items, datas, strict=True)
-                ]
-                add(f"D_J:J={coupling!r}", version, params, t, vals)
+    if any(o[9] is not None or o[8] not in ("vector",) for o in items):
+        add(name, [(int(o[0]), int(o[1]), int(o[2]), _nan(o[9]), str(o[8])) for o in items])
+    if name == "d_cyc":
+        zero = [
+            (int(o[0]), int(o[1]), int(o[2]), float(_data_dict(o[12], name)["zero_extended"]),
+             "ok")
+            for o in items
+        ]  # fmt: skip
+        add("d_cyc:zero_extended", zero)
+    if name == "D_J":
+        datas = [_data_dict(o[12], name) for o in items]
+        for j, coupling in enumerate(datas[0]["couplings"]):
+            vals = []
+            for o, d in zip(items, datas, strict=True):
+                x = _nan(d["robustness"][j])
+                vals.append((int(o[0]), int(o[1]), int(o[2]), x,
+                             "ok" if math.isfinite(x) else "undefined"))  # fmt: skip
+            add(f"D_J:J={coupling!r}", vals)
     return out
 
 
@@ -3021,28 +3556,25 @@ def _nan(x: Any) -> float:
     return math.nan if x is None else float(x)
 
 
-def _peak_summaries(obs: Sequence[Sequence[Any]]) -> dict[str, list[dict[str, Any]]]:
+def _peak_summaries(
+    peaks: Mapping[tuple[str, str, str, str], Sequence[tuple[Any, ...]]],
+) -> dict[str, list[dict[str, Any]]]:
     """The three peak-time statistics of v1.4 §5.8 (:func:`~sparsegf2.study.stats.peak_time_summaries`)
-    of every stored peak, under both explicit horizon policies (``exclude``, ``include``)."""
-    peaks: dict[str, list[dict[str, Any]]] = {}
-    by_key: dict[tuple[str, str, str, str], list[Sequence[Any]]] = {}
-    for o in obs:
-        if o[3] == -1 and str(o[4]).startswith("peak_"):
-            by_key.setdefault((o[4], o[5], o[6], o[7]), []).append(o)
-    for (name, version, params, context), items in sorted(by_key.items()):
-        datas = [_data_dict(o[11], name) for o in items]
-        gg = np.array([o[0] for o in items], dtype=np.int64)
-        cc = np.array([o[1] for o in items], dtype=np.int64)
-        rr = np.array([o[2] for o in items], dtype=np.int64)
-        tstar = np.array([_nan(o[8]) for o in items], dtype=np.float64)
-        at_horizon = np.array([bool(d.get("at_horizon")) for d in datas])
+    of every current peak, under both explicit horizon policies (``exclude``, ``include``)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for (name, version, params, context), items in sorted(peaks.items()):
+        gg = np.array([i[0] for i in items], dtype=np.int64)
+        cc = np.array([i[1] for i in items], dtype=np.int64)
+        rr = np.array([i[2] for i in items], dtype=np.int64)
+        tstar = np.array([i[3] for i in items], dtype=np.float64)
+        at_horizon = np.array([i[4] for i in items], dtype=bool)
         summaries = {
             policy: stats.peak_time_summaries(
                 gg, cc, rr, tstar, at_horizon=at_horizon, horizon_policy=policy
             ).to_dict()
             for policy in ("exclude", "include")
         }
-        peaks.setdefault(name, []).append(
+        out.setdefault(name, []).append(
             {"version": version, "params": params, "context": context, "summaries": summaries}
         )
-    return peaks
+    return out

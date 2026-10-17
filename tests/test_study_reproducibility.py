@@ -71,6 +71,66 @@ def test_how_the_work_is_split_and_run_never_changes_the_content(tmp_path, refer
         store.close()
 
 
+#: One change of every logical field the digest reads (doc 05 §3.7), each on one row.
+_LOGICAL_CHANGES = (
+    "UPDATE manifests SET digest = 'x' WHERE revision = 1",
+    *(
+        f"UPDATE graphs SET {column} = {value} WHERE g = 1"
+        for column, value in (("seed", "'[1]'"), ("generator", "'x'"), ("edge_order", "'x'"),
+                              ("num_edges", "num_edges + 1"), ("digest", "'x'"),
+                              ("measures_version", "'x'"))
+    ),
+    *(
+        f"UPDATE trajectories SET {column} = {value} WHERE tid = 2"
+        for column, value in (("u", "u + 100"), ("p_float_hex", "'x'"), ("run_seed", "'[1]'"),
+                              ("graph_digest", "'x'"), ("dynamics_version", "'x'"),
+                              ("g", "g + 7"), ("c", "c + 7"), ("p", "'0.9'"))
+    ),
+    *(
+        f"UPDATE traces SET {column} = {value} WHERE rowid = 2"
+        for column, value in (("final_layer", "final_layer - 1"), ("tau0", "tau0 + 1"),
+                              ("tau1", "tau1 + 1"), ("censored0", "1 - censored0"),
+                              ("status", "CASE status WHEN 'censored' THEN 'purified' ELSE 'censored' END"), ("num_measurements", "num_measurements + 1"),
+                              ("layers", "layers + 1"))
+    ),
+    "UPDATE traces SET k_points = ? WHERE rowid = 2",
+    "UPDATE traces SET tau = ? WHERE rowid = 2",
+    "UPDATE completions SET requirements = 'x' WHERE tid = 3",
+    "UPDATE derivations SET derivation = 'x' WHERE tid = 3",
+    *(
+        f"UPDATE snapshots SET {column} = {value} WHERE rowid = 3"
+        for column, value in (("status", "CASE status WHEN 'stored' THEN 'phys_only' ELSE 'stored' END"), ("num_qubits", "num_qubits + 1"),
+                              ("rank", "rank - 1"), ("k", "k + 1"), ("joint_digest", "'x'"),
+                              ("phys_digest", "'x'"), ("t", "t + 100"))
+    ),
+    *(
+        f"UPDATE observable_defs SET {column} = 'x' WHERE observable = 'D'"
+        for column in ("params_json", "level", "inputs", "definition")
+    ),
+    *(
+        f"UPDATE observations SET {column} = {value} WHERE rowid = 8"
+        for column, value in (("value", "value + 1"), ("se", "se + 1"), ("method", "'x'"),
+                              ("status", "CASE status WHEN 'undefined' THEN 'ok' ELSE 'undefined' END"), ("context", "'x'"), ("t", "t + 100"))
+    ),
+    "UPDATE observations SET data = ? WHERE rowid = (SELECT min(rowid) FROM observations "
+    "WHERE data IS NOT NULL)",
+    "UPDATE signed_runs SET outcomes = ?",
+    "UPDATE signed_runs SET random = ?",
+    "UPDATE signed_runs SET signed_digests = '{}'",
+    "UPDATE signed_runs SET format = 'x'",
+)  # fmt: skip
+
+#: Changes that describe how the content was produced, or what follows from the edges: none
+#: changes the digest (the graph measurements: lambda2's last bits depend on the platform).
+_PROVENANCE_CHANGES = (
+    "UPDATE graphs SET measures = '{}' WHERE g = 1",
+    "UPDATE units SET elapsed_seconds = 99, threads = 99, finished_utc = 'x'",
+    "UPDATE observations SET unit_id = NULL",
+    "UPDATE manifests SET created_utc = 'x', git_commit = 'x'",
+    "UPDATE snapshots SET joint = ?, unit_id = 1 WHERE rowid = 4",
+)
+
+
 def test_the_logical_digest_sees_every_change_of_content(tmp_path, reference):
     _, digest = reference
     other = sup.manifest(**PAIRED, seeds={"master_graph_seed": 101, "master_circuit_seed": 203})
@@ -78,16 +138,25 @@ def test_the_logical_digest_sees_every_change_of_content(tmp_path, reference):
         assert store.logical_digest(manifests=False) != digest
     with sup.build(tmp_path / "t", sup.manifest(**PAIRED)) as store:
         assert store.logical_digest() == digest
-        seen = {digest}
-        for change in (
-            "UPDATE observations SET se = se + 1 WHERE rowid = 7",
-            "UPDATE observations SET value = value + 1 WHERE rowid = 8 AND value IS NOT NULL",
-            "UPDATE snapshots SET k = k + 1 WHERE rowid = 3",
-            "UPDATE traces SET final_layer = final_layer - 1 WHERE rowid = 2",
-            "UPDATE graphs SET measures = '{}' WHERE g = 1",
-        ):
+        runner.replay_signed(store, store.trajectory_keys()[0], [5], record=True)
+        start = store.logical_digest()
+        for change in _PROVENANCE_CHANGES:
             con = sup.open_for_tampering(store)
-            assert con.execute(change).rowcount == 1, change
+            row = con.execute("SELECT joint FROM snapshots WHERE rowid = 4").fetchone()
+            again = zlib.compress(zlib.decompress(row[0]), 1)  # another compression level
+            assert con.execute(change, (again,) if "?" in change else ()).rowcount >= 1, change
+            con.commit()
+            con.close()
+            assert store.logical_digest() == start, change
+        seen = {start}
+        for change in _LOGICAL_CHANGES:
+            con = sup.open_for_tampering(store)
+            args: tuple = ()
+            if "?" in change:
+                args = (
+                    zlib.compress(b'{"changed":1}' if "data" in change else b"\x07\x00\x00\x00"),
+                )
+            assert con.execute(change, args).rowcount >= 1, change
             con.commit()
             con.close()
             now = store.logical_digest()

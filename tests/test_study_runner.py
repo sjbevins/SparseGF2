@@ -150,15 +150,29 @@ def test_requirements_name_what_a_trajectory_records():
     assert req["snapshot"] == "tableau_snapshot" and req["contiguous_distance"]
     assert req["uniform_erasure"] == {"samples": 12, "exact_budget": 6}
     assert [e["name"] for e in req["correlated_erasure"]] == ["ring"]
+    assert "peak" not in req and "domain" not in req  # derived, not simulated (T3-F01)
     digest = runner.requirements_digest(req)
+    derived = runner.requirements_digest(runner.derivation(revisions, "F", 6, "0.25"))
     same = [sup.manifest(storage={"graphs_per_unit": 1, "compression_level": 1})]
     assert runner.requirements_digest(runner.requirements(same, "F", 6, "0.25")) == digest
     for other in (
-        sup.manifest(analysis={"peak": {"z": 2.0, "bootstrap": 5}}),
         sup.manifest(depth={"layers": {"fixed": 12}, "checkpoints": {"list": [2, 5]}}),
         sup.manifest(observables={**sup.BASE["observables"], "contiguous_distance": False}),
     ):
         assert runner.requirements_digest(runner.requirements([other], "F", 6, "0.25")) != digest
+    # the analysis rule and a schedule with the same depths change what is derived, never what
+    # is simulated: no circuit runs again for them
+    narrower = sup.manifest(depth={"layers": {"fixed": 10}, "checkpoints": {"list": [2]}})
+    for chain in (
+        [sup.manifest(analysis={"peak": {"z": 2.0, "bootstrap": 5}})],
+        [sup.manifest(analysis={"peak": {"bootstrap": 0}})],
+        [sup.manifest(), narrower],
+    ):
+        assert runner.requirements_digest(runner.requirements(chain, "F", 6, "0.25")) == digest
+        assert runner.requirements_digest(runner.derivation(chain, "F", 6, "0.25")) != derived
+    narrowed = runner.derivation([sup.manifest(), narrower], "F", 6, "0.25")
+    assert narrowed["domain"] == [0, 1, 2, 10] and narrowed["layers"] == 10
+    assert runner.derivation(revisions, "P", 6, "0.25") is None
     p = runner.requirements([sup.manifest(protocols=["F", "P"])], "P", 6, "0.25")
     assert p == {
         "protocol": "P",

@@ -1776,6 +1776,83 @@ def _resample_indices(seed: int | tuple[int, ...], count: int, bound: int) -> np
     return np.floor(unit * bound).astype(np.int64)
 
 
+def _resampled_robustness(
+    resampled: np.ndarray, n: int, counts: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """``D(0)`` and its error of every resampled code, ``(B, E)`` each: exactly the arithmetic of
+    :func:`integrated_robustness` on ``resampled`` (``(B, E, S)``, drawn from checked samples)
+    with the counts of each checkpoint, without checking the draws again."""
+    s = resampled.shape[-1]
+    failed = np.cumsum(analysis._histogram(resampled, n), axis=-1)[..., : n + 1]
+    curve = failed / s  # analysis.failure_by_size
+    w = 0
+    if counts is not None:
+        exact = analysis.exact_failure_by_size(counts, n)  # the same for every replicate
+        w = int(counts.shape[-1])
+        curve[..., 1 : w + 1] = exact
+    has = resampled[..., 0] <= n
+    value = np.where(has, (1.0 - curve[..., :n]).sum(axis=-1), 0.0)
+    if s >= 2:
+        y = (np.maximum(resampled, w + 1) - (w + 1)).astype(np.float64)
+        se = np.sqrt(y.var(axis=-1, ddof=1) / s)
+    else:
+        se = np.full(resampled.shape[:-1], np.nan)
+    return value, np.where(has, se, 0.0)
+
+
+def _plateau_peaks(
+    times: np.ndarray, value: np.ndarray, se: np.ndarray, z: float, end: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """``T*`` and the horizon flag of the plateau peak of every row of ``value`` (``(B, E)``) with
+    errors ``se``: row ``i`` gives exactly ``peak(times, value[i], se[i], rule="plateau", z=z,
+    horizon=end)`` (its ``t_star`` and ``at_horizon``), computed for all rows at once.
+
+    The arithmetic is the scalar rule's, element by element: ``d* = max d``, ``t*`` its first
+    maximizer, ``A = {t : d(t) >= d* - z sqrt(se(t)^2 + se(t*)^2)}`` with ``t*`` kept, and
+    ``T* = exp(mean_A ln t)`` (``A``'s one element when it has one) for each distinct ``A``;
+    NaN and False where the peak is missing (``d* = 0``) or the row is invalid (a value or an
+    error not finite and nonnegative).
+    """
+    rows = value.shape[0]
+    t_star = np.full(rows, np.nan)
+    at_horizon = np.zeros(rows, dtype=bool)
+    positive = times > 0
+    if not positive.any() or rows == 0:
+        return t_star, at_horizon
+    tp = times[positive]
+    dp = value[:, positive]
+    ep = se[:, positive]
+    valid = np.isfinite(dp).all(axis=1) & (dp >= 0).all(axis=1)
+    valid &= np.isfinite(ep).all(axis=1) & (ep >= 0).all(axis=1)
+    if not valid.any():
+        return t_star, at_horizon
+    d_star = dp.max(axis=1)
+    first = np.argmax(dp == d_star[:, None], axis=1)
+    index = np.arange(rows)
+    # se(t*)^2 as the scalar rule computes it (a float64 scalar squared), row by row
+    first_sq = np.array([e**2 for e in ep[index, first]], dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        keep = dp >= d_star[:, None] - z * np.sqrt(ep**2 + first_sq[:, None])
+    keep[index, first] = True
+    found = valid & (d_star != 0)
+    if not found.any():
+        return t_star, at_horizon
+    sets, which = np.unique(keep[found], axis=0, return_inverse=True)
+    values = np.empty(len(sets))
+    ends = np.zeros(len(sets), dtype=bool)
+    for i, mask in enumerate(sets):
+        chosen = tp[mask]
+        if chosen.size == 1:
+            values[i] = float(chosen[0])
+        else:
+            values[i] = float(np.exp(np.log(chosen.astype(np.float64)).mean()))
+        ends[i] = bool(np.any(chosen == end))
+    which = np.asarray(which).reshape(-1)
+    t_star[found] = values[which]
+    at_horizon[found] = ends[which]
+    return t_star, at_horizon
+
+
 def bootstrap_peak(
     t: Any,
     first_failure: Any,
@@ -1796,7 +1873,9 @@ def bootstrap_peak(
     replicate ``b`` resamples, independently at every checkpoint ``e``, ``S`` orderings with
     replacement from that checkpoint's ``S`` (the estimates at different checkpoints are
     independent given the codes, so they are resampled independently; the exact counts are
-    kept), recomputes ``D(0)`` and its error, and takes the plateau peak. The indices are
+    kept), recomputes ``D(0)`` and its error, and takes the plateau peak (all replicates at
+    once: :func:`_resampled_robustness` and :func:`_plateau_peaks` give exactly the values of
+    :func:`integrated_robustness` and :func:`peak` replicate by replicate). The indices are
     ``floor(u * S)`` from :func:`numpy.random.PCG64` seeded by ``SeedSequence(seed)`` (raw
     stream, ``u`` its top 53 bits), drawn in the order replicate, checkpoint, sample.
 
@@ -1831,17 +1910,8 @@ def bootstrap_peak(
         b, times.size, samples
     )
     resampled = np.take_along_axis(np.broadcast_to(d, (b, *d.shape)), picks, axis=2)
-    reps = integrated_robustness(
-        resampled,
-        n,
-        exact_counts=None if counts is None else np.broadcast_to(counts, (b, *counts.shape)),
-    )
-    t_star = np.full(b, np.nan)
-    at_horizon = np.zeros(b, dtype=bool)
-    for i in range(b):
-        p = peak(times, reps.value[i], reps.se[i], rule="plateau", z=z, horizon=horizon)
-        t_star[i] = p.t_star
-        at_horizon[i] = p.at_horizon
+    value, se = _resampled_robustness(resampled, n, counts)
+    t_star, at_horizon = _plateau_peaks(times, value, se, float(z), estimate.horizon)
     return PeakBootstrap(
         estimate=estimate,
         t_star=t_star,
@@ -2783,9 +2853,10 @@ for _entry in (
         "1",
         "trajectory",
         ("trace:D_J", "k_trace"),
-        {**_PLATEAU, "J": REQUIRED},
-        "the plateau peak of D(J)(t) at one coupling J, sensitivity over z; no bootstrap of T* "
-        "(the probe keeps failing fractions only); its se are binomial, lower bounds for the "
+        {**_PLATEAU, "J": REQUIRED, "name": REQUIRED},
+        "the plateau peak of D(J)(t) at one coupling J of the correlated probe name (two probes "
+        "may share a coupling, so both keys name the trace), sensitivity over z; no bootstrap of "
+        "T* (the probe keeps failing fractions only); its se are binomial, lower bounds for the "
         "chain, so the plateau is narrower than z there: record se_exact (v1.4 §5.8)",
         peak,
     ),

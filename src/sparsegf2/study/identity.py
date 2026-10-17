@@ -126,7 +126,7 @@ PROTOCOLS = ("F", "P")
 ROWSPACE_FORMAT_VERSION = "SGF2RS1"
 
 #: The layout of the SQLite store (design §4).
-STORE_SCHEMA_VERSION = "sparsegf2.study.store/1"
+STORE_SCHEMA_VERSION = "sparsegf2.study.store/2"
 
 #: The ordered original-edge convention of v1.4 §2.2 recorded with every graph.
 ORIGINAL_EDGE_ORDER = "offset-major"

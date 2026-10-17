@@ -105,7 +105,7 @@ def test_stored_peaks_record_their_errors_and_the_catalog_bootstrap_seed(tmp_pat
             # D(J): the chain on the interaction graph has lower-bound errors, the cycle exact ones
             for coupling, probe, exact in ((0.0, "ring", False), (1.5, "ring", False), (0.5, "loop", True)):  # fmt: skip
                 peak_j = store.observation(
-                    key, -1, "peak_D_J", params=_params("peak_D_J", rule, J=coupling)
+                    key, -1, "peak_D_J", params=_params("peak_D_J", rule, J=coupling, name=probe)
                 )
                 assert peak_j["data"]["probe"] == probe
                 assert peak_j["data"]["se_exact"] is exact, (key, coupling)

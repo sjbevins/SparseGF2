@@ -454,10 +454,13 @@ def test_entries_declare_the_kind_of_every_parameter():
 
 def test_peak_parameters_are_only_those_a_function_consumes():
     """peak_D's bootstrap is run by bootstrap_peak (orderings); D(J) has no orderings, so
-    peak_D_J lists no bootstrap (its key would claim replicates that never ran)."""
+    peak_D_J lists no bootstrap (its key would claim replicates that never ran). Its coupling J
+    and the name of its correlated probe select the trace (two probes may share a coupling)."""
     assert set(ob.get("peak_D").params) == {"rule", "z", "sensitivity_z", "bootstrap"}
-    assert set(ob.get("peak_D_J").params) == {"rule", "z", "sensitivity_z", "J"}
-    assert "bootstrap" not in json.loads(ob.params_key("peak_D_J", {"J": 1.0}))
+    assert set(ob.get("peak_D_J").params) == {"rule", "z", "sensitivity_z", "J", "name"}
+    assert "bootstrap" not in json.loads(ob.params_key("peak_D_J", {"J": 1.0, "name": "ring"}))
+    with pytest.raises(ValueError, match="name"):
+        ob.params_key("peak_D_J", {"J": 1.0})
     assert "probe:erasure_first_failure" in ob.get("peak_D").inputs  # what the bootstrap reads
 
 
