@@ -139,16 +139,45 @@ def _vector(name: str, values: Any, size: int | None = None) -> np.ndarray:
     return a
 
 
+_MEAN_RTOL = 1e-9  # y against the mean of its graph means, relative to the largest |value|
+
+
+def _check_graph_mean(i: int, y: float, graph_means: np.ndarray) -> None:
+    """Refuse a point whose ``y`` is not the mean of its defined graph means (to rounding)."""
+    defined = graph_means[~np.isnan(graph_means)]
+    if defined.size == 0:
+        raise ValueError(
+            f"graph_means[{i}] has no defined value, so it cannot be the graph values behind "
+            f"y[{i}] = {y!r}: leave the point out"
+        )
+    mean = float(np.sum(defined)) / defined.size
+    if abs(y - mean) > _MEAN_RTOL * float(np.max(np.abs(defined))):
+        raise ValueError(
+            f"y[{i}] = {y!r} is not the mean of graph_means[{i}] ({mean!r}): the bootstrap "
+            "recomputes every replicate as the mean of resampled graph means, so graph_means must "
+            "be the per-graph values whose equal-weight mean is y (a nested mean, or a restricted "
+            "mean as the nested mean of min(tau, T_max)); a median or another estimator cannot "
+            "carry graph_means: leave graphs and graph_means out (no bootstrap)"
+        )
+
+
 @dataclass(frozen=True, eq=False)
 class ScalingData:
     """The points ``(n, p, y, se)`` of one observable at one ``beta``, ready for a collapse.
 
-    ``y`` is the ensemble estimate of the time observable at size ``n`` and rate ``p`` (for
-    example a nested mean, or a restricted mean or median from a survival curve: say which in
-    ``estimator``) and ``se`` its standard error (positive). ``graphs`` and ``graph_means`` (one
-    array per point) are the per-graph values behind ``y``: they let :func:`bootstrap_fit` and
-    :func:`compare_shared_independent` resample graphs; every point of a size must have the same
-    graph labels, because the rates were measured on the same graphs.
+    ``y`` is the ensemble estimate of the time observable at size ``n`` and rate ``p`` (a
+    nested mean; under censoring a survival-based estimate: say which in ``estimator``) and
+    ``se`` its standard error (positive). ``graphs`` and ``graph_means`` (one array per point)
+    are the per-graph values behind ``y``: they let :func:`bootstrap_fit`,
+    :func:`compare_shared_independent` and :func:`compare_methods` resample graphs. Every point
+    of a size must have the same graph labels, because the rates were measured on the same
+    graphs, and ``y`` must be the equal-weight mean of the defined ``graph_means`` of its point
+    (to rounding; a point that is not is refused), because the bootstrap recomputes every
+    replicate as the mean of the resampled graph means. So only a graph-equal mean can carry
+    graph values: a nested mean, or the restricted mean ``E[min(tau, T_max)]``, which is the
+    nested mean of ``min(tau, T_max)`` (``docs/study/06-statistics.md`` §6.5). A Kaplan-Meier
+    median has no per-graph values whose mean it is: such data can be fitted, with an error
+    supplied by the user, but not bootstrapped here.
     ``censored_fraction`` and ``horizon_fraction`` (per point, optional) are passed through to
     the diagnostics. ``observable``, ``beta``, ``label`` ("exploratory" or "confirmatory") and
     ``estimator`` are recorded with every fit.
@@ -217,6 +246,7 @@ class ScalingData:
                     raise ValueError(f"graphs[{i}] must be distinct increasing graph labels")
                 if np.isinf(gm).any():
                     raise ValueError(f"graph_means[{i}] must be finite or NaN")
+                _check_graph_mean(i, float(y[i]), gm)
                 labels.append(lab)
                 values.append(gm)
             set_(self, "graphs", tuple(labels))
@@ -797,8 +827,8 @@ def minimize_bounded(
     """Minimize ``fun`` over the box ``bounds`` by Nelder–Mead from several starts.
 
     Each free coordinate (``lo < hi``) is written ``theta = lo + (hi - lo)(1 + sin phi)/2`` with
-    ``phi`` unbounded: a smooth map onto the closed box that reaches both bounds (MINUIT's
-    transformation), so Nelder–Mead runs without constraints in ``phi``. A coordinate with
+    ``phi`` unbounded: a smooth map onto the closed box that reaches both bounds (07 §6.1,
+    Proposition 5), so Nelder–Mead runs without constraints in ``phi``. A coordinate with
     ``lo == hi`` is held fixed. Non-finite values of ``fun`` count as ``+inf``.
 
     Starts: the rows of ``initial`` (one point or several) or, without them, the center of the
@@ -1223,7 +1253,7 @@ def _fit_poly(
 class _WindowFit:
     outcome: _Outcome
     selected: np.ndarray
-    stable: bool
+    stable: bool | None  # None: a fixed set, never redrawn (so never checked)
     iterations: int
     solution: _PolySolution | None
 
@@ -1292,8 +1322,11 @@ class CollapseFit:
     Polynomial fits also have the ``degree``, the ``window`` rule, the total ``chi2`` and
     ``dof = points_used - (degree + 1) - (free parameters)``, the point set ``selected`` (a mask
     over the data's points), the ``window_range`` ``(min x, max x)`` of the set at the fit,
-    whether the window was ``window_stable`` after ``window_iterations`` fits, and the
-    ``coefficients`` of ``F(x) = sum_k a_k x^k``. ``chi2 / dof`` is about 1 when the points
+    ``window_stable`` (True when the window drawn again at the fit is ``selected``, False when it
+    is not after ``window_iterations`` fits; None for a refit that keeps a given set by design
+    and never redraws it: leave-one-size-out, the drift of :func:`collapse_diagnostics`, a
+    bootstrap replicate with ``reselect_window=False``), and the ``coefficients`` of
+    ``F(x) = sum_k a_k x^k``. ``chi2 / dof`` is about 1 when the points
     scatter about the master curve as their errors say; the rates of a size share graphs, so
     their errors are correlated and ``chi2`` does not follow a chi-square law (the bootstrap
     gives the uncertainties).
@@ -1734,6 +1767,7 @@ def _replicate_values(
     positions = {n: np.searchsorted(lab, d) for n, (lab, d) in draws.items()}
     for i in range(data.size):
         m, s = _stats._replicate(data.graph_means[i], positions[int(data.n[i])])
+        assert s is not None
         ystar[:, i] = m
         sestar[:, i] = s
     return ystar, sestar
@@ -1743,22 +1777,50 @@ def _valid(y: np.ndarray, se: np.ndarray) -> np.ndarray:
     return np.isfinite(y) & np.isfinite(se) & (se > 0)
 
 
-def _replicate_collapse(
-    n: np.ndarray, p: np.ndarray, y: np.ndarray, se: np.ndarray
-) -> tuple[_Collapse, int] | None:
+def _replicate_data(
+    data: ScalingData, y: np.ndarray, se: np.ndarray, p: np.ndarray | None = None
+) -> tuple[ScalingData, np.ndarray] | None:
+    """A replicate's usable points (finite ``y``, positive ``se``) as data, with their mask over
+    ``data``'s points (rates ``p`` replace ``data.p`` when given); None when no point is usable."""
     keep = _valid(y, se)
     if not keep.any():
         return None
-    return _Collapse(n[keep], p[keep], y[keep], se[keep]), int(keep.sum())
+    rates = data.p if p is None else p
+    part = ScalingData(
+        n=data.n[keep],
+        p=rates[keep],
+        y=y[keep],
+        se=se[keep],
+        observable=data.observable,
+        beta=data.beta,
+        label=data.label,
+        estimator=data.estimator,
+    )
+    return part, keep
 
 
-def _replicate_polynomial(
-    n: np.ndarray, p: np.ndarray, y: np.ndarray, se: np.ndarray, mask: np.ndarray, degree: int
-) -> _Polynomial | None:
-    keep = mask & _valid(y, se)
-    if not keep.any():
-        return None
-    return _Polynomial(n[keep], p[keep], y[keep], se[keep], degree)
+def _fixed_window_fit(
+    data: ScalingData,
+    mask: np.ndarray,
+    settings: _Settings,
+    initial: ArrayLike | None,
+    anchor: np.ndarray,
+) -> CollapseFit:
+    """A polynomial fit on the given point set ``mask`` of ``data``, never redrawn: from
+    ``initial`` (else ``anchor``) and the settings' random starts (``window_stable`` None)."""
+    poly = _Polynomial.subset(data, mask, settings.degree)
+    rows = _rows(initial)
+    outcome = _fit_poly([poly], settings, rows if rows is not None else anchor)
+    solution = (
+        poly.solve(*(float(v) for v in outcome.params)) if outcome.status in _USABLE else None
+    )
+    return _collapse_fit(data, settings, outcome, _WindowFit(outcome, mask, None, 1, solution))
+
+
+@dataclass(frozen=True, eq=False)
+class _Replicate:
+    fit: CollapseFit  # fitted on the replicate's usable points
+    keep: np.ndarray  # those points, as a mask over the data's points
 
 
 def _refit(
@@ -1767,21 +1829,30 @@ def _refit(
     settings: _Settings,
     y: np.ndarray,
     se: np.ndarray,
-    p: np.ndarray | None = None,
-) -> _Outcome | None:
-    """Refit replicate values ``y``, ``se`` (rates ``p``) with the fit's method and window,
-    from the fit's parameters, without random starts; None when no point is usable."""
-    rates = data.p if p is None else p
-    if settings.method == HOUDAYER_HARTMANN:
-        prepared = _replicate_collapse(data.n, rates, y, se)
-        if prepared is None:
-            return None
-        return _fit_hh([prepared[0]], [prepared[1]], settings, fit.params, starts=0)
-    assert fit.selected is not None
-    poly = _replicate_polynomial(data.n, rates, y, se, fit.selected, settings.degree)
-    if poly is None:
+    *,
+    initial: ArrayLike | None,
+    reselect: bool,
+    reference: np.ndarray | None = None,
+) -> _Replicate | None:
+    """One bootstrap replicate (values ``y``, ``se``) fitted the way ``fit`` fitted the data.
+
+    The replicate's usable points are fitted by the same procedure with the same ``initial``,
+    seed and bounds (``settings`` carries the replicate's random starts): Houdayer-Hartmann
+    from ``initial`` or the box center and the random starts; polynomial with ``reselect`` its
+    own window (drawn at ``reference``, else at the replicate's own Houdayer-Hartmann fit as for
+    the data, and redrawn until it settles), without it the fit's window (from ``initial`` or the
+    fit's parameters). None when no point is usable.
+    """
+    made = _replicate_data(data, y, se)
+    if made is None:
         return None
-    return _fit_poly([poly], settings, fit.params, starts=0)
+    part, keep = made
+    if settings.method == HOUDAYER_HARTMANN or reselect:
+        return _Replicate(_fit_one(part, settings, initial, reference), keep)
+    assert fit.selected is not None
+    return _Replicate(
+        _fixed_window_fit(part, fit.selected[keep], settings, initial, fit.params), keep
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -1792,7 +1863,12 @@ class BootstrapFit:
     (NaN rows where a refit returned no parameters), ``costs`` and ``statuses`` theirs; ``se``
     the standard deviation of the usable replicates per parameter and ``lower``/``upper`` their
     percentile interval at ``level``; ``failed`` the replicates without parameters and
-    ``at_bound`` those with a parameter on its bound.
+    ``at_bound`` those with a parameter on its bound. ``replicate_starts`` is the number of
+    random starts of every refit and ``reselect_window`` whether polynomial refits drew their
+    own windows (None for Houdayer-Hartmann). Polynomial bootstraps also keep each replicate's
+    point set, ``selected`` ``(B, P)`` (a mask over the data's points; all False where a
+    replicate has none), and ``window_stable`` ``(B,)``, whether its window settled (False for
+    a failed replicate; None with ``reselect_window=False``, where nothing is redrawn).
     """
 
     fit: CollapseFit
@@ -1806,6 +1882,10 @@ class BootstrapFit:
     failed: int
     at_bound: int
     seed: Any
+    replicate_starts: int = 0
+    reselect_window: bool | None = None
+    selected: np.ndarray | None = None
+    window_stable: np.ndarray | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
@@ -1820,6 +1900,24 @@ def _replicate_count(replicates: Any, smallest: int) -> int:
     ):
         raise ValueError(f"replicates must be an integer >= {smallest}")
     return int(replicates)
+
+
+def _replicate_starts(value: Any, starts: int) -> int:
+    """The random starts of a refit: ``starts`` (the data fit's) when ``value`` is None."""
+    if value is None:
+        return starts
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError(
+            f"replicate_starts must be a non-negative integer, or None for as many as starts; "
+            f"not {value!r}"
+        )
+    return int(value)
+
+
+def _reselect(value: Any) -> bool:
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"reselect_window must be True or False, not {value!r}")
+    return bool(value)
 
 
 def bootstrap_fit(
@@ -1837,17 +1935,28 @@ def bootstrap_fit(
     min_points: int | None = None,
     max_evaluations: int = 2000,
     window_iterations: int = 5,
+    replicate_starts: int | None = None,
+    reselect_window: bool = True,
 ) -> BootstrapFit:
     """The uncertainty of ``(p_c, z, nu)`` by resampling graphs (v1.4 §5.8, §9).
 
     For every size ``n`` the graphs are resampled once per replicate
     (``graph_bootstrap(labels_n, replicates, seed=[seed, n])``) and every rate's mean and error
     at that size are recomputed from the same drawn graphs, so the coupling of the rates
-    (shared graphs, gates and mask uniforms) is kept. Each replicate is refitted with the same
-    method from the data's fit (no random starts; a polynomial refit keeps the fit's window); a
-    point whose replicate error is 0 or undefined is left out of that replicate. Returns the
-    replicate parameters, their standard deviations and percentile intervals. Needs the
-    per-graph values (:func:`scaling_data`).
+    (shared graphs, gates and mask uniforms) is kept. A point whose replicate error is 0 or
+    undefined is left out of that replicate. Returns the replicate parameters, their standard
+    deviations and percentile intervals. Needs the per-graph values (:func:`scaling_data`).
+
+    Each replicate is fitted by the same procedure as the data (:func:`fit_collapse` with the
+    same ``method``, ``bounds``, ``initial``, ``seed`` and settings), so the spread includes
+    everything the estimate depends on: the multi-start search (``replicate_starts`` random
+    starts, by default as many as ``starts``; fewer is cheaper and approximates the procedure)
+    and, for the polynomial method with ``reselect_window`` (the default, ruling R-FSS), the
+    window, which each replicate draws at its own Houdayer-Hartmann fit (or ``initial``) and
+    redraws until it settles. ``reselect_window=False`` refits every replicate on the data fit's
+    window instead (cheaper; its errors leave out the window's variability by construction).
+    The seed is both the graph draws' (``[seed, n]``) and the fits' random starts', for the data
+    and for every replicate alike. Measured calibration on synthetic data: 07 §11.
     """
     settings = _settings(
         bounds,
@@ -1862,22 +1971,34 @@ def bootstrap_fit(
     )
     lvl = _stats._level(level)
     reps_count = _replicate_count(replicates, 2)
+    rep_starts = _replicate_starts(replicate_starts, settings.starts)
+    reselect = _reselect(reselect_window)
     draws = _draws_by_size([data], reps_count, seed)
     fit = _fit_one(data, settings, initial)
+    rep_settings = replace(settings, starts=rep_starts)
+    polynomial = settings.method == POLYNOMIAL
     reps = np.full((reps_count, 3), np.nan)
     costs = np.full(reps_count, np.nan)
+    selected = np.zeros((reps_count, data.size), dtype=bool) if polynomial else None
+    stable = np.zeros(reps_count, dtype=bool) if polynomial and reselect else None
     statuses: list[str] = []
     if fit.usable:
         ystar, sestar = _replicate_values(data, draws)
         for b in range(reps_count):
-            out = _refit(data, fit, settings, ystar[b], sestar[b])
+            out = _refit(
+                data, fit, rep_settings, ystar[b], sestar[b], initial=initial, reselect=reselect
+            )
             if out is None:
                 statuses.append("too_few_points")
                 continue
-            statuses.append(out.status)
-            if out.status in _USABLE:
-                reps[b] = out.params
-                costs[b] = out.cost
+            statuses.append(out.fit.status)
+            if out.fit.usable:
+                reps[b] = out.fit.params
+                costs[b] = out.fit.cost
+            if selected is not None and out.fit.selected is not None:
+                selected[b, np.flatnonzero(out.keep)] = out.fit.selected
+            if stable is not None:
+                stable[b] = out.fit.window_stable is True
     else:
         statuses = [fit.status] * reps_count
     usable = ~np.isnan(reps[:, 0])
@@ -1898,6 +2019,10 @@ def bootstrap_fit(
         failed=int((~usable).sum()),
         at_bound=sum(1 for s in statuses if s == "at_bound"),
         seed=seed,
+        replicate_starts=rep_starts,
+        reselect_window=reselect if polynomial else None,
+        selected=selected,
+        window_stable=stable,
     )
 
 
@@ -1918,7 +2043,8 @@ class SharedComparison:
     ``p_value = (1 + #{null >= delta}) / (1 + B')`` over the ``B'`` usable replicates, and
     ``prefers``: ``"independent"`` when ``p_value <= alpha``, ``"shared"`` otherwise, and
     ``"undetermined"`` when a fit gave no parameters. ``message`` explains an undetermined
-    result.
+    result. ``replicate_starts`` and ``reselect_window`` (None for Houdayer-Hartmann) are the
+    null refits' settings.
     """
 
     shared: SharedFit
@@ -1933,6 +2059,8 @@ class SharedComparison:
     seed: Any
     message: str
     method: str = HOUDAYER_HARTMANN
+    replicate_starts: int = 0
+    reselect_window: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
@@ -1960,23 +2088,30 @@ def compare_shared_independent(
     min_points: int | None = None,
     max_evaluations: int = 2000,
     window_iterations: int = 5,
+    replicate_starts: int | None = None,
+    reselect_window: bool = True,
 ) -> SharedComparison:
     """Test one shared ``(p_c, z, nu)`` against independent exponents (v1.4 §5.8, §5.9).
 
     The statistic ``delta`` (see :class:`SharedComparison`) is the cost of sharing the
-    parameters. Its null distribution is built by graph-cluster resampling of data that satisfy
-    the shared hypothesis exactly: every observable ``o`` is mapped point by point to
+    parameters. Its null distribution is built by graph-cluster resampling of data mapped onto
+    the shared hypothesis: every observable ``o`` is mapped point by point to
 
         p' = p_c^s + (p - p_c^o) n^(1/nu_o - 1/nu_s),   y' = y n^(z_s - z_o)
 
     (and its graph means and errors by the same factor), which gives at ``theta_s`` exactly the
-    scaled coordinates the observable has at its own ``theta_o``, so its collapse (and, for the
-    polynomial method, its point set) is kept and the shared parameters are exact for the
-    mapped data. Each replicate resamples the graphs once per size
+    scaled coordinates the observable has at its own ``theta_o``: its collapse quality there
+    (and, for the polynomial method, its window) is the one it had at ``theta_o``. The mapped
+    data follow the shared scaling form with ``theta_s`` exactly when the data follow theirs
+    without noise; with noise their own best parameters lie near ``theta_s``, not exactly on it
+    (07 §8.3). Each replicate resamples the graphs once per size
     (``graph_bootstrap(labels_n, B, seed=[seed, n])``), applies the draws to every rate and
-    observable, recomputes the means and errors, refits shared and independent parameters
-    (starting from ``theta_s``) and records ``delta*``. The p-value is
-    ``(1 + #{delta* >= delta}) / (1 + B')``. Needs the per-graph values of every point.
+    observable, recomputes the means and errors, and computes ``delta*`` by the same procedure
+    as ``delta``: the shared and the independent fits of the replicate, with the same
+    ``initial``, seed and settings and ``replicate_starts`` random starts (default: as many as
+    ``starts``); for the polynomial method each observable's window is drawn again for the
+    replicate (``reselect_window``, the default) or kept from its fit to the data. The p-value
+    is ``(1 + #{delta* >= delta}) / (1 + B')``. Needs the per-graph values of every point.
     """
     items = _datasets(datasets)
     beta = _common_beta(items)
@@ -1994,8 +2129,15 @@ def compare_shared_independent(
     if not (isinstance(alpha, float) and 0 < alpha < 1):
         raise ValueError(f"alpha must be a probability strictly between 0 and 1, not {alpha!r}")
     reps = _replicate_count(replicates, 1)
+    rep_settings = replace(settings, starts=_replicate_starts(replicate_starts, settings.starts))
+    reselect = _reselect(reselect_window)
     draws = _draws_by_size(items, reps, seed)
     polynomial = settings.method == POLYNOMIAL
+    recorded: dict[str, Any] = {
+        "method": settings.method,
+        "replicate_starts": rep_settings.starts,
+        "reselect_window": reselect if polynomial else None,
+    }
     if polynomial:
         independent = tuple(_fit_one(d, settings, initial) for d in items)
         shared = _shared_polynomial(items, settings, initial, independent, beta)
@@ -2026,7 +2168,7 @@ def compare_shared_independent(
             failed=reps,
             seed=seed,
             message=f"a fit returned no parameters (statuses {bad}): no comparison",
-            method=settings.method,
+            **recorded,
         )
     if polynomial:
         delta = shared.chi2 - sum(f.chi2 for f in independent)
@@ -2039,9 +2181,9 @@ def compare_shared_independent(
         factor = n ** (theta_s[1] - f.z)
         p_new = theta_s[0] + (d.p - f.p_c) * n ** (1.0 / f.nu - 1.0 / theta_s[2])
         ystar, sestar = _replicate_values(d, draws)
-        mapped.append((d.n, p_new, ystar * factor, sestar * factor, f.selected))
+        mapped.append(_Mapped(d, f, p_new, ystar * factor, sestar * factor))
     for b in range(reps):
-        value = _null_replicate(mapped, b, settings, theta_s, polynomial)
+        value = _null_replicate(mapped, b, rep_settings, theta_s, initial, reselect, beta)
         if value is not None:
             null[b] = value
     valid = null[~np.isnan(null)]
@@ -2063,45 +2205,79 @@ def compare_shared_independent(
         failed=int(reps - valid.size),
         seed=seed,
         message=message,
-        method=settings.method,
+        **recorded,
     )
 
 
+@dataclass(frozen=True, eq=False)
+class _Mapped:
+    """One observable's data mapped onto the shared parameters, and its bootstrap values."""
+
+    data: ScalingData
+    fit: CollapseFit  # the observable's own fit to the (unmapped) data
+    p: np.ndarray  # the mapped rates p'
+    ystar: np.ndarray  # (B, P) replicate means, mapped
+    sestar: np.ndarray  # (B, P) replicate errors, mapped
+
+
 def _null_replicate(
-    mapped: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]],
+    mapped: Sequence[_Mapped],
     b: int,
     settings: _Settings,
     theta_s: np.ndarray,
-    polynomial: bool,
+    initial: ArrayLike | None,
+    reselect: bool,
+    beta: str | None,
 ) -> float | None:
-    """``delta*`` of replicate ``b`` of the mapped data (None when a refit fails)."""
-    if polynomial:
-        polys = []
-        for n, p_new, ys, ss, mask in mapped:
-            assert mask is not None
-            poly = _replicate_polynomial(n, p_new, ys[b], ss[b], mask, settings.degree)
-            if poly is None:
-                return None
-            polys.append(poly)
-        s_out = _fit_poly(polys, settings, theta_s, starts=0)
-        i_outs = [_fit_poly([poly], settings, theta_s, starts=0) for poly in polys]
+    """``delta*`` of replicate ``b`` of the mapped data, by the procedure that gave ``delta``
+    (None when a fit fails).
+
+    Houdayer-Hartmann: the shared and each independent fit from ``initial`` (or the box center)
+    and the random starts. Polynomial with ``reselect``: each observable fitted alone with its
+    own window (as :func:`fit_collapse`), then the shared fit on those windows from the
+    independent parameters (as :func:`fit_shared`); without it, the windows of the observables'
+    fits to the data, the independent fits from ``initial`` or ``theta_s`` (the mapped data's
+    image of each observable's own parameters, Proposition 6) and the shared fit from theirs.
+    """
+    parts = []
+    for m in mapped:
+        made = _replicate_data(m.data, m.ystar[b], m.sestar[b], m.p)
+        if made is None:
+            return None
+        parts.append(made)
+    if settings.method == HOUDAYER_HARTMANN:
+        cols = [_Collapse.of(part) for part, _ in parts]
+        counts = [part.size for part, _ in parts]
+        s_out = _fit_hh(cols, counts, settings, initial)
+        i_outs = [_fit_hh([c], [k], settings, initial) for c, k in zip(cols, counts, strict=True)]
         if s_out.status not in _USABLE or any(o.status not in _USABLE for o in i_outs):
             return None
-        return s_out.chi2 - sum(o.chi2 for o in i_outs)
-    prepared = [_replicate_collapse(n, p_new, ys[b], ss[b]) for n, p_new, ys, ss, _ in mapped]
-    cols = [x[0] for x in prepared if x is not None]
-    counts = [x[1] for x in prepared if x is not None]
-    if len(cols) < len(prepared):
+        ind_total = sum(o.cost * o.used[0] for o in i_outs)
+        ind_count = sum(o.used[0] for o in i_outs)
+        return float(s_out.cost - ind_total / ind_count)
+    if reselect:
+        independent = [_fit_one(part, settings, initial) for part, _ in parts]
+        if not all(f.usable for f in independent):
+            return None
+        shared = _shared_polynomial(
+            [part for part, _ in parts], settings, initial, independent, beta
+        )
+        if not shared.usable:
+            return None
+        return shared.chi2 - sum(f.chi2 for f in independent)
+    polys = []
+    for (part, keep), m in zip(parts, mapped, strict=True):
+        assert m.fit.selected is not None
+        polys.append(_Polynomial.subset(part, m.fit.selected[keep], settings.degree))
+    rows = _rows(initial)
+    i_outs = [_fit_poly([poly], settings, rows if rows is not None else theta_s) for poly in polys]
+    if any(o.status not in _USABLE for o in i_outs):
         return None
-    s_out = _fit_hh(cols, counts, settings, theta_s, starts=0)
-    i_outs = [
-        _fit_hh([c], [k], settings, theta_s, starts=0) for c, k in zip(cols, counts, strict=True)
-    ]
-    if s_out.status not in _USABLE or any(o.status not in _USABLE for o in i_outs):
+    start = np.array([o.params for o in i_outs])
+    s_out = _fit_poly(polys, settings, start if rows is None else np.vstack([rows, start]))
+    if s_out.status not in _USABLE:
         return None
-    ind_total = sum(o.cost * o.used[0] for o in i_outs)
-    ind_count = sum(o.used[0] for o in i_outs)
-    return float(s_out.cost - ind_total / ind_count)
+    return s_out.chi2 - sum(o.chi2 for o in i_outs)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2136,21 +2312,21 @@ class LeaveOneSizeOut:
 
 
 def _without_size_polynomial(
-    data: ScalingData, full: CollapseFit, size: int, settings: _Settings, starts: int | None
+    data: ScalingData, full: CollapseFit, size: int, settings: _Settings
 ) -> tuple[CollapseFit, float, int]:
-    """A polynomial refit on the full fit's window minus one size, and the held-out cost."""
+    """A polynomial refit on the full fit's window minus one size (from the full fit and the
+    settings' random starts; the set is kept, so ``window_stable`` is None), and the held-out
+    cost."""
     assert full.selected is not None
     keep = data.n != size
     part = data.subset(keep)
-    mask = full.selected[keep]
-    poly = _Polynomial.subset(part, mask, settings.degree)
-    outcome = _fit_poly([poly], settings, full.params, starts=starts)
-    solution = (
-        poly.solve(*(float(v) for v in outcome.params)) if outcome.status in _USABLE else None
+    fit = _fixed_window_fit(part, full.selected[keep], settings, None, full.params)
+    if not fit.usable:
+        return fit, math.nan, 0
+    solution = _Polynomial.subset(part, full.selected[keep], settings.degree).solve(
+        fit.p_c, fit.z, fit.nu
     )
-    window = _WindowFit(outcome, mask, True, 1, solution)
-    fit = _collapse_fit(part, settings, outcome, window)
-    if solution is None:
+    if solution is None:  # pragma: no cover - a usable fit has a finite objective
         return fit, math.nan, 0
     held = _Polynomial.subset(data, data.n == size, settings.degree)
     x, big_y, dy = _held_coordinates(held, fit)
@@ -2207,7 +2383,7 @@ def leave_one_size_out(
     fits, held_cost, held_points = [], [], []
     for size in sizes:
         if settings.method == POLYNOMIAL and full.usable:
-            fit, cost, points = _without_size_polynomial(data, full, size, settings, None)
+            fit, cost, points = _without_size_polynomial(data, full, size, settings)
             fits.append(fit)
             held_cost.append(cost)
             held_points.append(points)
@@ -2333,7 +2509,7 @@ def collapse_diagnostics(
         settings = _settings_of(fit, starts)
         smallest = int(data.sizes[0])
         if polynomial:
-            drift_fit = _without_size_polynomial(data, fit, smallest, settings, None)[0]
+            drift_fit = _without_size_polynomial(data, fit, smallest, settings)[0]
         else:
             part = data.subset(data.n != smallest)
             out = _fit_hh([_Collapse.of(part)], [part.size], settings, fit.params)
@@ -2389,7 +2565,8 @@ class MethodComparison:
     ``se_difference`` is the standard deviation of the replicate differences, ``z`` the
     difference in its units (``|z|`` of a few or less: the methods agree within the sampling
     spread), and ``se_houdayer_hartmann``, ``se_polynomial`` each method's bootstrap error.
-    ``failed`` counts replicates where either refit gave no parameters.
+    ``failed`` counts replicates where either refit gave no parameters. ``replicate_starts``
+    and ``reselect_window`` are the refits' settings (:func:`bootstrap_fit`).
     """
 
     houdayer_hartmann: CollapseFit
@@ -2402,10 +2579,23 @@ class MethodComparison:
     replicates: int
     failed: int
     seed: Any
+    replicate_starts: int = 0
+    reselect_window: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = _plain(self)
         return out
+
+
+def _method_reference(
+    hh: CollapseFit | None, settings: _Settings, initial: ArrayLike | None
+) -> np.ndarray:
+    """Where :func:`compare_methods` draws the polynomial's first window: ``initial``'s first
+    row, else the Houdayer-Hartmann fit of the same data, else the box center."""
+    rows = _rows(initial)
+    if rows is not None:
+        return rows[0]
+    return hh.params if hh is not None and hh.usable else settings.box.mean(axis=1)
 
 
 def compare_methods(
@@ -2421,15 +2611,20 @@ def compare_methods(
     min_points: int | None = None,
     max_evaluations: int = 2000,
     window_iterations: int = 5,
+    replicate_starts: int | None = None,
+    reselect_window: bool = True,
 ) -> MethodComparison:
     """Fit with both methods and compare their parameters against the bootstrap spread.
 
     The polynomial fit draws its first window at the Houdayer-Hartmann fit (unless ``initial``
     is given). With ``replicates > 0`` (and per-graph values in the data) each graph-bootstrap
-    replicate is refitted by both methods from their fits; the spread of the paired replicate
-    differences is the error of the difference, so ``z = difference / se_difference`` measures
-    the disagreement in units of what resampling the graphs explains (ruling R-FSS: the two
-    methods' agreement is a reported diagnostic).
+    replicate is fitted by both methods by the same procedure as the data (as in
+    :func:`bootstrap_fit`: ``replicate_starts`` random starts, by default as many as ``starts``;
+    the replicate's polynomial window drawn at its own Houdayer-Hartmann fit and redrawn until it
+    settles, or with ``reselect_window=False`` the data fit's window); the spread of the paired
+    replicate differences is the error of the difference, so ``z = difference / se_difference``
+    measures the disagreement in units of what resampling the graphs explains (ruling R-FSS: the
+    two methods' agreement is a reported diagnostic).
     """
     hh_settings = _settings(
         bounds,
@@ -2444,13 +2639,10 @@ def compare_methods(
     )
     poly_settings = replace(hh_settings, method=POLYNOMIAL)
     count = _replicate_count(replicates, 0)
+    rep_starts = _replicate_starts(replicate_starts, hh_settings.starts)
+    reselect = _reselect(reselect_window)
     hh = _fit_one(data, hh_settings, initial)
-    rows = _rows(initial)
-    if rows is not None:
-        reference = rows[0]
-    else:
-        reference = hh.params if hh.usable else hh_settings.box.mean(axis=1)
-    poly = _fit_one(data, poly_settings, initial, reference)
+    poly = _fit_one(data, poly_settings, initial, _method_reference(hh, hh_settings, initial))
     difference = poly.params - hh.params
     nan3 = np.full(3, np.nan)
     se_diff, se_hh, se_poly = nan3, nan3, nan3
@@ -2458,14 +2650,25 @@ def compare_methods(
     if count and hh.usable and poly.usable:
         draws = _draws_by_size([data], count, seed)
         ystar, sestar = _replicate_values(data, draws)
+        hh_rep = replace(hh_settings, starts=rep_starts)
+        poly_rep = replace(poly_settings, starts=rep_starts)
         pairs = []
         for b in range(count):
-            a = _refit(data, hh, hh_settings, ystar[b], sestar[b])
-            c = _refit(data, poly, poly_settings, ystar[b], sestar[b])
-            if a is None or c is None or a.status not in _USABLE or c.status not in _USABLE:
+            a = _refit(data, hh, hh_rep, ystar[b], sestar[b], initial=initial, reselect=True)
+            c = _refit(
+                data,
+                poly,
+                poly_rep,
+                ystar[b],
+                sestar[b],
+                initial=initial,
+                reselect=reselect,
+                reference=_method_reference(None if a is None else a.fit, hh_rep, initial),
+            )
+            if a is None or c is None or not a.fit.usable or not c.fit.usable:
                 failed += 1
                 continue
-            pairs.append((a.params, c.params))
+            pairs.append((a.fit.params, c.fit.params))
         if len(pairs) > 1:
             first = np.array([pa for pa, _ in pairs])
             second = np.array([pc for _, pc in pairs])
@@ -2487,6 +2690,8 @@ def compare_methods(
         replicates=count,
         failed=failed,
         seed=seed,
+        replicate_starts=rep_starts,
+        reselect_window=reselect,
     )
 
 

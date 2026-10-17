@@ -313,11 +313,13 @@ def test_the_fit_recovers_the_parameters_of_exact_data():
 
 
 def test_the_fit_recovers_the_parameters_within_its_bootstrap_errors():
-    # 20 graphs, a 5% graph effect shared by the rates of a size and 3% rate noise. A Monte
-    # Carlo over 40 such datasets (07-finite-size-scaling.md §11, not run here) gave fit standard
-    # deviations 0.016, 0.043, 0.11 for (p_c, z, nu), no visible bias, and bootstrap errors
-    # 0.85-0.91 of them. Each parameter within 4 bootstrap errors (at least 3.4 true ones):
-    # false alarm about 2e-3 overall (more if these 40-replicate errors come out low).
+    # 20 graphs, a 5% graph effect shared by the rates of a size and 3% rate noise. The
+    # calibration of 07-finite-size-scaling.md §11 (not run here: 200 fits, 40 bootstraps of 40
+    # replicates) gave fit standard deviations 0.013, 0.038, 0.086 for (p_c, z, nu), no visible
+    # bias, and bootstrap errors of 1.04, 0.98 and 1.11 of them on average, with a 5th
+    # percentile over datasets of 0.82, 0.76 and 0.69. Averaging P(|Z| > 4 r) over the measured
+    # per-dataset ratios r gives a false alarm of about 2e-3 for "each parameter within 4
+    # bootstrap errors" (it was about 1.2e-2 with the earlier local refits, whose errors were low).
     data = _hierarchical(seed=101)
     boot = fss.bootstrap_fit(data, bounds=BOX, replicates=40, seed=2, starts=4)
     assert boot.fit.status == "ok" and boot.failed == 0
@@ -327,6 +329,64 @@ def test_the_fit_recovers_the_parameters_within_its_bootstrap_errors():
     assert boot.level == 0.95 and boot.at_bound == 0
     assert boot.replicates.shape == (40, 3) and len(boot.statuses) == 40
     json.dumps(boot.to_dict())
+
+
+def test_the_bootstrap_errors_match_the_true_spread_of_the_fits():
+    # v1.4 §7.4 ("Analysis": interval coverage of synthetic controls). M = 80 datasets of a
+    # small design (sizes 16, 32, 64; 9 rates; 20 graphs; known (p_c, z, nu)) give the true
+    # spread s_F of each estimator: Houdayer-Hartmann, polynomial and their difference. The
+    # first K = 12 are also bootstrapped by compare_methods (B = 19), whose replicates are those
+    # of bootstrap_fit for each method (test_compare_methods_bootstraps_like_bootstrap_fit).
+    # R = sqrt(mean over K of se^2) / s_F estimates the ratio of the bootstrap error to the true
+    # one. Checked: 0.6 <= R <= 2 for each parameter of each method (a bootstrap more than 1.67
+    # times too narrow, or twice too wide, fails), and R >= 0.6 for the difference. Measured on
+    # 24 independent repeats of this test (other seeds): log R had means (-0.15, -0.13, -0.11)
+    # (Houdayer-Hartmann), (-0.07, -0.07, 0.07) (polynomial), (0.37, 0.47, 0.40) (difference:
+    # conservative) and standard deviations 0.08-0.26; a normal model of log R puts the false
+    # alarm at about 3e-3 (union over the nine bounds), and no repeat failed. Errors shrunk 2x
+    # fail in every repeat for either method (only in 25% for the difference alone).
+    rates = np.linspace(0.12, 0.28, 9)
+    fits = {"hh": [], "poly": []}
+    se = {"hh": [], "poly": [], "diff": []}
+    for i in range(80):
+        data = _hierarchical(sizes=(16, 32, 64), rates=rates, seed=9000 + i)
+        boot = i < 12
+        cm = fss.compare_methods(
+            data, bounds=BOX, starts=0, replicates=19 if boot else 0, seed=7 + i
+        )
+        assert cm.houdayer_hartmann.usable and cm.polynomial.usable
+        fits["hh"].append(cm.houdayer_hartmann.params)
+        fits["poly"].append(cm.polynomial.params)
+        if boot:
+            assert cm.failed <= 2 and cm.reselect_window and cm.replicate_starts == 0
+            se["hh"].append(cm.se_houdayer_hartmann)
+            se["poly"].append(cm.se_polynomial)
+            se["diff"].append(cm.se_difference)
+    hh, poly = np.array(fits["hh"]), np.array(fits["poly"])
+    spread = {
+        "hh": hh.std(axis=0, ddof=1),
+        "poly": poly.std(axis=0, ddof=1),
+        "diff": (poly - hh).std(axis=0, ddof=1),
+    }
+    ratio = {k: np.sqrt(np.mean(np.array(v) ** 2, axis=0)) / spread[k] for k, v in se.items()}
+    for k in ("hh", "poly"):
+        assert np.all((ratio[k] >= 0.6) & (ratio[k] <= 2.0)), (k, ratio[k])
+    assert np.all(ratio["diff"] >= 0.6), ratio["diff"]
+
+
+def test_compare_methods_bootstraps_like_bootstrap_fit():
+    # compare_methods resamples with bootstrap_fit's draws and fits each replicate by the same
+    # procedure, so (without failed replicates) its errors are bootstrap_fit's
+    data = _hierarchical(sizes=(16, 32, 64), rates=np.linspace(0.12, 0.28, 9), seed=8)
+    cm = fss.compare_methods(data, bounds=BOX, starts=1, replicates=4, seed=6)
+    hh = fss.bootstrap_fit(data, bounds=BOX, starts=1, replicates=4, seed=6)
+    poly = fss.bootstrap_fit(data, bounds=BOX, method="polynomial", starts=1, replicates=4, seed=6)
+    assert cm.failed == 0 and hh.failed == 0 and poly.failed == 0
+    assert np.array_equal(cm.se_houdayer_hartmann, hh.se)
+    assert np.array_equal(cm.se_polynomial, poly.se)
+    assert np.allclose(
+        cm.se_difference, (poly.replicates - hh.replicates).std(axis=0, ddof=1), rtol=1e-12
+    )
 
 
 def test_the_bootstrap_resamples_graphs_once_per_size_for_every_rate():
@@ -345,10 +405,88 @@ def test_the_bootstrap_resamples_graphs_once_per_size_for_every_rate():
     shifted = list(data.graph_means)
     shifted[1] = shifted[0] + 0.5
     paired = fss.ScalingData(
-        n=data.n, p=data.p, y=data.y, se=data.se, graphs=data.graphs, graph_means=tuple(shifted)
+        n=data.n,
+        p=data.p,
+        y=np.array([gm.mean() for gm in shifted]),
+        se=data.se,
+        graphs=data.graphs,
+        graph_means=tuple(shifted),
     )
     ys, _ = fss._replicate_values(paired, draws)
     assert np.allclose(ys[:, 1] - ys[:, 0], 0.5, rtol=0, atol=1e-12)
+
+
+def _replicate_data(data, replicates, seed):
+    """The bootstrap's replicate data sets, built from its documented draws (one per size)."""
+    ystar, sestar = fss._replicate_values(data, fss._draws_by_size([data], replicates, seed))
+    return [
+        fss.ScalingData(n=data.n, p=data.p, y=ystar[b], se=sestar[b]) for b in range(replicates)
+    ]
+
+
+def test_every_bootstrap_replicate_is_fitted_like_the_data():
+    # the bootstrap describes the estimator only if each replicate goes through the same
+    # procedure: fit_collapse with the same bounds, starts and seed (the bootstrap's seed draws
+    # both the graphs and the fit's random starts) on the replicate's values,
+    # not a local search from the data's fit (which stays near it on the rough Houdayer-Hartmann
+    # quality and makes the errors too small, 07 §11)
+    data = _hierarchical(sizes=(16, 32, 64), rates=np.linspace(0.12, 0.28, 9), seed=8)
+    boot = fss.bootstrap_fit(data, bounds=BOX, replicates=6, seed=4, starts=2)
+    assert boot.replicate_starts == 2 and boot.reselect_window is None and boot.selected is None
+    for b, rep in enumerate(_replicate_data(data, 6, 4)):
+        again = fss.fit_collapse(rep, bounds=BOX, starts=2, seed=4)
+        assert np.array_equal(boot.replicates[b], again.params), b
+        assert boot.costs[b] == again.cost and boot.statuses[b] == again.status
+    # fewer random starts per replicate when asked (an approximation of the procedure)
+    cheap = fss.bootstrap_fit(data, bounds=BOX, replicates=3, seed=4, starts=2, replicate_starts=0)
+    assert cheap.replicate_starts == 0
+    for b, rep in enumerate(_replicate_data(data, 3, 4)):
+        assert np.array_equal(
+            cheap.replicates[b], fss.fit_collapse(rep, bounds=BOX, starts=0, seed=4).params
+        )
+
+
+def test_polynomial_replicates_draw_their_own_windows():
+    # ruling R-FSS (design §11): the polynomial bootstrap re-selects the window in every
+    # replicate, as the fit did for the data (first drawn at the replicate's Houdayer-Hartmann
+    # fit, redrawn at its own fit until it settles), so the window's variability is in the error
+    data = _hierarchical(seed=100)
+    boot = fss.bootstrap_fit(data, bounds=BOX, method="polynomial", replicates=6, seed=3, starts=0)
+    assert boot.reselect_window is True and boot.selected.shape == (6, data.size)
+    for b, rep in enumerate(_replicate_data(data, 6, 3)):
+        again = fss.fit_collapse(rep, bounds=BOX, method="polynomial", starts=0, seed=3)
+        assert np.array_equal(boot.replicates[b], again.params), b
+        assert np.array_equal(boot.selected[b], again.selected)
+        assert boot.window_stable[b] == again.window_stable
+        if again.window_stable:  # the replicate's window is the one drawn at its own fit
+            assert np.array_equal(fss.window_points(data, *again.params), boot.selected[b])
+    moved = [b for b in range(6) if not np.array_equal(boot.selected[b], boot.fit.selected)]
+    assert moved, "every replicate kept the data fit's window"
+    # reselect_window=False keeps the data fit's window in every replicate (never redrawn)
+    fixed = fss.bootstrap_fit(
+        data, bounds=BOX, method="polynomial", replicates=3, seed=3, starts=0, reselect_window=False
+    )
+    assert fixed.reselect_window is False and fixed.window_stable is None
+    assert all(np.array_equal(fixed.selected[b], fixed.fit.selected) for b in range(3))
+    json.dumps(boot.to_dict())
+
+
+def test_bootstrap_settings_are_checked():
+    data = _hierarchical(sizes=(16, 32), rates=np.linspace(0.15, 0.25, 3), graphs=6, seed=3)
+    for bad in (-1, 1.5, True):
+        with pytest.raises(ValueError, match="replicate_starts"):
+            fss.bootstrap_fit(data, bounds=BOX, replicates=2, replicate_starts=bad)
+        with pytest.raises(ValueError, match="replicate_starts"):
+            fss.compare_methods(data, bounds=BOX, replicates=2, replicate_starts=bad)
+    for bad in ("yes", 1, None):
+        with pytest.raises(ValueError, match="reselect_window"):
+            fss.bootstrap_fit(data, bounds=BOX, replicates=2, reselect_window=bad)
+    other = _hierarchical(sizes=(16, 32), rates=np.linspace(0.15, 0.25, 3), graphs=6, seed=4)
+    other = fss.ScalingData(**{**vars(other), "observable": "b"})
+    with pytest.raises(ValueError, match="replicate_starts"):
+        fss.compare_shared_independent([data, other], bounds=BOX, replicates=2, replicate_starts=-2)
+    with pytest.raises(ValueError, match="reselect_window"):
+        fss.compare_shared_independent([data, other], bounds=BOX, replicates=2, reselect_window=0)
 
 
 def test_bootstrap_points_must_share_their_graphs():
@@ -498,6 +636,82 @@ def test_the_comparison_prefers_independent_exponents_for_different_nu():
     json.dumps(cmp.to_dict())
 
 
+@pytest.mark.parametrize("method", ["houdayer_hartmann", "polynomial"])
+def test_the_comparison_keeps_its_size_when_the_parameters_are_shared(method):
+    # negative control: K = 4 pairs of observables generated with the same (p_c, z, nu) and
+    # different scaling functions, so v1.4 §5.9's shared hypothesis holds. If the bootstrap null
+    # were exact (delta exchangeable with its B replicates), each p-value would be uniform on
+    # {1/(B+1), ..., 1}, so at least a uniform U on (0, 1]; a conservative null makes it larger.
+    # The pairs are independent (own data, own draws), so P(sum p <= s) <= s^K / K! for s <= 1
+    # (Irwin-Hall). The mean p-value must be at least 0.15: false alarm at most
+    # 0.6^4 / 24 = 5.4e-3 under a valid null. In development the p-values were (0.8, 0.9, 0.2,
+    # 0.7) with Houdayer-Hartmann. A degenerate null (every delta* = 0) puts every p-value at
+    # the smallest, 1/(B+1) = 0.1, and fails; a null shrunk tenfold gave a mean of 0.27 and
+    # passes, so test_null_replicates_are_the_comparison_on_mapped_resampled_data checks the
+    # null replicates exactly.
+    rates = np.linspace(0.12, 0.28, 9)
+    sizes = (16, 32, 64)
+    pvalues = []
+    for k in range(4):
+        a = _hierarchical(TRUTH, _f1, sizes=sizes, rates=rates, seed=300 + k, name="a")
+        b = _hierarchical(TRUTH, _f2, sizes=sizes, rates=rates, seed=400 + k, name="b")
+        cmp = fss.compare_shared_independent(
+            [a, b], bounds=BOX, method=method, replicates=9, seed=50 + k, starts=0
+        )
+        assert cmp.failed <= 1 and cmp.prefers in ("shared", "independent")
+        pvalues.append(cmp.p_value)
+    assert np.mean(pvalues) >= 0.15, pvalues
+
+
+@pytest.mark.parametrize("method", ["houdayer_hartmann", "polynomial"])
+def test_null_replicates_are_the_comparison_on_mapped_resampled_data(method):
+    # 07 §8.3, written out here with the public fits: replicate b maps each observable onto the
+    # shared parameters (p' = p_c^s + (p - p_c^o) n^(1/nu_o - 1/nu_s), y' = y n^(z_s - z_o)),
+    # resamples its graphs with graph_bootstrap(labels_n, B, [seed, n]) (the same draws for both
+    # observables and every rate), and computes delta* exactly as delta: fit_shared and
+    # fit_collapse with the comparison's settings. A null pushed down in any way (scaled,
+    # frozen at the shared parameters, a wrong mapping or draw) changes some replicate.
+    rates = np.linspace(0.12, 0.28, 9)
+    sizes = (16, 32, 64)
+    a = _hierarchical(TRUTH, _f1, sizes=sizes, rates=rates, graphs=8, seed=301, name="a")
+    b = _hierarchical(TRUTH, _f2, sizes=sizes, rates=rates, graphs=8, seed=401, name="b")
+    reps, seed, starts = 3, 9, 1
+    cmp = fss.compare_shared_independent(
+        [a, b], bounds=BOX, method=method, replicates=reps, seed=seed, starts=starts
+    )
+    assert cmp.failed == 0 and cmp.replicate_starts == starts
+    theta_s = cmp.shared.params
+    for r in range(reps):
+        mapped = []
+        for d, own in zip((a, b), cmp.independent, strict=True):
+            n = d.n.astype(np.float64)
+            factor = n ** (theta_s[1] - own.z)
+            p_new = theta_s[0] + (d.p - own.p_c) * n ** (1.0 / own.nu - 1.0 / theta_s[2])
+            y, se = np.empty(d.size), np.empty(d.size)
+            for i in range(d.size):
+                draw = st.graph_bootstrap(d.graphs[i], reps, seed=[seed, int(d.n[i])])[r]
+                vals = d.graph_means[i][np.searchsorted(d.graphs[i], draw)]
+                y[i] = vals.sum() / vals.size
+                dev = vals - y[i]
+                se[i] = np.sqrt((dev * dev).sum() / (vals.size * (vals.size - 1)))
+            mapped.append(
+                fss.ScalingData(
+                    n=d.n, p=p_new, y=y * factor, se=se * factor, observable=d.observable
+                )
+            )
+        alone = [
+            fss.fit_collapse(m, bounds=BOX, method=method, starts=starts, seed=seed)
+            for m in mapped
+        ]
+        shared = fss.fit_shared(mapped, bounds=BOX, method=method, starts=starts, seed=seed)
+        if method == "polynomial":
+            delta = shared.chi2 - sum(f.chi2 for f in alone)
+        else:
+            pooled = sum(f.cost * f.points_used for f in alone) / sum(f.points_used for f in alone)
+            delta = shared.cost - pooled
+        assert cmp.null[r] == pytest.approx(delta, rel=1e-12, abs=1e-12), (r, cmp.null[r], delta)
+
+
 def _mapped(data, own, shared):
     n = data.n.astype(float)
     factor = n ** (shared[1] - own[1])
@@ -523,8 +737,23 @@ def test_the_null_mapping_moves_each_observable_onto_the_shared_parameters():
     assert fss.collapse_cost(mapped, *shared).cost == pytest.approx(
         fss.collapse_cost(a, *generic).cost, rel=1e-9
     )
+    # ... along the slice p_c = p_c^s the map (z, nu) -> (z + z_o - z_s, nu'), with
+    # 1/nu' = 1/nu + 1/nu_o - 1/nu_s, carries the mapped quality onto the original one at other
+    # (z, nu) too (Proposition 6's second claim; polynomial chi2 on a fixed set as well) ...
+    sel = fss.polynomial_cost(a, *generic).selected
+    for z, nu in [(0.9, 1.3), (1.1, 1.7), (0.97, 1.52)]:
+        z_o = z + generic[1] - shared[1]
+        nu_o = 1.0 / (1.0 / nu + 1.0 / generic[2] - 1.0 / shared[2])
+        assert fss.collapse_cost(mapped, shared[0], z, nu).cost == pytest.approx(
+            fss.collapse_cost(a, generic[0], z_o, nu_o).cost, rel=1e-9
+        )
+        assert fss.polynomial_cost(mapped, shared[0], z, nu, selected=sel).chi2 == pytest.approx(
+            fss.polynomial_cost(a, generic[0], z_o, nu_o, selected=sel).chi2, rel=1e-9
+        )
     # ... and when the observable's own parameters are its fit, the refit of the mapped data
-    # lands on the shared set
+    # lands near the shared set, not exactly on it: off that slice the mapped data are no
+    # reparametrization of the original ones (nu_o != nu_s), so with noise their own optimum
+    # moves a little (07 §8.3; here by less than 2e-3, against a bootstrap error near 0.013 for p_c)
     own = fss.fit_collapse(a, bounds=BOX, starts=3)
     refit = fss.fit_collapse(_mapped(a, own.params, shared), bounds=BOX, initial=shared, starts=0)
     assert np.allclose(refit.params, shared, atol=2e-3)
@@ -677,6 +906,32 @@ def test_scaling_data_refuses_bad_input(kwargs, match):
         fss.ScalingData(**args)
 
 
+def test_scaling_data_refuses_a_y_that_is_not_the_mean_of_its_graph_means():
+    # the bootstrap recomputes every replicate as the mean of the drawn graph means, so the y it
+    # fits must be that mean; a median (2 here) would be fitted as one estimator and resampled
+    # as another
+    labels = (np.array([0, 1, 2]),)
+    values = (np.array([1.0, 2.0, 6.0]),)
+
+    def make(y, gm=values):
+        return fss.ScalingData(n=[8], p=[0.1], y=[y], se=[1.0], graphs=labels, graph_means=gm)
+
+    assert make(3.0).y[0] == 3.0
+    assert make(3.0 * (1 + 1e-15)).y[0] > 3.0  # rounding of another summation order is fine
+    with pytest.raises(ValueError, match=r"not the mean of graph_means\[0\].*median"):
+        make(2.0)
+    # undefined graph means are left out, as nested_mean(nan_policy="omit") leaves them out
+    assert make(1.5, (np.array([1.0, 2.0, np.nan]),)).y[0] == 1.5
+    with pytest.raises(ValueError, match="no defined value"):
+        make(1.0, (np.full(3, np.nan),))
+    # data built from nested means are consistent by construction, NaN-omitting ones included
+    g, c, r = np.repeat([0, 1, 2], 2), np.tile([0, 1], 3), np.zeros(6, dtype=int)
+    m = st.nested_mean(g, c, r, np.array([1.0, np.nan, 2.0, 4.0, 0.5, 0.25]), nan_policy="omit")
+    assert fss.scaling_data([8], [0.1], [m]).y[0] == float(m.mean)
+    # without graph values any estimate can be fitted (no bootstrap)
+    assert fss.ScalingData(n=[8], p=[0.1], y=[2.0], se=[1.0], estimator="KM median").y[0] == 2.0
+
+
 # ---------------------------------------------------------------------------------------------
 # the less common paths
 # ---------------------------------------------------------------------------------------------
@@ -718,7 +973,7 @@ def test_replicates_that_cannot_be_refitted_are_counted():
         observable="b",
         beta="0.1",
         graphs=lone.graphs,
-        graph_means=lone.graph_means,
+        graph_means=tuple(gm * 1.1 for gm in lone.graph_means),
     )
     cmp = fss.compare_shared_independent([lone, other], bounds=BOX, replicates=3, starts=1)
     assert cmp.prefers == "undetermined" and cmp.failed == 3
@@ -882,7 +1137,9 @@ def test_the_degree_changes_the_answer_until_it_is_enough():
 def test_chi2_per_dof_is_about_one_for_independent_errors():
     # independent normal errors of known size (no graph effect): over 20 datasets the mean of
     # chi2/dof (about 40 degrees of freedom each) is 1 within 4 of its standard errors
-    # (measured 0.94 +- 0.06; false alarm below 1e-4 if the window and the fit added nothing)
+    # (measured 0.94 +- 0.06). The standard error is estimated from the same 20 values, so the
+    # statistic is about Student's t with 19 degrees of freedom: false alarm
+    # P(|t_19| > 4) = 7.7e-4 if the window and the fit added nothing (not the normal 6e-5)
     n = np.repeat(SIZES, 21)
     p = np.tile(np.linspace(0.1, 0.3, 21), len(SIZES))
     truth = n * _f1((p - 0.2) * n ** (1 / 1.5))
@@ -903,10 +1160,17 @@ def test_the_two_methods_agree_on_clean_and_on_noisy_data():
     assert np.all(np.abs(clean.difference) < [1e-3, 1e-2, 2e-2])
     assert np.isnan(clean.se_difference).all() and clean.replicates == 0
     noisy = fss.compare_methods(_hierarchical(seed=7), bounds=BOX, replicates=20, seed=3, starts=4)
-    # in development z = (-0.64, 0.52, 1.29); |z| < 4 fails with probability about 1e-4 when
-    # the methods agree in distribution and the 20-replicate errors are right
+    # in development z = (-0.75, 0.65, 0.79). se_difference is the standard deviation of 20
+    # replicate differences, so with right errors and methods that agree in distribution each z
+    # is about Student's t with 19 degrees of freedom: P(|t_19| > 4) = 7.7e-4 per parameter,
+    # 2.3e-3 for the three (not the normal tail's 6e-5). The methods' nu biases differ a little
+    # (07 §11); a mean shift of one paired error raises the nu term to about 6e-3.
     assert noisy.failed == 0 and np.all(np.abs(noisy.z) < 4), noisy.z
-    assert np.all(noisy.se_difference < noisy.se_houdayer_hartmann)  # paired: errors cancel
+    # pairing: both methods fit the same resampled graphs, so their replicates are positively
+    # correlated and the paired error is below the unpaired sqrt(se_hh^2 + se_poly^2) (it need
+    # not be below each method's own error: the polynomial's window changes are not shared)
+    unpaired = np.hypot(noisy.se_houdayer_hartmann, noisy.se_polynomial)
+    assert np.all(noisy.se_difference < unpaired), (noisy.se_difference, unpaired)
     assert np.allclose(noisy.difference, noisy.polynomial.params - noisy.houdayer_hartmann.params)
     json.dumps(noisy.to_dict())
 
@@ -966,24 +1230,33 @@ def test_the_polynomial_method_runs_through_every_tool():
     assert usable and np.allclose(loso.params[usable], TRUTH, atol=[1e-3, 1e-2, 3e-2])
     held = loso.held_out_cost[usable]
     assert np.all(held[~np.isnan(held)] < 1.0)
+    # these refits keep the full fit's window minus a size by design: they never redraw it, so
+    # whether it would settle is not checked (None), not claimed (True)
+    assert all(f.window_stable is None and f.window_iterations == 1 for f in loso.fits)
     fit = fss.fit_collapse(a, bounds=BOX, method="polynomial", starts=2)
     diag = fss.collapse_diagnostics(a, fit)
     assert np.array_equal(diag.bracketed, fit.selected)
     assert diag.coverage == pytest.approx(fit.points_used / a.size)
     assert np.isnan(diag.chi2[~fit.selected]).all() and diag.drift_fit.method == "polynomial"
+    assert diag.drift_fit.window_stable is None and fit.window_stable is True
     assert "outside the polynomial window" in " ".join(diag.notes)
-    boot = fss.bootstrap_fit(
-        _hierarchical(seed=5), bounds=BOX, method="polynomial", replicates=5, seed=1, starts=1
-    )
-    assert boot.fit.method == "polynomial" and boot.failed == 0 and np.all(boot.se > 0)
+    assert json.loads(json.dumps(loso.to_dict()))["fits"][0]["window_stable"] is None
     rates = np.linspace(0.12, 0.28, 17)
     h1 = _hierarchical((0.2, 1.0, 1.2), _f1, rates=rates, sg=0.02, sp=0.02, seed=11, name="a")
     h2 = _hierarchical((0.2, 1.0, 2.5), _f2, rates=rates, sg=0.02, sp=0.02, seed=12, name="b")
     cmp = fss.compare_shared_independent(
-        [h1, h2], bounds=BOX, method="polynomial", replicates=9, seed=5, starts=2, alpha=0.1
+        [h1, h2],
+        bounds=BOX,
+        method="polynomial",
+        replicates=9,
+        seed=5,
+        starts=2,
+        alpha=0.1,
+        replicate_starts=0,
     )
-    # in development: delta 181 against a null whose largest of 9 replicates was 27
+    # in development: delta 181 against a null whose largest of 9 replicates was 30
     assert cmp.method == "polynomial" and cmp.failed == 0
+    assert cmp.reselect_window is True and cmp.replicate_starts == 0
     assert cmp.prefers == "independent" and cmp.p_value == pytest.approx(1 / 10)
     assert cmp.delta == pytest.approx(cmp.shared.chi2 - sum(f.chi2 for f in cmp.independent))
 
