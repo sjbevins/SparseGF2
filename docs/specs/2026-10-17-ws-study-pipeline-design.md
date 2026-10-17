@@ -332,3 +332,23 @@ and tested to leave every result bit-identical.
   where bracketing changes), `fss` offers a continuous objective: a weighted least-squares fit of a
   polynomial master curve `F` of chosen degree jointly with `(p_c, z, nu)` on the points whose
   scaled abscissa lies in the fitted window; the two methods' agreement is a reported diagnostic.
+
+## 12. Forward compatibility with the queued MIPT study (v0.3)
+
+The owner queued `docs/misc/watts_strogatz_mipt_focused_program_v0_3.md`, to start after this
+implementation. Its infrastructure needs are built now so the store needs no migration later; its
+observables and campaign are the queued task.
+
+* **Two protocols** (v0.3 §2). `F` (full reference: `reference="purification"`, the v1.4 protocol)
+  and `P` (pure product `|0...0>` on the system only: `reference="none"`). The trajectory key is
+  `(experiment_id, protocol, n, beta_token, p_token, g, c, r)`; the store's tables carry a
+  `protocol` column (default `"F"`). P and F with the same graph, run seed and stream index `u`
+  have the same ordered gate and mask history (the engine draws nothing reference-specific for
+  these two modes; a test proves it on exported circuits). P snapshots are the `n`-qubit pure state
+  (`tableau_snapshot` works in any reference mode, `N = n`); `stop_when_purified` does not apply.
+  The manifest gains `protocols` (default `["F"]`) and per-protocol checkpoint and observable
+  settings.
+* **Graph measurements** (v0.3 §4), computed once per graph record from the edge list alone and
+  versioned: `q_G = |E(G) \ E(C(n,2))| / (2n)`; the mean shortest-path distance over reachable
+  distinct vertex pairs and the component count; `lambda_2` of the unnormalized Laplacian `D - A`
+  (0 when disconnected); the population variance of the degrees.
