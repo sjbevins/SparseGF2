@@ -259,7 +259,7 @@ def _uniforms(seed: Any, count: int) -> np.ndarray:
 
 
 def _t_two_sided(theta: float, dof: int) -> float:
-    """``P(|T| <= sqrt(dof) tan(theta))`` for Student's t (Abramowitz and Stegun 26.7.3-4)."""
+    """Student's ``A(theta) = P(|X_nu| <= sqrt(nu) tan(theta))``, ``nu = dof`` (doc 06 §4.2)."""
     s, c = math.sin(theta), math.cos(theta)
     c2 = c * c
     if dof % 2:
@@ -280,21 +280,22 @@ def _t_two_sided(theta: float, dof: int) -> float:
 def student_t_quantile(probability: float, dof: int) -> float:
     """The quantile ``t_q`` of Student's t distribution with ``dof`` (an integer >= 1) degrees of freedom.
 
-    With ``theta = arctan(t / sqrt(nu))`` the two-sided probability ``A(t) = P(|T| <= t)`` is an
-    exact finite sum (Abramowitz and Stegun, 26.7.3 and 26.7.4):
+    With ``X_nu`` a Student variable on ``nu = dof`` degrees of freedom, ``s >= 0`` and
+    ``theta = arctan(s / sqrt(nu))``, the two-sided probability ``A(theta) = P(|X_nu| <= s)`` is an
+    exact finite sum (Abramowitz and Stegun, 26.7.3 and 26.7.4; doc 06 §4.2):
 
     * ``nu = 1``: ``A = 2 theta / pi``;
-    * ``nu`` odd: ``A = (2/pi) [theta + sin(theta) cos(theta) sum_{k=0}^{(nu-3)/2} a_k cos^(2k) theta]``,
-      ``a_0 = 1``, ``a_k = a_{k-1} 2k / (2k + 1)``;
-    * ``nu`` even: ``A = sin(theta) sum_{k=0}^{(nu-2)/2} b_k cos^(2k) theta``, ``b_0 = 1``,
-      ``b_k = b_{k-1} (2k - 1) / (2k)``.
+    * ``nu`` odd: ``A = (2/pi) [theta + sin(theta) cos(theta) sum_{k=0}^{(nu-3)/2} alpha_k
+      cos^(2k) theta]``, ``alpha_0 = 1``, ``alpha_k = alpha_{k-1} 2k / (2k + 1)``;
+    * ``nu`` even: ``A = sin(theta) sum_{k=0}^{(nu-2)/2} kappa_k cos^(2k) theta``, ``kappa_0 = 1``,
+      ``kappa_k = kappa_{k-1} (2k - 1) / (2k)``.
 
     ``A`` increases from 0 to 1 on ``theta in [0, pi/2)``; the quantile for ``q > 1/2`` is
-    ``sqrt(nu) tan(theta*)`` with ``A(theta*) = 2q - 1``, found by bisection to the last bit, and
-    ``t_q = -t_{1-q}``. Used for the intervals ``mean +- t_{(1+level)/2, G-1} SE`` of
-    :meth:`GraphMean.interval`. The arguments are checked on every call; only the computation
-    is cached (by ``(q, int(dof))``), so a refused ``dof`` such as ``2.0`` or ``True`` is refused
-    whatever was computed before.
+    ``t_{q,nu} = sqrt(nu) tan(theta*)`` with ``A(theta*) = 2q - 1``, found by bisection to the last
+    bit, and ``t_{q,nu} = -t_{1-q,nu}``. Used for the intervals
+    ``mean +- t_{(1+level)/2, G'-1} SE`` of :meth:`GraphMean.interval`. The arguments are checked
+    on every call; only the computation is cached (by ``(q, int(dof))``), so a refused ``dof``
+    such as ``2.0`` or ``True`` is refused whatever was computed before.
     """
     if isinstance(dof, bool) or not isinstance(dof, (int, np.integer)) or dof < 1:
         raise ValueError(f"dof must be an integer >= 1, not {dof!r}")

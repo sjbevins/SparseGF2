@@ -51,51 +51,68 @@ methods' agreement as a diagnostic (§5, §12). Houdayer and Hartmann's quality 
 
 ## 2. Notation
 
+Each symbol has the one meaning given here throughout the document. The indices of the second
+row number positions and the terms of sums; $dY$, $d\bar Y$ and $d\tilde Y$ are single symbols
+(errors), not products with the degree $d$; and $F_1$, $F_3$ are the master curves of the
+benchmarks (§5.8, §11).
+
 | symbol | meaning | type | in the code |
 |---|---|---|---|
-| $n$, $p$, $\beta$ | system size, measurement rate, rewiring probability (fixed in a fit) | integer, reals | `ScalingData.n`, `.p`, `.beta` |
+| $n$, $p$, $\beta$; $n_i$, $p_i$ | system size, measurement rate, rewiring probability (fixed in a fit); those of point $i$ | integer, reals | `ScalingData.n`, `.p`, `.beta` |
+| $i$, $l$; $j$; $k$; $o$; $q$ | indices: of points ($l$ over a bracketing set); of a size's sorted points and of a fit's iterates; of the powers of the polynomial; of observables; of the parameters | integers $\ge 0$ | |
+| $n'$, $x'_j$, $m'$; $n''$, $x''_j$, $m''$ | a size other than $n_i$, its scaled abscissas in the order of its rates, and its number of points; a third size, likewise (§4.1) | integers; reals | (inside `_Collapse.chi2`) |
 | $\theta$ | a time observable ($\tau_\ell$, $T^\ast$) | random variable | `ScalingData.observable` (its name) |
-| $y$, $s$ | the estimate of $\mathbb{E}[\theta \mid n, \beta, p]$ at a point and its standard error | reals, $s > 0$ | `ScalingData.y`, `.se` |
+| $\tau_\ell$, $\ell$; $T^\ast$; $T_{\max}$ | the first-passage depth to code dimension $\ell$; the peak time; the horizon ([06-statistics.md](06-statistics.md) §6, §8) | integers; real; integer | (the observables' names) |
+| $\mu(n, p)$ | $\mathbb{E}[\theta \mid n, \beta, p]$, the ensemble mean whose scaling is fitted (v1.4 §5.9) | real | (target) |
+| $y$, $s$ | the estimate of $\mu(n, p)$ at a point and its standard error | reals, $s > 0$ | `ScalingData.y`, `.se` |
 | $P$ | number of points $(n, p)$ | integer | `ScalingData.size` |
 | $O$ | number of observables in a shared fit or a comparison | integer | `len(datasets)` |
 | $\boldsymbol\theta = (p_c, z, \nu)$ | critical rate, dynamic exponent, correlation-length exponent | reals, $\nu > 0$ | `CollapseFit.p_c`, `.z`, `.nu`; `PARAMETERS` |
-| $[\ell_k, h_k]$ | the box of parameter $k$ ($\ell_k = h_k$ fixes it) | reals | `bounds` |
-| $N_{\mathrm{free}}$ | number of free parameters, those with $\ell_k < h_k$ (3 unless some are fixed) | integer | `fss.py::_free` |
-| $x$, $Y$, $dY$ | scaled abscissa $(p - p_c)n^{1/\nu}$, ordinate $y\,n^{-z}$, error $s\,n^{-z}$ | reals | `fss.py::scaled_coordinates` |
-| $F$ | an observable's scaling function (never parametrized) | function | |
+| $\vartheta_q$; $\vartheta_q^-$, $\vartheta_q^+$ | coordinate $q$ of $\boldsymbol\theta$ ($q = 1, 2, 3$ for $p_c$, $z$, $\nu$); the bounds of its box $[\vartheta_q^-, \vartheta_q^+]$ (equal bounds fix it) | reals | `bounds` |
+| $N_{\mathrm{free}}$ | number of free parameters, those with $\vartheta_q^- < \vartheta_q^+$ (3 unless some are fixed) | integer | `fss.py::_free` |
+| $x$, $Y$, $dY$ | scaled abscissa $(p - p_c)n^{1/\nu}$, ordinate $y\,n^{-z}$, error $s\,n^{-z}$ ($x_i$, $Y_i$, $dY_i$ for point $i$) | reals | `fss.py::scaled_coordinates` |
+| $F$, $F'$ | an observable's scaling function (never parametrized), and its derivative | functions | |
+| $c$; $c_+$, $c_-$ | the slope of $F$ where it is linear (Proposition 3); the slopes right and left of a kink | reals | |
 | $\mathcal B_i$ | the bracketing points of point $i$ (from the other sizes) | set | `fss.py::_Collapse.chi2` |
 | $u_l$, $w_l$ | a bracketing point's abscissa relative to $x_i$, $u_l = x_l - x_i$, and its weight $1/dY_l^2$ | reals | (inside `chi2`) |
-| $K$, $\bar u$, $\bar y$, $S_{uu}$, $b$ | $\sum_l w_l$; the weighted means of the $u_l$ and of the bracketing ordinates $Y_l$; the weighted spread of the $u_l$; the slope of the weighted line | reals | (inside `chi2`) |
+| $K$, $\bar u$, $\bar y$, $S_{uu}$, $b$; $\bar x$ | $\sum_l w_l$; the weighted means of the $u_l$ and of the bracketing ordinates $Y_l$; the weighted spread of the $u_l$; the slope of the weighted line; the weighted mean abscissa $K_x/K$ (Proposition 1) | reals | (inside `chi2`) |
 | $K_x$, $K_y$, $K_{xx}$, $K_{xy}$, $\Delta_{\mathrm{HH}}$ | Houdayer and Hartmann's raw weighted sums and their determinant $KK_{xx} - K_x^2$ | reals | (the tests' reference) |
 | $\bar Y_i$, $d\bar Y_i^2$ | master-curve estimate at $x_i$ and its variance | reals | (inside `chi2`) |
 | $\chi^2_i$ | $(Y_i - \bar Y_i)^2/(dY_i^2 + d\bar Y_i^2)$ | real | `CollapseCost.chi2` |
 | $S(\boldsymbol\theta)$, $N$ | the collapse quality, the mean of $\chi^2_i$ over the $N$ bracketed points | real, integer | `CollapseCost.cost`, `.points_used`; `CollapseFit.cost` |
 | $e_l$, $\lambda$ | a point's error $Y_l - F(x_l)$ (Proposition 3); a units factor (Proposition 2) | reals | |
 | $N_{\min}$ | bracketed points a parameter vector needs to be admissible | integer | `min_points` |
-| $\varphi$ | the unbounded variables of the optimizer | reals | (inside `minimize_bounded`) |
-| $\mathbf v$, $\bar{\mathbf v}$ | Nelder–Mead vertices and the centroid of all but the worst | vectors | (inside `_nelder_mead`) |
-| $\hat{\boldsymbol\theta}$, $\hat{\boldsymbol\theta}_o$, $\hat{\boldsymbol\theta}_s$ | a fit; observable $o$'s own fit; the shared fit | vectors | `CollapseFit.params`, `SharedFit.params` |
+| $f$; $f_r$, $f_{\mathrm{best}}$ | the function the optimizer minimizes over the box ($S$, or $\chi^2$ on a window; $+\infty$ where inadmissible); its value at the reflected vertex, and the best vertex's value (§6) | reals | the objective of `minimize_bounded` |
+| $\varphi_q$, $\boldsymbol\varphi$ | the unbounded variable of coordinate $q$ (§6.1), and the vector of them | reals | (inside `minimize_bounded`) |
+| $\mathbf v$, $\bar{\mathbf v}$; $\mathbf v_w$, $\mathbf v_r$ | Nelder–Mead vertices and the centroid of all but the worst; the worst vertex and its reflection | vectors | (inside `_nelder_mead`) |
+| $\hat{\boldsymbol\theta} = (\hat p_c, \hat z, \hat\nu)$, $\hat{\boldsymbol\theta}_o$, $\hat{\boldsymbol\theta}_s$ | a fit; observable $o$'s own fit; the shared fit (with components $\hat p_c^{\,o}$, $\hat z_o$, $\hat\nu_o$ and $\hat p_c^{\,s}$, $\hat z_s$, $\hat\nu_s$) | vectors | `CollapseFit.params`, `SharedFit.params` |
 | $S_o$, $N_o$; $S_{\mathrm{shared}}$, $S_{\mathrm{ind}}$ | observable $o$'s quality and bracketed points; the pooled shared and independent qualities | reals, integer | `SharedFit.costs`, `.cost`; `SharedComparison.independent_cost` |
+| $\chi^2_{oi}$; $\chi^2_o$, $\chi^2_{\mathrm{shared}}$ | the $\chi^2_i$ of point $i$ of observable $o$ (§8.1); observable $o$'s polynomial objective, and the shared one $\sum_o \chi^2_o$ (§5.7) | reals | `SharedFit.chi2` (the shared one) |
 | $\Delta$ | shared cost minus pooled independent cost (polynomial: shared $\chi^2$ minus the independent $\chi^2$ sum) | real | `SharedComparison.delta` |
-| $p'$, $y'$, $s'$; $\nu'$; $S'_o$ | the data mapped onto the shared parameters (§8.3); the mapped exponent along $p_c = \hat p_c^{\,s}$; the mapped data's quality | reals | (inside `compare_shared_independent`) |
+| $\tilde p$, $\tilde y$, $\tilde s$; $\tilde x$, $\tilde Y$, $d\tilde Y$; $\tilde\nu$; $\tilde S_o$ | observable $o$'s data mapped onto the shared parameters (§8.3), and their scaled coordinates; the mapped exponent along $p_c = \hat p_c^{\,s}$; the mapped data's quality | reals | (inside `compare_shared_independent`) |
+| $\gamma_i$ | the derivative of a smooth objective with respect to $x_i$ at the common coordinates (after Proposition 6) | real | |
 | $\Delta^\ast$, $B'$ | a null replicate of $\Delta$; the usable null replicates | real, integer | `SharedComparison.null` |
+| $\alpha$ | the level of the comparison's test | real | `alpha` (0.05) |
 | $B$ | bootstrap replicates | integer | `replicates` |
-| $d$, $F_{\mathbf a}$, $\mathbf a$ | degree, polynomial master curve $\sum_{k\le d} a_k x^k$, its coefficients | integer, function, vector | `degree`, `CollapseFit.coefficients` |
-| $A$, $\boldsymbol\eta$, $\mathbf r$ | whitened Vandermonde matrix $A_{ik} = x_i^k/dY_i$, whitened data $\eta_i = Y_i/dY_i$, residual $\boldsymbol\eta - A\mathbf a$ | matrix, vectors | (inside `_Polynomial.solve`) |
-| $\xi$; $U\Sigma V^{\mathsf T}$; $\epsilon$ | the rescaled abscissa $x/\max_i\lvert x_i\rvert$; the singular value decomposition of $A$; $2^{-52}$ | | (inside `_Polynomial.solve`) |
+| $d$, $F_{\mathbf a}$, $\mathbf a$, $a_k$ | degree, polynomial master curve $\sum_{k\le d} a_k x^k$, its coefficients | integer, function, vector | `degree`, `CollapseFit.coefficients` |
+| $A$, $\boldsymbol\eta$, $\eta_i$, $\mathbf r$ | whitened Vandermonde matrix $A_{ik} = x_i^k/dY_i$, whitened data $\eta_i = Y_i/dY_i$, residual $\boldsymbol\eta - A\mathbf a$ | matrix, vectors | (inside `_Polynomial.solve`) |
+| $A^{+}$, $\Pi_A$, $I$ | the pseudoinverse of $A$; the orthogonal projection onto its column space; the identity matrix | matrices | |
+| $\xi$; $U\Sigma V^{\mathsf T}$, $\sigma_{\max}$; $\epsilon$ | the rescaled abscissa $x/\max_i\lvert x_i\rvert$; the singular value decomposition of $A$ and its largest singular value; $2^{-52}$ | | (inside `_Polynomial.solve`) |
 | $W(\boldsymbol\theta)$, $x_{\max}$ | the window map (the points it selects at $\boldsymbol\theta$); the half-width of a fixed window | set, real | `fss.py::window_points`, `window` |
 | $\mathcal S$; $\mathcal S_j$, $\boldsymbol\theta_j$ | the polynomial method's fixed point set (its window); its iterates during a fit | sets, vectors | `CollapseFit.selected`; (inside `_window_fit`) |
 | $\chi^2(\boldsymbol\theta)$, $\mathrm{dof}$ | the polynomial objective on $\mathcal S$; $\lvert\mathcal S\rvert - (d+1) - N_{\mathrm{free}}$ | real, integer | `CollapseFit.chi2`, `.dof`, `fss.py::polynomial_cost` |
 | $\zeta$ | the two methods' standardized difference, difference over its paired bootstrap error | real | `MethodComparison.z` |
 | $\rho$ | a calibration ratio: bootstrap error over the true spread of the fits (§11) | real | (tests and §11) |
+| $t_{19}$ | Student's $t$ law with 19 degrees of freedom (the false-alarm rates of the validation map) | probability law | |
+| $\mathbb E$, $\Pr$, $\operatorname{Var}$; $\mathbb R$; $\mathsf T$; $\pi$; $\mathcal O$ | expectation, probability and variance; the real numbers; the transpose (as a superscript); the circle constant; Landau's order of growth (§13) | | |
 
 ## 3. The scaling hypothesis
 
 At fixed $\beta$, for a time observable $\theta$ with ensemble mean
-$y(n, p) = \mathbb{E}[\theta \mid n, \beta, p]$ (v1.4 §5.9),
+$\mu(n, p) = \mathbb{E}[\theta \mid n, \beta, p]$ (v1.4 §5.9),
 
 $$
-y(n, p) \simeq n^{z}\, F\big((p - p_c)\, n^{1/\nu}\big),
+\mu(n, p) \simeq n^{z}\, F\big((p - p_c)\, n^{1/\nu}\big),
 $$
 
 the dynamic finite-size-scaling form of Hashizume, Bentsen and Daley (PRR 2022, Eq. (5)) for the
@@ -105,8 +122,10 @@ and is never parametrized: a collapse asks only that the points of all sizes fal
 the coordinates
 
 $$
-x = (p - p_c)\,n^{1/\nu}, \qquad Y = y\,n^{-z}, \qquad dY = s\,n^{-z}.
+x = (p - p_c)\,n^{1/\nu}, \qquad Y = y\,n^{-z}, \qquad dY = s\,n^{-z},
 $$
+
+where $y$ is a point's estimate of $\mu(n, p)$ and $s$ its standard error.
 
 Each observable has its own $F$; the parameters may or may not be shared (§8). Small-world
 geometry can add a crossover scale (the number of rewired edges is of order $n\beta$, v1.4 §5.9),
@@ -134,13 +153,14 @@ horizon-peak fractions of each point travel with the data (`censored_fraction`,
 
 ### 4.1 Definition (Houdayer and Hartmann, PRB 70, 014418 (2004), as implemented)
 
-For point $i$ of size $n_i$ and every *other* size $n' \ne n_i$, let $x'_0 \le \dots \le x'_{m-1}$
-be the scaled abscissas of size $n'$ (in the order of their rates: at fixed $n$, $x$ increases
-with $p$ for every $\boldsymbol\theta$). Size $n'$ contributes to $\mathcal B_i$:
+For point $i$ of size $n_i$ and every *other* size $n' \ne n_i$, with $m'$ points, let
+$x'_0 \le \dots \le x'_{m'-1}$ be the scaled abscissas of size $n'$ (in the order of their rates:
+at fixed $n$, $x$ increases with $p$ for every $\boldsymbol\theta$). Size $n'$ contributes to
+$\mathcal B_i$:
 
 * its two consecutive points with $x'_j \le x_i < x'_{j+1}$, $j$ the last index with
   $x'_j \le x_i$;
-* when $x_i = x'_{m-1}$ exactly (the top of $n'$'s range), its last two points;
+* when $x_i = x'_{m'-1}$ exactly (the top of $n'$'s range), its last two points;
 * when $n'$ has a single point, that point if $x'_0 = x_i$;
 * nothing otherwise: no extrapolation beyond a size's range.
 
@@ -204,10 +224,11 @@ line is unbiased for that line, so $\mathbb{E}\bar Y_i = F(x_i)$, with variance 
 (Proposition 1). So $\mathbb{E}(Y_i - \bar Y_i)^2 = dY_i^2 + d\bar Y_i^2$. ∎
 
 Linearity across each size's pair separately is not enough. The rule of §4.1 can give one size
-the pair $[x_i, x'_{j+1}]$ (when $x'_j = x_i$) and another the pair $[x''_{m-2}, x_i]$ (when $x_i$
-is the top of its range); the two pairs then meet only at $x_i$, and an $F$ with a kink there,
-linear on each pair, biases the line. With equal weights and $u = 0, 1, -1, 0$ the bias at $u = 0$
-is $(c_+ - c_-)/4$ for slopes $c_+$ to the right and $c_-$ to the left. Linearity on each pair
+$n'$ the pair $[x_i, x'_{j+1}]$ (when $x'_j = x_i$) and another size $n''$, with $m''$ points, the
+pair $[x''_{m''-2}, x_i]$ (when $x_i = x''_{m''-1}$, the top of $n''$'s range); the two pairs
+then meet only at $x_i$, and an $F$ with a kink there, linear on each pair, biases the line.
+With equal weights and $u = 0, 1, -1, 0$ the bias at $u = 0$ is $(c_+ - c_-)/4$ for slopes $c_+$
+to the right and $c_-$ to the left. Linearity on each pair
 does imply linearity on their hull when some pair has $x_i$ in its interior (it then overlaps
 every other pair on an interval of positive length), when every pair lies on one side of $x_i$,
 or when $F$ is differentiable at $x_i$ (every pair's line then has slope $F'(x_i)$).
@@ -276,17 +297,17 @@ With $A_{ik} = x_i^k/dY_i$ and $\eta_i = Y_i/dY_i$ ($i \in \mathcal S$, $k = 0, 
 
 $$
 \chi^2(\boldsymbol\theta) = \big\lvert \boldsymbol\eta - A A^{+} \boldsymbol\eta\big\rvert^2
-= \boldsymbol\eta^{\mathsf T}(I - P_A)\,\boldsymbol\eta ,
+= \boldsymbol\eta^{\mathsf T}(I - \Pi_A)\,\boldsymbol\eta ,
 $$
 
-with $A^{+}$ the pseudoinverse and $P_A$ the orthogonal projection onto the column space of $A$;
+with $A^{+}$ the pseudoinverse and $\Pi_A$ the orthogonal projection onto the column space of $A$;
 and $\min_{\boldsymbol\theta, \mathbf a}$ of the weighted sum is $\min_{\boldsymbol\theta}\chi^2$.
 So only $(p_c, z, \nu)$ are searched.
 
 *Proof.* For fixed $\boldsymbol\theta$ the sum is $\lvert \boldsymbol\eta - A\mathbf a\rvert^2$, a
 linear least squares problem: its minimum over $\mathbf a$ is attained at
 $\mathbf a = A^{+}\boldsymbol\eta$ and is the squared distance from $\boldsymbol\eta$ to the
-column space, $\lvert(I - P_A)\boldsymbol\eta\rvert^2$. A joint minimum over
+column space, $\lvert(I - \Pi_A)\boldsymbol\eta\rvert^2$. A joint minimum over
 $(\boldsymbol\theta, \mathbf a)$ is the minimum over $\boldsymbol\theta$ of the minimum over
 $\mathbf a$. ∎
 
@@ -349,8 +370,8 @@ infinitely differentiable wherever $n^{1/\nu}$ and $n^{-z}$ are finite.
 distinct rates in $\mathcal S$ has $d + 1$ distinct abscissas for every $\boldsymbol\theta$ ($x$
 increases strictly with $p$ at fixed $n$), so $A$ has $d + 1$ linearly independent rows
 (Vandermonde rows at distinct points, scaled by positive factors) and full column rank. Then
-$P_A = A(A^{\mathsf T}A)^{-1}A^{\mathsf T}$ is smooth, and so is
-$\boldsymbol\eta^{\mathsf T}(I - P_A)\boldsymbol\eta$. ∎
+$\Pi_A = A(A^{\mathsf T}A)^{-1}A^{\mathsf T}$ is smooth, and so is
+$\boldsymbol\eta^{\mathsf T}(I - \Pi_A)\boldsymbol\eta$. ∎
 
 Contrast with Proposition 4: across the measured rate 0.18, §15 (f) shows $\chi^2$ changing by
 about $4\times10^{-4}$ per $10^{-7}$ of $p_c$, steadily, where the Houdayer–Hartmann quality jumps
@@ -403,8 +424,8 @@ With independent Gaussian errors of known size, $\Delta$ is minus twice the log 
 of the shared against the independent model (the master-curve coefficients are free in both), so
 by Wilks's theorem (S. S. Wilks, Ann. Math. Statist. 9, 60 (1938)) it would be asymptotically
 chi-square with $N_{\mathrm{free}}(O - 1)$ degrees of freedom, the number of parameters the
-shared hypothesis removes (a parameter fixed through $\ell_k = h_k$ is fixed in both models and
-removes none). With the study's correlated errors this law does not hold, and the bootstrap null
+shared hypothesis removes (a parameter fixed through $\vartheta_q^- = \vartheta_q^+$ is fixed in
+both models and removes none). With the study's correlated errors this law does not hold, and the bootstrap null
 of §8.3 is used. Each null replicate fits every observable alone with its own window, then the
 shared fit on those windows, exactly as for the data, so P3 holds within each replicate as well.
 
@@ -424,7 +445,7 @@ difference (§11), so $\lvert\zeta\rvert$ errs on the small side.
 
 A benchmark in development used 40 synthetic datasets per scenario, made with §11's generator (20
 graphs, a 5% graph effect shared by the rates of a size, 3% rate noise, sizes 16–128, 21 rates).
-Its master curves were the logistic $F_1$ and a steeper one, $F_3(x) = 2/(1 + e^{3x}) + 0.5$. The
+Its master curves were the logistic $F_1$ and a steeper one, $F_3(x) = 2/(1 + \exp(3x)) + 0.5$. The
 polynomial fits started at the Houdayer–Hartmann fit. Root-mean-square errors of
 $(p_c, z, \nu)$ (true $(0.2, 1, 1.5)$):
 
@@ -467,27 +488,31 @@ When to prefer which:
 
 ### 6.1 The box and the reparametrization
 
-Each free parameter ($\ell_k < h_k$) is written
+Each free coordinate of $\boldsymbol\theta$ ($\vartheta_q^- < \vartheta_q^+$) is written
 
 $$
-\theta_k = \ell_k + (h_k - \ell_k)\,\frac{1 + \sin\varphi_k}{2}, \qquad \varphi_k \in \mathbb{R},
+\vartheta_q = \vartheta_q^- + (\vartheta_q^+ - \vartheta_q^-)\,\frac{1 + \sin\varphi_q}{2},
+\qquad \varphi_q \in \mathbb{R},
 $$
 
-and a parameter with $\ell_k = h_k$ is held fixed (`fss.py::minimize_bounded`). The
-transformation is a choice made here; Proposition 5 proves the properties the optimizer relies
-on.
+and a coordinate with $\vartheta_q^- = \vartheta_q^+$ is held fixed (`fss.py::minimize_bounded`).
+The transformation is a choice made here; Proposition 5 proves the properties the optimizer
+relies on. `minimize_bounded` minimizes any function $f$ of $\boldsymbol\theta$; in a fit, $f$ is
+$S$ (§4) or the polynomial $\chi^2$ on a window (§5), with $+\infty$ where it is inadmissible or
+undefined.
 
-**Proposition 5 (derived here).** The map is smooth and maps $\mathbb R$ onto $[\ell_k, h_k]$,
-reaching both bounds at finite $\varphi_k$ ($\pm\pi/2$); hence
+**Proposition 5 (derived here).** The map is smooth and maps $\mathbb R$ onto
+$[\vartheta_q^-, \vartheta_q^+]$, reaching both bounds at finite $\varphi_q$ ($\pm\pi/2$); hence
 $\inf_{\boldsymbol\varphi} f(\boldsymbol\theta(\boldsymbol\varphi)) = \inf_{\text{box}} f$, and a
-minimizer on a bound corresponds to a stationary point in $\varphi$.
+minimizer on a bound corresponds to a stationary point in $\boldsymbol\varphi$.
 
 *Proof.* $\sin$ maps $\mathbb R$ onto $[-1, 1]$ and is smooth; the affine map takes $[-1, 1]$ onto
-$[\ell_k, h_k]$. Surjectivity gives the equality of infima. At $\varphi_k = \pm\pi/2$ the
-derivative $\cos\varphi_k$ vanishes. ∎
+$[\vartheta_q^-, \vartheta_q^+]$. Surjectivity gives the equality of infima. At
+$\varphi_q = \pm\pi/2$ the derivative $\cos\varphi_q$ vanishes. ∎
 
 The optimizer can thus reach a bound exactly (tests: a minimum outside the box lands on its
-corner), and Nelder–Mead runs unconstrained in $\varphi$. The map is periodic, which is harmless.
+corner), and Nelder–Mead runs unconstrained in $\boldsymbol\varphi$. The map is periodic, which is
+harmless.
 
 ### 6.2 Nelder–Mead
 
@@ -571,36 +596,39 @@ they do not; but $S$ is not a calibrated chi-square (§4.2), so $\Delta$ needs a
 Each observable $o$ is mapped point by point to
 
 $$
-p' = \hat p_c^{\,s} + (p - \hat p_c^{\,o})\,n^{1/\hat\nu_o - 1/\hat\nu_s}, \qquad
-y' = y\,n^{\hat z_s - \hat z_o}, \qquad s' = s\,n^{\hat z_s - \hat z_o},
+\tilde p = \hat p_c^{\,s} + (p - \hat p_c^{\,o})\,n^{1/\hat\nu_o - 1/\hat\nu_s}, \qquad
+\tilde y = y\,n^{\hat z_s - \hat z_o}, \qquad \tilde s = s\,n^{\hat z_s - \hat z_o},
 $$
 
-and its graph means by the same factor.
+and its graph means by the same factor. The mapped data's scaled coordinates are $\tilde x$,
+$\tilde Y$, $d\tilde Y$ (§3 applied to $\tilde p$, $\tilde y$, $\tilde s$) and their quality is
+$\tilde S_o$.
 
 **Proposition 6 (derived here).** The mapped data have, at $\hat{\boldsymbol\theta}_s$, exactly
 the scaled coordinates that observable $o$ has at $\hat{\boldsymbol\theta}_o$; hence
-$S'_o(\hat{\boldsymbol\theta}_s) = S_o(\hat{\boldsymbol\theta}_o)$, and along
-$p_c = \hat p_c^{\,s}$ the map $(z, \nu) \mapsto (z + \hat z_o - \hat z_s,\ \nu')$ with
-$1/\nu' = 1/\nu + 1/\hat\nu_o - 1/\hat\nu_s$ carries $S'_o$ onto $S_o$.
+$\tilde S_o(\hat{\boldsymbol\theta}_s) = S_o(\hat{\boldsymbol\theta}_o)$, and along
+$p_c = \hat p_c^{\,s}$ the map $(z, \nu) \mapsto (z + \hat z_o - \hat z_s,\ \tilde\nu)$ with
+$1/\tilde\nu = 1/\nu + 1/\hat\nu_o - 1/\hat\nu_s$ carries $\tilde S_o$ onto $S_o$.
 
-*Proof.* $x' = (p' - \hat p_c^{\,s})\,n^{1/\hat\nu_s} = (p - \hat p_c^{\,o})\,n^{1/\hat\nu_o} = x$ and
-$Y' = y'\,n^{-\hat z_s} = y\,n^{-\hat z_o} = Y$, likewise $dY' = dY$; the quality depends on the
-data only through these. For the second claim repeat the computation with $(\hat p_c^{\,s}, z, \nu)$. ∎
+*Proof.* $\tilde x = (\tilde p - \hat p_c^{\,s})\,n^{1/\hat\nu_s} = (p - \hat p_c^{\,o})\,n^{1/\hat\nu_o} = x$
+and $\tilde Y = \tilde y\,n^{-\hat z_s} = y\,n^{-\hat z_o} = Y$, likewise $d\tilde Y = dY$; the
+quality depends on the data only through these. For the second claim repeat the computation with
+$(\hat p_c^{\,s}, z, \nu)$. ∎
 
 So the mapped data keep each observable's collapse quality and noise, and at
 $\hat{\boldsymbol\theta}_s$ (and, for the polynomial method, on the window it chose) each has
 exactly the fit it had at its own parameters. Proposition 6 does not say that
-$\hat{\boldsymbol\theta}_s$ *minimizes* $S'_o$. Off the slice $p_c = \hat p_c^{\,s}$ the mapped
-abscissa at $(p_c, z, \nu)$ is
-$x' = (\hat p_c^{\,s} - p_c)\,n^{1/\nu} + (p - \hat p_c^{\,o})\,n^{1/\nu'}$: its shift and its slope
-in $p$ grow with different powers of $n$ unless $\hat\nu_o = \hat\nu_s$, so it is the abscissa of
-the original data at no parameter vector, and $S'_o$ is no reparametrization of $S_o$ there
-(derived here). For a smooth objective (the polynomial $\chi^2$ on a fixed set) the consequence is
-explicit: with $g_i$ the derivative of the objective with respect to $x_i$ at the common
-coordinates, stationarity of $S_o$ at $\hat{\boldsymbol\theta}_o$ gives
-$\sum_i g_i\,n_i^{1/\hat\nu_o} = 0$, while
-$\partial S'_o/\partial p_c = -\sum_i g_i\,n_i^{1/\hat\nu_s}$ at $\hat{\boldsymbol\theta}_s$, which is
-not 0 in general; the $z$ and $\nu$ derivatives vanish by the slice equivalence. So the mapped
+$\hat{\boldsymbol\theta}_s$ *minimizes* $\tilde S_o$. Off the slice $p_c = \hat p_c^{\,s}$ the
+mapped abscissa at $(p_c, z, \nu)$ is
+$\tilde x = (\hat p_c^{\,s} - p_c)\,n^{1/\nu} + (p - \hat p_c^{\,o})\,n^{1/\tilde\nu}$: its shift and
+its slope in $p$ grow with different powers of $n$ unless $\hat\nu_o = \hat\nu_s$, so it is the
+abscissa of the original data at no parameter vector, and $\tilde S_o$ is no reparametrization of
+$S_o$ there (derived here). For a smooth objective (the polynomial $\chi^2$ on a fixed set) the
+consequence is explicit: with $\gamma_i$ the derivative of the objective with respect to $x_i$ at
+the common coordinates, stationarity of $S_o$ at $\hat{\boldsymbol\theta}_o$ gives
+$\sum_i \gamma_i\,n_i^{1/\hat\nu_o} = 0$, while
+$\partial\tilde S_o/\partial p_c = -\sum_i \gamma_i\,n_i^{1/\hat\nu_s}$ at
+$\hat{\boldsymbol\theta}_s$, which is not 0 in general; the $z$ and $\nu$ derivatives vanish by the slice equivalence. So the mapped
 data's own optimum lies *near* $\hat{\boldsymbol\theta}_s$, exactly on it only without noise (data
 that follow the scaling form exactly at $\hat{\boldsymbol\theta}_o$ map to data that follow it
 exactly at $\hat{\boldsymbol\theta}_s$) or when $\hat\nu_o = \hat\nu_s$. In development the shift
@@ -906,11 +934,12 @@ is consistent with it within the sizes and rates measured.
 2. Per evaluation: $n^{1/\nu}$ and $n^{-z}$ by `np.power` (exact for integer powers); if anything
    overflows, the quality is undefined (every $\chi^2$ NaN).
 3. For each size, `searchsorted` of every $x_i$ in that size's sorted abscissas gives the last
-   index with $x' \le x_i$; the rules of §4.1 turn it into a pair (or a single point, or nothing).
+   index $j$ with $x'_j \le x_i$; the rules of §4.1 turn it into a pair (or a single point, or
+   nothing).
 4. Gather the pairs into $(P, 2\times\text{sizes})$ arrays with a mask, and compute $K$, $\bar u$,
    $\bar y$, $S_{uu}$, $b$, $\bar Y$, $d\bar Y^2$ and $\chi^2$ in two passes.
 
-Cost $O(P\times\text{sizes})$ per evaluation (about 60–90 µs for 84–164 points and 4 sizes on the
+Cost $\mathcal O(P\times\text{sizes})$ per evaluation (about 60–90 µs for 84–164 points and 4 sizes on the
 development machine).
 
 ### 13.2 A fit (`fit_collapse`)
@@ -1201,7 +1230,7 @@ assert both.failed == 0 and np.all(np.abs(both.z) < 4)
 
 ## 16. Validation map
 
-All in `tests/test_study_fss.py`.
+All in `tests/test_study_fss.py`, except the last row (`tests/test_study_stats_fss_notation.py`).
 
 | test | what it checks | how |
 |---|---|---|
@@ -1232,9 +1261,10 @@ All in `tests/test_study_fss.py`.
 | `test_the_polynomial_objective_is_continuous_where_the_quality_jumps` | P2 against Proposition 4 | steps of $10^{-9}$ in $p_c$ across 0.18 change $\chi^2$ by at most twice the local slope times the step, while $S$ jumps by more than $10^{-3}$; smooth in $z$ and $\nu$ |
 | `test_the_degree_changes_the_answer_until_it_is_enough` | §5.6 | steep master curve over $\lvert x\rvert \le 2$: degree 2 biased with $\chi^2/\mathrm{dof}$ over 100 times that of degree 9, which recovers the truth |
 | `test_chi2_per_dof_is_about_one_for_independent_errors` | §5.5 | 20 datasets with independent errors: mean $\chi^2/\mathrm{dof}$ within 4 standard errors of 1 (measured $0.94 \pm 0.06$; the error is estimated from the 20 values, so the false alarm is the Student-$t_{19}$ tail, $7.7\times10^{-4}$) |
-| `test_the_two_methods_agree_on_clean_and_on_noisy_data` | §5.7, §12 | exact data: differences below $(10^{-3}, 10^{-2}, 2\times10^{-2})$; noisy data: $\lvert\zeta\rvert < 4$ (each $\zeta$ about Student-$t_{19}$: false alarm $7.7\times10^{-4}$ per parameter, $2.3\times10^{-3}$ for the three; a bias difference of one paired error raises the $\nu$ term to about $6\times10^{-3}$), paired error below the unpaired $\sqrt{\mathrm{se}_{\mathrm{HH}}^2 + \mathrm{se}_{\mathrm{poly}}^2}$ |
+| `test_the_two_methods_agree_on_clean_and_on_noisy_data` | §5.7, §12 | exact data: differences below $(10^{-3}, 10^{-2}, 2\times10^{-2})$; noisy data: $\lvert\zeta\rvert < 4$ (each $\zeta$ about Student-$t_{19}$: false alarm $7.7\times10^{-4}$ per parameter, $2.3\times10^{-3}$ for the three; a bias difference of one paired error raises the $\nu$ term to about $6\times10^{-3}$), paired error below the unpaired one, the root sum of squares of `se_houdayer_hartmann` and `se_polynomial` |
 | `test_too_few_points_for_the_polynomial_give_a_status`, `test_polynomial_paths_without_a_usable_answer`, `test_an_unsettled_window_is_reported` | §5.3 admissibility, statuses | distinct rates, one size in the window, $\mathrm{dof} = 1$ accepted and 0 refused, overflow everywhere, failed observables in a shared fit, an unsettled window reported and a settled one from the same start |
 | `test_the_polynomial_method_runs_through_every_tool`, `test_polynomial_settings_are_checked` | §5.7 | shared fit, leave-one-size-out (refits report `window_stable = None`, also in JSON), diagnostics (the drift refit too), and the comparison with `method="polynomial"` (P3's $\Delta$, re-selected windows); input checks |
+| `test_the_notation_table_lists_every_symbol_once`, `test_the_checks_find_a_missing_row_a_doubled_row_and_an_old_symbol` | §2: every symbol of this document and of [06-statistics.md](06-statistics.md) has one row | every math span read for its symbols (letters with their decorations, primes and star; subscripts that are expressions read too) against the table; no symbol in two rows; the letters renamed for having two meanings (the projection $\Pi_A$, the box $[\vartheta_q^-, \vartheta_q^+]$, the mapped data with a tilde, $m'$ and $m''$, $\gamma_i$) not used the old way; a mapped abscissa written with a prime and an unlisted $m''$ each found |
 
 ## 17. Limitations and departures
 

@@ -2097,10 +2097,11 @@ def compare_shared_independent(
     parameters. Its null distribution is built by graph-cluster resampling of data mapped onto
     the shared hypothesis: every observable ``o`` is mapped point by point to
 
-        p' = p_c^s + (p - p_c^o) n^(1/nu_o - 1/nu_s),   y' = y n^(z_s - z_o)
+        p~ = p_c^s + (p - p_c^o) n^(1/nu_o - 1/nu_s),   y~ = y n^(z_s - z_o)
 
-    (and its graph means and errors by the same factor), which gives at ``theta_s`` exactly the
-    scaled coordinates the observable has at its own ``theta_o``: its collapse quality there
+    (07 §8.3 writes them with a tilde; the graph means and errors are mapped by the factor of
+    y), which gives at ``theta_s`` exactly the scaled coordinates the observable has at its own
+    ``theta_o``: its collapse quality there
     (and, for the polynomial method, its window) is the one it had at ``theta_o``. The mapped
     data follow the shared scaling form with ``theta_s`` exactly when the data follow theirs
     without noise; with noise their own best parameters lie near ``theta_s``, not exactly on it
@@ -2215,7 +2216,7 @@ class _Mapped:
 
     data: ScalingData
     fit: CollapseFit  # the observable's own fit to the (unmapped) data
-    p: np.ndarray  # the mapped rates p'
+    p: np.ndarray  # the mapped rates p~ (07 §8.3)
     ystar: np.ndarray  # (B, P) replicate means, mapped
     sestar: np.ndarray  # (B, P) replicate errors, mapped
 

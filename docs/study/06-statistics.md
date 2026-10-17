@@ -30,7 +30,7 @@ as written, in order, in one namespace, in a few seconds.
 ## 1. Purpose and scope
 
 The study samples nested random objects (v1.4 §1, §6.1): interaction graphs $G_g$ drawn
-independently from the Watts–Strogatz law $\mu_{n,\beta}$, gate sequences $c$ drawn given their
+independently from the Watts–Strogatz law $\mathrm{WS}(n, \beta)$, gate sequences $c$ drawn given their
 graph, and measurement realizations $r$ drawn given their gate sequence (the native engine has
 $r = 0$ only, design §9 D1). Samples that share a graph are correlated, and the graphs are the
 independent units (v1.4 §6.4). This part implements:
@@ -53,46 +53,63 @@ is [07-finite-size-scaling.md](07-finite-size-scaling.md).
 
 ## 2. Notation
 
+Each symbol has the one meaning given here throughout the document. The indices $i$, $j$, $k$
+number positions and the terms of sums, and the $d$ of a differential ($dt$, $d/d\varepsilon$)
+is not the trace $d(t)$.
+
 | symbol | meaning | type | in the code |
 |---|---|---|---|
+| $n$, $\beta$, $p$; $p_1$, $p_2$ | system size, rewiring probability and measurement rate of a condition $(n, \beta, p)$; two rates of one $(n, \beta)$ (§5) | integer, reals | (the study's conditions) |
+| $\mathrm{WS}(n, \beta)$ | the Watts–Strogatz law of the interaction graph (v1.4 §2.2 writes it $\mu_{n,\beta}$) | probability law | (the graph generator) |
 | $g, c, r$ | graph, gate-sequence and replica labels of a trajectory | integers $\ge 0$ | `g`, `c`, `r` |
+| $i$; $j$, $k$ | a trajectory (row) index; the indices of event depths (§6) and of the terms of a sum | integers $\ge 0$ | |
 | $G$ | number of graphs (v1.4's $N_{\mathrm{graphs}}$) | integer | `GraphMean.num_graphs` |
-| $G_g$, $\mathbf G$ | the $g$-th graph (random, drawn from $\mu_{n,\beta}$); all of them | random graphs | (the graph records) |
-| $\Gamma_{gc}$, $\phi$ | gate sequence $c$ of graph $g$ (random); $\phi(G_g, \Gamma_{gc})$, a trajectory's mean given both (Proposition 1) | | |
+| $\mathcal G$ | a random graph drawn from $\mathrm{WS}(n, \beta)$ | random graph | |
+| $G_g$, $\mathbf G$ | the $g$-th graph (random, drawn from $\mathrm{WS}(n, \beta)$); all of them | random graphs | (the graph records) |
+| $\Gamma_{gc}$, $\phi$ | gate sequence $c$ of graph $g$ (random); $\phi(G_g, \Gamma_{gc})$, a trajectory's mean given both (Proposition 1) | random sequence; real | |
 | $C_g$ | gate sequences on graph $g$ | integer | `NestedMean.circuits_per_graph` |
 | $R_{gc}$ | replicas of gate sequence $(g, c)$ | integer | `NestedMean.replicas_per_circuit` |
-| $N$, $n_g$ | rows (trajectories) in all, and of graph $g$: $n_g = \sum_c R_{gc}$ | integers | `NestedMean.num_trajectories`, `.trajectories_per_graph` |
-| $F_{gcr}$, $F_i$ | the observable of one trajectory (one checkpoint, or a vector of them) | real or NaN | rows of `values` |
-| $\hat f_{gc}$, $\hat f_g$ | gate-sequence and graph means | real | `NestedMean.graph_means` ($\hat f_g$) |
+| $N$, $N_g$ | rows (trajectories) in all, and of graph $g$: $N_g = \sum_c R_{gc}$ | integers | `NestedMean.num_trajectories`, `.trajectories_per_graph` |
+| $N(\mathcal G)$ | rows allocated to a graph, as a function of the graph, so $N_g = N(G_g)$ (Proposition 2) | integer | |
+| $K$ | values per row: the checkpoints of a trace, 1 for a scalar | integer | trailing size of `values` |
+| $F$; $F_{gcr}$, $F_i$ | the observable of a random trajectory; of trajectory $(g, c, r)$, which is row $i$ (one checkpoint, or a vector of them) | real or NaN | rows of `values` |
+| $\hat f_{gc}$, $\hat f_g$, $\hat f_g(p)$ | gate-sequence and graph means; a graph mean at rate $p$ (§5) | real | `NestedMean.graph_means` ($\hat f_g$) |
 | $\bar F_g$, $\hat\mu_{\mathrm{pool}}$ | the plain average of graph $g$'s rows; the pooled mean of all rows (§3.3) | reals | (not computed) |
-| $\hat\mu$ | the nested estimate | real | `GraphMean.mean` |
-| $\widehat{\mathrm{SE}}$ | the graph-cluster standard error | real | `GraphMean.se` |
+| $\hat\mu$; $\hat\mu_1$, $\hat\mu_2$ | the nested estimate; the estimates at $p_1$ and $p_2$ (§7.2) | real | `GraphMean.mean` |
+| $\widehat{\mathrm{SE}}$; $\widehat{\mathrm{SE}}_1$, $\widehat{\mathrm{SE}}_2$ | the graph-cluster standard error; the errors at $p_1$ and $p_2$ (§5) | real | `GraphMean.se` |
+| $\widehat{\operatorname{Var}}$ | an estimated variance (§6.3) | real | |
 | $G'$ | graphs that contribute a defined value | integer | `GraphMean.contributing_graphs` |
-| $m(g)$ | $\mathbb{E}[F \mid G = g]$, the mean over gates, masks and outcomes on graph $g$ | real | (target) |
-| $\mu$ | $\mathbb{E}_{G}[m(G)]$, the ensemble mean (v1.4 §6.2) | real | (target) |
-| $n(G)$ | rows allocated to a graph, as a function of the graph (Proposition 2) | integer | |
+| $m(\mathcal G)$ | $\mathbb{E}[F \mid \mathcal G]$, the mean over gates, masks and outcomes given the graph; $m(G_g)$ for the $g$-th graph | real function of the graph | (target) |
+| $\mu$, $\mu(p)$ | $\mathbb{E}[m(\mathcal G)]$, the ensemble mean (v1.4 §6.2 writes it $\mu_F$); at rate $p$ | real | (target) |
 | $v_g$ | $\operatorname{Var}\hat f_g$ | real | |
 | $a_g$, $b_{gc}$, $e_{gcr}$; $\sigma_a^2$, $\sigma_b^2$, $\sigma_e^2$ | graph, gate-sequence and leaf effects of the variance-components model (§4.1), and their variances | reals | (the tests' generators) |
 | $\mathcal D$ | the event that a value is defined (§3.4) | event | `nan_policy="omit"` |
-| $\theta$, $A(\theta)$; $a_k$, $b_k$ | the angle $\arctan(t/\sqrt\nu)$ and the two-sided probability $\Pr(\lvert T\rvert \le t)$ of §4.2; the coefficients of its finite sums | reals | (inside `_t_two_sided`) |
-| $t_{q,\nu}$ | the $q$-quantile of Student's $t$ with $\nu$ degrees of freedom | real | `student_t_quantile(q, nu)` |
+| $X_\nu$, $s$ | a random variable with Student's $t$ law on $\nu$ degrees of freedom, and a value of it (§4.2) | random variable, real | |
+| $\nu$ | the degrees of freedom of Student's $t$ | integer $\ge 1$ | `dof` |
+| $\theta$, $\theta^\ast$; $A(\theta)$; $\alpha_k$, $\kappa_k$ | the angle $\arctan(s/\sqrt\nu)$, and the one with $A(\theta^\ast) = 2q - 1$; the two-sided probability $\Pr(\lvert X_\nu\rvert \le \sqrt\nu\tan\theta)$ (§4.2); the coefficients of its finite sums for odd and for even $\nu$ | reals | (inside `_t_two_sided`) |
+| $t_{q,\nu}$, $q$ | the $q$-quantile of Student's $t$ with $\nu$ degrees of freedom; the probability $q$ | reals | `student_t_quantile(probability, dof)` |
+| $\mathrm{level}$ | the coverage level of an interval | real in $(0, 1)$ | `level` |
 | $\Delta_g$, $\bar\Delta$ | per-graph difference between two rates, and its mean | reals | `paired_difference(...).graph_means`, `.mean` |
 | $k_t$, $\ell$ | the code dimension at depth $t$ and a threshold (v1.4 §5.2) | integers | (the store's traces) |
+| $t$; $t_j$, $J$ | a depth (circuit layers); the $J$ distinct event depths | reals $\ge 0$ (integers in the study) | `SurvivalCurve.times` ($t_j$) |
+| $Y_j$, $D_j$ | weighted numbers at risk and of events at $t_j$ | reals | `SurvivalCurve.at_risk`, `.events` (as shares of $W$) |
 | $\tau$, $T_{\max}$ | a first-passage depth $\tau_\ell$ and the horizon (censoring depth) | integers | `times`, `observed`; `SurvivalCurve.horizon` |
 | $T_i$ | the recorded depth of trajectory $i$ (its $\tau$, or its censoring depth) | integer | `times` |
 | $w_i$; $W$, $W_g$ | weight of trajectory $i$; the total weight, and graph $g$'s | positive | `graph_equal_weights` |
 | $L$ | $\operatorname{lcm}_{g,c}(C_g R_{gc})$, the integer weights' total per graph | integer | (inside `graph_equal_weights`) |
-| $t_j$, $J$; $Y_j$, $D_j$ | the $J$ distinct event depths; weighted numbers at risk and of events | reals | `SurvivalCurve.times`; `at_risk`, `events` (as shares of $W$) |
 | $Y_{gj}$, $D_{gj}$ | cluster $g$'s at-risk and event weights at $t_j$ | reals | (inside `_km_influence_chunks`) |
-| $\hat S(t)$, $\hat S_g(t)$ | Kaplan–Meier estimate of $S(t) = \Pr(\tau > t)$; graph $g$'s nested fraction with $\tau > t$ (Proposition 7) | in $[0, 1]$ | `SurvivalCurve.survival` |
+| $S(t)$; $\hat S(t)$, $\hat S_g(t)$ | the survival function $\Pr(\tau > t)$; its Kaplan–Meier estimate; graph $g$'s nested fraction with $\tau > t$ (Proposition 7) | in $[0, 1]$ | `SurvivalCurve.survival` ($\hat S$) |
 | $u$, $\hat S_{\mathrm{float}}$ | the unit roundoff $2^{-53}$; the curve as a float64 product (§6.4) | reals | (inside `_snap_half`) |
 | $U_g(t)$, $\varepsilon$ | influence of cluster $g$ on $\hat S(t)$; the scaling of its weights by $1 + \varepsilon$ | reals | `stats.py::_km_influence_chunks` |
 | $\mathrm{RM}(h)$, $h$, $\lambda_j$ | restricted mean $\int_0^h \hat S(t)\,dt$ to the horizon $h$; the length of the step at $t_j$ inside $[0, h]$ | reals | `SurvivalCurve.restricted_mean`, `.restricted_horizon` |
 | $d(t)$, $\mathcal T_+$, $d^\ast$, $\mathcal A$, $T^\ast$ | a robustness trace, the positive checkpoints, its maximum and maximizing set, the peak depth (v1.4 §5.8) | | `traces`, `checkpoints`, `peak_times`, `at_horizon` |
+| $\hat\eta$ | the nested mean of $\ln T^\ast$ (§8) | real | `PeakTimeSummary.log_mean` |
 | $x_i$ | positive values in Proposition 11 (the $T^\ast$) | reals | |
-| $B$, $b$ | bootstrap replicates, and a replicate's index | integers | `replicates` |
-| $V$, $x$ | $2^{64} - (2^{64} \bmod G)$, the rejection bound of the bootstrap draws; a raw 64-bit word (§7.1) | integers | (inside `graph_bootstrap`) |
+| $B$; $\hat\mu^\ast$, $\bar\Delta^\ast$ | bootstrap replicates; a replicate's estimate of $\mu$ and of the paired difference (§7.2) | integer; reals | `replicates`; `GraphMean.bootstrap(draws)` |
+| $V$, $\omega$ | $2^{64} - (2^{64} \bmod G)$, the rejection bound of the bootstrap draws; a raw 64-bit word (§7.1) | integers | (inside `_bounded_integers`) |
 | $\hat\sigma^2$ | the variance of the empirical law of the $\hat f_g$ (Proposition 10) | real | |
+| $z$ | a standardized deviation, (estimate $-$ target) / standard error, in the tolerances of the validation map (§12) | real | (the tests) |
+| $\mathbb E$, $\Pr$, $\operatorname{Var}$, $\operatorname{Cov}$; $\mathbf 1[\cdot]$; $\pi$; $\mathcal O$ | expectation, probability, variance and covariance; the indicator of an event; the circle constant; Landau's order of growth (§9) | | |
 
 ## 3. The nested estimator
 
@@ -130,32 +147,33 @@ $\mathbb{E}[\phi(G_g, \Gamma_{gc}) \mid \mathbf G] = m(G_g)$.
 Averages of quantities with conditional mean $m(G_g)$ have conditional mean $m(G_g)$:
 $\mathbb{E}[\hat f_{gc} \mid \mathbf G] = \mathbb{E}[\hat f_{g} \mid \mathbf G] = m(G_g)$. Hence
 $\mathbb{E}[\hat\mu \mid \mathbf G] = \frac1G\sum_g m(G_g)$ and
-$\mathbb{E}\hat\mu = \mathbb{E}[m(G)] = \mu$. ∎
+$\mathbb{E}\hat\mu = \mathbb{E}[m(\mathcal G)] = \mu$. ∎
 
 The conditional statement is the useful one: given the graphs that were drawn,
 $\hat\mu$ estimates their *equal-weight* average $\frac1G\sum_g m(G_g)$, whatever the allocation.
 
 ### 3.3 Why pooling weights graphs by their row counts
 
-The pooled mean of all $N$ rows is $\hat\mu_{\mathrm{pool}} = \sum_g n_g \bar F_g / \sum_g n_g$,
-with $n_g = \sum_c R_{gc}$ the rows of graph $g$ and $\bar F_g$ their plain average.
+The pooled mean of all $N$ rows is $\hat\mu_{\mathrm{pool}} = \sum_g N_g \bar F_g / \sum_g N_g$,
+with $N_g = \sum_c R_{gc}$ the rows of graph $g$ and $\bar F_g$ their plain average.
 
 **Proposition 2 (derived here).** Under the assumptions of Proposition 1,
-$\mathbb{E}[\hat\mu_{\mathrm{pool}} \mid \mathbf G] = \sum_g n_g\, m(G_g) / \sum_g n_g$: each graph
-weighs in proportion to its rows. If the $n_g$ are constants, $\hat\mu_{\mathrm{pool}}$ is also
-unbiased for $\mu$; if they depend on the graphs, it converges to
-$\mathbb{E}[n(G)m(G)]/\mathbb{E}[n(G)] = \mu + \operatorname{Cov}(n(G), m(G))/\mathbb{E}[n(G)]$
+$\mathbb{E}[\hat\mu_{\mathrm{pool}} \mid \mathbf G] = \sum_g N_g\, m(G_g) / \sum_g N_g$: each graph
+weighs in proportion to its rows. If the $N_g$ are constants, $\hat\mu_{\mathrm{pool}}$ is also
+unbiased for $\mu$; if they depend on the graphs, $N_g = N(G_g)$, it converges to
+$\mathbb{E}[N(\mathcal G)m(\mathcal G)]/\mathbb{E}[N(\mathcal G)] = \mu + \operatorname{Cov}(N(\mathcal G), m(\mathcal G))/\mathbb{E}[N(\mathcal G)]$
 as $G \to \infty$, which differs from $\mu$ whenever the allocation is correlated with the graph
 means.
 
 *Proof.* $\bar F_g$ is an average of rows with conditional mean $m(G_g)$, so the first claim
-follows as in Proposition 1. With constant $n_g$, $\mathbb{E}$ of the weighted average of
-identically distributed $m(G_g)$ is $\mu$. With $n_g = n(G_g)$, numerator and denominator divided
-by $G$ converge almost surely to $\mathbb{E}[n(G) m(G)]$ and $\mathbb{E}[n(G)]$ (strong law), and
-$\mathbb{E}[nm] = \mathbb{E}[n]\mu + \operatorname{Cov}(n, m)$. ∎
+follows as in Proposition 1. With constant $N_g$, $\mathbb{E}$ of the weighted average of
+identically distributed $m(G_g)$ is $\mu$. With $N_g = N(G_g)$, numerator and denominator divided
+by $G$ converge almost surely to $\mathbb{E}[N(\mathcal G) m(\mathcal G)]$ and
+$\mathbb{E}[N(\mathcal G)]$ (strong law), and
+$\mathbb{E}[N(\mathcal G) m(\mathcal G)] = \mathbb{E}[N(\mathcal G)]\,\mu + \operatorname{Cov}(N(\mathcal G), m(\mathcal G))$. ∎
 
 So the equal graph weight of v1.4 §6.3 is a statement about the target: conditionally on the
-graphs, the nested estimator weighs each graph $1/G$ and the pooled one $n_g/N$. Example
+graphs, the nested estimator weighs each graph $1/G$ and the pooled one $N_g/N$. Example
 §11 (b) shows the bias of pooling when the allocation follows the graph type. When the allocation
 is balanced ($C_g = C$, $R_{gc} = R$) the two coincide (v1.4 §6.3): $\hat\mu$ is then the plain
 mean of the $GCR$ rows, though those rows remain correlated within graphs.
@@ -172,7 +190,7 @@ sequence with no defined row from its graph, and a graph with no defined value f
 estimator is, conditionally on the graphs and the pattern of defined rows, the equal-weight mean
 over the graphs with at least one defined row of each graph's equal-weight mean of its defined
 rows. It targets neither $\mu = \mathbb{E}[F]$ (undefined rows have no value) nor
-$\mathbb{E}[F \mid \mathcal D]$, which weighs graph $g$ by $\Pr(\mathcal D \mid G = g)$; it also
+$\mathbb{E}[F \mid \mathcal D]$, which weighs graph $g$ by $\Pr(\mathcal D \mid G_g)$; it also
 depends on the allocation, because a graph enters only when one of its rows is defined. Example
 (test `test_undefined_values_are_refused_unless_omitted_which_changes_the_target`): graph 0 has
 one defined circuit of value 1 among four, graph 1 four defined circuits of value 3; the omitted
@@ -225,21 +243,23 @@ graphs. Its coverage is exact when the $\hat f_g$ are independent normal with eq
 unequal variances it is approximate (measured 0.948 at level 0.95 for $G = 20$ in
 `test_the_estimator_is_unbiased_and_its_cluster_error_estimates_the_exact_variance`).
 
-**The $t$ quantile without SciPy** (`stats.py::student_t_quantile`). With
-$\theta = \arctan(t/\sqrt\nu)$, the two-sided probability $A(t) = \Pr(\lvert T\rvert \le t)$ is a
-finite sum (Abramowitz and Stegun, 26.7.3 and 26.7.4):
+**The $t$ quantile without SciPy** (`stats.py::student_t_quantile`). Let $X_\nu$ have Student's
+$t$ law on $\nu$ degrees of freedom. For $s \ge 0$ and $\theta = \arctan(s/\sqrt\nu)$, the
+two-sided probability $A(\theta) = \Pr(\lvert X_\nu\rvert \le s)$ is a finite sum (Abramowitz and
+Stegun, 26.7.3 and 26.7.4):
 
 $$
 \nu = 1:\ A = \tfrac{2\theta}{\pi};\qquad
-\nu\ \text{odd}:\ A = \tfrac{2}{\pi}\Big[\theta + \sin\theta\cos\theta\sum_{k=0}^{(\nu-3)/2} a_k\cos^{2k}\theta\Big];\qquad
-\nu\ \text{even}:\ A = \sin\theta\sum_{k=0}^{(\nu-2)/2} b_k\cos^{2k}\theta,
+\nu\ \text{odd}:\ A = \tfrac{2}{\pi}\Big[\theta + \sin\theta\cos\theta\sum_{k=0}^{(\nu-3)/2} \alpha_k\cos^{2k}\theta\Big];\qquad
+\nu\ \text{even}:\ A = \sin\theta\sum_{k=0}^{(\nu-2)/2} \kappa_k\cos^{2k}\theta,
 $$
 
-with $a_0 = b_0 = 1$, $a_k = a_{k-1}\,2k/(2k+1)$, $b_k = b_{k-1}(2k-1)/(2k)$. $A$ increases from
-0 to 1 on $[0, \pi/2)$, so the quantile for $q > 1/2$ is $\sqrt\nu\tan\theta^\ast$ with
-$A(\theta^\ast) = 2q - 1$, found by bisection until no double lies strictly inside the bracket;
-$t_{1-q} = -t_q$. The tests compare it with the closed forms for $\nu = 1, 2$, with tables and
-with a numerical integral of the density.
+with $\alpha_0 = \kappa_0 = 1$, $\alpha_k = \alpha_{k-1}\,2k/(2k+1)$,
+$\kappa_k = \kappa_{k-1}(2k-1)/(2k)$. $A$ increases from 0 to 1 on $[0, \pi/2)$, so the quantile
+for $q > 1/2$ is $t_{q,\nu} = \sqrt\nu\tan\theta^\ast$ with $A(\theta^\ast) = 2q - 1$, found by
+bisection until no double lies strictly inside the bracket; $t_{1-q,\nu} = -t_{q,\nu}$. The tests
+compare it with the closed forms for $\nu = 1, 2$, with tables and with a numerical integral of
+the density.
 
 ## 5. Paired differences across rates
 
@@ -438,11 +458,11 @@ are censored in every or in some trajectory (v1.4 §5.9: report censoring by con
 
 ### 7.1 Draws
 
-`stats.py::graph_bootstrap(graphs, B, seed)` returns a $(B, G)$ array of graph labels: replicate
-$b$ draws $G$ labels uniformly with replacement. The draws come from the raw output of numpy's
+`stats.py::graph_bootstrap(graphs, B, seed)` returns a $(B, G)$ array of graph labels: each
+replicate draws $G$ labels uniformly with replacement. The draws come from the raw output of numpy's
 PCG64 bit generator seeded by `SeedSequence(seed)`; numpy keeps the raw bit streams and
 `SeedSequence` stable across versions (unlike `Generator` methods), so a seed gives the same
-draws. A raw word $x$ is mapped to $x \bmod G$ after rejecting the $2^{64} \bmod G$ largest words:
+draws. A raw word $\omega$ is mapped to $\omega \bmod G$ after rejecting the $2^{64} \bmod G$ largest words:
 the accepted words are uniform on $[0, V)$ with $V = 2^{64} - (2^{64} \bmod G)$ a multiple of $G$,
 so every residue has $V/G$ preimages and is equally likely.
 
@@ -454,8 +474,9 @@ out of the replicate). The finite-size-scaling bootstrap also recomputes each re
 cluster error from the drawn graph means (drawn copies count as separate graphs).
 
 **Proposition 9 (pairing survives; derived here).** If the same draws are applied to two
-estimates on the same graphs, the replicate differences are the replicates of the paired
-difference: $\hat\mu_2^{\ast b} - \hat\mu_1^{\ast b} = \bar\Delta^{\ast b}$.
+estimates $\hat\mu_1$ and $\hat\mu_2$ on the same graphs (at rates $p_1$ and $p_2$), the replicate
+differences are the replicates of the paired difference: in every replicate,
+$\hat\mu_2^{\ast} - \hat\mu_1^{\ast} = \bar\Delta^{\ast}$.
 
 *Proof.* Each replicate is the mean of the drawn graphs' values, a linear function of the graph
 values with the same coefficients for both estimates. ∎
@@ -490,9 +511,9 @@ $d^\ast = 0$. It names three different statistics, which `stats.py::peak_time_su
 apart (all with graph-equal weights):
 
 * the arithmetic mean $\mathbb{E}[T^\ast]$: `PeakTimeSummary.arithmetic`, the nested mean of $T^\ast$;
-* the geometric mean $\exp(\mathbb{E}[\ln T^\ast])$: `geometric`, from the nested mean of
-  $\ln T^\ast$ (`log_mean`), with the delta-method error
-  $\exp(\hat m)\,\widehat{\mathrm{SE}}(\hat m)$;
+* the geometric mean $\exp(\mathbb{E}[\ln T^\ast])$: `geometric`, $\exp(\hat\eta)$ from the nested
+  mean $\hat\eta$ of $\ln T^\ast$ (`log_mean`), with the delta-method error
+  $\exp(\hat\eta)\,\widehat{\mathrm{SE}}(\hat\eta)$;
 * $\operatorname{argmax}_{t\in\mathcal T_+}\mathbb{E}[d(t)]$: `argmax`, the maximizer of the nested
   mean trace `mean_trace` over the positive checkpoints (the first one; `argmax_set` lists every
   exact maximizer of the averaged values and `argmax_at_horizon` says whether $T_{\max}$ is one).
@@ -536,7 +557,7 @@ distribution of the argmax.
    means; sums and counts of the defined gate-sequence means per graph, their means $\hat f_g$.
 5. $\hat\mu$, $\widehat{\mathrm{SE}}$ and the contributing graphs from the defined $\hat f_g$.
 
-Cost $O(N\log N + NK)$ for $N$ rows and $K$ values per row; exact up to floating-point sums in a
+Cost $\mathcal O(N\log N + NK)$ for $N$ rows and $K$ values per row; exact up to floating-point sums in a
 fixed order, so the result is bitwise invariant under any permutation or chunking of the rows.
 
 ### 9.2 Kaplan–Meier (`weighted_kaplan_meier`, `nested_kaplan_meier`)
@@ -555,7 +576,7 @@ fixed order, so the result is bitwise invariant under any permutation or chunkin
    event weights at their event index, then Proposition 6 in cumulative form; accumulate
    $\sum_g U_g^2$ and the squared influences on the restricted mean.
 
-Cost $O(N\log N + GJ)$ time, bounded memory; the curve is exact for integer weights at $1/2$ and a
+Cost $\mathcal O(N\log N + GJ)$ time, bounded memory; the curve is exact for integer weights at $1/2$ and a
 float64 product elsewhere.
 
 ### 9.3 Bootstrap (`graph_bootstrap`, `GraphMean.bootstrap`)
@@ -569,7 +590,7 @@ float64 product elsewhere.
    result does not depend on the block size. `GraphMean.bootstrap` computes the means only; the
    finite-size-scaling bootstrap also asks for each replicate's cluster error.
 
-Cost $O(BGK)$ time per estimate, $O(2^{20} + BK)$ memory.
+Cost $\mathcal O(BGK)$ time per estimate, $\mathcal O(2^{20} + BK)$ memory.
 
 ## 10. From the mathematics to the code
 
@@ -600,7 +621,7 @@ Cost $O(BGK)$ time per estimate, $O(2^{20} + BK)$ memory.
 | `SurvivalCurve.at_risk`, `.events` | $Y_j/W$, $D_j/W$ |
 | `SurvivalCurve.restricted_mean` | $\int_0^h\hat S$ |
 | `CensoringSummary.censored_fraction` | nested mean of $\mathbf 1[\text{censored}]$ |
-| `PeakTimeSummary.geometric`, `.geometric_se` | $e^{\hat m}$, $e^{\hat m}\widehat{\mathrm{SE}}(\hat m)$, $\hat m$ the nested mean of $\ln T^\ast$ |
+| `PeakTimeSummary.geometric`, `.geometric_se` | $\exp(\hat\eta)$, $\exp(\hat\eta)\,\widehat{\mathrm{SE}}(\hat\eta)$, $\hat\eta$ the nested mean of $\ln T^\ast$ |
 
 ## 11. Worked examples
 
@@ -816,7 +837,7 @@ assert refused.arithmetic is None and "horizon" in refused.note
 
 ## 12. Validation map
 
-All in `tests/test_study_stats.py`.
+All in `tests/test_study_stats.py`, except the last row (`tests/test_study_stats_fss_notation.py`).
 
 | test | what it checks | how |
 |---|---|---|
@@ -846,6 +867,7 @@ All in `tests/test_study_stats.py`.
 | `test_graph_equal_weights_are_integers_with_equal_graph_totals`, `test_graph_equal_weights_refuse_an_overflowing_allocation`, `test_nested_kaplan_meier_takes_any_allocation` | §6.2 weights | integer weights with equal totals; an allocation with $\operatorname{lcm}(1, \dots, 43)$ refused by `graph_equal_weights` and taken by `nested_kaplan_meier` with float weights: its curve, errors and restricted mean equal the nested means and errors of $\mathbf 1[\tau > t]$ and $\min(\tau, T_{\max})$ (relative $10^{-12}$, $10^{-9}$) |
 | `test_censoring_summary_uses_graph_equal_weights` | §6.6 | exact |
 | `test_the_three_peak_statistics_are_different_numbers`, `test_horizon_peaks_follow_the_declared_policy`, `test_missing_peaks_are_left_out_and_counted`, `test_argmax_replicates_follow_the_graph_draws` | §8, Propositions 11 and 12 | exact |
+| `test_the_notation_table_lists_every_symbol_once`, `test_the_checks_find_a_missing_row_a_doubled_row_and_an_old_symbol` | §2: every symbol of this document and of [07-finite-size-scaling.md](07-finite-size-scaling.md) has one row | every math span read for its symbols (letters with their decorations, primes and star; subscripts that are expressions read too) against the table; no symbol in two rows; the letters renamed for having two meanings not used the old way; a removed row, an unknown command, an unlisted symbol, a doubled row and an old symbol each found |
 
 ## 13. Limitations and departures
 
