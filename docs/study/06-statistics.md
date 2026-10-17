@@ -793,7 +793,7 @@ All in `tests/test_study_stats.py`.
 | `test_nested_mean_matches_a_loop_reference_on_unbalanced_hierarchies` | §3.1, §4.1 | against dictionaries and loops, relative $10^{-13}$ |
 | `test_a_balanced_allocation_gives_the_plain_mean` | §3.3 balanced case | exact to rounding |
 | `test_the_estimator_is_unbiased_and_its_cluster_error_estimates_the_exact_variance` | Propositions 1 and 3, interval coverage | 4000 normal replicates: $\lvert z\rvert \le 4.5$ for the mean (false alarm $7\times10^{-6}$), variance ratio within 5 standard deviations ($\approx 10^{-6}$), mean of $\widehat{\mathrm{SE}}^2$ within 4.5 standard errors, coverage in $[0.93, 0.97]$ (measured 0.948, 5.1 binomial standard deviations from the edge) |
-| `test_the_result_does_not_depend_on_the_order_or_chunking_of_the_rows` | bitwise invariance (§3.1) | permuted and re-chunked rows, `np.array_equal` |
+| `test_the_result_does_not_depend_on_the_order_or_chunking_of_the_rows`, `test_censoring_and_peak_summaries_do_not_depend_on_the_order_or_chunking_of_the_rows` | bitwise invariance (§3.1, §9.2; v1.4 §7.4 "Analysis") of the nested mean, the Kaplan–Meier curve, the censoring and peak summaries | permuted and re-chunked rows, `np.array_equal` |
 | `test_trailing_axes_are_independent_columns` | vector values | equal to column-by-column calls |
 | `test_undefined_values_are_refused_unless_omitted_which_changes_the_target` | §3.4 | exact values and counts |
 | `test_one_graph_has_no_graph_ensemble_error` | $G = 1$ | NaN error and interval |

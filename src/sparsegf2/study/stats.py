@@ -47,6 +47,7 @@ from numpy.typing import ArrayLike
 
 __all__ = [
     "CensoringSummary",
+    "KM_VARIANCE",
     "GraphMean",
     "NestedMean",
     "PeakTimeSummary",

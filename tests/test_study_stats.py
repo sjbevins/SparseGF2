@@ -1088,3 +1088,43 @@ def test_results_serialize_to_json():
     assert out["median"] == 2.0 and out["mean"] is None and out["variance"] == st.KM_VARIANCE
     single = st.mean_over_graphs([0], [1.0]).to_dict()
     assert single["se"] is None
+
+
+def test_censoring_and_peak_summaries_do_not_depend_on_the_order_or_chunking_of_the_rows():
+    # v1.4 §7.4 ("Analysis"): weights, aggregation, censoring and peak flags invariant under
+    # chunking; every summary sorts its rows canonically, so the results are bitwise equal
+    rng = np.random.default_rng(52)
+    g, c, r = _hierarchy(rng, 10, max_circuits=3, max_replicas=2)
+    tau = rng.geometric(0.1, g.size)
+    observed = tau <= 15
+    times = np.minimum(tau, 15).astype(float)
+    tstar = np.where(rng.random(g.size) < 0.1, np.nan, rng.uniform(1, 64, g.size))
+    at_h = rng.random(g.size) < 0.2
+    cps = np.array([0.0, 1, 2, 4, 8, 16, 32, 64])
+    traces = rng.integers(0, 5, (g.size, cps.size)).astype(float)
+    perm = rng.permutation(g.size)
+    chunks = np.array_split(perm, 3)
+    order = np.concatenate([chunks[1], chunks[2], chunks[0]])
+
+    def run(idx):
+        km = st.nested_kaplan_meier(g[idx], c[idx], r[idx], times[idx], observed[idx])
+        cs = st.censoring_summary(g[idx], c[idx], r[idx], times[idx], observed[idx])
+        pk = st.peak_time_summaries(
+            g[idx],
+            c[idx],
+            r[idx],
+            tstar[idx],
+            at_horizon=at_h[idx],
+            traces=traces[idx],
+            checkpoints=cps,
+            horizon_policy="include",
+        )
+        return km, cs, pk
+
+    a, b = run(np.arange(g.size)), run(order)
+    for name in ("times", "survival", "se", "at_risk", "events"):
+        assert np.array_equal(getattr(a[0], name), getattr(b[0], name)), name
+    assert a[0].restricted_mean == b[0].restricted_mean and a[0].median == b[0].median
+    assert a[0].restricted_mean_se == b[0].restricted_mean_se
+    assert a[1].to_dict() == b[1].to_dict()
+    assert a[2].to_dict() == b[2].to_dict()
