@@ -30,10 +30,16 @@ def rng(request) -> np.random.Generator:
 
 # ---------------------------------------------------------------------------
 # No silent skips. With SPARSEGF2_NO_SKIPS=1 (set in CI) any skipped test fails
-# the session, except the docs test on a machine without bash.
+# the session, except for platform limits: the docs test on a machine without
+# bash, and the one-thread-per-physical-core tests where the operating system
+# cannot pin threads to cores (macOS; tests/test_performance.py).
 # ---------------------------------------------------------------------------
 
-_ALLOWED_SKIP_REASONS = {"no working bash"}
+_ALLOWED_SKIP_REASONS = {
+    "no working bash",
+    "one thread per physical core needs the cores (Windows or Linux)",
+    "the operating system's cores cannot be read here",
+}
 _skips: list[tuple[str, str]] = []
 
 
