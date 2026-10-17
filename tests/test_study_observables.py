@@ -141,65 +141,131 @@ def test_the_catalog_has_one_entry_per_observable():
     assert {r["id"] for r in rows if r["retrospective"]} == RETROSPECTIVE
     table = ob.catalog_markdown().splitlines()
     assert len(table) == len(rows) + 2 and table[0].startswith("| id |")
-    # every row has the header's six cells, and each cell reads back as its text
+    # every row has the header's six cells, and each cell reads back as its text: the ids are
+    # code spans, the definitions plain text (they hold _, *, [, <, ~ and |)
     for line, row in zip(table[2:], rows, strict=True):
         cells = _gfm_row(line)
         assert len(cells) == 6, line
         assert cells[0] == ("code", row["id"])
         assert cells[5] == ("text", row["definition"])
     assert sum("|" in r["definition"] for r in rows) >= 4  # the case that broke the table
+    assert sum("_" in r["definition"] for r in rows) >= 10  # and the one that is inline syntax
 
 
-def _gfm_row(line):
-    """A GitHub table row as (kind, rendered text) per cell, written from the GFM rules: the row
-    is split at every "|" not preceded by a backslash; the backslash of an escaped "\\|" is
-    dropped; the cell is then inline Markdown, where a backslash before ASCII punctuation is an
-    escape (it shows the punctuation), except inside a code span, where text is literal."""
-    cells, current, previous = [], "", ""
+_INLINE_OPENERS = "`*_[<&~$"
+"""The characters that can begin inline syntax in a GitHub table cell, from the specifications:
+code spans (`), emphasis and strong emphasis (* and _), links and images ([; an image is ![),
+autolinks and raw HTML (<) and entity and numeric character references (&) (CommonMark 0.31
+§6), strikethrough (~, GitHub Flavored Markdown) and math ($, GitHub). A "]" or "!" begins
+nothing without a "[" and a backslash is handled as an escape."""
+
+
+def _split_row(line, rule):
+    """The cells of a table row before inline parsing. A "|" is a cell delimiter unless it is
+    escaped: under rule "gfm" when a backslash precedes it (the GFM table extension, cmark-gfm's
+    scanner), under rule "parity" when an odd run of backslashes precedes it (marked's
+    splitCells). Either way the backslash just before an escaped "|" is dropped and the spaces
+    and tabs at each cell's ends are removed."""
+    cells, current, run = [], "", 0
     for ch in line.strip()[1:-1] + "|":
-        if ch == "|" and previous != "\\":
-            cells.append(current.strip())
+        escaped = run > 0 if rule == "gfm" else run % 2 == 1
+        if ch == "|" and not escaped:
+            cells.append(current.strip(" \t"))
             current = ""
         elif ch == "|":
             current = current[:-1] + "|"
         else:
             current += ch
-        previous = ch
-    out = []
-    for cell in cells:
-        if len(cell) >= 2 and cell[0] == cell[-1] == "`":
-            out.append(("code", cell[1:-1]))
-            continue
-        text, i = "", 0
-        while i < len(cell):
-            if cell[i] == "\\" and i + 1 < len(cell) and cell[i + 1] in string.punctuation:
-                text += cell[i + 1]
-                i += 2
-            else:
-                text += cell[i]
-                i += 1
-        out.append(("text", text))
-    return out
+        run = run + 1 if ch == "\\" else 0
+    return cells
+
+
+def _inline(cell):
+    """(kind, shown text) of one cell's inline Markdown. A cell that is one code span shows its
+    content literally ("code"; one space is stripped from each end when both ends have one).
+    Otherwise a backslash before ASCII punctuation shows that character and any other character
+    shows itself ("text"); an unescaped character of _INLINE_OPENERS could begin Markdown
+    syntax, so the cell is then reported as ("markdown", cell): this model does not vouch for
+    what it shows."""
+    if len(cell) >= 2 and cell[0] == cell[-1] == "`" and "`" not in cell[1:-1]:
+        inner = cell[1:-1]
+        if len(inner) >= 2 and inner[0] == inner[-1] == " " and inner.strip(" "):
+            inner = inner[1:-1]
+        return ("code", inner)
+    text, i = "", 0
+    while i < len(cell):
+        if cell[i] == "\\" and i + 1 < len(cell) and cell[i + 1] in string.punctuation:
+            text += cell[i + 1]
+            i += 2
+        elif cell[i] in _INLINE_OPENERS:
+            return ("markdown", cell)
+        else:
+            text += cell[i]
+            i += 1
+    return ("text", text)
+
+
+def _gfm_row(line):
+    """A GitHub table row as (kind, shown text) per cell, written from the GFM rules
+    (_split_row, then _inline); the row must split alike under the parity rule of parsers that
+    count backslashes."""
+    cells = _split_row(line, "gfm")
+    assert _split_row(line, "parity") == cells, line
+    return [_inline(cell) for cell in cells]
+
+
+def _registered_row(ident, definition):
+    """The table row of a definition registered under ``ident`` for the test, read back by
+    _gfm_row, with the number of lines of the whole table."""
+    entry = ob.ObservableDef(
+        ident, "1", "snapshot", ("physical_code",), {}, definition, ob.code_parameters
+    )
+    ob.register(entry)
+    try:
+        table = ob.catalog_markdown().splitlines()
+        rows = [_gfm_row(line) for line in table[2:]]
+        shown = " ".join(ident.splitlines()).strip(" \t")
+        found = [cells for cells in rows if cells[0][1] == shown]
+        assert len(found) == 1, table
+        return found[0], len(table)
+    finally:
+        del ob._REGISTRY[(ident, "1")]
 
 
 def test_the_catalog_table_keeps_backslashes_and_pipes():
     """A definition with a backslash before a pipe, a doubled backslash and a lone one reads back
     exactly (escaping only the pipe drops the backslash: "a\\|b" would show as "a|b"); so does an
-    id with a pipe and a backslash before a pipe, in its code span (where backslashes are
-    literal, so doubling them would show two)."""
+    id with a pipe, in its code span, and an id with a backslash before a pipe, written as plain
+    text (in a code span backslashes are literal, so doubling them would show two, and a single
+    one before the escaped pipe is a run of two, which parsers that count the run do not read as
+    an escape)."""
     hard = "P(A\\|m) and a\\|b, then c\\\\|d, a lone \\ and Q(A|m) (v1.4 §5.7)"
-    ident = "t|ab\\|le"
-    entry = ob.ObservableDef(
-        ident, "1", "snapshot", ("physical_code",), {}, hard, ob.code_parameters
+    cells, _ = _registered_row("t|able", hard)
+    assert len(cells) == 6
+    assert cells[0] == ("code", "t|able") and cells[5] == ("text", hard)
+    cells, _ = _registered_row("t|ab\\|le", hard)
+    assert cells[0] == ("text", "t|ab\\|le") and cells[5] == ("text", hard)
+
+
+def test_the_catalog_table_shows_markdown_syntax_as_text():
+    """Text that would be Markdown syntax in a cell (emphasis, code spans, links, images,
+    autolinks, HTML, entities, strikethrough, math) reads back as itself, as does an id with a
+    backtick (which would end its code span); line breaks of every kind (\\n, \\r\\n, \\r) are
+    joined by spaces, so the table keeps one line per row and each row its six cells."""
+    hard = (
+        "*a* and **b**, _c_ and __d__, `e` and ``f``, [g](h), ![i](j), [k], <l>, <http://m.n>, "
+        "&amp; and &#35;, ~o~ and ~~p~~, $q$ and $$r$$, s! and t] (v1.4 §5.7)\n"
+        "second line\r\nthird line\rfourth line"
     )
-    ob.register(entry)
-    try:
-        line = next(r for r in ob.catalog_markdown().splitlines() if r.startswith("| `t\\|ab"))
-        cells = _gfm_row(line)
-        assert len(cells) == 6, line
-        assert cells[0] == ("code", ident) and cells[5] == ("text", hard)
-    finally:
-        del ob._REGISTRY[(ident, "1")]
+    shown = " ".join(hard.splitlines())
+    cells, lines = _registered_row("u`v", hard)
+    assert lines == len(ob.catalog()) + 3  # the header, the rule, the rows and this one
+    assert len(cells) == 6
+    assert cells[0] == ("text", "u`v") and cells[5] == ("text", shown)
+    # an identifier stays a code span; spaces and tabs at the ends go, as the table drops them
+    # from a plain cell (a code span would keep a space at one end)
+    cells, _ = _registered_row(" w_x", "\t *y*\t \n")
+    assert cells[0] == ("code", "w_x") and cells[5] == ("text", "*y*")
 
 
 def test_register_get_and_versions():
@@ -1784,6 +1850,8 @@ def test_a_snapshot_is_checked_against_its_n():
     for wrong in (6, 11):
         with pytest.raises(ValueError, match=f"protocol-P snapshot of n = {wrong} .* has {wrong}"):
             ob.SnapshotInput(wrong, n, key=_key(wrong, "P"), tableau=tableau)
+    # what a width cannot see, one way: this F state of n = 6 has the width of a P state of 12
+    ob.SnapshotInput(2 * n, n, key=_key(2 * n, "P"), tableau=tableau)
     # without a key: n, n + 1 or 2n
     for wrong in (4, 5, 7, 8):  # 12 qubits are 2n only at n = 6, n + 1 at 11 and n at 12
         with pytest.raises(ValueError, match="the joint tableau has 12 qubits"):
@@ -1809,8 +1877,11 @@ def test_a_snapshot_is_checked_against_its_n():
     for wrong in (m, m - 1):
         with pytest.raises(ValueError, match=f"protocol-F snapshot of n = {wrong}"):
             ob.SnapshotInput(wrong, 4, key=_key(wrong), tableau=state)
-    # what a width cannot see: an F state of n = 4 has the width of this P state of n = 8
-    ob.SnapshotInput(m // 2, 4, key=_key(m // 2), tableau=state)
+    # and the other way: this P state of n = 8 has the width of an F state of n = 4, so under the
+    # F key of 4 it is computed as one, into a plausible wrong k (its own k is 0, above)
+    wrong_f = ob.SnapshotInput(m // 2, 4, key=_key(m // 2), tableau=state)
+    wrong_k = state.physical_code(m // 2).num_logical
+    assert ob.compute("k", wrong_f).value == wrong_k == 2  # doc 04 §5.9 quotes it
     # the code: exactly n qubits, with or without a key
     for wrong in (5, 8):
         with pytest.raises(ValueError, match=f"the code has 6 qubits, not num_system = {wrong}"):

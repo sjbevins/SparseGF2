@@ -2288,28 +2288,46 @@ def catalog() -> tuple[dict[str, Any], ...]:
     return tuple(_REGISTRY[key].row() for key in sorted(_REGISTRY))
 
 
-def _cell(text: str, *, code: bool = False) -> str:
-    """``text`` as one GitHub Markdown table cell, lines joined.
+_INLINE_SYNTAX = frozenset("\\`*_[<&~$|")
+"""The characters ``_cell`` writes after a backslash in plain text: the pipe (a cell delimiter)
+and every character that can begin inline syntax in a GitHub table cell: ``\\`` (an escape),
+a backtick (a code span), ``*`` and ``_`` (emphasis), ``[`` (a link or image), ``<`` (an
+autolink or HTML), ``&`` (an entity or numeric reference), ``~`` (strikethrough) and ``$``
+(GitHub's math)."""
 
-    A table row is split at every ``|`` that does not follow a backslash, the backslash of an
-    escaped ``\\|`` is removed, and the cell is then read as inline Markdown, where ``\\\\`` is
-    one backslash. So plain text writes each ``\\`` as ``\\\\`` and then each ``|`` as ``\\|``:
-    a backslash before a pipe survives as itself and never escapes the pipe's escape. Inside a
-    code span (``code=True``, wrapped in backticks) backslashes are literal, so only ``|`` is
-    escaped.
+
+def _cell(text: str, *, code: bool = False) -> str:
+    """``text`` as one cell of a GitHub Flavored Markdown table.
+
+    Its lines (``\\n``, ``\\r\\n``, ``\\r`` and the other breaks of ``str.splitlines``) are
+    joined by spaces, so a row stays one line, and the spaces and tabs at its ends are removed,
+    as the table layer removes them. That layer splits a row at every ``|`` that does not
+    follow a backslash and removes the backslash of each escaped ``\\|``; the cell is then
+    inline Markdown, where a backslash before ASCII punctuation shows that character. So plain
+    text is written with a backslash before every character of :data:`_INLINE_SYNTAX` (``\\``
+    becomes ``\\\\``, ``|`` becomes ``\\|``): no inline syntax can begin, a backslash before a
+    pipe shows as itself, and every pipe follows an odd run of backslashes, which parsers that
+    count the run (marked) also read as an escape. With ``code=True`` (the id) the text is a
+    code span, where backslashes are literal and only ``|`` is escaped, unless it holds a
+    backtick (which would end the span) or a backslash (a backslash before the escaped pipe
+    would make a run of two there): then it is written as plain text.
     """
-    one = " ".join(str(text).split("\n"))
-    if code:
+    one = " ".join(str(text).splitlines()).strip(" \t")
+    if code and one and "`" not in one and "\\" not in one:
         return "`" + one.replace("|", "\\|") + "`"
-    return one.replace("\\", "\\\\").replace("|", "\\|")
+    return "".join("\\" + c if c in _INLINE_SYNTAX else c for c in one)
 
 
 def catalog_markdown() -> str:
     """:func:`catalog` as a Markdown table (id, version, level, inputs, parameters, definition).
 
-    Every cell is escaped by ``_cell`` (``\\`` as ``\\\\``, ``|`` as ``\\|``; the id is a code
-    span, where only ``|`` is escaped), so each row has the header's six cells and every cell
-    reads back as its text.
+    Every cell is written by ``_cell``, so under the GitHub Flavored Markdown specification each
+    row has the header's six cells and every cell reads back as its text, with its lines joined
+    by spaces and the spaces and tabs at its ends removed: the pipe and every character that
+    could begin inline syntax (an escape, a code span, emphasis, a link, an autolink or HTML, an
+    entity, strikethrough, GitHub's math) are escaped, and the id is a code span unless it holds
+    a backtick or a backslash. What GitHub adds after the Markdown, such as emoji shortcodes
+    (``:b:``), is not Markdown syntax and is not escaped.
     """
     lines = [
         "| id | version | level | inputs | parameters | definition |",

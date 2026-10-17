@@ -858,17 +858,34 @@ the key's $n$ is `num_system`; the code has exactly $n$ qubits; the joint tablea
 width of the key's protocol, $2n$ for F (the system and its references) and $n$ for P (design §12),
 or, without a key, one of the widths a joint state of $n$ system qubits can have ($n$, $n + 1$ or
 $2n$); and every edge endpoint lies in $0..n-1$, with no self-loop (the list is normalized once).
-So a snapshot paired with another size's key is refused rather than computed into plausible
-wrong values, also when its width is one the keyless check accepts ($n$ or $n + 1$ under an F key
-of $n$, $n + 1$ or $2n$ under a P key of $n$). Two pairings no width can expose remain the caller's to get
-right: the graph of a smaller size (an edge list has no node count) and an F state of $n$ under a
-P key of $2n$; the store pairs both by the trajectory's key. `compute` resolves the entry and the
-parameters, calls `entry.compute(snapshot, params, entry)` and returns the value with its key
-(`observable_id`, `version`, `params_key`). `catalog_markdown` writes every cell as GitHub table
-text: a row is split at each `|` not preceded by a backslash, the backslash of `\|` is dropped,
-and the cell is then inline Markdown, where `\\` is one backslash; so each `\` is written `\\` and
-then each `|` is written `\|` (in the id's code span, where backslashes are literal, only `|` is
-escaped). Every row has the header's six cells and every cell reads back as its text.
+So a snapshot whose width differs from that of its key's protocol and size is refused rather than
+computed into plausible wrong values, also when its width is one the keyless check accepts ($n$ or
+$n + 1$ under an F key of $n$, $n + 1$ or $2n$ under a P key of $n$). What no check of the data
+can expose remains the caller's to get right: the graph of a smaller size (an edge list has no
+node count); an F state of $n$ and a P state of $2n$ under each other's key, since both have $2n$
+qubits (the F state of $n = 6$ is accepted under the P key of 12, and an 8-qubit P state, whose
+$k$ is 0, is computed under the F key of $n = 4$ as an F snapshot, with $k = 2$); and a snapshot
+of another trajectory with the same widths. The store pairs all of them by the trajectory's key.
+`compute` resolves the entry and the parameters, calls `entry.compute(snapshot, params, entry)`
+and returns the value with its key (`observable_id`, `version`, `params_key`).
+
+`catalog_markdown` writes every cell as text of a GitHub Flavored Markdown table: its lines
+(`\n`, `\r\n`, `\r` and the other breaks of `str.splitlines`) joined by spaces, so that a row stays
+one line, and the spaces and tabs at its ends removed, as the table removes them. The table
+splits a row at each `|` not preceded by a backslash and drops the backslash of `\|`; the cell is
+then inline Markdown, where a backslash before ASCII punctuation shows that character. So a
+backslash is written before every `|` and before every character that can begin inline syntax:
+`\` (an escape), the backtick (a code span), `*` and `_` (emphasis), `[` (a link or an image), `<`
+(an autolink or HTML), `&` (an entity), `~` (strikethrough) and the dollar sign (GitHub's math).
+No syntax can then begin, a backslash before a pipe shows as itself, and every pipe follows an odd
+run of backslashes, which parsers that count the run (marked) also read as an escape. The id is a
+code span, where backslashes are literal and only `|` is escaped, unless it holds a backtick
+(which would end the span) or a backslash (before an escaped pipe it would make a run of two):
+then it is written as plain text like the other cells. Under the GitHub Flavored Markdown
+specification every row therefore has the header's six cells and every cell reads back as its
+text, lines joined and ends trimmed (a bare address such as `http://a.b` may become a link that
+shows the same text). What GitHub adds after the Markdown, such as emoji shortcodes (`:b:`), is not
+Markdown syntax and is not escaped.
 
 ## 6. From the mathematics to the code
 
@@ -1234,14 +1251,15 @@ stored peaks, which need the runner (`tests/test_study_runner_peaks.py`).
 
 | property | test | what is compared |
 |---|---|---|
-| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table read by a GitHub-table model written in the test (six cells in every row, every id and definition read back exactly) |
-| the table keeps backslashes and pipes | `test_the_catalog_table_keeps_backslashes_and_pipes` | a registered definition with a backslash before a pipe, two backslashes before a pipe and a lone backslash, and an id with a pipe, read back exactly by the same model (escaping only the pipes loses the backslash before a pipe) |
+| registry: one entry per observable, sorted rows, plain values, retrospective set | `test_the_catalog_has_one_entry_per_observable` | ids, levels, inputs, v1.4 sections, the Markdown table read by a model of the GitHub Flavored Markdown table and inline rules written in the test (a row splits alike under the rule that any backslash escapes a pipe and the rule that an odd run does; a plain cell with an unescaped character that can begin inline syntax is not vouched for): six cells in every row, every id a code span and every definition read back exactly |
+| the table keeps backslashes and pipes | `test_the_catalog_table_keeps_backslashes_and_pipes` | a registered definition with a backslash before a pipe, two backslashes before a pipe and a lone backslash, an id with a pipe (a code span) and an id with a backslash before a pipe (plain text), read back exactly by the same model (escaping only the pipes loses the backslash before a pipe; a code span splits the second id differently under the two rules) |
+| the table shows Markdown syntax as text | `test_the_catalog_table_shows_markdown_syntax_as_text` | a definition with emphasis, strong emphasis, code spans, a link, an image, a bracketed word, HTML, an autolink, entities, strikethrough, math and line breaks `\n`, `\r\n`, `\r`, and an id with a backtick, read back exactly (lines joined) with one table line per row; an identifier with a space before it stays a code span and a definition's spaces and tabs at the ends are trimmed. The 15 mutants of the cell writer (each escaped character left out in turn, `split("\n")` for the line breaks, no trimming, a code span for an id with a backtick or a backslash, the round-2 writer) each fail at least one of these three tests |
 | versions: a changed entry needs a new version | `test_register_get_and_versions` | refusal, a second version, `get` by version, refusals of bad entries |
 | canonical parameter keys | `test_parameters_are_resolved_and_keyed_canonically`, `test_numerically_equal_parameters_have_one_key`, `test_entries_declare_the_kind_of_every_parameter` | defaults, unknown and missing names, key equality, `json.dumps` reference; one key for $J$ = 1, 1.0, numpy scalars, $\pm 0$, int and float coupling lists, a scalar or one-element $\varepsilon$, a range string of sizes and its expansion (`"1:4:2"`, `" 1 : 4 : 2 "`, `"1:5:2"`, `[1, 3]`), a correlated entry as written and as `CorrelatedErasure.from_dict` parses it, the design manifest's `analysis.peak`; strings, bools, fractional ints, NaN, $\pm 10^{400}$ (a `ValueError` naming the parameter, also in `region_seed`) and malformed or empty ranges refused; kinds required and defaults canonical |
 | parameters a function consumes | `test_peak_parameters_are_only_those_a_function_consumes` | `peak_D` keeps `bootstrap`, `peak_D_J` has none |
 | `compute` refusals | `test_compute_refuses_what_it_cannot_compute` | missing inputs, no key, wrong $n$, bad route |
 | `compute` passes the entry and keys the value | `test_compute_hands_the_entry_to_its_compute_and_keys_the_value` | the entry and canonical parameters reach `compute`; `observable_id`, `version`, `params_key`; a non-`ObservableValue` refused |
-| a snapshot checked against $n$ | `test_a_snapshot_is_checked_against_its_n` | the 12-qubit F tableau of $n = 6$: under F keys refused at $n$ = 4, 5, 7, 8, 11, 12 (at 12 and 11 its 12 qubits are $n$ and $n + 1$, widths the keyless check accepts) and under P keys at 6 and 11; without a key refused at 4, 5, 7, 8 and accepted at 6, 11, 12; an 8-qubit P state: $k = 0$ under its P key, refused under F keys of 8 and 7, accepted under an F key of 4 (what no width can see); a 6-qubit code refused at $n$ = 5, 8 with and without a key; edges with an endpoint $\ge n$ or a self-loop refused when built, the list normalized; types |
+| a snapshot checked against $n$ | `test_a_snapshot_is_checked_against_its_n` | the 12-qubit F tableau of $n = 6$: under F keys refused at $n$ = 4, 5, 7, 8, 11, 12 (at 12 and 11 its 12 qubits are $n$ and $n + 1$, widths the keyless check accepts) and under P keys at 6 and 11, accepted under the P key of 12 (what no width can see, one way); without a key refused at 4, 5, 7, 8 and accepted at 6, 11, 12; an 8-qubit P state: $k = 0$ under its P key, refused under F keys of 8 and 7, accepted under the F key of 4 and computed there as an F snapshot, $k = 2$ (the other way); a 6-qubit code refused at $n$ = 5, 8 with and without a key; edges with an endpoint $\ge n$ or a self-loop refused when built, the list normalized; types |
 | change points (§3.2) | `test_change_points_round_trip_and_are_canonical`, `test_change_points_refuse_what_is_not_a_trace` | hand cases; 300 random traces against a loop; every refusal |
 | Propositions 2, 3 | `test_first_passage_matches_its_definition` | 300 random traces: $\tau$, $\widehat\tau^{\mathrm{chk}}$ against $\min$ over layers and checkpoints; $\tau \le \widehat\tau^{\mathrm{chk}}$; $k_t = \min\lbrace\ell : \tau_\ell \le t\rbrace$ (exact) |
 | hand-made first passages, censoring, zero fill | `test_first_passage_on_hand_made_traces` | multi-drop, plateaus, censoring, `survival_data`, `to_dict`, change-point input |
@@ -1357,6 +1375,12 @@ bootstrap seed's tag left out of the version record) each fail `tests/test_study
   today (Proposition 18, the convention after the proof).
 * **Pairing a snapshot with its data.** `SnapshotInput` refuses every width that contradicts the
   key, but an edge list carries no node count and an F state of $n$ qubits has the width of a P
-  state of $2n$, so a graph of a smaller size, or an F state under a P key of twice its $n$,
-  cannot be refused by a check of the data alone; the store pairs snapshots and graphs by the
-  trajectory's key (§5.9).
+  state of $2n$. So a graph of a smaller size, an F state of $n$ under the P key of $2n$, a P state
+  of $2n$ under the F key of $n$ (computed as an F snapshot: §5.9 shows one with $k = 2$ where the
+  state's own $k$ is 0) and a snapshot of another trajectory with the same widths cannot be
+  refused by a check of the data alone; the store pairs snapshots and graphs by the trajectory's
+  key (§5.9).
+* **The catalog table** reads back as its text under the GitHub Flavored Markdown specification
+  (§5.9), as a model of the specification's table and inline rules written in the tests checks,
+  and as rendering every row with marked 15.0.12 confirmed once (by hand, not in the suite).
+  What GitHub adds after the Markdown, such as emoji shortcodes, is not escaped.
