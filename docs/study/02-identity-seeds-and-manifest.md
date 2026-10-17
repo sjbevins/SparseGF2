@@ -123,7 +123,9 @@ token and no identifier, so the string is unambiguous.
 $u(g, c) = g\,s + c$ with the stride $s$ of the manifest and $0 \le c < s$ (`identity.stream_index`; the inverse is
 `split_stream_index`). The engine runs a condition with `circuits_per_graph = s` and `indices = [u(g, c) for the wanted pairs]`, so trajectory $u$
 runs on graph $\lfloor u/s\rfloor = g$ and draws its circuit from stream $u$ of the run seed. The design's default stride is $C$; a
-larger frozen $s$ lets circuits $C, \dots, s-1$ be added later without renumbering.
+larger frozen $s$ lets circuits $C, \dots, s-1$ be added later without renumbering. The engine looks the graph up by position in the list of
+graphs it is given (`MonitoredCircuit.run(indices=...)`: each index must be below `len(edges) * circuits_per_graph`), so a run of the
+trajectories of the graph labels $g_0, \dots, g_1 - 1$ must be given the graphs $0, \dots, g_1 - 1$ in that order; the earlier ones are not simulated.
 
 ### 3.5 Graph records and the edge digest (v1.4 §2.2 "Tracking", §8)
 
@@ -437,6 +439,16 @@ for line in text.splitlines():
         pairs |= {(a, b) for a, b in zip(flat[0::2], flat[1::2])}
 assert pairs <= {tuple(e) for e in records[1].edges.tolist()}  # all gates are edges of graph 1
 assert not pairs <= {tuple(e) for e in records[0].edges.tolist()}  # and not all of graph 0's
+
+# a run on explicit indices: the list of graphs must reach the largest label
+result = spec.run(indices=[ident.stream_index(1, 3, 4)], seed=29)
+assert result.trajectories.tolist() == [7]  # graph 1, circuit 3, trajectory 1 * 4 + 3
+try:
+    spec.run(indices=[ident.stream_index(3, 0, 4)], seed=29)  # graph 3: only graphs 0, 1, 2 were given
+except ValueError as error:
+    print("refused:", str(error)[:90])
+else:
+    raise AssertionError("an index beyond the given graphs was accepted")
 ```
 
 ### (c) A graph record and its digest, computed by hand
