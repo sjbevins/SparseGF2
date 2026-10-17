@@ -700,8 +700,7 @@ def test_null_replicates_are_the_comparison_on_mapped_resampled_data(method):
                 )
             )
         alone = [
-            fss.fit_collapse(m, bounds=BOX, method=method, starts=starts, seed=seed)
-            for m in mapped
+            fss.fit_collapse(m, bounds=BOX, method=method, starts=starts, seed=seed) for m in mapped
         ]
         shared = fss.fit_shared(mapped, bounds=BOX, method=method, starts=starts, seed=seed)
         if method == "polynomial":
