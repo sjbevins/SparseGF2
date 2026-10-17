@@ -377,8 +377,10 @@ indices (`_run_condition`: target `SweepSpec.indices(n)` minus the saved ones) i
 `MonitoredCircuit.run(indices=chunk, seed=run_seed)`, each saved atomically (temporary file,
 then `fsync`, then rename; `study/sweep.py:_save_part`) on a writer thread while the next chunk
 computes. An interrupted run waits for the saves in flight and loses at most the chunk being
-computed; the next run deletes stray temporaries and resumes. Chunk sizes, compression and
-writers: section 12.
+computed; the next run deletes stray temporaries and resumes. A part that cannot be read
+(damaged after it was saved) makes `status`, `run`, `load` and `load_results` refuse with a
+message naming the file: delete it, and the next run recomputes its trajectories exactly.
+Chunk sizes, compression and writers: section 12.
 
 **Growing.** A new spec may add sizes, rewiring probabilities, rates, graphs and circuits per
 graph. It may not change `stride`, the master seeds, `picture`, `stop_when_purified`,

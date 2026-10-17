@@ -24,6 +24,7 @@ import os
 import re
 import threading
 import time
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -494,12 +495,28 @@ def _part_paths(folder: Path) -> list[Path]:
     return sorted(found, key=lambda p: int(p.name[7:-4]))  # by the first stream index
 
 
+#: What reading a damaged part raises (a truncated zip, a missing array, a bad header).
+_DAMAGED = (zipfile.BadZipFile, EOFError, KeyError, ValueError, OSError)
+
+
+def unreadable_part(path: Path, exc: BaseException) -> ValueError:
+    """The error for a part that cannot be read, naming it and what to do."""
+    return ValueError(
+        f"{str(path)!r} is not a readable saved part ({type(exc).__name__}: {exc}): it was "
+        "damaged after it was saved; delete it and run the sweep again, which recomputes its "
+        "trajectories exactly"
+    )
+
+
 def _saved_indices(folder: Path) -> np.ndarray:
     """The stream indices the saved parts of a condition hold (reads one array of each)."""
     held = []
     for path in _part_paths(folder):
-        with np.load(path, allow_pickle=False) as z:
-            held.append(z["trajectories"])
+        try:  # numpy leaves a truncated file open, so the handle is ours
+            with path.open("rb") as fh, np.load(fh, allow_pickle=False) as z:
+                held.append(z["trajectories"])
+        except _DAMAGED as exc:
+            raise unreadable_part(path, exc) from None
     return np.concatenate(held).astype(np.int64) if held else np.zeros(0, dtype=np.int64)
 
 
@@ -804,7 +821,12 @@ def _reader(directory: str | Path, n: int, beta: Any, p: Any):
     seed = list(sweep.run_seed(n, b))
 
     def read(path: Path) -> mipt.EnsembleResult:
-        part = mipt.EnsembleResult.load(path)
+        try:
+            with path.open("rb") as fh:  # a truncated zip fails here, on our own handle
+                zipfile.ZipFile(fh).close()
+            part = mipt.EnsembleResult.load(path)
+        except _DAMAGED as exc:
+            raise unreadable_part(path, exc) from None
         if part.seed_entropy != seed:
             raise ValueError(f"{str(path)!r} was not made by this sweep (its seed differs)")
         return _rebased(part, mc, path)
@@ -892,9 +914,12 @@ def verify(directory: str | Path, n: int, beta: Any, p: Any, u: int) -> dict[str
     replayed = replay(directory, n, beta, p, u)
     folder, read = _reader(directory, n, beta, p)
     for path in _part_paths(folder):
-        with np.load(path, allow_pickle=False) as z:
-            if u not in z["trajectories"]:
-                continue
+        try:
+            with path.open("rb") as fh, np.load(fh, allow_pickle=False) as z:
+                if u not in z["trajectories"]:
+                    continue
+        except _DAMAGED as exc:
+            raise unreadable_part(path, exc) from None
         part = read(path)
         row = int(np.flatnonzero(part.trajectories == u)[0])
         break

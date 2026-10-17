@@ -4156,8 +4156,11 @@ def _sweep_condition_summary(folder: Path) -> dict[str, Any]:
         raise ValueError(f"nothing saved yet in {str(folder)!r}")
     size = 0
     for path in files:
-        with zipfile.ZipFile(path) as z:
-            size += sum(info.file_size for info in z.infolist())
+        try:
+            with zipfile.ZipFile(path) as z:
+                size += sum(info.file_size for info in z.infolist())
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise sweep.unreadable_part(path, exc) from None
     n, beta, p = entry["n"], entry["beta"], entry["p"]
     if size > MAX_RESULT_GB * 2**30:
         raise ValueError(

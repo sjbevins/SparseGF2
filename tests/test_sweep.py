@@ -556,3 +556,21 @@ def test_a_stride_too_large_for_int64_is_refused_before_anything_is_written(tmp_
     assert "result-1000000000000.npz" in names and len(names) == 4
     assert sweep.run(big, directory)["ran"] == 0 and sweep.status(directory)["saved"] == 4
     assert sweep.load(directory, 6, "0", "0.1").trajectories.tolist() == [0, 1, 10**12, 10**12 + 1]
+
+
+def test_a_damaged_part_is_named_with_what_to_do(tmp_path):
+    directory = tmp_path / "damaged"
+    small = spec_with(sizes=[6], betas=["0"], rates=["0.1"])
+    sweep.run(small, directory, chunk_size=2)
+    path = sorted((directory / "n6_beta0_p0.1").glob("result-*.npz"))[-1]
+    path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])  # truncated
+    for call in (
+        lambda: sweep.status(directory),
+        lambda: sweep.run(small, directory),
+        lambda: sweep.load(directory, 6, "0", "0.1"),
+        lambda: api.load_results(str(directory / "n6_beta0_p0.1")),
+    ):
+        with pytest.raises(ValueError, match=f"{path.name}.*not a readable saved part.*delete it"):
+            call()
+    path.unlink()  # as the message says: delete it, and the next run recomputes it
+    assert sweep.run(small, directory)["ran"] == 2
