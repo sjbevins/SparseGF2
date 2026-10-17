@@ -67,13 +67,24 @@ probability law and no random stream (Proposition 13 in §4.8).
 | $V$ | the system, $\lbrace 0, \dots, n-1\rbrace$ | set of qubits | `system_qubits` |
 | $R$ | the reference qubits $n, \dots, N-1$ (reference $n + i$ is $R_i$ of v1.4) | set of qubits | `reference_qubits` |
 | $N$ | all qubits, $N = n + \lvert R\rvert$ ($2n$ in the purification picture) | integer | `num_qubits` |
+| $q$, $q'$ | qubits, $0 \le q < N$ | integers | `q` |
+| $A$, $B$ | sets of qubits (regions); in Propositions 11 and 12 and §8, $B = V \setminus A$ | sets of qubits | `region`; the arguments `a`, `b` of `mutual_information` |
+| $\beta$ | the rewiring probability of a Watts–Strogatz graph (§5.8, §8) | real in $[0, 1]$ | `beta` |
 | $\mathbb{F}_2$ | the field with two elements; all arithmetic on bits is mod 2 | | XOR, AND on `uint64` words |
+| $I$, $X$, $Y$, $Z$ | the single-qubit Paulis; $X_q$ is $X$ on qubit $q$, $I_R$ the identity on the qubits $R$ | operators | |
+| $P$, $P'$ | Pauli operators on $N$ qubits (Propositions 1, 2, 4, 7) | operators | rows, signs dropped |
+| $x_q$, $z_q$; $x$, $z$ | the X and Z bits of qubit $q$ in a vector; bits, or the X and Z halves $(x_0, \dots, x_{N-1})$, $(z_0, \dots, z_{N-1})$ of a vector (§3.1, Proposition 1) | bits, vectors | bit `q & 63` of word `q >> 6` (X) and of word `wq + (q >> 6)` (Z) |
 | $\varphi(P)$ | the phase-free vector $(x_0, \dots, x_{N-1}, z_0, \dots, z_{N-1})$ of a Pauli $P$ | $\mathbb{F}_2^{2N}$ | a row |
 | $\sigma(x, z)$ | the single-qubit Pauli $i^{xz} X^x Z^z$ ($I$, $X$, $Z$, $Y$) | operator | |
-| $\lambda$ | a scalar $\pm 1$, $\pm i$ (the phase of a Pauli operator) | complex number | |
+| $\lambda$, $\mu$ | scalars $\pm 1$, $\pm i$ (phases of Pauli operators) | complex numbers | |
+| $v$, $w$, $v'$; $\bar w$ | vectors of $\mathbb{F}_2^{2N}$ (of $\mathbb{F}_2^{d}$ in Proposition 5); $\bar w$ is $w \in \mathbb{F}_2^{2\lvert A\rvert}$ extended by zeros (Lemma 3) | vectors | rows |
 | $\langle v, w\rangle$ | the symplectic form $\sum_q (x_q z'_q + z_q x'_q)$ | $\mathbb{F}_2$ | `_kernel/entropy.py::generators_commute` |
-| $U^\perp$ | the symplectic complement $\lbrace w : \langle v, w\rangle = 0 \text{ for all } v \in U\rbrace$ of a subspace $U$ | subspace | |
+| $U$ | a subspace of $\mathbb{F}_2^{2N}$ (of $\mathbb{F}_2^d$ in §3.4 and Proposition 5); in Proposition 7, $U = \widetilde{\mathsf S}_t$ | subspace | the row space of `rows` |
+| $U^\perp$ | the symplectic complement $\lbrace w : \langle v, w\rangle = 0 \text{ for all } v \in U\rbrace$ of a subspace $U$; $v^\perp$ is $\operatorname{span}(v)^\perp$ | subspace | |
 | $\mathsf S$, $\widetilde{\mathsf S}$ | a stabilizer group and its phase-free group $\varphi(\mathsf S)$ | group, subspace | engine tableau rows; `PhaseFreeTableau` |
+| $g$ | an element of a stabilizer group $\mathsf S$ | operator | |
+| $\lvert\Phi^+\rangle$ | the Bell state $(\lvert 00\rangle + \lvert 11\rangle)/\sqrt 2$ (§3.3) | state vector | `reference="purification"` |
+| $\lvert\psi\rangle$, $\lvert\psi'\rangle$ | a pure stabilizer state before and after a measurement (Proposition 4) | state vectors | |
 | $r$ | $\dim \widetilde{\mathsf S}$ | integer | `PhaseFreeTableau.rank` |
 | $\pi_A$ | restriction to the qubits $A$: keep $x_q$, $z_q$ for $q \in A$ | linear map $\mathbb{F}_2^{2N} \to \mathbb{F}_2^{2\lvert A\rvert}$ | column subset |
 | $\bar A$ | the complement of a set of qubits $A$ among all $N$ qubits | set of qubits | `np.setdiff1d` in `PhaseFreeTableau.entropy` |
@@ -93,6 +104,9 @@ probability law and no random stream (Proposition 13 in §4.8).
 | $I(A:B)$ | $S(A) + S(B) - S(A \cup B)$, in bits | integer | `PhaseFreeTableau.mutual_information` |
 | $\mathrm{RREF}(\widetilde{\mathsf S})$ | the canonical basis (§3.4) | matrix | `PhaseFreeTableau.canonical()` |
 | $d$ | the length of the vectors of a subspace $U \subseteq \mathbb{F}_2^d$ (§3.4, Proposition 5) | integer | `2 * num_qubits` |
+| $b_i$, $b$ | the rows of a basis in reduced row echelon form (§3.4, Propositions 5, 7; §5.4: the canonical rows); in Proposition 7, $b$ is a row of $\mathcal B$ | vectors | rows of `canonical()` |
+| $p$, $p_i$ | a lead (§3.4): a column, written in the column order; $p_i$ the lead of $b_i$ | column | `cols[pivots[i]]` |
+| $c$ | a column as a packed position: bit $c \,\&\, 63$ of word $c \gg 6$ of a row (§5.1) | integer | `c`, `cols[j]` |
 | $L(U)$ | the leads (§3.4) of the nonzero elements of $U$ (Proposition 5) | set of columns | `pivots` |
 | $J$ | a set of basis rows whose sum is a given element (Propositions 5, 7) | set | |
 | $\mathcal B$, $\mathcal B_R$, $\mathcal B_V$ | the RREF basis for the reference-first column order, its rows with a reference lead and its rows with a system lead (Proposition 7) | sets of rows | in `physical_tableau`: `rows[:first]`, `rows[first:rank]` |
@@ -100,8 +114,9 @@ probability law and no random stream (Proposition 13 in §4.8).
 | $w_g$ | $\lceil N / 64\rceil$, words per column of the engine tableau (one bit per generator) | integer | `tab.shape[1]` |
 | $W$ | words per packed row given to an elimination (§5.1, §5.2): $2 w_q$ for a phase-free row | integer | `rows.shape[1]` |
 | $s$ | the number of rows given to an elimination (§5.1) | integer | `rows.shape[0]` |
-| $i$, $j$ | indices, local to the passage where they appear; in §3.6, $j$ numbers the generators of the engine tableau, which are the rows of a snapshot | integers | `r` in `joint_snapshot_rows` |
+| $i$, $j$ | indices, local to the passage where they appear; in §3.6, $j$ numbers the generators of the engine tableau, which are the rows of a snapshot; $i$ is also the imaginary unit in $\pm i$ and $i^{xz}$ (§3.1, §4.1, §4.2) | integers | `r` in `joint_snapshot_rows` |
 | $C$ | circuits per graph in a collection of graphs | integer | `circuits_per_graph` |
+| $f$ | the first trajectory of a range run (§3.7) | integer | `first_trajectory` |
 | $u$ | a trajectory index (v1.4 §7.2): it runs graph $\lfloor u / C\rfloor$ with circuit $u \bmod C$ | integer $\ge 0$ | `indices[t]`, `trajectories[t]` |
 | $h$ | the 64-bit hash of a probe's name, which keys its streams | integer | `phash[j]` in `_kernel/ensemble.py` |
 | $\mathrm{mix}$ | the stream-index mixer of the engine's random numbers | function | `_kernel/rng.py::mix` |
@@ -252,10 +267,10 @@ standard, and the proofs are written out so that every step can be checked.
 
 ### 4.1 The representation
 
-**Proposition 1.** For Paulis $P, Q$ on $N$ qubits:
-(a) $\varphi(PQ) = \varphi(P) + \varphi(Q)$;
-(b) $PQ = (-1)^{\langle \varphi(P), \varphi(Q)\rangle}\, QP$;
-(c) $\varphi(P) = \varphi(Q)$ if and only if $P = \lambda Q$ for some $\lambda \in \lbrace\pm1, \pm i\rbrace$.
+**Proposition 1.** For Paulis $P, P'$ on $N$ qubits:
+(a) $\varphi(PP') = \varphi(P) + \varphi(P')$;
+(b) $PP' = (-1)^{\langle \varphi(P), \varphi(P')\rangle}\, P'P$;
+(c) $\varphi(P) = \varphi(P')$ if and only if $P = \lambda P'$ for some $\lambda \in \lbrace\pm1, \pm i\rbrace$.
 
 *Proof.* On one qubit, $ZX = -XZ$ gives
 $X^x Z^z X^{x'} Z^{z'} = (-1)^{z x'} X^{x + x'} Z^{z + z'}$, where $X^2 = Z^2 = I$ lets the
@@ -274,8 +289,8 @@ with $\lvert \mathsf S\rvert = 2^{\dim \widetilde{\mathsf S}}$, it is the row sp
 any generating set of $\mathsf S$, and the stabilized subspace has dimension
 $2^{N - \dim \widetilde{\mathsf S}}$. In particular a pure state has $\dim \widetilde{\mathsf S} = N$.
 
-*Proof.* If $\varphi(P) = \varphi(Q)$ for $P, Q \in \mathsf S$, then $P = \lambda Q$
-(Proposition 1c), so $\lambda I = P Q^{-1} \in \mathsf S$. $\lambda = -1$ is excluded by
+*Proof.* If $\varphi(P) = \varphi(P')$ for $P, P' \in \mathsf S$, then $P = \lambda P'$
+(Proposition 1c), so $\lambda I = P P'^{-1} \in \mathsf S$. $\lambda = -1$ is excluded by
 $-I \notin \mathsf S$, and $\lambda = \pm i$ too, since then $(\lambda I)^2 = -I \in \mathsf S$;
 hence $\lambda = 1$: $\varphi$ is injective on $\mathsf S$. By Proposition 1a the image of a
 group is closed under addition, so it is a subspace, and it is spanned by the images of
@@ -313,12 +328,12 @@ not depend on the measurement outcomes or on any sign.
 *Proof.* By induction over the operations; the state stays pure (a measurement projects a
 pure state onto a pure state). *Clifford gate $G$.* $G P G^\dagger$ is a Pauli for every Pauli
 $P$, and $\varphi(G P G^\dagger) = M_G \varphi(P)$ for a $2N \times 2N$ binary (symplectic)
-matrix $M_G$ that depends on $G$ only: on the two qubits a two-qubit gate acts on, the
-images of $X_a, X_b, Z_a, Z_b$ fix the columns of $M_G$, and Proposition 1a extends it
-linearly. So $\widetilde{\mathsf S} \mapsto M_G \widetilde{\mathsf S}$. In the engine the
-Clifford with index $16s + b$ applies the $4 \times 4$ matrix of its symplectic class
-$s$ to the columns of its two qubits (`_kernel/tableau.py::apply_2q`, `sym = g >> 4`); the
-four sign bits $b$ only change signs (v1.4 §9.1). *Measurement of a Pauli $M$ with outcome
+matrix $M_G$ that depends on $G$ only: on the two qubits $q, q'$ a two-qubit gate acts on,
+the images of $X_q, X_{q'}, Z_q, Z_{q'}$ fix the columns of $M_G$, and Proposition 1a extends
+it linearly. So $\widetilde{\mathsf S} \mapsto M_G \widetilde{\mathsf S}$. In the engine the
+Clifford with index `g` applies the $4 \times 4$ matrix of its symplectic class `g >> 4` to
+the columns of its two qubits (`_kernel/tableau.py::apply_2q`, `sym = g >> 4`); its four
+sign bits `g & 15` only change signs (v1.4 §9.1). *Measurement of a Pauli $M$ with outcome
 $\pm 1$.* If $M$ commutes with all of $\mathsf S$, then $\varphi(M) \in \widetilde{\mathsf S}^\perp
 = \widetilde{\mathsf S}$ (Lemma 3c), the outcome is determined and the state does not change.
 Otherwise let $v_M = \varphi(M)$. The new state is
@@ -331,8 +346,8 @@ abelian group $\mathsf S$, so it is not in $\mathsf S$). The group they generate
 does not contain $-I$ (that would put $\mp M$ in $\mathsf S$), has $2^N$ elements and
 stabilizes $\lvert\psi'\rangle$. The Paulis that fix $\lvert\psi'\rangle$ form a
 stabilizer group in the sense of §3.2: products and inverses of Paulis that fix a vector fix
-it; $-I$ and $\pm iI$ fix no nonzero vector; and two of them, $P$ and $Q$, commute, since
-$PQ = -QP$ would give $\lvert\psi'\rangle = PQ\lvert\psi'\rangle = -QP\lvert\psi'\rangle =
+it; $-I$ and $\pm iI$ fix no nonzero vector; and two of them, $P$ and $P'$, commute, since
+$PP' = -P'P$ would give $\lvert\psi'\rangle = PP'\lvert\psi'\rangle = -P'P\lvert\psi'\rangle =
 -\lvert\psi'\rangle$. This group contains the one above and, stabilizing a nonzero vector, has
 at most $2^N$ elements (Proposition 2: the stabilized subspace has dimension
 $2^{N - \dim}$, at least 1), so the two are equal, and
@@ -345,11 +360,12 @@ which contains no outcome and no sign. ∎
 
 The engine realizes this update with
 `_kernel/tableau.py::measure_1q_phase_free_tracked` (`_collapse_phase_free`): the rows
-anticommuting with $M$ (bitset `anti`) other than a pivot row $p$ are replaced by their
-sum with $p$, which commutes with $M$, and row $p$ by $m$. The $N - 1$ rows that now
-commute with $M$ are independent and lie in $\widetilde{\mathsf S} \cap m^\perp$, which has
-dimension $N - 1$, so they span it. The tracked version chooses the pivot to keep the
-reference rows (`ref_rows`) a basis of their reference parts
+anticommuting with $M$ (bitset `anti`) other than one pivot row (`pivot`) are replaced by
+their sum with the pivot row, which commutes with $M$, and the pivot row by $v_M$. The
+$N - 1$ rows that now commute with $M$ are independent and lie in
+$\widetilde{\mathsf S} \cap v_M^\perp$, which has dimension $N - 1$, so they span it. The
+tracked version chooses the pivot to keep the reference rows (`ref_rows`) a basis of their
+reference parts
 ([code-dimension.md](../observables/code-dimension.md) §2); every pivot choice gives the same
 span, and the canonical form erases the choice. Consequence: the phase-free tableau of a
 trajectory is fixed by its graph, gate sequence and measurement mask, which the phase-free
@@ -627,11 +643,12 @@ as before. The int64 array goes to the kernel in place of the former scalar `fir
 ### 5.8 Measured cost
 
 One thread of an AMD Ryzen 9 9950X3D, Numba 0.68, 2026-10-17; purification picture,
-Watts–Strogatz graph ($k = 4$, $\beta = 0.1$), `random_edges`. The snapshot cost is the
-difference of one trajectory's time with a snapshot at every layer and without, divided by
-the evaluations (medians of 7 runs); the canonicalization time is `from_words` of a stored
+Watts–Strogatz graph of degree 4 and $\beta = 0.1$ (`graphs.watts_strogatz(n, 4, 0.1)`),
+`random_edges`. The snapshot cost is the difference of one trajectory's time with a snapshot
+at every layer and without, divided by the evaluations (medians of 7 runs); the
+canonicalization time is `from_words` of a stored
 snapshot (copy, checks and §5.1). "Scrambled" is a dense state ($2n\lceil\log_2 n\rceil$
-scramble gates, no measurements); "monitored" is depth $n$ at $p = 0.1$.
+scramble gates, no measurements); "monitored" is depth $n$ at `measurement_rate=0.1`.
 
 | $n$ ($N$) | snapshot per evaluation | canonicalization | bytes (§3.5) | zlib level 6, scrambled | zlib level 6, monitored (median; min) |
 |---|---|---|---|---|---|
@@ -654,28 +671,36 @@ $2 + 0.004 N^2 \max(1, N/2048)^{1.5}$ µs: 3.9 to 16 times the measured cost at 
 measured (4.1 in the single picture at $n = 512$, 7.9 in the purification picture).
 
 Many snapshots at once (§5.9), on 32 threads of the same machine: for a unit at $n = 256$
-($N = 512$, Watts–Strogatz $k = 4$, $\beta = 0.1$, $p = 0.1$, 2048 layers) of 256 trajectories
-with 13 snapshot evaluations, the joint canonical form, the physical form and both byte
-strings take 0.85 to 0.93 ms per snapshot one at a time and 0.17 to 0.18 ms in batches
+($N = 512$, Watts–Strogatz degree 4 and $\beta = 0.1$, `measurement_rate=0.1`, 2048 layers)
+of 256 trajectories with 13 snapshot evaluations, the joint canonical form, the physical form
+and both byte strings take 0.85 to 0.93 ms per snapshot one at a time and 0.17 to 0.18 ms in
+batches
 (about 5 times faster; the engine run itself took 0.62 to 0.70 s, against 2.8 to 3.1 s and
 0.58 to 0.60 s); at $n = 128$, 0.23 ms and 0.049 ms (4.6 times; engine 0.11 s). The bytes are
 the same.
 
 ### 5.9 Many row spaces at once
 
-`PhaseFreeTableau.from_words_batch(words, counts, N)` takes $B$ generator sets, `words` of
-shape $(B, R, 2w_q)$ and `counts` (item $b$ is `words[b, :counts[b]]`; a negative count gives
-`None`), and `_kernel/rowspace.py::rref_batch` runs §5.1 with the canonical order on every
-item in a `prange` loop on every Numba thread. `tableau.py::physical_tableaux(tableaux, n)` runs
-§5.5's two eliminations on every item the same way (`physical_rows_batch`), and
-`tableau.py::to_bytes_batch(tableaux)` packs every item's bytes (`pack_msb_first_batch`) and
-keeps them in the objects, so `digest` does not pack again. `EnsembleResult.tableaux(e)` is
-`from_words_batch` on `generators[:, e]` and `counts[:, e]`. The kernels of one row space
-(`rref`, `rank_of_columns`, `pack_msb_first`, `_kernel/entropy.py::generators_commute`)
-release the GIL, so a pool of Python threads can run them at once; the batch kernels keep it,
-as the engine's parallel kernels do, because two parallel launches from two Python threads at
-once abort the process under Numba's `workqueue` threading layer (with the GIL held they take
-turns).
+`PhaseFreeTableau.from_words_batch(words, counts, N)` takes many generator sets at once:
+`words` of shape `(items, rows, 2 * wq)` and `counts` (item `i` is `words[i, :counts[i]]`; a
+negative count gives `None`), and `_kernel/rowspace.py::rref_batch` runs §5.1 with the
+canonical order on every item in a `prange` loop on every Numba thread.
+`tableau.py::physical_tableaux(tableaux, n)` runs §5.5's two eliminations on every item the
+same way (`physical_rows_batch`), and `tableau.py::to_bytes_batch(tableaux)` packs every
+item's bytes (`pack_msb_first_batch`) and keeps them in the objects, so `digest` does not
+pack again. `EnsembleResult.tableaux(e)` is `from_words_batch` on `generators[:, e]` and
+`counts[:, e]`.
+
+*Threads.* The kernels of one row space (`rref`, `rank_of_columns`, `pack_msb_first`,
+`_kernel/entropy.py::generators_commute`) are compiled with `nogil`, so a pool of Python
+threads can run them at once. The batch kernels, like the engine's, are parallel regions,
+and Numba releases the GIL while a parallel region runs, whatever `nogil` says: batch calls
+and engine runs from several Python threads overlap. Numba's `omp` and `tbb` threading layers
+run overlapping regions; its `workqueue` layer (Numba's fallback when neither OpenMP nor TBB
+is available) terminates the process when a second region starts while one runs. Every
+parallel launch of the package (the engine, shot sampling and these batches) runs inside
+`_parallel.py::threads`, which under any layer but `omp` and `tbb` holds one process-wide
+lock while its block runs: there, the calls take turns.
 
 *Exactness.* Each item goes through the same compiled `rref` and `pack_msb_first` as one
 object alone, on the same rows in the same order, so the results are the objects and bytes
@@ -707,6 +732,7 @@ of its canonical rows.
 | trajectory $u$ of row $t$ (§3.7, Proposition 13) | `_kernel/ensemble.py::run_ensemble` (`u = indices[t]`); `mipt.py::MonitoredCircuit.run(indices=...)`, `_trajectory_indices` |
 | a stabilizer state from a simulator, signs dropped | `PhaseFreeTableau.from_simulator` |
 | many row spaces at once (§5.9) | `PhaseFreeTableau.from_words_batch`, `tableau.py::physical_tableaux`, `tableau.py::to_bytes_batch`, `mipt.py::EnsembleResult.tableaux`; kernels `_kernel/rowspace.py::rref_batch`, `physical_rows_batch`, `pack_msb_first_batch` |
+| parallel launches from several Python threads (§5.9) | `_parallel.py::threads` (the launch lock), `_parallel.py::concurrent_launches`, `CONCURRENT_LAYERS` |
 
 Stored fields of a run with a `tableau_snapshot` probe named `name`:
 
@@ -964,7 +990,8 @@ Every check is exact (integer or bit equality); none is statistical.
 | stops | `test_tableau_snapshot.py::test_after_a_stop_nothing_is_saved` | counts $-1$, value $N$, `tableau` and `code` refuse, the buffer stays zero |
 | save, load, concatenate, replay | `test_tableau_snapshot.py::test_save_load_concatenate_and_replay`, `test_a_result_without_the_probe_saves_as_before` | equal tableaux and digests after a round trip; a merged result against the full run; a replayed snapshot; a file without the probe has the same array names as before and the `code_snapshot` shape |
 | one snapshot probe per spec; the JSON probe | `test_tableau_snapshot.py::test_one_snapshot_probe_per_spec`, `test_the_json_probe_its_layout_summary_and_saved_file` | refusals; the layout's exact shapes against the saved file ($N$ = 12 and 80: `[3, 2, 80, 4]`); the summary note; `load_results` of the saved run: its probe summaries equal `run_ensemble`'s, and its storage lists the snapshot arrays |
-| many row spaces at once (§5.9) | `test_tableau.py::test_batch_canonicalization_equals_one_at_a_time`, `test_batch_canonicalization_checks_its_input`, `test_batch_physical_tableaux_equal_one_at_a_time`, `test_batch_bytes_equal_one_at_a_time`, `test_the_kernels_release_the_gil`; `test_tableau_snapshot.py::test_tableaux_of_an_evaluation_are_the_tableaux_one_by_one` | equal words, objects and bytes to the one-at-a-time methods ($N$ = 1 to 140; with chunks of one item, of a few and of all; on 1, 2 and every thread; with `None` items and stopped rows), the input untouched, refusals; the one-row-space kernels compiled with `nogil`, the batch kernels `parallel` and holding the GIL |
+| many row spaces at once (§5.9) | `test_tableau.py::test_batch_canonicalization_equals_one_at_a_time`, `test_batch_canonicalization_checks_its_input`, `test_batch_physical_tableaux_equal_one_at_a_time`, `test_batch_bytes_equal_one_at_a_time`, `test_the_kernels_release_the_gil`; `test_tableau_snapshot.py::test_tableaux_of_an_evaluation_are_the_tableaux_one_by_one` | equal words, objects and bytes to the one-at-a-time methods ($N$ = 1 to 140; with chunks of one item, of a few and of all; on 1, 2 and every thread; with `None` items and stopped rows), the input untouched, refusals; the one-row-space kernels compiled with `nogil`, the batch kernels `parallel` |
+| calls from several Python threads (§5.9) | `tests/test_parallel_launches.py::test_concurrent_batches_and_runs_under_the_workqueue_layer`, `test_blocks_take_turns_unless_the_layer_runs_launches_at_once`, `test_a_block_may_nest_and_an_error_releases_the_lock` | in a process under the `workqueue` layer, three threads canonicalizing, reducing and serializing a batch and one running the engine, 30 times each, return the one-at-a-time bytes and the run's own values (without the launch lock that process terminates, exit code 3); the lock is held during a block exactly under layers other than `omp` and `tbb`; nesting, errors and the thread count |
 | the snapshot's price | `tests/test_estimates.py::test_every_probe_costs_at_most_its_estimate` | `tableau_snapshot` in the purification and single pictures at $n = 512$, timed against `_probe_us` with the file's normalized method |
 | streams unchanged | `tests/test_randomness_contract.py` (unchanged) | the pinned digests of contract 2 |
 
@@ -992,7 +1019,9 @@ Every check is exact (integer or bit equality); none is statistical.
   purification picture use the same index arithmetic with more words.
 * **Many snapshots.** Canonicalize many snapshots with `EnsembleResult.tableaux`,
   `physical_tableaux` and `to_bytes_batch` (§5.9), not with a Python loop over `tableau`:
-  the results are the same and the work runs on every thread.
+  the results are the same and the work runs on every thread. Overlapping them with an
+  engine run in another Python thread is safe under every threading layer, but gains time
+  only under `omp` and `tbb`: under `workqueue` the launches take turns (§5.9).
 * **One snapshot probe per spec** (design §2.1): a `code_snapshot` and a `tableau_snapshot`
   cannot share a run; the tableau's physical code (`EnsembleResult.code`) replaces the
   former.
