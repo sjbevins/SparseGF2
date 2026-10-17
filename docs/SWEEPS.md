@@ -514,7 +514,10 @@ result. Chunk sizes never change a result.
 ## 13. Limits
 
 * `n >= 5` (the generator needs `k = 4 < n`); `n`, `g`, the master seeds and `c` are 32-bit
-  words; `u = g * stride + c` must fit int64 (`study/identity.py:stream_index`).
+  words (at most `2^32` graphs and circuits per graph); `stride` and the largest stream index
+  `(graphs - 1) * stride + circuits_per_graph - 1` must be below `2^63`. `SweepSpec.from_json`
+  refuses a spec that breaks one of these before anything is written. A part's name is its
+  first `u`, zero-padded to at least 12 digits.
 * `stride` is frozen: more circuits per graph than `stride` need a new directory.
 * A directory grows only under the randomness contract, graph generator, Clifford numbering,
   dynamics, row-space format and seed tags recorded in `versions`, and reading it needs the

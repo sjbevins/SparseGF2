@@ -538,3 +538,21 @@ def test_compression_and_writers_change_no_result(reference, tmp_path, compressi
             assert {info.compress_type for info in z.infolist()} == {method}
     with pytest.raises(ValueError, match="compression must be one of"):
         sweep.run(SPEC, directory, compression="best")
+
+
+def test_a_stride_too_large_for_int64_is_refused_before_anything_is_written(tmp_path):
+    for stride, graphs_ in [(2**62, 3), (2**70, 1)]:
+        directory = tmp_path / f"s{stride}"
+        with pytest.raises(ValueError, match="int64"):
+            sweep.run(spec_with(sizes=[6], stride=stride, graphs=graphs_), directory)
+        assert not directory.exists()
+    with pytest.raises(ValueError, match="graphs"):
+        SweepSpec.from_json(spec_with(graphs=2**32 + 1))
+    # a 13-digit stream index: part names grow past 12 digits and are still read
+    big = spec_with(sizes=[6], betas=["0"], rates=["0.1"], stride=10**12)
+    directory = tmp_path / "wide"
+    assert sweep.run(big, directory, chunk_size=1)["complete"]
+    names = sorted(p.name for p in (directory / "n6_beta0_p0.1").glob("result-*.npz"))
+    assert "result-1000000000000.npz" in names and len(names) == 4
+    assert sweep.run(big, directory)["ran"] == 0 and sweep.status(directory)["saved"] == 4
+    assert sweep.load(directory, 6, "0", "0.1").trajectories.tolist() == [0, 1, 10**12, 10**12 + 1]

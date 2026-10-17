@@ -71,7 +71,7 @@ DEFAULT_WRITERS = 4
 #: Without a chunk size, every chunk after the first holds about this many seconds of
 #: simulation at the rate the previous chunk measured.
 CHUNK_SECONDS = 10.0
-_PART = re.compile(r"result-(\d{12})\.npz")
+_PART = re.compile(r"result-(\d{12,})\.npz")  # the first u, zero-padded to 12 digits
 _REQUIRED = (
     "sizes",
     "betas",
@@ -147,6 +147,11 @@ def _per_size(value: Any, where: str, sizes: Sequence[int], parse: Callable[[Any
 
 def _count(value: Any, where: str) -> int:
     return identity._integer(value, where, minimum=1)
+
+
+def _labels(value: Any, where: str) -> int:
+    """A count of graphs or circuits: their labels g, c are 32-bit seed words."""
+    return identity._integer(value, where, minimum=1, maximum=identity.SEED_LIMIT)
 
 
 def _tokens(value: Any, where: str) -> tuple[Token, ...]:
@@ -244,12 +249,12 @@ class SweepSpec:
             or not all(isinstance(q, Mapping) for q in probes)
         ):
             raise ValueError('probes: give a list of objects like [{"kind": "code_dimension"}]')
-        circuits = _per_size(data["circuits_per_graph"], "circuits_per_graph", sizes, _count)
+        circuits = _per_size(data["circuits_per_graph"], "circuits_per_graph", sizes, _labels)
         spec = cls(
             sizes=tuple(sizes),
             betas=_tokens(data["betas"], "betas"),
             rates=_per_size(data["rates"], "rates", sizes, _tokens),
-            graphs=_per_size(data["graphs"], "graphs", sizes, _count),
+            graphs=_per_size(data["graphs"], "graphs", sizes, _labels),
             circuits_per_graph=circuits,
             layers=_layers(data["layers"], sizes),
             checkpoints=_checkpoint_rule(data.get("checkpoints", DEFAULT_CHECKPOINTS)),
@@ -264,6 +269,13 @@ class SweepSpec:
             picture=data.get("picture", "purification"),
             stop_when_purified=data.get("stop_when_purified", False),
         )
+        top = (max(spec.graphs.values()) - 1) * spec.stride + max(circuits.values()) - 1
+        if max(top, spec.stride) >= 2**63:  # the engine also takes stride as an int64
+            raise ValueError(
+                f"stride: the stride {spec.stride} and the largest stream index (graphs - 1) * "
+                f"stride + circuits_per_graph - 1 = {top} must fit the engine's int64 indices "
+                "(below 2**63); lower stride or graphs"
+            )
         if spec.picture not in PICTURES:
             raise ValueError(f"picture must be one of {list(PICTURES)}, got {spec.picture!r}")
         if not isinstance(spec.stop_when_purified, bool):
@@ -478,7 +490,8 @@ def _write_graphs(root: Path, sweep: SweepSpec, n: int, beta: Token) -> None:
 def _part_paths(folder: Path) -> list[Path]:
     if not folder.is_dir():
         return []
-    return sorted(p for p in folder.iterdir() if _PART.fullmatch(p.name))
+    found = [p for p in folder.iterdir() if _PART.fullmatch(p.name)]
+    return sorted(found, key=lambda p: int(p.name[7:-4]))  # by the first stream index
 
 
 def _saved_indices(folder: Path) -> np.ndarray:
