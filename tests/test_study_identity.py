@@ -226,6 +226,21 @@ def test_a_decimal_of_up_to_15_digits_survives_the_trip_through_a_json_number(di
     assert Token.parse(float(scaled)) == Token.parse(scaled)
 
 
+def test_the_json_number_proposition_needs_the_normal_range():
+    # DBL_DIG = 15 holds for normal doubles (|x| >= 2**-1022): just above that bound 15-digit
+    # decimals survive, and below it a subnormal carries fewer digits, or the value underflows
+    smallest_normal = 2.0**-1022
+    for text in ("2.22507385850721e-308", "1.23456789012345e-300", "9.99999999999999e-308"):
+        assert float(text) >= smallest_normal
+        assert Token.parse(float(text)) == Token.parse(text)
+    subnormal = "1.23456789012345e-320"
+    assert 0 < float(subnormal) < smallest_normal and repr(float(subnormal)) == "1.2347e-320"
+    assert Token.parse(float(subnormal)) != Token.parse(subnormal)
+    assert float("1e-400") == 0.0 and Token.parse(float("1e-400")) != Token.parse("1e-400")
+    # the exact forms have no such limit: the string is read exactly
+    assert Token.parse(subnormal).value == Fraction(123456789012345, 10**334)
+
+
 # ---------------------------------------------------------------------------
 # the trajectory key
 # ---------------------------------------------------------------------------

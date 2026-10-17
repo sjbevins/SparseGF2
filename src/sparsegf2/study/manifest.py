@@ -1575,7 +1575,7 @@ class ExperimentManifest:
         ``measurement_rate=float(p)``, ``reference="purification"``,
         ``schedule="random_edges"``, ``gates_per_layer=n // 2``, ``random_orientation=False``,
         no scramble, ``periodic=True``, ``checkpoints="every_layer"`` and
-        ``stop_when_purified`` from ``dynamics``. Trajectory $u = g s + c$ then runs on graph
+        ``stop_when_purified`` from ``dynamics``. Trajectory $u = g \\bar C + c$ then runs on graph
         $g$ (``u // stride``). For ``protocol="P"`` (design §12) the only differences are
         ``reference="none"`` (the system starts in |0...0>) and ``stop_when_purified=False``
         (there is no reference to purify): the engine draws nothing that depends on the
@@ -1652,16 +1652,18 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
     predeclares the peak rule (to change them, start a new experiment).
 
     Allowed (design §3, "Revisions" and ruling R-CK): more conditions and rates (every old
-    $(n, \\beta, p)$ stays), more graphs, more circuits per graph (up to the frozen stride), a
-    larger $T_{\\max}$ (per size; a lower one is forbidden), **any** change of the checkpoint
-    rule (the schedule used for work is the union of the schedules of all revisions,
-    :func:`effective_checkpoints`, so no stored depth is dropped), more observables (every old
-    observable keeps its settings), a new protocol (design §12) or a new checkpoint rule for
-    protocol P, and any change of ``storage``, ``resources`` and ``analysis`` (they do not
-    touch recorded data). Forbidden: a change of ``schema``, ``experiment_id``, ``label``, the
-    seeds, ``gate_mode``, the stride, ``dynamics`` or the number of measurement replicas, the
-    removal of a protocol, and any removal or change of what the old manifest recorded. The
-    checks run in the order of this list.
+    $(n, \\beta, p)$ stays; not in a confirmatory manifest), more graphs, more circuits per graph
+    (up to the frozen stride), a larger $T_{\\max}$ (per size; a lower one is forbidden),
+    **any** change of the checkpoint rule (the schedule used for work is the union of the
+    schedules of all revisions, :func:`effective_checkpoints`, so no stored depth is dropped),
+    more observables (every old observable keeps its settings and its name), a new protocol
+    (design §12) or a new checkpoint rule for protocol P, and any change of ``storage``,
+    ``resources`` and, in an exploratory manifest, ``analysis`` (they do not touch recorded
+    data). Forbidden: a change of ``schema``, ``experiment_id``, ``label``, the seeds,
+    ``gate_mode``, the stride, ``dynamics`` or the number of measurement replicas, the removal
+    of a protocol, any removal or change of what the old manifest recorded, and, in a
+    confirmatory manifest, a new condition or a change of ``analysis``. The checks run in the
+    order of this list.
     """
     if not isinstance(old, ExperimentManifest) or not isinstance(new, ExperimentManifest):
         raise TypeError("check_extension compares two ExperimentManifest objects")
@@ -1734,24 +1736,6 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
                     f"condition (n = {c.n}, beta = {c.beta}, p = {p}) of the old manifest is missing "
                     "from the new one: a revision may add conditions and rates, not remove them"
                 )
-    if old.label == "confirmatory":
-        old_rates = {(c.n, c.beta): set(c.rates) for c in old_conditions}
-        for c in new.conditions():
-            for p in c.rates:
-                if p not in old_rates.get((c.n, c.beta), ()):
-                    return (
-                        f"condition (n = {c.n}, beta = {c.beta}, p = {p}) is new, but the manifest "
-                        "is labeled 'confirmatory': v1.4 section 9 freezes the rate grid P(n, beta) "
-                        "before confirmatory runs (start a new experiment to change it)"
-                    )
-        if old.analysis != new.analysis:
-            return changed(
-                "analysis",
-                old.analysis.to_dict(),
-                new.analysis.to_dict(),
-                "a confirmatory manifest freezes its analysis rules (v1.4 sections 5.8 and 9: the "
-                "peak rule is predeclared)",
-            )
     for c in old_conditions:
         before, after = old.layers(c.n, c.beta), new.layers(c.n, c.beta)
         if after < before:
@@ -1790,6 +1774,24 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
             "its random stream and its stored values; an unnamed entry is named by its position, "
             f"so give it 'name': {name!r} to keep its name; add other settings as a new entry)"
         )
+    if old.label == "confirmatory":
+        old_rates = {(c.n, c.beta): set(c.rates) for c in old_conditions}
+        for c in new.conditions():
+            for p in c.rates:
+                if p not in old_rates.get((c.n, c.beta), ()):
+                    return (
+                        f"condition (n = {c.n}, beta = {c.beta}, p = {p}) is new, but the manifest "
+                        "is labeled 'confirmatory': v1.4 section 9 freezes the rate grid P(n, beta) "
+                        "before confirmatory runs (start a new experiment to change it)"
+                    )
+        if old.analysis != new.analysis:
+            return changed(
+                "analysis",
+                old.analysis.to_dict(),
+                new.analysis.to_dict(),
+                "a confirmatory manifest freezes its analysis rules (v1.4 sections 5.8 and 9: the "
+                "peak rule is predeclared)",
+            )
     return None
 
 

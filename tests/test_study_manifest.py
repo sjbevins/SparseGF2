@@ -1720,6 +1720,14 @@ def test_a_confirmatory_manifest_freezes_its_conditions_and_analysis():
         ],
     ]:
         assert check_extension(confirmed, with_changes(*base, *changes)) is None, changes
+    # the freeze is the last check (item 8 of document 02, section 3.11): a lower horizon is
+    # reported first
+    both = with_changes(
+        *base,
+        ("conditions.0.p", ["0.1", "0.15", "0.2", "0.25"]),
+        ("depth.layers", {"per_n": 4}),
+    )
+    assert "T_max for n = 16 changed from 128 to 64" in check_extension(confirmed, both)
     # and a valid confirmatory chain has its effective schedule
     longer = with_changes(*base, ("depth.layers", {"per_n": 16}))
     assert set(confirmed.checkpoints(16, "0.1")) <= set(
