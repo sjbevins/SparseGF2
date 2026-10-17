@@ -545,6 +545,7 @@ def test_a_result_without_the_probe_saves_as_before(tmp_path):
                 "snapshot::code_snapshot",
                 "snapshot_counts::code_snapshot",
                 "purification_layer",
+                "first_passage",  # with a reference, k's first passages
             ]
         )
         assert z["snapshot::code_snapshot"].shape == (2, 1, 10, 2)

@@ -193,6 +193,12 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * **Purification time tau:** the first of the spec's checkpoints at which the reference
   is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
   never purified within the horizon.
+* **First passages:** with a reference, the engine also reads k after every layer, whatever
+  the checkpoints, and saves `first_passage` (int64, trajectories x (n + 1)):
+  `first_passage[t, ell]` is the exact first layer with k <= ell, or `-1` if k stayed above
+  ell through `final_layer`, the censoring depth (`result.first_passage_times()` gives
+  `(time, observed)` for `analysis.kaplan_meier`). Column 0 is the exact purification time;
+  the columns together give k at every layer (`docs/SWEEPS.md` section 7).
 
 ## Conventions
 
@@ -529,8 +535,11 @@ sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # rerun trajectory u = 3, 
  "checkpoints": {"count": 12}, "master_graph_seed": 17, "master_circuit_seed": 29}
 ```
 
-* Default probes: `code_dimension` at every layer and `tableau_snapshot` on the geometric
-  checkpoints; purification is tested at every layer, so `purification_layer` is exact.
+* Default probes: `code_dimension` and `tableau_snapshot` on the geometric checkpoints, plus
+  the exact first passages `first_passage` (k read at every layer, n + 1 numbers per
+  trajectory); purification is tested at every layer, so `purification_layer` is exact.
+  Sweeps made before first passages were recorded had `code_dimension` at every layer; their
+  `sweep.json` names it, so grow them with that stored spec.
 * Rates of one `(n, beta)` share the graphs, the gates and the mask uniforms (masks nested
   in p); different `(n, beta)` are independent. Trajectory `u = g * stride + c` runs on
   graph `g`; growing a sweep (sizes, betas, rates, graphs, circuits per graph) never changes

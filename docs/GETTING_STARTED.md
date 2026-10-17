@@ -381,6 +381,7 @@ each trajectory simulated.
 | `checkpoint_layers` | the spec's checkpoint layers |
 | `purification_layer`, `censored` | τ per trajectory (−1 = censored), and the censoring mask (`None` without a reference) |
 | `final_layer`, `num_measurements` | last layer simulated and number of measurements, per trajectory |
+| `first_passage`, `first_passage_times()` | exact first layer with k ≤ ℓ for ℓ = 0..n, read at every layer (−1 = not reached by `final_layer`; `None` without a reference), and `(time, observed)` for Kaplan–Meier |
 | `trajectories`, `graph_index` | global trajectory indices of the rows, and each one's graph |
 | `snapshots[name]` | `(generators, counts)` of the `code_snapshot` probe |
 | `code(t, c)` | the code of row `t` at evaluation `c` of the snapshot probe, as a `StabilizerCode` |

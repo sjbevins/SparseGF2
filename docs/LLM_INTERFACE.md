@@ -370,7 +370,8 @@ adds `by_threads`, `[{"threads", "estimated_seconds"}, ...]` in the order given;
 beyond the trajectory count stay idle. It always adds `layout`: `arrays` (`name`, `shape`,
 `dtype`, uncompressed `megabytes` of each array that `output_dir` will hold, as
 `EnsembleResult.save` writes them: `value::<probe>`, `snapshot::` and `snapshot_counts::`
-for a `code_snapshot`, the graph arrays and the run's own), `files` (`result.npz`,
+for a `code_snapshot`, the graph arrays and the run's own, among them, with a reference,
+`purification_layer` and `first_passage`), `files` (`result.npz`,
 `spec.json`, `provenance.json`) and a `note`. Disk use is lower, because the file is
 compressed, and a `snapshot::` array is an upper bound (each code fills only its first
 rows); `benchmark_ensemble` and `load_results` measure it. `run_ensemble`,
@@ -738,13 +739,17 @@ the files and the estimators. The spec is a JSON object: `sizes`, `betas` and `r
 tokens such as `"0.1"` or `"1/3"`; `rates` may be a per-size table), `graphs` and
 `circuits_per_graph` (ints or per-size tables), `layers` (`{"per_n": a}` or a per-size table),
 `master_graph_seed`, `master_circuit_seed`, and optionally `stride` (1024), `checkpoints`
-(`{"count": 12}`, or `{"list": [...]}`), `probes` (engine JSON; default `code_dimension` at
-every layer and `tableau_snapshot` at the checkpoints), `picture` (`"purification"`,
+(`{"count": 12}`, or `{"list": [...]}`), `probes` (engine JSON; default `code_dimension` and
+`tableau_snapshot` at the checkpoints; sweeps made before first passages were recorded had
+`code_dimension` at every layer), `picture` (`"purification"`,
 `"single"` or `"none"`) and `stop_when_purified` (false). Errors start `sweep spec:` and name the field.
 Running again resumes; a spec that adds sizes, betas, rates, graphs or circuits grows the
 sweep without changing a saved trajectory, and one that would change saved data is refused.
-`sweep replay` prints `identical` and the saved tableau digests, and exits with 1 when the
-rerun differs. There is no sweep tool: `load_results(DIR)` returns the index (`kind:
+With a reference every result holds the exact first passages of the code dimension,
+`first_passage[t, ell] = min{layer : k <= ell}` for `ell = 0..n` (int64, -1 where not reached
+by `final_layer`, the censoring depth), read after every layer whatever the checkpoints
+(SWEEPS.md section 7). `sweep replay` prints `identical` and the saved tableau digests, and
+exits with 1 when the rerun differs. There is no sweep tool: `load_results(DIR)` returns the index (`kind:
 "sweep"`, every condition with its `path`, `saved` and target `trajectories`, the `versions`
 and the `spec`); `load_results(DIR/<path>)` the usual summary of all the condition's saved
 parts together (refused above the memory limit, with the Python call `sweep.parts` that reads

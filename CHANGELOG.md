@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+* **Exact first passages, online.** With a reference, the ensemble engine reads the code
+  dimension k after every layer (a popcount, whatever the checkpoints) and records
+  `EnsembleResult.first_passage`, int64 `(trajectories, n + 1)`: the first layer with
+  `k <= ell` for `ell = 0..n` (v1.4 §5.2), or -1 where k stayed above `ell` through
+  `final_layer`, the censoring depth; `first_passage_times()` gives `(time, observed)` for
+  Kaplan–Meier. Saved, loaded, concatenated (None when a chunk saved before lacks them) and
+  replayed; `estimate_ensemble`'s layout lists the array. It draws nothing: every random
+  stream and every other output is bitwise unchanged (pinned digests in
+  `tests/test_first_passage.py`), and `stop_when_purified` still stops at the first
+  purification checkpoint. The sweep's default probes are now `code_dimension` and
+  `tableau_snapshot` on the sparse checkpoints (`code_dimension` at every layer took 8 MB per
+  trajectory at `T = 10^6`); a sweep written before names its probes in `sweep.json` and keeps
+  working (grow it with that stored spec). Tests compare the first passages with dense
+  every-layer traces (33 rates, `T` up to `10^5`) and with Stim `10^4` layers deep.
 * **Faster phase-free ensembles at large n, and a CPU-specific option.** The ensemble engine
   pads each tableau column of `16 j` words with one zero word (`mipt._row_padding`), so the
   columns that a measurement scans at one word offset no longer share a fraction of the cache

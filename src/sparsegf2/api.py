@@ -2105,7 +2105,8 @@ def _estimate_seconds(
 
 def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
     """Memory of the run's result: every probe value (float64) plus the saved codes or tableaux
-    (uint64 words: ``n x 2 ceil(n / 64)`` per code, ``N x 2 ceil(N / 64)`` per joint tableau)."""
+    (uint64 words: ``n x 2 ceil(n / 64)`` per code, ``N x 2 ceil(N / 64)`` per joint tableau)
+    and, with a reference, the ``n + 1`` first passages (int64)."""
     n = mc.num_system
     values = sum(len(mc.probe_layers(p.name)) * mipt._probe_length(p, n) for p in mc.probes)
     snapshots = 0
@@ -2113,7 +2114,8 @@ def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
         if p.kind in mipt._SNAPSHOT_KINDS:
             _, evaluations, rows, words = mipt._snapshot_shape(mc, p, 1)
             snapshots += evaluations * rows * words
-    return trajectories * 8 * (values + snapshots + 4)
+    first = n + 1 if mc.reference != "none" else 0
+    return trajectories * 8 * (values + snapshots + first + 4)
 
 
 def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
@@ -2204,6 +2206,7 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
             )
     if mc.reference != "none":
         rows.append(_array_row("purification_layer", (trajectories,), np.int64))
+        rows.append(_array_row("first_passage", (trajectories, n + 1), np.int64))
     note = (
         "Sizes are uncompressed. The file is saved with np.savez_compressed, so the disk use "
         "is lower (benchmark_ensemble measures it), and a small __meta__ record holds the "
@@ -3553,6 +3556,7 @@ def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
         num_measurements=result.num_measurements[keep],
         elapsed_seconds=result.elapsed_seconds * share,
         snapshots={name: (g[keep], c[keep]) for name, (g, c) in result.snapshots.items()},
+        first_passage=None if result.first_passage is None else result.first_passage[keep],
     )
 
 
