@@ -521,16 +521,19 @@ def test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_f
 
 def test_seed_tuples_have_one_fixed_length_per_domain_and_it_exceeds_the_pool():
     sizes, betas = (5, 16), ("0", "0.1")
-    assert {len(graph_seed(17, n, b, g)) for n in sizes for b in betas for g in (0, 9)} == {6}
-    assert {
+    graph = {len(graph_seed(17, n, b, g)) for n in sizes for b in betas for g in (0, 9)}
+    shared = {
         len(run_seed(29, n, b, "shared", p)) for n in sizes for b in betas for p in (None, "0.1")
-    } == {5}
-    assert {
+    }
+    independent = {
         len(run_seed(29, n, b, "independent", p)) for n in sizes for b in betas for p in RATES
-    } == {7}
-    assert (
-        min(5, 6, 7) > 4
-    )  # SeedSequence hashes four words by position; a longer entropy is mixed in whole
+    }
+    assert (graph, shared, independent) == ({6}, {5}, {7})
+    # SeedSequence hashes the first pool_size words by position (zero-padding a shorter entropy)
+    # and mixes every further word in whole: numpy's pool, read from numpy, is what every study
+    # seed must exceed for the padding argument of the documentation
+    pool = np.random.SeedSequence(0).pool_size
+    assert pool == 4 and min(graph | shared | independent) > pool
 
 
 def test_run_seed_shared_is_one_tuple_per_condition_for_every_rate():
@@ -601,18 +604,29 @@ def test_run_seed_refuses_unknown_modes_and_bad_arguments():
         run_seed(29, 16, "0.1", "independent", "2")
 
 
-def test_graph_seed_gives_the_stream_the_graph_generator_uses():
-    # the six words are the entropy as given: the generator reads SeedSequence(seed).generate_state(4)
-    seed = graph_seed(17, 16, "0.1", 3)
-    a = np.random.SeedSequence(seed).generate_state(4)
-    assert np.array_equal(a, np.random.SeedSequence(list(seed)).generate_state(4))
-    assert np.array_equal(
-        a, np.random.SeedSequence(list(wsref.graph_seed(17, 16, "0.1", 3))).generate_state(4)
-    )
-    words = np.random.SeedSequence(seed).generate_state(
-        4, dtype=np.uint64
-    )  # what the xoshiro state is
-    assert words.tolist() == wsref.seed_words(seed)
+def test_graph_seed_gives_the_stream_the_graph_generator_uses(monkeypatch):
+    # The six words are the entropy as given. The native generator derives its xoshiro256** state
+    # with _kernel.rng.seed_state; the reference rewiring derives it with its own seed_words. Both
+    # are called here on the study's seeds, and the generator is watched while it builds a graph.
+    from sparsegf2._kernel import rng as native
+
+    for g in range(4):
+        seed = graph_seed(17, 16, "0.1", g)
+        assert seed == wsref.graph_seed(17, 16, "0.1", g)
+        assert native.seed_state(seed).tolist() == wsref.seed_words(seed)
+        assert native.seed_state(list(seed)).tolist() == wsref.seed_words(seed)
+    seen = []
+
+    def watched(seed):
+        state = native.seed_state(seed)
+        seen.append((seed, state.copy()))
+        return state
+
+    monkeypatch.setattr(graphs, "seed_state", watched)
+    record = build_graph(16, "0.1", 3, 17)
+    assert len(seen) == 1 and seen[0][0] == record.seed == graph_seed(17, 16, "0.1", 3)
+    assert seen[0][1].tolist() == wsref.seed_words(record.seed)
+    assert np.array_equal(record.edges, wsref.rewire(16, 0.1, record.seed))
 
 
 def test_the_study_builds_its_graphs_with_the_native_generator_and_the_study_seed():

@@ -6,16 +6,23 @@ Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored
   trace for trace; the exported circuits equal both the protocol oracle and a direct
   transcription of the draws; masks are ``uniform < float(p)`` and nested across rates;
   prefixes do not depend on the horizon; the native Clifford numbering is ``16 s + b``.
-* **Statistical**, at fixed seeds, with the false-alarm rate stated: every chi-square test
-  passes when its p-value exceeds ``ALPHA = 1e-6``, every z-test when ``|z| < SIGMAS = 4.5``
-  (two-sided false alarm 6.8e-6). Roughly 84 such assertions run here (about 40 chi-square
-  tests and 44 z-tests), so a *correct* implementation at fresh seeds would fail one with
-  probability below 4e-4; at the fixed seeds the outcome is deterministic. Statistics use exact
-  reference laws: the occupancy law of with-replacement edge draws, Binomial(2n, beta)
-  rewiring counts, and the exact distribution of the rewiring process for n = 6 and 7 (a
-  dynamic program with no random numbers). The sensitivity of each family is shown by negative
-  controls (a wrong beta, a biased target sampler, a biased Clifford sample, a wrong rate, and
-  seeds that are shared across sizes or rewiring probabilities must fail).
+* **Statistical**, at fixed seeds, with the false-alarm rate stated: every p-value test
+  (chi-square, or a Bonferroni-corrected maximum) passes when its p-value exceeds
+  ``ALPHA = 1e-6``, every z-test when ``|z| < SIGMAS = 4.5`` (two-sided false alarm 6.8e-6 under
+  the normal approximation). Counted component by component (a maximum over 48 positions is 48
+  z-tests, the minimum of six p-values six tests, and the three parametrizations of the
+  misreading test repeat one test on the same graphs), 46 p-value tests and 149 z-tests run
+  here, so a *correct* implementation at fresh seeds would fail one with probability at most
+  46 x 1e-6 + 149 x 6.8e-6 = 1.1e-3 (the union bound, valid whatever the dependence between the
+  tests); docs/study/01-ensemble-and-sampling.md section 5.4 lists them. At the fixed seeds the
+  outcome is deterministic. Statistics use exact reference laws, means and variances (none is
+  estimated from the sample): the occupancy law of with-replacement edge draws,
+  Binomial(2n, beta) rewiring counts, uniform gate draws, Binomial(n, p) masks, and the exact
+  distribution of the rewiring process for n = 6 and 7 (a dynamic program with no random
+  numbers; its second and fourth central moments give the z-test of the spread). The
+  sensitivity of each family is shown by negative controls (a wrong beta, a biased target
+  sampler, a biased Clifford sample, a wrong rate, and seeds that are shared across sizes or
+  rewiring probabilities must fail).
 
 Every graph and every circuit below is drawn from the study's own seeds (ruling R-SEED:
 ``identity.graph_seed(master, n, beta, g)`` and ``identity.run_seed(master, n, beta, mode, p)``),
@@ -406,10 +413,16 @@ def test_the_native_generator_has_the_exact_moments_at_n_7(beta):
     for values, stat in [(degvar, wsref.degree_variance), (new, wsref.new_edge_count)]:
         mean = float(q @ values)
         var = float(q @ (values - mean) ** 2)
+        fourth = float(q @ (values - mean) ** 4)
         got = np.array([stat(e, n) for e in sample], dtype=float)
         z = (got.mean() - mean) / math.sqrt(var / total)
         assert abs(z) < SIGMAS, (stat.__name__, mean, got.mean(), z)
-        assert 0.9 < got.var() / var < 1.1  # the sample variance matches the exact one
+        # the spread too: V = mean of (x - mean)^2 about the exact mean has E V = var and, for
+        # independent draws, Var V = (mu_4 - var^2) / N exactly (mu_4 the exact fourth central
+        # moment), so it is a z-test with the variance of the exact law, like the mean
+        spread = float(np.mean((got - mean) ** 2))
+        z_spread = (spread - var) / math.sqrt((fourth - var**2) / total)
+        assert abs(z_spread) < SIGMAS, (stat.__name__, var, spread, z_spread)
 
 
 # ---------------------------------------------------------------------------
@@ -851,17 +864,32 @@ def test_masks_are_independent_of_the_gate_draws(masks):
         assert value > ALPHA, name
     # the measured count of a layer against the mean Clifford class and the mean edge of its
     # gates, and the gates of the next layer against this layer's mask (the stream reads the
-    # mask uniforms just before them): a correlation r of N independent layers is N(0, 1 / N)
+    # mask uniforms just before them). Every moment comes from the exact laws, none from the
+    # sample: the count X of a layer is Binomial(n, p); the class of a gate is uniform on 720
+    # values and its edge on |E|, so the mean Y of the h gates of a layer has the variance of
+    # one uniform draw over h. Under independence the products (X - EX)(Y - EY) of different
+    # layers are uncorrelated with variance Var X Var Y (the two layers of a "next" pair are
+    # different draws too), so z = sum (X - EX)(Y - EY) / sqrt(N Var X Var Y) has mean 0 and
+    # variance 1 exactly, and is N(0, 1) up to the central limit approximation (N = 8000).
+    n, h = sample.n, sample.h
+    num_edges = 2 * n  # every graph of the study has 2n edges (n >= 5)
+    assert sample.edge.min() == 0 and sample.edge.max() == num_edges - 1
     count = sample.mask.sum(axis=2)
+    classes = (sample.clifford // 16).mean(axis=2)
+    edges = sample.edge.mean(axis=2)
+    x_law = (n * p, n * p * (1 - p))
+    class_law = ((720 - 1) / 2, (720**2 - 1) / 12 / h)
+    edge_law = ((num_edges - 1) / 2, (num_edges**2 - 1) / 12 / h)
     pairs = {
-        "class": (count.ravel(), (sample.clifford // 16).mean(axis=2).ravel()),
-        "edge": (count.ravel(), sample.edge.mean(axis=2).ravel()),
-        "next class": (count[:, :-1].ravel(), (sample.clifford // 16).mean(axis=2)[:, 1:].ravel()),
-        "next edge": (count[:, :-1].ravel(), sample.edge.mean(axis=2)[:, 1:].ravel()),
+        "class": (count, classes, class_law),
+        "edge": (count, edges, edge_law),
+        "next class": (count[:, :-1], classes[:, 1:], class_law),
+        "next edge": (count[:, :-1], edges[:, 1:], edge_law),
     }
-    for name, (a, b) in pairs.items():
-        r = np.corrcoef(a, b)[0, 1]
-        assert abs(r) * math.sqrt(a.size) < SIGMAS, (name, r)
+    for name, (a, b, (b_mean, b_var)) in pairs.items():
+        terms = (a.ravel() - x_law[0]) * (b.ravel() - b_mean)
+        z = float(terms.sum()) / math.sqrt(terms.size * x_law[1] * b_var)
+        assert abs(z) < SIGMAS, (name, z)
 
 
 def correlated_masks(kind: str, shape=(40, 200, 12), p=0.3, share=0.2, seed=11) -> np.ndarray:
