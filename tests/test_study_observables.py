@@ -249,11 +249,14 @@ def test_the_catalog_table_keeps_backslashes_and_pipes():
 
 def test_the_catalog_table_shows_markdown_syntax_as_text():
     """Text that would be Markdown syntax in a cell (emphasis, code spans, links, images,
-    autolinks, HTML, entities, strikethrough, math) reads back as itself, as does an id with a
-    backtick (which would end its code span); line breaks of every kind (\\n, \\r\\n, \\r) are
-    joined by spaces, so the table keeps one line per row and each row its six cells."""
+    angle brackets, HTML, entities, strikethrough, math) reads back as itself, as does an id with
+    a backtick (which would end its code span); line breaks of every kind (\\n, \\r\\n, \\r) are
+    joined by spaces, so the table keeps one line per row and each row its six cells. Addresses
+    (``://``, ``www.``, e-mail) are not here: GitHub's extended autolinks read them from the raw
+    text before any escape, so the registry refuses them (tested in
+    test_register_get_and_versions)."""
     hard = (
-        "*a* and **b**, _c_ and __d__, `e` and ``f``, [g](h), ![i](j), [k], <l>, <http://m.n>, "
+        "*a* and **b**, _c_ and __d__, `e` and ``f``, [g](h), ![i](j), [k], <l>, <m.n>, "
         "&amp; and &#35;, ~o~ and ~~p~~, $q$ and $$r$$, s! and t] (v1.4 §5.7)\n"
         "second line\r\nthird line\rfourth line"
     )
@@ -294,6 +297,12 @@ def test_register_get_and_versions():
         dataclasses.replace(entry, inputs=("snapshot",))
     with pytest.raises(ValueError, match="input"):
         dataclasses.replace(entry, inputs=("trace",))
+    # a bare address becomes a GitHub extended autolink from the raw text, which no escape can
+    # stop, so the catalog table could not show it as written: such definitions are refused
+    for text in ("see https://arxiv.org/abs/2007.03822", "see www.example.org/a_b", "x@y.org"):
+        with pytest.raises(ValueError, match="bare web or e-mail address"):
+            dataclasses.replace(entry, definition=text)
+    assert not any(ob._BARE_ADDRESS.search(r["definition"]) for r in ob.catalog())
     with pytest.raises(ValueError, match="NUL"):
         dataclasses.replace(entry, id="d\x00cyc")
     with pytest.raises(ValueError, match="non-empty"):

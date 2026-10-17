@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import re
 import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
@@ -2133,6 +2134,12 @@ class SnapshotInput:
         return graphs.from_edges(self.edges, self.num_system)
 
 
+_BARE_ADDRESS = re.compile(r"www\.|://|[\w.+-]@[\w-]")
+"""What starts a GitHub extended autolink (GFM section 6.9: ``www.``, a scheme's ``://``, an
+e-mail address). The autolink is taken from the raw text, before any escape is read, so no
+escaping can make such a cell read back as written; definitions may not contain one."""
+
+
 @dataclass(frozen=True, eq=False)
 class ObservableDef:
     """One entry of the observable catalog (design §5).
@@ -2144,7 +2151,8 @@ class ObservableDef:
       trace of another observable);
     * ``params``: each parameter's default (:data:`REQUIRED` when it must be given), read-only,
       in canonical form;
-    * ``definition``: the formula and its v1.4 section, in words;
+    * ``definition``: the formula and its v1.4 section, in words (no bare web or e-mail address:
+      the catalog table could not show it as written; cite by name);
     * ``function``: the pure function of this module that computes it;
     * ``compute``: for an observable computed later from a stored snapshot,
       ``compute(snapshot, params, entry) -> ObservableValue`` with :class:`SnapshotInput`, the
@@ -2170,6 +2178,14 @@ class ObservableDef:
     def __post_init__(self) -> None:
         _label(self.id, "id")
         _label(self.version, "version")
+        address = _BARE_ADDRESS.search(self.definition)
+        if address is not None:
+            raise ValueError(
+                f"the definition of {self.id!r} contains a bare web or e-mail address (near "
+                f"{address.group(0)!r}): GitHub makes a link of it from the raw text, so the "
+                "catalog table could not show it as written; cite the reference by name (the "
+                "documents under docs/study carry the links)"
+            )
         if self.level not in LEVELS:
             raise ValueError(f"level must be one of {list(LEVELS)}, got {self.level!r}")
         for kind in self.inputs:
@@ -2305,9 +2321,12 @@ def _cell(text: str, *, code: bool = False) -> str:
     follow a backslash and removes the backslash of each escaped ``\\|``; the cell is then
     inline Markdown, where a backslash before ASCII punctuation shows that character. So plain
     text is written with a backslash before every character of :data:`_INLINE_SYNTAX` (``\\``
-    becomes ``\\\\``, ``|`` becomes ``\\|``): no inline syntax can begin, a backslash before a
-    pipe shows as itself, and every pipe follows an odd run of backslashes, which parsers that
-    count the run (marked) also read as an escape. With ``code=True`` (the id) the text is a
+    becomes ``\\\\``, ``|`` becomes ``\\|``): no inline syntax that is read after the escapes can
+    begin, a backslash before a pipe shows as itself, and every pipe follows an odd run of
+    backslashes, which parsers that count the run (marked) also read as an escape. GitHub's
+    extended autolinks (``www.``, ``://``, e-mail addresses) are read from the raw text before
+    any escape and cannot be protected: text with one does not read back as written (the
+    catalog refuses such definitions, :data:`_BARE_ADDRESS`). With ``code=True`` (the id) the text is a
     code span, where backslashes are literal and only ``|`` is escaped, unless it holds a
     backtick (which would end the span) or a backslash (a backslash before the escaped pipe
     would make a run of two there): then it is written as plain text.
@@ -2322,12 +2341,16 @@ def catalog_markdown() -> str:
     """:func:`catalog` as a Markdown table (id, version, level, inputs, parameters, definition).
 
     Every cell is written by ``_cell``, so under the GitHub Flavored Markdown specification each
-    row has the header's six cells and every cell reads back as its text, with its lines joined
-    by spaces and the spaces and tabs at its ends removed: the pipe and every character that
-    could begin inline syntax (an escape, a code span, emphasis, a link, an autolink or HTML, an
-    entity, strikethrough, GitHub's math) are escaped, and the id is a code span unless it holds
-    a backtick or a backslash. What GitHub adds after the Markdown, such as emoji shortcodes
-    (``:b:``), is not Markdown syntax and is not escaped.
+    row has the header's six cells and every cell without a bare web or e-mail address reads
+    back as its text, with its lines joined by spaces and the spaces and tabs at its ends
+    removed: the pipe and every character that could begin inline syntax (an escape, a code
+    span, emphasis, a link, an autolink in angle brackets or HTML, an entity, strikethrough,
+    GitHub's math) are escaped, and the id is a code span unless it holds a backtick or a
+    backslash. A bare address would become an extended autolink, read from the raw text
+    before any escape; the registry refuses definitions that contain one, so the guarantee holds
+    for every definition (ids, versions, inputs and parameter names are labels without one).
+    What GitHub adds after the Markdown, such as emoji shortcodes (``:b:``), is not Markdown
+    syntax and is not escaped.
     """
     lines = [
         "| id | version | level | inputs | parameters | definition |",

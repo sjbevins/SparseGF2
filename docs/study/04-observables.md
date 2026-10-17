@@ -84,7 +84,8 @@ and no random stream: it reads what the engine produced.
 | $\widehat\tau^{\mathrm{chk}}_\ell$ | $\min\lbrace t \in \mathcal T : k_t \le \ell\rbrace$ | depth or censored | `FirstPassage.tau_chk`, `.observed_chk` |
 | $A_{a,m}$ | the cyclic interval $\lbrace a, a+1, \dots, a+m-1\rbrace \bmod n$ | set | windows of `contiguous_distance` |
 | $d_{\mathrm{cyc}}$, $d^0_{\mathrm{cyc}}$ | the shortest failing interval; its zero extension | integers (raw: NaN at $k = 0$) | `CyclicDistance.raw`, `.zero_extended` |
-| $G = (V, E)$ | the trajectory's interaction graph | graph | `edges` |
+| $G = (V, E)$ | the trajectory's interaction graph ($E$ is always its edge set; a Pauli operator is written $P$ or $P'$) | graph | `edges` |
+| $C(n, 2)$ | the degree-four circulant graph on $V$: edges $\lbrace i, (i+d) \bmod n\rbrace$, $d \in \lbrace 1, 2\rbrace$ (v1.4 §2.1; doc 01) | graph | `graphs.watts_strogatz` at $\beta = 0$ |
 | $\Omega_{n,m}$ | the $m$-subsets of $V$, $\lbrace A \subseteq V : \lvert A\rvert = m\rbrace$ | family of sets | |
 | $\Gamma_G(A)$ | the neighborhood of $A$ in $G$: vertices adjacent to some vertex of $A$ | set | `reach` in `connected_distance` |
 | $\mathcal C_m(G)$ | the $m$-subsets $A$ with $G[A]$ connected | family of sets | `connected_distance` levels |
@@ -102,6 +103,7 @@ and no random stream: it reads what the engine produced.
 | $S$ | orderings (or regions) per evaluation (without an argument; $S(X)$ is an entropy) | integer | `samples` |
 | $w$ | the exhaustive cutoff: exact counts for $m = 1, \dots, w$ (without an argument; $w(x)$ below is the word map of a seed) | integer | `max_exact`, width of `exact_counts` |
 | $Y_j$, $Z_j$ | $\max(D_j, w+1) - (w+1)$; $T_\varepsilon(\max(D_j, w+1))$ | per-ordering values | in `integrated_robustness`, `uniform_channel_failure` |
+| $\sigma_X$, $s_X$ | the true standard deviation of a per-sample quantity $X$ and its sample standard deviation over the $S$ samples (so $s_Y$, $s_Z$, $s_I$) | reals $\ge 0$ | |
 | $T_\varepsilon(d)$ | $\Pr[\mathrm{Bin}(n, \varepsilon) \ge d]$ | probability | `_binomial_tails` |
 | $d(t)$, $\mathrm{se}(t)$ | a depth trace at the checkpoints and its standard error | reals | `d`, `se` of `peak` |
 | $d^*$, $\mathcal A$, $T^*$ | the maximum over $\mathcal T_+$, the maximizing set, its log midpoint | real, set, real | `Peak.d_star`, `.maximizing_set`, `.t_star` |
@@ -110,7 +112,7 @@ and no random stream: it reads what the engine produced.
 | $\Phi_{\mathcal N}$ | the standard normal distribution function (not the channel failure $\Phi$) | function | |
 | $\tau_{\mathrm{int}}$ | the integrated autocorrelation time of a chain's records | real $\ge 1$ | `erasures.chain_diagnostics` |
 | $\kappa$ | the true standard deviation of a chain estimate over its binomial error, about $\sqrt{\tau_{\mathrm{int}}}$ | real $\ge 1$ | |
-| $\xi$ | the trajectory key $(\text{experiment}, n, \beta, p, g, c, r, \text{protocol})$, in the code's field order; the seeds read every field but the protocol (Proposition 18(c)) | identity | `identity.TrajectoryKey` |
+| $\xi$ | the trajectory key $(\text{experiment}, n, \beta, p, g, c, r, \text{protocol})$, in the code's field order: graph $g$, circuit $c$, measurement replica $r$ (always 0); the seeds read every field but the protocol (Proposition 18(c)). Inside $\xi$, $c$ and $r$ are these indices, not a count or a rank | identity | `identity.TrajectoryKey` |
 | $w(x)$ | the 32-bit words (low, high) of `blake2b(x, digest_size=8)` read little-endian | two integers | `observables._text_words` |
 
 Subscripts $t$ are dropped when one depth is meant. All entropies and informations are in bits.
@@ -176,8 +178,9 @@ $$
 Proposition 6 proves this equals $S(A) + S(R) - S(A \cup R)$ of the joint state and
 $\dim (N_t)_A - \dim (W_t)_A$, the number of independent logical operators supported in $A$.
 `StabilizerCode.lost_information` computes it from the physical code
-($2\lvert A\rvert - s - \operatorname{rank} H\vert_A + \operatorname{rank} H\vert_B$, `codes.py`
-module docstring) and `PhaseFreeTableau.mutual_information(A, R)` from the joint state.
+($2\lvert A\rvert - r_t - \operatorname{rank} H\vert_A + \operatorname{rank} H\vert_B$, with
+$H$ a generator matrix of $W_t$ and $r_t$ its rank; the `codes.py` module docstring writes $s$ for
+$r_t$) and `PhaseFreeTableau.mutual_information(A, R)` from the joint state.
 
 ### 3.5 The ring-contiguous distance (v1.4 §5.5)
 
@@ -433,10 +436,10 @@ logical operators supported in $A$, modulo the stabilizers supported in $A$.
 *Proof (derived here; v1.4 cites Li and Fisher, Theorem 1 and Eqs. (12)–(14), for the
 statement).* By the Knill–Laflamme conditions, an erasure of $A$ (a channel whose Kraus operators
 act on $A$) is correctable iff $\Pi O \Pi = c(O)\Pi$ for every operator $O$ on $A$, with $\Pi$ the
-code projector; by linearity it suffices to check Paulis $E$ supported in $A$. If $E$ anticommutes
-with a stabilizer, $\Pi E \Pi = 0$. If $E$ is a stabilizer up to a phase, $\Pi E \Pi$ is a multiple
-of $\Pi$. Otherwise $E \in N \setminus W$ (up to phase) is a nontrivial logical operator: it maps
-the code space to itself and acts on it as a non-identity Pauli, so $\Pi E \Pi = E\Pi$ is not a
+code projector; by linearity it suffices to check Paulis $P$ supported in $A$. If $P$ anticommutes
+with a stabilizer, $\Pi P \Pi = 0$. If $P$ is a stabilizer up to a phase, $\Pi P \Pi$ is a multiple
+of $\Pi$. Otherwise $P \in N \setminus W$ (up to phase) is a nontrivial logical operator: it maps
+the code space to itself and acts on it as a non-identity Pauli, so $\Pi P \Pi = P\Pi$ is not a
 multiple of $\Pi$. So correctability holds iff $N_A \subseteq W$, i.e. $N_A = W_A$, i.e.
 $I(A:R) = 0$ by Proposition 6. ∎
 
@@ -586,7 +589,7 @@ them exactly on the exact profiles of engine codes (`StabilizerCode.boundary_fai
 
 **Proposition 16 (the estimators of $P_{\mathcal C,G,J}$, $D(J)$ and $\Phi_J$).** The engine
 probe records, for each coupling $J$ and size $m$, the failing fraction
-$\hat P_J(m) = \frac1S\sum_s f(A_s)$ of $S$ regions drawn from $Q_{G,J}(\cdot\mid m)$; each size of
+$\hat P_J(m) = \frac1S\sum_{j=1}^{S} f(A_j)$ of $S$ regions drawn from $Q_{G,J}(\cdot\mid m)$; each size of
 each evaluation draws from its own stream (`RANDOMNESS_CONTRACT = 2`;
 [correlated-erasure.md](../observables/correlated-erasure.md) §5.1, §7.4), so the
 $\hat P_J(m)$ of different sizes are independent given the code.
@@ -633,17 +636,21 @@ per graph. Neither error contains the bias of an incompletely equilibrated chain
 $\Phi_J$ that leans on interpolation. §7(f) shows the bias of an interpolated $D(J)$.
 
 **Proposition 17 (the mean-leakage estimator).** With regions $A_1, \dots, A_S$ from
-`erasures.sample_regions` at $(m, J)$ and $\hat\ell = \frac1S\sum_s I(A_s:R)$: (a) for exact
-samples, $\hat\ell$ is unbiased with standard error $\sigma/\sqrt S$, estimated by $s/\sqrt S$;
-(b) for the chain, $\hat\ell$ is consistent, its bias is at most $2k$ times the total-variation
-distance of the records from $Q_J$, and the standard error is estimated by $s/\sqrt{\mathrm{ESS}}$
-with $\mathrm{ESS} = \min(S/\tau_{\mathrm{int}}, S)$ of the series $I(A_s:R)$.
+`erasures.sample_regions` at $(m, J)$ and $\hat\ell = \frac1S\sum_{j=1}^{S} I(A_j:R)$: (a) for
+exact samples, $\hat\ell$ is unbiased with standard error $\sigma_I/\sqrt S$, estimated by
+$s_I/\sqrt S$, where $\sigma_I$ is the standard deviation of $I(A:R)$ for $A \sim Q_{G,J}(\cdot\mid m)$
+and $s_I$ that of the $S$ values $I(A_j:R)$; (b) for the chain, $\hat\ell$ is consistent, its bias
+is at most $2k$ times the total-variation distance of the records from $Q_J$, and the standard
+error is estimated by $s_I/\sqrt{\mathrm{ESS}}$ with $\mathrm{ESS} = \min(S/\tau_{\mathrm{int}}, S)$
+of the series $I(A_j:R)$.
 
 *Proof (derived here).* (a) i.i.d. draws. (b) $0 \le I \le 2k$, so
-$\lvert\mathbb E I(A_s) - \bar\ell\rvert \le 2k\lVert\mathcal L(A_s) - Q_J\rVert_{\mathrm{TV}}$, and the
+$\lvert\mathbb E I(A_j) - \bar\ell\rvert \le 2k\lVert\mathcal L(A_j) - Q_J\rVert_{\mathrm{TV}}$, and the
 total-variation argument of correlated-erasure.md §5.1 applies to each record. For a stationary
 series with integrated autocorrelation time $\tau_{\mathrm{int}}$ the variance of the mean is
-$\sigma^2\tau_{\mathrm{int}}/S$ to leading order; $\tau_{\mathrm{int}}$ is estimated by
+$\sigma_I^2\tau_{\mathrm{int}}/S$ to leading order, with $\tau_{\mathrm{int}} = 1 + 2\sum_{t \ge 1}\rho(t)$
+the convention of `erasures.chain_diagnostics` (whose docstring cites Madras and Sokal 1988 for the
+windowed estimator); $\tau_{\mathrm{int}}$ is estimated by
 `erasures.chain_diagnostics` (Sokal's window), and the cap at $S$ keeps the error at least the
 independent one (`codes.py::CorrelatedFailure.failure_ess` uses the same cap). ∎
 
@@ -826,12 +833,13 @@ $10^{-9}S$), and zeros where $k = 0$. (2) The curve (`analysis.correlated_failur
 `holds_code`). (3) $\hat D(J) = \sum_{m\lt n}(1 - \tilde P(m))$, 0 where $k = 0$. (4) Interpolation
 weights from the unit vectors; binomial variances; Proposition 16. (5) Carry the sampler's
 configuration (`MonitoredCircuit.correlated_sampler(name)`: method, rungs, step, burn-in, thinning,
-tempering) as given. $O(c\,s + n)$ per code, $O(s\,n)$ once for the weights.
+tempering) as given. $O(n_J n_m + n)$ per code, $O(n_m n)$ once for the weights, with $n_J$ the
+number of couplings and $n_m$ the number of sampled sizes.
 
 **5.7 Mean leakage** (`mean_leakage`, `mean_leakage_exact`). Sampled: (1) the seed of
 Proposition 18; (2) `erasures.sample_regions(edges, n, m, [J], S, ..., seed=list(seed))` (exact on
 a cycle or a path, else the swap chain with replica exchange; correlated-erasure.md §4); (3)
-$I(A_s:R)$ for each region; (4) mean, ESS, error (Proposition 17). $k = 0$ or $m = 0$ return 0
+$I(A_j:R)$ for each region; (4) mean, ESS, error (Proposition 17). $k = 0$ or $m = 0$ return 0
 without drawing. Cost: the sampler's (correlated-erasure.md §8.1) plus $S$ region evaluations.
 Exact: every $m$-subset, its boundary from the membership matrix, $I(A:R)$ per region; refused
 above `budget` regions (default two million); $O(\binom nm(\lvert E\rvert + \text{elimination}))$.
@@ -877,15 +885,18 @@ then inline Markdown, where a backslash before ASCII punctuation shows that char
 backslash is written before every `|` and before every character that can begin inline syntax:
 `\` (an escape), the backtick (a code span), `*` and `_` (emphasis), `[` (a link or an image), `<`
 (an autolink or HTML), `&` (an entity), `~` (strikethrough) and the dollar sign (GitHub's math).
-No syntax can then begin, a backslash before a pipe shows as itself, and every pipe follows an odd
+No syntax that is read after the escapes can then begin, a backslash before a pipe shows as itself, and every pipe follows an odd
 run of backslashes, which parsers that count the run (marked) also read as an escape. The id is a
 code span, where backslashes are literal and only `|` is escaped, unless it holds a backtick
 (which would end the span) or a backslash (before an escaped pipe it would make a run of two):
 then it is written as plain text like the other cells. Under the GitHub Flavored Markdown
 specification every row therefore has the header's six cells and every cell reads back as its
-text, lines joined and ends trimmed (a bare address such as `http://a.b` may become a link that
-shows the same text). What GitHub adds after the Markdown, such as emoji shortcodes (`:b:`), is not
-Markdown syntax and is not escaped.
+text, lines joined and ends trimmed, for every text without a bare web or e-mail address. Such an
+address (`www.`, `://`, an e-mail) starts one of GitHub's extended autolinks, which are read from
+the raw text before any escape (GFM section 6.9), so no escaping protects it; the registry
+therefore refuses a definition that contains one (`_BARE_ADDRESS`, tested in
+`test_register_get_and_versions`), and the documents carry the links instead. What GitHub adds
+after the Markdown, such as emoji shortcodes (`:b:`), is not Markdown syntax and is not escaped.
 
 ## 6. From the mathematics to the code
 
@@ -1383,4 +1394,6 @@ bootstrap seed's tag left out of the version record) each fail `tests/test_study
 * **The catalog table** reads back as its text under the GitHub Flavored Markdown specification
   (§5.9), as a model of the specification's table and inline rules written in the tests checks,
   and as rendering every row with marked 15.0.12 confirmed once (by hand, not in the suite).
-  What GitHub adds after the Markdown, such as emoji shortcodes, is not escaped.
+  The model does not simulate GitHub's extended autolinks; the guarantee instead rests on the
+  registry refusing bare web and e-mail addresses in definitions. What GitHub adds after the
+  Markdown, such as emoji shortcodes, is not escaped.
