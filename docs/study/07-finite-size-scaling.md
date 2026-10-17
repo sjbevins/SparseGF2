@@ -10,7 +10,7 @@ design `docs/specs/2026-10-17-ws-study-pipeline-design.md` ("design §x"). The e
 enter a fit (nested means, survival-based estimates, graph-cluster errors, the bootstrap over
 graphs) are [06-statistics.md](06-statistics.md). The Python blocks run as written, in order, in
 one namespace, in a few seconds; blocks marked `<!-- not run -->` reproduce the calibration of
-§10 and take about a minute.
+§11 and take about a minute.
 
 ## Contents
 
@@ -18,18 +18,19 @@ one namespace, in a few seconds; blocks marked `<!-- not run -->` reproduce the 
 2. [Notation](#2-notation)
 3. [The scaling hypothesis](#3-the-scaling-hypothesis)
 4. [The collapse quality](#4-the-collapse-quality)
-5. [The bounded Nelder–Mead](#5-the-bounded-neldermead)
-6. [Fits and their statuses](#6-fits-and-their-statuses)
-7. [Shared versus independent exponents](#7-shared-versus-independent-exponents)
-8. [Leaving one size out](#8-leaving-one-size-out)
-9. [The bootstrap of a fit](#9-the-bootstrap-of-a-fit)
-10. [Calibration on synthetic data](#10-calibration-on-synthetic-data)
-11. [Diagnostics, and what they can and cannot tell apart](#11-diagnostics-and-what-they-can-and-cannot-tell-apart)
-12. [Algorithms](#12-algorithms)
-13. [From the mathematics to the code](#13-from-the-mathematics-to-the-code)
-14. [Worked examples](#14-worked-examples)
-15. [Validation map](#15-validation-map)
-16. [Limitations and departures](#16-limitations-and-departures)
+5. [The polynomial master curve (ruling R-FSS)](#5-the-polynomial-master-curve-ruling-r-fss)
+6. [The bounded Nelder–Mead](#6-the-bounded-neldermead)
+7. [Fits and their statuses](#7-fits-and-their-statuses)
+8. [Shared versus independent exponents](#8-shared-versus-independent-exponents)
+9. [Leaving one size out](#9-leaving-one-size-out)
+10. [The bootstrap of a fit](#10-the-bootstrap-of-a-fit)
+11. [Calibration on synthetic data](#11-calibration-on-synthetic-data)
+12. [Diagnostics, and what they can and cannot tell apart](#12-diagnostics-and-what-they-can-and-cannot-tell-apart)
+13. [Algorithms](#13-algorithms)
+14. [From the mathematics to the code](#14-from-the-mathematics-to-the-code)
+15. [Worked examples](#15-worked-examples)
+16. [Validation map](#16-validation-map)
+17. [Limitations and departures](#17-limitations-and-departures)
 
 ## 1. Purpose and scope
 
@@ -43,7 +44,10 @@ graph-cluster uncertainty paired across $p$, explicit censoring and horizon-peak
 shared-versus-separate comparison. Design §7 names the method: the collapse quality of Houdayer
 and Hartmann, a bounded Nelder–Mead written here (no SciPy), multi-start, leave-one-size-out, the
 paired bootstrap, diagnostics, and exploratory and confirmatory runs told apart by a recorded
-label. This part implements exactly that.
+label. Ruling R-FSS (design §11) adds a continuous objective, a polynomial master curve fitted
+jointly with the parameters, as the `method="polynomial"` of every fitting function, with the two
+methods' agreement as a diagnostic (§5, §12). Houdayer and Hartmann's quality stays the default
+(§5.8 says why). This part implements exactly that.
 
 ## 2. Notation
 
@@ -62,8 +66,11 @@ label. This part implements exactly that.
 | $N_{\min}$ | bracketed points a parameter vector needs to be admissible | integer | `min_points` |
 | $[\ell_k, h_k]$ | the box of parameter $k$ | reals | `bounds` |
 | $\varphi$ | the unbounded variables of the optimizer | reals | (inside `minimize_bounded`) |
-| $\Delta$ | shared cost minus pooled independent cost | real | `SharedComparison.delta` |
+| $\Delta$ | shared cost minus pooled independent cost (polynomial: shared $\chi^2$ minus the independent $\chi^2$ sum) | real | `SharedComparison.delta` |
 | $B$ | bootstrap replicates | integer | `replicates` |
+| $d$, $F_{\mathbf a}$ | degree and polynomial master curve $\sum_{k\le d} a_k x^k$ | integer, function | `degree`, `CollapseFit.coefficients` |
+| $\mathcal S$ | the polynomial method's fixed point set (its window) | set | `CollapseFit.selected`, `fss.py::window_points` |
+| $\chi^2(\boldsymbol\theta)$, $\mathrm{dof}$ | the polynomial objective on $\mathcal S$; $\lvert\mathcal S\rvert - (d+1) - (\text{free parameters})$ | real, integer | `CollapseFit.chi2`, `.dof`, `fss.py::polynomial_cost` |
 
 ## 3. The scaling hypothesis
 
@@ -84,7 +91,7 @@ $$
 x = (p - p_c)\,n^{1/\nu}, \qquad Y = y\,n^{-z}, \qquad dY = s\,n^{-z}.
 $$
 
-Each observable has its own $F$; the parameters may or may not be shared (§7). Small-world
+Each observable has its own $F$; the parameters may or may not be shared (§8). Small-world
 geometry can add a crossover scale (the number of rewired edges is of order $n\beta$, v1.4 §5.9),
 so a single power-law collapse may hold only in a window of sizes and rates: choose the window
 before fitting (`ScalingData.subset`) and record it.
@@ -94,7 +101,7 @@ appreciable. `ScalingData.estimator` records which estimate was used: a nested m
 is censored; otherwise a survival-based estimate, such as the restricted mean
 $\mathbb{E}[\min(\tau, T_{\max})]$ or the Kaplan–Meier median ([06-statistics.md](06-statistics.md)
 §6), whose own scaling is then what the fit tests. The censored and horizon-peak fractions of each
-point travel with the data (`censored_fraction`, `horizon_fraction`) into the diagnostics (§11).
+point travel with the data (`censored_fraction`, `horizon_fraction`) into the diagnostics (§12).
 
 ## 4. The collapse quality
 
@@ -163,12 +170,12 @@ variance $dY_l^2$, and $F$ is linear across each bracket, then $\mathbb{E}\chi^2
 linear $F$ it is unbiased for $F(x_i)$ with variance $d\bar Y_i^2$ (Proposition 1). So
 $\mathbb{E}(Y_i - \bar Y_i)^2 = dY_i^2 + d\bar Y_i^2$. ∎
 
-Curvature of $F$ across a bracket adds a bias (dense rates make it small; §14 (a)). The
+Curvature of $F$ across a bracket adds a bias (dense rates make it small; §15 (a)). The
 $\chi^2_i$ of different points share bracketing points, and in the study the errors of one size
 are correlated across rates (the rates share graphs, [06-statistics.md](06-statistics.md) §5), so
 $S$ is not a calibrated chi-square statistic: its *minimum* over $\boldsymbol\theta$ can fall well
-below 1 when correlated shifts of a size are absorbed by the parameters (§10). Uncertainties come
-from the bootstrap (§9), not from the curvature of $S$.
+below 1 when correlated shifts of a size are absorbed by the parameters (§11). Uncertainties come
+from the bootstrap (§10), not from the curvature of $S$.
 
 **Proposition 4 (piecewise continuity; derived here).** $S$ is continuous in $\boldsymbol\theta$
 except where some $\mathcal B_i$ changes, that is where some $x_i$ crosses an abscissa of another
@@ -183,9 +190,9 @@ the least-squares line through the new set of points differs in general from the
 
 At $p_c$ equal to a measured rate, every size's point at that rate has $x = 0$, so many brackets
 switch together: the fitted $p_c$ often sits at the edge of such a jump, at a measured rate to
-within rounding (§14 (b) shows a jump of 0.025 in $S$ across $p_c = 0.18$ and a fit landing on
+within rounding (§15 (b) shows a jump of 0.025 in $S$ across $p_c = 0.18$ and a fit landing on
 0.18 to within $10^{-9}$). This is a property of Houdayer and Hartmann's quality, kept as published;
-multi-start (§5) and the bootstrap (§9) treat the resulting roughness. The Monte Carlo of §10
+multi-start (§6) and the bootstrap (§10) treat the resulting roughness. The Monte Carlo of §11
 finds no bias in $\hat p_c$ from it.
 
 ### 4.3 Admissibility
@@ -194,11 +201,208 @@ A parameter vector is admissible only when at least $N_{\min}$ points are bracke
 (`min_points`, default $\max(3, \lceil P/2\rceil)$, a convention chosen here): the mean of a few
 $\chi^2_i$ says little, and parameters that push most sizes' scaled ranges apart would otherwise
 win on a handful of points. Inadmissible vectors count as $+\infty$. For several observables
-(§7) each needs its own $N_{\min}$.
+(§8) each needs its own $N_{\min}$.
 
-## 5. The bounded Nelder–Mead
+## 5. The polynomial master curve (ruling R-FSS)
 
-### 5.1 The box and the reparametrization
+Ruling R-FSS (design §11) adds a continuous objective beside the Houdayer–Hartmann quality: a
+weighted least-squares fit of a polynomial master curve, jointly with $(p_c, z, \nu)$, on the
+points of a window in $x$. It is `method="polynomial"` in `fit_collapse`, `fit_shared`,
+`compare_shared_independent`, `leave_one_size_out` and `bootstrap_fit`; `collapse_diagnostics`
+follows the method of the fit it is given. The propositions of this section are numbered P1–P3.
+
+### 5.1 The objective
+
+For a fixed point set $\mathcal S$ (§5.3) and parameters $\boldsymbol\theta$, with $x_i$, $Y_i$,
+$dY_i$ as in §3,
+
+$$
+\chi^2(\boldsymbol\theta) = \min_{\mathbf a \in \mathbb{R}^{d+1}} \sum_{i \in \mathcal S}
+\frac{\big(Y_i - F_{\mathbf a}(x_i)\big)^2}{dY_i^2}, \qquad
+F_{\mathbf a}(x) = \sum_{k=0}^{d} a_k x^k .
+$$
+
+Since $(Y_i - F(x_i))/dY_i = (y_i - n_i^{z}F(x_i))/s_i$, each point is compared with the master
+curve in the data's own units and errors. `fss.py::polynomial_cost` evaluates $\chi^2$ at given
+parameters; `fit_collapse(..., method="polynomial")` minimizes it over the box with the optimizer
+of §6.
+
+### 5.2 The closed form: three parameters searched, the coefficients solved
+
+**Proposition P1 (variable projection; Golub and Pereyra, SIAM J. Numer. Anal. 10, 413 (1973)).**
+With $A_{ik} = x_i^k/dY_i$ and $b_i = Y_i/dY_i$ ($i \in \mathcal S$, $k = 0, \dots, d$),
+
+$$
+\chi^2(\boldsymbol\theta) = \big\lvert b - A A^{+} b\big\rvert^2 = b^{\mathsf T}(I - P_A)\,b ,
+$$
+
+with $A^{+}$ the pseudoinverse and $P_A$ the orthogonal projection onto the column space of $A$;
+and $\min_{\boldsymbol\theta, \mathbf a}$ of the weighted sum is $\min_{\boldsymbol\theta}\chi^2$.
+So only $(p_c, z, \nu)$ are searched.
+
+*Proof.* For fixed $\boldsymbol\theta$ the sum is $\lvert b - A\mathbf a\rvert^2$, a linear least
+squares problem: its minimum over $\mathbf a$ is attained at $\mathbf a = A^{+}b$ and is the
+squared distance from $b$ to the column space, $\lvert(I - P_A)b\rvert^2$. A joint minimum over
+$(\boldsymbol\theta, \mathbf a)$ is the minimum over $\boldsymbol\theta$ of the minimum over
+$\mathbf a$. ∎
+
+The computation (`fss.py::_Polynomial.solve`) works in the basis $\xi = x/\max_i\lvert x_i\rvert$,
+which spans the same column space (so $\chi^2$ is unchanged) and is better conditioned. The
+singular value decomposition $A = U\Sigma V^{\mathsf T}$ gives $\mathbf a = V\Sigma^{-1}U^{\mathsf T}b$,
+dropping singular values below $\sigma_{\max}\max(\lvert\mathcal S\rvert, d+1)\,\epsilon$, then
+$r = b - A\mathbf a$ and $\chi^2 = \lvert r\rvert^2$. The reported `coefficients` are
+$a_k/(\max\lvert x\rvert)^k$, in powers of $x$. $V\Sigma^{-2}V^{\mathsf T}$ is their covariance for
+unit-variance whitened errors; it gives the variance of the fitted curve at a new abscissa, used for
+held-out points (§9).
+
+### 5.3 The window rule, exactly
+
+The window $W(\boldsymbol\theta)$ (`fss.py::window_points`; only $p_c$ and $\nu$ enter) is
+
+* `window="overlap"` (the default): the points with
+  $x_i \in [\max_n \min_{j \in n} x_j,\ \min_n \max_{j \in n} x_j]$, every size's points in the
+  range that every size covers (empty when the ranges do not meet);
+* `window=x_max` ($> 0$): the points with $\lvert x_i\rvert \le x_{\max}$;
+
+both ends included. A fit (`fss.py::_window_fit`):
+
+1. draws the first window at $\boldsymbol\theta_0$: the first row of `initial`, else the
+   Houdayer–Hartmann fit with the same settings, else the box center; $\mathcal S_0 = W(\boldsymbol\theta_0)$;
+2. minimizes $\chi^2$ on $\mathcal S_0$ from `initial` (or $\boldsymbol\theta_0$) and `starts`
+   random starts, giving $\boldsymbol\theta_1$;
+3. draws $\mathcal S_j = W(\boldsymbol\theta_j)$; stops if $\mathcal S_j = \mathcal S_{j-1}$
+   (`window_stable`), else minimizes $\chi^2$ on $\mathcal S_j$ from $\boldsymbol\theta_j$ (no
+   random starts) and repeats; at most `window_iterations` (5) fits, the last one kept.
+
+The set never changes during a search, so the optimizer sees a continuous objective (P2). Two
+alternatives were rejected: a hard window redrawn at every $\boldsymbol\theta$ makes $\chi^2$ jump
+when a point enters or leaves; a smooth taper keeps it continuous but lets the number of effective
+points change with $\boldsymbol\theta$, so the search could lower $\chi^2$ by pushing points out
+of the window. A fixed set has a fixed number of degrees of freedom.
+
+A set is admissible when it holds points of at least two sizes, some size has $d + 1$ distinct
+rates in it, and $\mathrm{dof} = \lvert\mathcal S\rvert - (d + 1) - (\text{free parameters}) \ge 1$;
+otherwise the status is `too_few_points` and the message names the condition.
+
+The window map can have more than one fixed point. In development the hierarchical example of
+§15 settled on 48 points from a start near the reference and on 49 points with more random
+starts; each fit was the optimum on its own window and $\nu$ differed by 0.027, a quarter of its
+bootstrap error. Refits (the bootstrap, the null, leave-one-size-out, the drift) keep the fit's
+window, so their spread does not include this choice (§11).
+
+### 5.4 Continuity
+
+**Proposition P2 (derived here).** On an admissible fixed set, $\chi^2(\boldsymbol\theta)$ is
+infinitely differentiable wherever $n^{1/\nu}$ and $n^{-z}$ are finite.
+
+*Proof.* $x_i$, $Y_i$ and $dY_i > 0$ are smooth in $\boldsymbol\theta$. A size with $d + 1$
+distinct rates in $\mathcal S$ has $d + 1$ distinct abscissas for every $\boldsymbol\theta$ ($x$
+increases strictly with $p$ at fixed $n$), so $A$ has $d + 1$ linearly independent rows
+(Vandermonde rows at distinct points, scaled by positive factors) and full column rank. Then
+$P_A = A(A^{\mathsf T}A)^{-1}A^{\mathsf T}$ is smooth, and so is $b^{\mathsf T}(I - P_A)b$. ∎
+
+Contrast with Proposition 4: across the measured rate 0.18, §15 (f) shows $\chi^2$ changing by
+about $4\times10^{-4}$ per $10^{-7}$ of $p_c$, steadily, where the Houdayer–Hartmann quality jumps
+by 0.023.
+
+### 5.5 $\chi^2/\mathrm{dof}$, and its caveat
+
+`CollapseFit.cost` is $\chi^2(\hat{\boldsymbol\theta})/\mathrm{dof}$ (also `chi2_per_dof`). With
+independent Gaussian errors of the stated sizes and a polynomial $F$ adequate on the window,
+$\chi^2(\hat{\boldsymbol\theta})$ follows a chi-square law with dof degrees of freedom to first
+order in the three nonlinear parameters (the linear least-squares result), so
+$\chi^2/\mathrm{dof} \approx 1$; over 20 synthetic datasets with independent 2% errors the mean
+was $0.94 \pm 0.06$ (`test_chi2_per_dof_is_about_one_for_independent_errors`). In the study the
+rates of a size share graphs, gates and mask uniforms, so a size's errors are correlated across
+$p$ and $\chi^2$ does not follow a chi-square law: it often falls below dof when the parameters
+absorb a coherent shift of a size (0.57 on the hierarchical example of §15). Read
+$\chi^2/\mathrm{dof} \gg 1$ as a failure of the polynomial or of the scaling form on the window,
+and take the uncertainties from the bootstrap (§10).
+
+### 5.6 The degree's effect
+
+The degree must let $F$ follow the master curve across the window. Too low a degree biases the
+parameters, and $\chi^2/\mathrm{dof}$ shows it: on a steep master curve over $\lvert x\rvert \le 2$
+(§15 (g)), degrees 2, 3, 5 and 9 give $\nu = 3.00$ (the box bound), 2.51, 1.84 and 1.5007 with
+$\chi^2/\mathrm{dof} = 322$, 67.6, 16.1 and 0.044 (true $\nu = 1.5$). Too high a degree costs
+variance and degrees of freedom. `fss.py::polynomial_degree_scan` fits a list of degrees from the
+same first window and reports their parameters, $\chi^2/\mathrm{dof}$ and spread; report it with
+any polynomial fit. The default, degree 3 (degrees 1 to 10 are accepted), suits the default
+overlap window, which is narrow (the smallest size's range when the sizes' ranges are nested).
+
+### 5.7 Refits, the shared fit and the comparison
+
+Every refit keeps the fit's window: bootstrap replicates (§10) refit on $\mathcal S$;
+leave-one-size-out and the drift refit (§9, §12) use $\mathcal S$ without the left-out size, and
+the held-out points inside the $x$ range the refit's polynomial was fitted on are compared with it,
+with its prediction variance added to their own. The shared fit (§8) uses each observable's window
+from its own fit.
+
+**Proposition P3 (derived here).** On these fixed sets,
+$\Delta = \chi^2_{\mathrm{shared}}(\hat{\boldsymbol\theta}_s) - \sum_o \chi^2_o(\hat{\boldsymbol\theta}_o) \ge 0$
+(up to the optimizer's tolerance).
+
+*Proof.* The minimum of $\sum_o\chi^2_o(\boldsymbol\theta_o)$ over independent
+$\boldsymbol\theta_o$ includes the choice $\boldsymbol\theta_o = \boldsymbol\theta$ for every
+$o$, so it is at most the shared minimum. ∎
+
+With independent Gaussian errors $\Delta$ would be a likelihood-ratio statistic, chi-square with
+$3(O - 1)$ degrees of freedom; with the study's correlated errors the bootstrap null of §8.3 is
+used. Its mapping keeps each observable's window: at $\hat{\boldsymbol\theta}_s$ the mapped data
+have the abscissas they had at $\hat{\boldsymbol\theta}_o$ (Proposition 6), so the mapped points of
+$\mathcal S_o$ are the points the observable's own window chose.
+
+`fss.py::compare_methods` fits the data with both methods (the polynomial window drawn at the
+Houdayer–Hartmann fit) and, with `replicates > 0`, refits every graph-bootstrap replicate with
+both, from their fits. The standard deviation of the paired replicate differences is the error of
+the difference, and `z = difference / se_difference` measures the disagreement in units of what
+resampling the graphs explains (§12). On the hierarchical example the two methods differed by
+$(0.0008, 0.0005, 0.0076)$ in $(p_c, z, \nu)$ with $z = (0.15, 0.04, 0.24)$ (§15 (g)).
+
+### 5.8 Which method, and why the default stays Houdayer and Hartmann's
+
+A benchmark in development used 40 synthetic datasets per scenario, made with §11's generator (20
+graphs, a 5% graph effect shared by the rates of a size, 3% rate noise, sizes 16–128, 21 rates).
+Its master curves were the logistic $F_1$ and a steeper one, $F_3(x) = 2/(1 + e^{3x}) + 0.5$. The
+polynomial fits started at the Houdayer–Hartmann fit. Root-mean-square errors of
+$(p_c, z, \nu)$ (true $(0.2, 1, 1.5)$):
+
+| method | $F_1$ | $F_3$ (steep) |
+|---|---|---|
+| Houdayer–Hartmann | 0.0161, 0.0427, 0.110 | 0.0009, 0.0114, 0.0219 |
+| polynomial, overlap window, degree 3 (the defaults) | 0.0178, 0.0440, 0.143 | 0.0029, 0.0219, 0.0436 |
+| polynomial, $\lvert x\rvert \le 1$, degree 3 | 0.0151, 0.0394, 0.109 | 0.0018, 0.0139, 0.0340 |
+| polynomial, $\lvert x\rvert \le 1$, degree 5 | 0.0158, 0.0407, 0.117 | 0.0017, 0.0126, 0.0230 |
+| polynomial, $\lvert x\rvert \le 2$, degree 5 | 0.0159, 0.0406, 0.108 | 0.0021, 0.0252, 0.294 |
+| polynomial, $\lvert x\rvert \le 2$, degree 7 | 0.0160, 0.0420, 0.105 | 0.0006, 0.0085, 0.0409 |
+| polynomial, $\lvert x\rvert \le 2.5$, degree 7 | 0.0157, 0.0409, 0.104 | 0.0010, 0.0095, 0.126 |
+
+Houdayer and Hartmann's quality uses every bracketed point (about 76 of 84 here) and needs no
+model of $F$. The polynomial with the parameter-free overlap window uses about 46–49 points, the
+smallest size's range, and is less efficient (the error of $\nu$ is 30% larger for $F_1$ and
+twice as large for $F_3$). Wider windows with higher degrees come close to Houdayer and Hartmann,
+or beat them on some parameters ($F_3$, $\lvert x\rvert \le 2$, degree 7: smaller errors in $p_c$
+and $z$, a larger one in $\nu$). They need $x_{\max}$ and $d$ chosen for the data, and they bias the
+parameters when the degree is too low for the window: $\nu$ off by 0.29 at $\lvert x\rvert \le 2$,
+degree 5, with $\chi^2/\mathrm{dof} = 10.7$ there. So no polynomial setting was better on both
+benchmarks, and the default stays Houdayer and Hartmann's.
+
+When to prefer which:
+
+* **Houdayer–Hartmann** (the default): no model of $F$; every bracketed point; robust without
+  tuning. Its objective jumps (Proposition 4), so fits can sit on the edge of a jump, and $S$ is no
+  calibrated statistic.
+* **Polynomial**: a smooth objective (P2), hence precise optimization and smooth parameter scans;
+  an explicit master curve (its coefficients, for plots and for comparing observables);
+  $\chi^2/\mathrm{dof}$ readable with the caveat of §5.5; nearly exact on clean data (§15 (f):
+  $p_c$ to $10^{-7}$, against $10^{-4}$ for Houdayer–Hartmann). Use it as the agreement check of
+  `compare_methods` (§12), and as a primary method once a window and degree have been validated on
+  the data: a degree scan whose parameters settle, $\chi^2/\mathrm{dof}$ consistent with the
+  bootstrap, and agreement with Houdayer and Hartmann.
+
+## 6. The bounded Nelder–Mead
+
+### 6.1 The box and the reparametrization
 
 Each free parameter ($\ell_k < h_k$) is written
 
@@ -221,7 +425,7 @@ derivative $\cos\varphi_k$ vanishes. ∎
 The optimizer can thus reach a bound exactly (tests: a minimum outside the box lands on its
 corner), and Nelder–Mead runs unconstrained in $\varphi$. The map is periodic, which is harmless.
 
-### 5.2 Nelder–Mead
+### 6.2 Nelder–Mead
 
 `fss.py::_nelder_mead` is the method of Lagarias, Reeds, Wright and Wright (SIAM J. Optim. 9,
 112 (1998)) with reflection 1, expansion 2, contraction 1/2 and shrink 1/2:
@@ -245,28 +449,30 @@ toward the interior. The best start wins (the first on ties) and is polished: a 
 Everything is deterministic given the seed. A coordinate within $10^{-6}$ of its box width from a
 bound is reported `at_bound`.
 
-## 6. Fits and their statuses
+## 7. Fits and their statuses
 
-`fss.py::fit_collapse(data, bounds=...)` minimizes $S$ over the box and returns a `CollapseFit`:
-the parameters, $S$ at them, the points used and the settings (bounds, $N_{\min}$ resolved and as
-given, random starts, seed, budget), with the data's `observable`, `beta`, `label` and
-`estimator`. It never raises for lack of data; its `status` says what happened:
+`fss.py::fit_collapse(data, bounds=...)` minimizes $S$ over the box (or, with
+`method="polynomial"`, $\chi^2$ on its window, §5) and returns a `CollapseFit`: the parameters,
+the objective at them (`cost`: $S$, or $\chi^2/\mathrm{dof}$), the points used and the settings
+(bounds, $N_{\min}$ resolved and as given, random starts, seed, budget; for the polynomial method
+the degree, the window rule, the point set and whether it settled), with the data's `observable`,
+`beta`, `label` and `estimator`. It never raises for lack of data; its `status` says what happened:
 
 | status | parameters | meaning |
 |---|---|---|
 | `ok` | yes | converged inside the box |
 | `at_bound` | yes | some parameter on a box bound (named in `at_bound`): the box is too small, or the data do not constrain that parameter; widen and refit |
 | `not_converged` | yes | the evaluation budget ran out before the tolerances were met |
-| `too_few_points` | no | fewer points than $N_{\min}$, or no admissible vector in the box (the sizes' scaled ranges never overlap enough) |
+| `too_few_points` | no | fewer points than $N_{\min}$, or no admissible vector in the box (the sizes' scaled ranges never overlap enough); for the polynomial method, a window that is not admissible (§5.3) or an objective undefined everywhere the search went |
 | `too_few_sizes` | no | fewer than two sizes: there is nothing to collapse |
 
 Two sizes give a fit, but three parameters are then weakly constrained (a collapse of two curves
 leaves a family of near-equivalent parameter sets); use at least three sizes, and more to see a
-drift (§11). `CollapseFit.usable` is true for the first three statuses.
+drift (§12). `CollapseFit.usable` is true for the first three statuses.
 
-## 7. Shared versus independent exponents
+## 8. Shared versus independent exponents
 
-### 7.1 The shared fit
+### 8.1 The shared fit
 
 `fss.py::fit_shared(datasets, bounds=...)` fits one $\boldsymbol\theta$ to several observables at
 one $\beta$ (refusing data from different $\beta$), each with its own $F$: the quality is evaluated
@@ -278,7 +484,7 @@ $$
 
 with each observable needing its own $N_{\min}$. This is v1.4's shared-criticality hypothesis.
 
-### 7.2 The statistic
+### 8.2 The statistic
 
 With independent fits $\hat{\boldsymbol\theta}_o$ and their pooled quality
 $S_{\mathrm{ind}} = \sum_o N_o S_o(\hat{\boldsymbol\theta}_o)/\sum_o N_o$,
@@ -291,7 +497,7 @@ measures how much the collapse worsens when the parameters are shared (`SharedCo
 $\Delta$ is near 0 when the observables' best parameters agree within their noise and large when
 they do not; but $S$ is not a calibrated chi-square (§4.2), so $\Delta$ needs a null distribution.
 
-### 7.3 The bootstrap null
+### 8.3 The bootstrap null
 
 `fss.py::compare_shared_independent` builds data that satisfy the shared hypothesis exactly and
 resamples them. Each observable $o$ is mapped point by point to
@@ -332,9 +538,9 @@ and `prefers` is `"independent"` when the p-value is at most `alpha` (0.05), `"s
 rule for bootstrap tests: resample from a distribution that satisfies the null, and keep the
 statistic's form. It is an approximation: the noise is the resampled noise of the observed data,
 the null center is built from the fitted parameters, and the refits start at
-$\hat{\boldsymbol\theta}_s$. §10 compares it with the true null distribution on synthetic data.
+$\hat{\boldsymbol\theta}_s$. §11 compares it with the true null distribution on synthetic data.
 
-## 8. Leaving one size out
+## 9. Leaving one size out
 
 `fss.py::leave_one_size_out` refits without each size in turn (from the full fit and `starts`
 random starts) and reports the refits' parameters, the `spread` (max minus min) of each parameter
@@ -342,12 +548,12 @@ over them, and the *held-out cost*: the mean $\chi^2_i$ of the left-out size's p
 master curve of the remaining sizes at the refit's parameters (each such point is bracketed only
 by the other sizes, which are exactly the training sizes). On data that obey the scaling form
 within their errors the refits agree and the held-out costs are of order 1 (on exact data with
-1% errors they are below 0.05, §14 (e)); a held-out cost far above 1, or parameters that move
+1% errors they are below 0.05, §15 (e)); a held-out cost far above 1, or parameters that move
 systematically with the left-out size, flag corrections to scaling, a crossover or a size outside
 the scaling window (v1.4 §5.8: held-out-size collapse diagnostics). With fewer than three sizes
 the refits have status `too_few_sizes`.
 
-## 9. The bootstrap of a fit
+## 10. The bootstrap of a fit
 
 `fss.py::bootstrap_fit` resamples graphs once per $(n, \beta)$: for each size, one draw matrix
 (`graph_bootstrap(labels_n, B, seed=[seed, n])`) applied to every rate's graph means, so each
@@ -359,7 +565,7 @@ random starts; a point whose replicate error is 0 or undefined is left out of th
 result has the replicate parameters, their standard deviations (`se`), percentile intervals
 (`lower`, `upper`), and counts of failed and at-bound replicates.
 
-## 10. Calibration on synthetic data
+## 11. Calibration on synthetic data
 
 The synthetic ensemble below has 20 graphs per point, a graph effect of 5% shared by every rate of
 a size (as the coupled rates of the study share their graphs) and 3% rate noise, four sizes
@@ -443,13 +649,50 @@ spanning 0.03–0.56, that pair lies far in the tail of the true null as well, s
 rather than a broken null, but it shows that a single rejection at the 5% level is weak evidence.
 Report the p-value with the fits' parameter differences and their bootstrap errors.
 
-## 11. Diagnostics, and what they can and cannot tell apart
+**The polynomial method** (§5, defaults: overlap window, degree 3) on the same 40 datasets:
+standard deviations $(0.0176, 0.0438, 0.137)$, bias $(-0.0038, 0.0083, 0.047)$; its bootstrap
+errors on the first dataset (60 replicates) were $(0.0147, 0.0418, 0.0932)$, so 0.84, 0.95 and
+0.68 of the true spread. The error of $\nu$ is low by a third, more than for Houdayer and Hartmann.
+Part of the reason is that refits keep the fit's window (§5.3), so the bootstrap does not see the
+window's own variability; inflate polynomial errors accordingly, or rely on the method comparison
+(§12). The benchmark of §5.8 is the same code with the polynomial fits added (about three minutes):
+
+<!-- not run -->
+
+```python
+def F3(x):
+    return 2.0 / (1.0 + np.exp(3.0 * x)) + 0.5
+
+
+truth = np.array([0.2, 1.0, 1.5])
+configs = [("overlap", 3), (1.0, 3), (1.0, 5), (2.0, 5), (2.0, 7), (2.5, 7)]
+for label, F in (("F1", F1), ("F3", F3)):
+    estimates = {"houdayer_hartmann": []} | {c: [] for c in configs}
+    for s in range(40):
+        d = synthetic(tuple(truth), F, seed=100 + s)
+        hh = fss.fit_collapse(d, bounds=box, starts=4)
+        estimates["houdayer_hartmann"].append(hh.params)
+        for window, degree in configs:
+            poly = fss.fit_collapse(d, bounds=box, method="polynomial", degree=degree,
+                                    window=window, initial=hh.params, starts=4)
+            estimates[(window, degree)].append(poly.params)
+    for key, values in estimates.items():
+        error = np.array(values) - truth
+        print(label, key, "rmse", np.round(np.sqrt(np.nanmean(error**2, axis=0)), 4))
+poly_boot = fss.bootstrap_fit(synthetic(tuple(truth), F1, seed=100), bounds=box,
+                              method="polynomial", replicates=60, seed=1, starts=4)
+print("polynomial bootstrap se", poly_boot.se)
+```
+
+## 12. Diagnostics, and what they can and cannot tell apart
 
 `fss.py::collapse_diagnostics(data, fit, bootstrap=None)` reports, at the fit:
 
 * **bracketing coverage**: which points enter $S$ (`bracketed`, their $\chi^2$), overall and per
   size (`coverage`, `coverage_by_size`). Unbracketed points are the ends of the scaled range: the
-  largest sizes' extreme rates. Low coverage means the fit rests on few points of some sizes.
+  largest sizes' extreme rates. Low coverage means the fit rests on few points of some sizes. For
+  a polynomial fit these are the points in its window and their squared whitened residuals, and a
+  note says when the window did not settle.
 * **drift with the smallest size removed**: a refit without the smallest size (same settings,
   started from the fit), its parameters minus the fit's (`drift`), and in units of a bootstrap's
   errors when one is given (`drift_in_se`).
@@ -457,6 +700,10 @@ Report the p-value with the fits' parameter differences and their bootstrap erro
   `horizon_fraction`) with their maxima and a note naming the estimator, since a point with
   appreciable censoring is only as good as its censoring-aware estimate.
 * `label` (exploratory or confirmatory) and `estimator`, recorded only.
+
+Two more diagnostics go with a fit: `fss.py::compare_methods`, the two methods side by side
+against the paired bootstrap spread of their difference (§5.7), and, for a polynomial fit,
+`fss.py::polynomial_degree_scan` (§5.6).
 
 What they can and cannot distinguish:
 
@@ -468,13 +715,16 @@ What they can and cannot distinguish:
 | horizon peaks | `horizon_fraction` per point | the true peak depth beyond the horizon: peak times there are lower bounds |
 | a poor collapse | $S$ well above 1, large $\chi^2$ at particular points | which assumption failed (the ansatz, the window, the errors) |
 | an unconstrained parameter | status `at_bound`, wide bootstrap intervals | whether widening the box would find a valid optimum |
+| the two methods disagree | `compare_methods`: $\lvert z\rvert$ of several | which one is right: a polynomial too low in degree, a window too wide, or Houdayer and Hartmann's fit on the edge of a jump each produce it; read the degree scan and $\chi^2/\mathrm{dof}$ |
+| a polynomial degree too low | `polynomial_degree_scan`: parameters that move with the degree, $\chi^2/\mathrm{dof} \gg 1$ | whether the scaling form itself fails on the window (that also raises $\chi^2/\mathrm{dof}$) |
+| an unsettled polynomial window | `window_stable = False`, a note | which of the fixed points is preferable; refit from other starts and compare |
 
 None of these diagnostics proves the scaling hypothesis: a good collapse with stable parameters
 is consistent with it within the sizes and rates measured.
 
-## 12. Algorithms
+## 13. Algorithms
 
-### 12.1 The quality (`_Collapse.chi2`)
+### 13.1 The quality (`_Collapse.chi2`)
 
 1. Once per data set: sort each size's points by rate (ties by value and error) into padded arrays
    (sizes $\times$ points per size).
@@ -488,7 +738,7 @@ is consistent with it within the sizes and rates measured.
 Cost $O(P\times\text{sizes})$ per evaluation (about 60–90 µs for 84–164 points and 4 sizes on the
 development machine).
 
-### 12.2 A fit (`fit_collapse`)
+### 13.2 A fit (`fit_collapse`)
 
 1. Statuses before searching: `too_few_sizes`, `too_few_points` (fewer than $N_{\min}$ points).
 2. `minimize_bounded` on the admissible quality (§4.3) from the center (or `initial`) and `starts`
@@ -497,31 +747,48 @@ development machine).
 
 About 6000 evaluations for 9 starts on 84 points (0.6 s).
 
-### 12.3 The bootstrap and the comparison
+### 13.3 The bootstrap and the comparison
 
 1. Per size, check that every point (of every observable) has the same graph labels; draw
    `graph_bootstrap(labels_n, B, seed=[seed, n])`.
 2. Replicate means and errors of every point from its graph means at the drawn positions (one
    vectorized pass per point).
-3. Refit each replicate from the full fit (comparison: map first, §7.3; refit shared and
+3. Refit each replicate from the full fit (comparison: map first, §8.3; refit shared and
    independent from $\hat{\boldsymbol\theta}_s$).
 
 Cost: $B$ (or $B\times(\text{observables} + 1)$) refits of about 0.1 s each.
 
-## 13. From the mathematics to the code
+### 13.4 The polynomial method (`_Polynomial.solve`, `_window_fit`)
+
+1. Per evaluation, on the fixed set: $x$, $Y$, $dY$ by `np.power`; undefined (the objective
+   $+\infty$) if anything overflows; the whitened Vandermonde matrix in the basis
+   $x/\max\lvert x\rvert$; its singular value decomposition; $\chi^2 = \lvert b - A\mathbf a\rvert^2$.
+2. A fit: the first window at the reference (§5.3); the multi-start search; the window redrawn at
+   the result until it no longer changes (usually one or two searches).
+
+About 35 µs per evaluation for 46 points and degree 3, about 3000 evaluations for 9 starts, and
+0.7 s for a fit including the Houdayer–Hartmann reference fit. Exact up to floating point (the
+pseudoinverse discards singular values below the rank tolerance).
+
+## 14. From the mathematics to the code
 
 | definition or algorithm | code |
 |---|---|
 | points of one observable at one $\beta$ (§3) | `fss.py::ScalingData`, `fss.py::scaling_data` (from `GraphMean` results), `ScalingData.subset` |
 | scaled coordinates | `fss.py::scaled_coordinates` |
 | the quality §4.1 | `fss.py::collapse_cost` → `CollapseCost`; `fss.py::_Collapse.chi2` |
-| the bounded optimizer §5 | `fss.py::minimize_bounded` → `MinimizeResult`; `fss.py::_nelder_mead` |
-| a fit and its status §6 | `fss.py::fit_collapse` → `CollapseFit`; `STATUSES` |
-| the shared fit §7.1 | `fss.py::fit_shared` → `SharedFit` |
-| the comparison and its null §7.2–7.3 | `fss.py::compare_shared_independent` → `SharedComparison` |
-| leave one size out §8 | `fss.py::leave_one_size_out` → `LeaveOneSizeOut` |
-| the bootstrap of a fit §9 | `fss.py::bootstrap_fit` → `BootstrapFit`; draws `fss.py::_draws_by_size` |
-| diagnostics §11 | `fss.py::collapse_diagnostics` → `CollapseDiagnostics` |
+| the bounded optimizer §6 | `fss.py::minimize_bounded` → `MinimizeResult`; `fss.py::_nelder_mead` |
+| a fit and its status §7 | `fss.py::fit_collapse` → `CollapseFit`; `STATUSES` |
+| the shared fit §8.1 | `fss.py::fit_shared` → `SharedFit` |
+| the comparison and its null §8.2–8.3 | `fss.py::compare_shared_independent` → `SharedComparison` |
+| leave one size out §9 | `fss.py::leave_one_size_out` → `LeaveOneSizeOut` |
+| the bootstrap of a fit §10 | `fss.py::bootstrap_fit` → `BootstrapFit`; draws `fss.py::_draws_by_size` |
+| diagnostics §12 | `fss.py::collapse_diagnostics` → `CollapseDiagnostics` |
+| the polynomial objective §5.1–5.2 | `fss.py::polynomial_cost` → `PolynomialCost`; `fss.py::_Polynomial.solve` |
+| the window §5.3 | `fss.py::window_points`; the fit's procedure `fss.py::_window_fit` |
+| polynomial fits §5 | `method="polynomial"` (with `degree`, `window`, `window_iterations`) of `fit_collapse`, `fit_shared`, `compare_shared_independent`, `leave_one_size_out`, `bootstrap_fit`; `METHODS`, `DEFAULT_DEGREE`, `MAX_DEGREE` |
+| the two methods side by side §5.7 | `fss.py::compare_methods` → `MethodComparison` |
+| the degree's effect §5.6 | `fss.py::polynomial_degree_scan` → `DegreeScan` |
 
 | field | formula |
 |---|---|
@@ -533,8 +800,13 @@ Cost: $B$ (or $B\times(\text{observables} + 1)$) refits of about 0.1 s each.
 | `LeaveOneSizeOut.held_out_cost` | mean $\chi^2$ of the left-out size at its refit |
 | `BootstrapFit.se`, `.lower`, `.upper` | standard deviation and percentile interval of the usable replicates |
 | `CollapseDiagnostics.drift` | parameters without the smallest size minus the fit's |
+| `CollapseFit.chi2`, `.dof`, `.cost` (polynomial) | $\chi^2(\hat{\boldsymbol\theta})$, $\lvert\mathcal S\rvert - (d+1) - (\text{free parameters})$, their ratio |
+| `CollapseFit.selected`, `.window_range`, `.window_stable`, `.window_iterations`, `.coefficients` | $\mathcal S$; $(\min, \max)$ of $x$ on $\mathcal S$ at the fit; whether $W(\hat{\boldsymbol\theta}) = \mathcal S$; fits made; $a_k$ |
+| `SharedFit.chi2`, `.dof`, `.selected` (polynomial) | $\sum_o\chi^2_o(\hat{\boldsymbol\theta}_s)$, $\sum_o(\lvert\mathcal S_o\rvert - d - 1) - (\text{free parameters})$, the $\mathcal S_o$ |
+| `MethodComparison.difference`, `.se_difference`, `.z` | polynomial minus Houdayer–Hartmann parameters; standard deviation of the paired replicate differences; their ratio |
+| `DegreeScan.params`, `.chi2_per_dof`, `.spread` | per degree; range over the usable fits |
 
-## 14. Worked examples
+## 15. Worked examples
 
 ### (a) The quality on exact data
 
@@ -608,7 +880,7 @@ assert np.allclose(ours[~np.isnan(ref)], ref[~np.isnan(ref)], rtol=1e-9)
 
 ### (b) A jump of the quality at a measured rate
 
-Synthetic data with a graph hierarchy (§10's generator, written out). Holding $z$ and $\nu$, the
+Synthetic data with a graph hierarchy (§11's generator, written out). Holding $z$ and $\nu$, the
 quality jumps where $p_c$ crosses the measured rate 0.18 (Proposition 4), and the fit sits at the
 edge of the jump:
 
@@ -693,7 +965,56 @@ assert boot.failed == 0 and np.all(boot.se > 0)
 print("bootstrap errors (8 replicates)", np.round(boot.se, 4))
 ```
 
-## 15. Validation map
+### (f) The polynomial master curve: closed form, exactness, continuity
+
+The closed form at fixed parameters against a direct solve of the normal equations (P1); the fit of
+exact data; and the objective across the measured rate 0.18 on the fit's fixed window (P2), where
+the Houdayer–Hartmann quality jumps:
+
+```python
+cost = fss.polynomial_cost(noisy, 0.19, 1.0, 1.5, degree=3)
+sel = cost.selected
+x, Y, dY = fss.scaled_coordinates(noisy, 0.19, 1.0, 1.5)
+A = np.vander(x[sel], 4, increasing=True) / dY[sel, None]
+b = Y[sel] / dY[sel]
+a = np.linalg.solve(A.T @ A, A.T @ b)
+assert math.isclose(cost.chi2, float(np.sum((b - A @ a) ** 2)), rel_tol=1e-9)
+assert np.allclose(cost.coefficients, a, rtol=1e-7)
+
+poly = fss.fit_collapse(exact, bounds=box, method="polynomial")
+assert poly.window_stable and np.allclose(poly.params, [0.2, 1.0, 1.5], atol=[1e-5, 1e-4, 1e-3])
+print(f"polynomial: p_c = {poly.p_c:.7f}, z = {poly.z:.6f}, nu = {poly.nu:.5f}, "
+      f"chi2/dof = {poly.cost:.1e} on {poly.points_used} points")
+
+pfit = fss.fit_collapse(noisy, bounds=box, method="polynomial")
+steps = (-1e-7, 0.0, 1e-7)
+chi2 = [fss.polynomial_cost(noisy, 0.18 + d, pfit.z, pfit.nu, selected=pfit.selected).chi2
+        for d in steps]
+quality = [fss.collapse_cost(noisy, 0.18 + d, pfit.z, pfit.nu).cost for d in steps]
+print("polynomial chi2", np.round(chi2, 6), "Houdayer-Hartmann S", np.round(quality, 6))
+assert abs(chi2[2] - chi2[0]) < 1e-3 and abs(quality[2] - quality[0]) > 1e-3
+```
+
+### (g) The degree's effect, and the two methods side by side
+
+A steep master curve over $\lvert x\rvert \le 2$: low degrees bias $\nu$ and say so through
+$\chi^2/\mathrm{dof}$ (§5.6). Then `compare_methods` on the hierarchical data (§5.7):
+
+```python
+steep = fss.ScalingData(n=n, p=p, se=0.01 * n, observable="steep",
+                        y=n * (2.0 / (1.0 + np.exp(3.0 * (p - 0.2) * n ** (1 / 1.5))) + 0.5))
+scan = fss.polynomial_degree_scan(steep, bounds=box, degrees=(2, 3, 5, 9), window=2.0,
+                                  initial=[0.2, 1.0, 1.5], starts=2)
+for d, f in zip(scan.degrees, scan.fits):
+    print(f"degree {d}: p_c = {f.p_c:.4f}, nu = {f.nu:.4f}, chi2/dof = {f.chi2_per_dof:.3g}")
+assert scan.chi2_per_dof[0] > 100 * scan.chi2_per_dof[-1] and abs(scan.params[-1, 2] - 1.5) < 0.01
+
+both = fss.compare_methods(noisy, bounds=box, replicates=10, seed=3, starts=2)
+print("polynomial - Houdayer-Hartmann", np.round(both.difference, 4), "z", np.round(both.z, 2))
+assert both.failed == 0 and np.all(np.abs(both.z) < 4)
+```
+
+## 16. Validation map
 
 All in `tests/test_study_fss.py`.
 
@@ -703,40 +1024,57 @@ All in `tests/test_study_fss.py`.
 | `test_the_bracketing_rule_at_the_edges` | §4.1 edge rules (top of a range, single points, no extrapolation) | hand-computed $\chi^2$ on binary-exact abscissas |
 | `test_a_linear_scaling_function_collapses_perfectly` | Proposition 3's exact case | $S < 10^{-20}$ at the truth |
 | `test_the_quality_does_not_depend_on_the_units_of_y` | Proposition 2 | relative $10^{-10}$ |
-| `test_extreme_parameters_give_no_quality_instead_of_overflow`, `test_overflowing_scaled_values_give_no_quality` | §12.1 step 2 | NaN quality |
-| `test_the_optimizer_finds_known_minima`, `test_a_minimum_outside_the_box_lands_on_its_bounds`, `test_fixed_coordinates_and_infinite_regions`, `test_the_optimizer_is_deterministic_given_its_seed` | §5, Proposition 5 | Rosenbrock, Himmelblau, Booth, a quadratic; corner minimum; fixed coordinates; $+\infty$ regions; bitwise determinism |
-| `test_the_fit_recovers_the_parameters_of_exact_data` | §6 | $\lvert\hat p_c - 0.2\rvert < 10^{-3}$, $\lvert\hat z - 1\rvert < 10^{-2}$, $\lvert\hat\nu - 1.5\rvert < 2\times10^{-2}$ |
-| `test_the_fit_recovers_the_parameters_within_its_bootstrap_errors` | §9, §10 | each parameter within 4 bootstrap errors (false alarm about $2\times10^{-3}$) |
-| `test_the_bootstrap_resamples_graphs_once_per_size_for_every_rate`, `test_bootstrap_points_must_share_their_graphs` | §9 pairing | the draws are `graph_bootstrap(labels, B, [seed, n])`; a constant offset between two rates survives every replicate exactly |
+| `test_extreme_parameters_give_no_quality_instead_of_overflow`, `test_overflowing_scaled_values_give_no_quality` | §13.1 step 2 | NaN quality |
+| `test_the_optimizer_finds_known_minima`, `test_a_minimum_outside_the_box_lands_on_its_bounds`, `test_fixed_coordinates_and_infinite_regions`, `test_the_optimizer_is_deterministic_given_its_seed` | §6, Proposition 5 | Rosenbrock, Himmelblau, Booth, a quadratic; corner minimum; fixed coordinates; $+\infty$ regions; bitwise determinism |
+| `test_the_fit_recovers_the_parameters_of_exact_data` | §7 | $\lvert\hat p_c - 0.2\rvert < 10^{-3}$, $\lvert\hat z - 1\rvert < 10^{-2}$, $\lvert\hat\nu - 1.5\rvert < 2\times10^{-2}$ |
+| `test_the_fit_recovers_the_parameters_within_its_bootstrap_errors` | §10, §11 | each parameter within 4 bootstrap errors (false alarm about $2\times10^{-3}$) |
+| `test_the_bootstrap_resamples_graphs_once_per_size_for_every_rate`, `test_bootstrap_points_must_share_their_graphs` | §10 pairing | the draws are `graph_bootstrap(labels, B, [seed, n])`; a constant offset between two rates survives every replicate exactly |
 | `test_fits_are_deterministic_given_the_seed`, `test_the_fit_does_not_depend_on_the_units_or_on_duplicated_points` | determinism, scaled inputs, duplicated points | bitwise; relative $10^{-6}$; duplicated data refit near the truth |
-| `test_a_fixed_parameter_stays_fixed`, `test_a_truth_outside_the_box_is_reported_at_its_bound`, `test_too_few_sizes_or_points_give_a_status_not_a_crash`, `test_min_points_is_respected`, `test_a_spent_budget_is_reported_as_not_converged` | §6 statuses | each status, no exception |
-| `test_the_shared_fit_recovers_a_common_set` | §7.1 | two observables with different $F$, same parameters |
-| `test_the_comparison_prefers_independent_exponents_for_different_nu` | §7.2–7.3 | $\nu = 1.2$ against 2.5: p-value $1/20$ with 19 replicates, $\Delta$ above 4 times the largest null replicate |
+| `test_a_fixed_parameter_stays_fixed`, `test_a_truth_outside_the_box_is_reported_at_its_bound`, `test_too_few_sizes_or_points_give_a_status_not_a_crash`, `test_min_points_is_respected`, `test_a_spent_budget_is_reported_as_not_converged` | §7 statuses | each status, no exception |
+| `test_the_shared_fit_recovers_a_common_set` | §8.1 | two observables with different $F$, same parameters |
+| `test_the_comparison_prefers_independent_exponents_for_different_nu` | §8.2–8.3 | $\nu = 1.2$ against 2.5: p-value $1/20$ with 19 replicates, $\Delta$ above 4 times the largest null replicate |
 | `test_the_null_mapping_moves_each_observable_onto_the_shared_parameters` | Proposition 6 | equal coordinates and quality at generic parameters; the refit of mapped data lands on the shared set |
-| `test_leaving_one_size_out_of_exact_data_gives_the_same_parameters` | §8 | every refit near the truth; held-out costs below 0.05 |
-| `test_diagnostics_report_coverage_drift_and_the_fractions_passed_through`, `test_drift_in_units_of_the_bootstrap_errors`, `test_a_failed_drift_refit_is_noted` | §11 | coverage equal to the quality's bracketed set; drift equal to the refit's difference; fractions passed through; notes |
+| `test_leaving_one_size_out_of_exact_data_gives_the_same_parameters` | §9 | every refit near the truth; held-out costs below 0.05 |
+| `test_diagnostics_report_coverage_drift_and_the_fractions_passed_through`, `test_drift_in_units_of_the_bootstrap_errors`, `test_a_failed_drift_refit_is_noted` | §12 | coverage equal to the quality's bracketed set; drift equal to the refit's difference; fractions passed through; notes |
 | `test_scaling_data_*`, `test_fit_bounds_are_checked`, `test_fit_settings_are_checked`, `test_shared_tools_check_their_inputs` | input checks | messages that say what to change |
+| `test_polynomial_cost_is_the_exact_weighted_least_squares` | P1, §5.2 | $\chi^2$, coefficients and residuals against normal equations solved in exact rationals (degrees 1–3), relative $10^{-10}$ ($\chi^2$) and $10^{-8}$ |
+| `test_the_window_rules` | §5.3 | the overlap and $\lvert x\rvert \le x_{\max}$ windows against their definitions; an empty overlap; refused rules |
+| `test_the_polynomial_fit_recovers_exact_parameters` | §5 | both windows: $(p_c, z, \nu)$ within $(10^{-5}, 10^{-4}, 10^{-3})$; a settled, self-consistent window; $\mathrm{dof}$ and $\chi^2/\mathrm{dof}$ |
+| `test_the_polynomial_objective_is_continuous_where_the_quality_jumps` | P2 against Proposition 4 | steps of $10^{-9}$ in $p_c$ across 0.18 change $\chi^2$ by at most twice the local slope times the step, while $S$ jumps by more than $10^{-3}$; smooth in $z$ and $\nu$ |
+| `test_the_degree_changes_the_answer_until_it_is_enough` | §5.6 | steep master curve over $\lvert x\rvert \le 2$: degree 2 biased with $\chi^2/\mathrm{dof}$ over 100 times that of degree 9, which recovers the truth |
+| `test_chi2_per_dof_is_about_one_for_independent_errors` | §5.5 | 20 datasets with independent errors: mean $\chi^2/\mathrm{dof}$ within 4 standard errors of 1 (measured $0.94 \pm 0.06$) |
+| `test_the_two_methods_agree_on_clean_and_on_noisy_data` | §5.7, §12 | exact data: differences below $(10^{-3}, 10^{-2}, 2\times10^{-2})$; noisy data: $\lvert z\rvert < 4$ (false alarm about $10^{-4}$), paired error below each method's |
+| `test_too_few_points_for_the_polynomial_give_a_status`, `test_polynomial_paths_without_a_usable_answer`, `test_an_unsettled_window_is_reported` | §5.3 admissibility, statuses | distinct rates, one size in the window, $\mathrm{dof} = 1$ accepted and 0 refused, overflow everywhere, failed observables in a shared fit, an unsettled window reported and a settled one from the same start |
+| `test_the_polynomial_method_runs_through_every_tool`, `test_polynomial_settings_are_checked` | §5.7 | shared fit, leave-one-size-out, diagnostics, bootstrap and comparison with `method="polynomial"` (P3's $\Delta$); input checks |
 
-## 16. Limitations and departures
+## 17. Limitations and departures
 
 * **The ansatz is unverified** (v1.4 §5.9): a fit measures how well the data collapse, not
   whether the hypothesis is true.
 * **The quality is piecewise continuous** (Proposition 4): fits can sit at the edge of a jump, at
-  a measured rate to within rounding. This is Houdayer and Hartmann's quality as published;
-  a smoother variant (averaging each size's linear interpolation) would change the method and is
-  not used.
+  a measured rate to within rounding. This is Houdayer and Hartmann's quality as published. It is
+  continuous between the changes of bracketing and jumps at them (design §11 calls it piecewise
+  constant there). The continuous alternative of ruling R-FSS is the polynomial method (§5).
+* **The polynomial method** needs a window and a degree that suit the data (§5.6, §5.8): too low a
+  degree biases the parameters, and the default overlap window, being narrow, is less efficient
+  than Houdayer and Hartmann's quality. Its window map can have several fixed points, and its
+  refits keep the fit's window, so its bootstrap errors are low (0.68 of the true spread of $\nu$
+  on §11's ensemble). Its $\chi^2/\mathrm{dof}$ is calibrated only for independent errors (§5.5).
 * **$S$ is not a calibrated chi-square**: points share brackets and the errors of a size are
   correlated across rates (shared graphs). Parameter uncertainties come from the graph bootstrap
-  (§9), which on the synthetic ensemble of §10 gave 0.85–0.91 of the true standard deviations
+  (§10), which on the synthetic ensemble of §11 gave 0.85–0.91 of the true standard deviations
   with 20 graphs; with fewer graphs expect smaller ratios.
-* **The bootstrap null** of the comparison is an approximation (§7.3); a single rejection at 5% is
-  weak evidence (§10). Report it with the parameter differences and their errors.
-* **Sizes are not strictly independent**: graph seeds `(master, g)` and circuit streams `u` are
-  shared across sizes (design §3), so the same labels at different $n$ use common random numbers.
-  The bootstrap resamples graphs once per $(n, \beta)$, as v1.4 §5.8 and the design ask, and treats
-  sizes as independent; the residual correlation through shared seeds is not modeled.
+* **The bootstrap null** of the comparison is an approximation (§8.3); a single rejection at 5% is
+  weak evidence (§11). Report it with the parameter differences and their errors.
+* **Sizes and $\beta$ values are independent samples** by ruling R-SEED (design §3, §11): graph
+  and run seeds are domain-tagged tuples that depend on $(n, \beta)$, so only the rates of one
+  $(n, \beta)$ share graphs, gates and mask uniforms. The bootstrap's one resampling per
+  $(n, \beta)$, applied to every rate and observable, is therefore the right unit, and treating the
+  sizes as independent is exact.
 * **The scaling window is chosen by the user** (`ScalingData.subset`); nothing here selects it.
 * **Conventions introduced here**: the admissibility floor $N_{\min} = \max(3, \lceil P/2\rceil)$
-  by default; the optimizer's tolerances, steps and polishing (§5.2); the bracketing tie rules
+  by default; the optimizer's tolerances, steps and polishing (§6.2); the bracketing tie rules
   (§4.1); the drift diagnostic removes the smallest size only (leave-one-size-out covers the
-  others). The `label` (exploratory or confirmatory) is recorded and changes nothing.
+  others); for the polynomial method, the fixed window redrawn until it settles, its reference
+  (the Houdayer–Hartmann fit) and the default degree 3 (§5.3). The `label` (exploratory or
+  confirmatory) is recorded and changes nothing.

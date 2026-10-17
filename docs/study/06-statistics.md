@@ -830,8 +830,11 @@ All in `tests/test_study_stats.py`.
   JSON service's `tau_median_all`).
 * **The peak horizon policy** (`refuse`, `exclude`, `include`) is a convention introduced here to
   make v1.4 §9's "explicit peak-at-horizon policy" a required choice; the default refuses.
-* **Graph seeds shared across conditions** (design §3): within one $(n, \beta, p)$ the graphs are
-  independent, which is all this part assumes; comparisons across $n$ or $\beta$ share random
-  numbers and are paired, not independent.
+* **What is coupled across conditions.** Within one $(n, \beta, p)$ the graphs are independent,
+  which is all this part assumes. By ruling R-SEED (design §3, §11) the graph and run seeds depend
+  on $(n, \beta)$, so different sizes and different $\beta$ are independent samples, and only the
+  rates of one $(n, \beta)$ share graphs, gates and mask uniforms: compare rates with
+  `paired_difference` and the shared bootstrap draws (§5, §7.2); compare sizes or $\beta$ values as
+  independent estimates.
 * **No SciPy**: Student's $t$ quantile is computed here (§4.2) and tested against closed forms
   and tables.
