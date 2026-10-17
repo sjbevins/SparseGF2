@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+* **Faster phase-free ensembles at large n, and a CPU-specific option.** The ensemble engine
+  pads each tableau column of `16 j` words with one zero word (`mipt._row_padding`), so the
+  columns that a measurement scans at one word offset no longer share a fraction of the cache
+  sets; `apply_2q` reads its 16 masks before the word loop, which lets the compiler vectorize
+  it. Neither changes a result. Sweep chunks are whole rounds of the running threads, at least
+  one (a part may exceed `PART_BYTES` for that). `sparsegf2.performance`: `cpu_topology()`
+  (Windows and Linux; cores, SMT siblings, L1d, L2 and each L3 domain), `PerformanceSettings`
+  (threads, placement `all`, `physical`, `vcache`, `other_ccd` or a list, sweep writers),
+  `applied(...)` (restores affinity and threads, also on an exception), and the presets
+  `9950x3d` and `auto`; `MonitoredCircuit.run(..., performance=...)`,
+  `sweep.run(..., performance=...)` and `sparsegf2 sweep run --performance`. Measurements in
+  `benchmarks/results/performance_x3d.md` and docs/SWEEPS.md section 12.
 * **Watts–Strogatz sweeps** (`sparsegf2.study`, [`docs/SWEEPS.md`](docs/SWEEPS.md)). A
   `SweepSpec` names a grid of conditions `(n, beta, p)` (exact rate tokens), the graphs and
   circuits per graph, the depth, the checkpoints (the geometric rule of v1.4 §9 or a list) and

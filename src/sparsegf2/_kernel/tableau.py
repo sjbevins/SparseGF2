@@ -142,6 +142,13 @@ def apply_2q(tab, a, b, g, lin2, anf2, ident2, ws, phases):
     c14 = _mask((anf >> 14) & 1)
     c15 = _mask((anf >> 15) & 1)
     track = phases and anf != 0
+    # The 16 masks are read once, before the loop: the compiler cannot prove that the stores
+    # into ``tab`` leave ``lin2`` unchanged, so masks read inside the loop are reloaded every
+    # word and the loop is not vectorized (about 4 times slower per gate at 32 words).
+    m00, m01, m02, m03 = m[0, 0], m[0, 1], m[0, 2], m[0, 3]
+    m10, m11, m12, m13 = m[1, 0], m[1, 1], m[1, 2], m[1, 3]
+    m20, m21, m22, m23 = m[2, 0], m[2, 1], m[2, 2], m[2, 3]
+    m30, m31, m32, m33 = m[3, 0], m[3, 1], m[3, 2], m[3, 3]
     for w in range(width):
         v0 = tab[ra, w]
         v1 = tab[rb, w]
@@ -177,10 +184,10 @@ def apply_2q(tab, a, b, g, lin2, anf2, ident2, ws, phases):
                 ^ (p15 & c15)
             )
         if linear:
-            tab[ra, w] = (v0 & m[0, 0]) ^ (v1 & m[1, 0]) ^ (v2 & m[2, 0]) ^ (v3 & m[3, 0])
-            tab[rb, w] = (v0 & m[0, 1]) ^ (v1 & m[1, 1]) ^ (v2 & m[2, 1]) ^ (v3 & m[3, 1])
-            tab[ra + 1, w] = (v0 & m[0, 2]) ^ (v1 & m[1, 2]) ^ (v2 & m[2, 2]) ^ (v3 & m[3, 2])
-            tab[rb + 1, w] = (v0 & m[0, 3]) ^ (v1 & m[1, 3]) ^ (v2 & m[2, 3]) ^ (v3 & m[3, 3])
+            tab[ra, w] = (v0 & m00) ^ (v1 & m10) ^ (v2 & m20) ^ (v3 & m30)
+            tab[rb, w] = (v0 & m01) ^ (v1 & m11) ^ (v2 & m21) ^ (v3 & m31)
+            tab[ra + 1, w] = (v0 & m02) ^ (v1 & m12) ^ (v2 & m22) ^ (v3 & m32)
+            tab[rb + 1, w] = (v0 & m03) ^ (v1 & m13) ^ (v2 & m23) ^ (v3 & m33)
 
 
 @njit(cache=True)

@@ -116,6 +116,7 @@ import numpy as np
 
 from sparsegf2 import erasures
 from sparsegf2 import graphs as _graphs
+from sparsegf2 import performance as _performance
 from sparsegf2._kernel import ensemble as _ens
 from sparsegf2._kernel import erasure_chain as _chain
 from sparsegf2._kernel.tables import ANF1, ANF2, IDENTITY_SYM1, IDENTITY_SYM2, LIN1, LIN2
@@ -126,6 +127,7 @@ from sparsegf2.circuit import Circuit
 from sparsegf2.clifford import num_cliffords
 from sparsegf2.gates import gate
 from sparsegf2.graphs import edge_coloring, from_edges
+from sparsegf2.performance import PerformanceSettings
 
 if TYPE_CHECKING:  # imported where used at run time (sparsegf2.tableau needs sparsegf2.codes)
     from sparsegf2.codes import StabilizerCode
@@ -1607,6 +1609,7 @@ class MonitoredCircuit:
         first_trajectory: int | None = None,
         indices: Sequence[int] | np.ndarray | None = None,
         num_threads: int | None = None,
+        performance: str | PerformanceSettings | None = None,
     ) -> EnsembleResult:
         """Simulate trajectories ``first_trajectory .. first_trajectory + trajectories - 1``,
         or exactly the trajectories listed in ``indices``.
@@ -1622,7 +1625,11 @@ class MonitoredCircuit:
         ``indices[i] // circuits_per_graph``, circuit stream ``indices[i]``,
         probe streams keyed by it), and ``result.trajectories`` is ``indices``
         in the given order. Runs in parallel over CPU cores (``num_threads``
-        limits that). Returns an :class:`EnsembleResult`.
+        limits that). ``performance``, a preset name of
+        :data:`sparsegf2.performance.PRESETS` or
+        :class:`~sparsegf2.performance.PerformanceSettings`, places the threads for this run
+        (process-wide, restored afterwards; ``num_threads``, when given, sets their number).
+        Neither changes a result. Returns an :class:`EnsembleResult`.
         """
         if indices is not None:
             if trajectories is not None or first_trajectory is not None:
@@ -1642,6 +1649,14 @@ class MonitoredCircuit:
             count = _integer(trajectories, "trajectories")
             self._check_trajectories(first, count)
             index = np.arange(first, first + count, dtype=np.int64)
+        trajectories = int(index.size)
+        settings = _performance.resolve(performance, self.num_qubits)
+        if settings is not None and num_threads is not None:
+            settings = replace(settings, threads=num_threads)
+        with _performance.applied(settings):
+            return self._run(index, seed, num_threads)
+
+    def _run(self, index: np.ndarray, seed, num_threads: int | None) -> EnsembleResult:
         trajectories = int(index.size)
         if trajectories:
             with threads(num_threads):
@@ -1683,6 +1698,7 @@ class MonitoredCircuit:
                     a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
                     bool(a["ce_need_graph"]), index, out, snap, snap_rows, tau, final, meas,
                     _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2, IDENTITY_SYM2,
+                    _row_padding((self.num_qubits + 63) // 64),
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
         values, snapshots = {}, {}
@@ -1983,6 +1999,19 @@ def _int_array(values, what: str) -> np.ndarray:
         if not whole:
             raise ValueError(f"{what} must hold integers, got {raw.tolist()}")
     return _read_only(raw.astype(np.int64).reshape(-1))
+
+
+def _row_padding(words: int) -> int:
+    """Zero words appended to each tableau column of ``words`` words in the ensemble engine.
+
+    A column of ``words = 16 j`` words is an even number (``2 j``) of 64-byte cache lines, so
+    successive columns, which a measurement reads at one fixed word offset, fall on a fraction
+    of the cache sets (a quarter of them at ``words = 32``) and evict each other. One more word
+    spreads them over every set. The padding never changes a result
+    (:func:`sparsegf2._kernel.ensemble.run_ensemble`); docs/SWEEPS.md section 12 has the
+    measurements.
+    """
+    return 1 if words % 16 == 0 else 0
 
 
 def _seed_sequence(seed) -> np.random.SeedSequence:

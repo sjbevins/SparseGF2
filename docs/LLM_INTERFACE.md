@@ -118,7 +118,7 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks; a sweep or one of its conditions, section 3.8) |
 | `sample_erasure_regions(graph, size, couplings, samples=200, num_nodes=None, burn_in=None, thin=1, tempering=True, chains=4, seed=None, method="auto", ladder="auto", max_step=None)` | `sparsegf2 regions --family F --n N ... --size M --couplings J... [...]` | read-only: geometry-correlated erasure regions on a graph alone (no circuit), with mixing diagnostics against exact values (section 3.7) |
 | `erasure_curves(path, e=None, delta=0.01, layer=None)` | `sparsegf2 curves RUN [--eps E...] [--delta D] [--layer L]` | read-only: Phi(e) and e_delta of a saved run's erasure probes, independent and correlated (section 3.7) |
-| `study.sweep.run(spec, directory, num_threads, chunk_size, compression, writers)` (Python only, no MCP tool) | `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K] [--compression C] [--writers W]` | generate, resume or grow a Watts–Strogatz sweep (section 3.8) |
+| `study.sweep.run(spec, directory, num_threads, chunk_size, compression, writers, performance)` (Python only, no MCP tool) | `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K] [--compression C] [--writers W] [--performance 9950x3d\|auto]` | generate, resume or grow a Watts–Strogatz sweep (section 3.8) |
 | `study.sweep.status(directory)` | `sparsegf2 sweep status DIR` | saved and target trajectories per condition |
 | `study.sweep.verify(directory, n, beta, p, u)` | `sparsegf2 sweep replay DIR N BETA P U` | rerun one trajectory and compare it with its saved row |
 
@@ -787,7 +787,9 @@ them one at a time); and `load_results` of one part file (`result-*.npz`) that p
   coupling.
 * `sparsegf2 sweep run|status|replay` (section 3.8): `run` logs each computed part on stderr
   and saves parts on `--writers` threads (4) with `--compression` `fast` (zlib level 1, the
-  default), `none` or `default`; neither changes a result. Ctrl-C (exit 130) waits for the
+  default), `none` or `default`; `--performance 9950x3d|auto` places the engine's threads
+  for the CPU (`sparsegf2.performance`, docs/SWEEPS.md section 12); none of these changes a
+  result. Ctrl-C (exit 130) waits for the
   saves in flight and keeps every saved part, so running again resumes.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
