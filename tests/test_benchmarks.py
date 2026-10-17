@@ -306,3 +306,50 @@ def test_committed_sweep_throughput_report_is_the_rendering_of_its_results(tmp_p
         (n, p, s) for n in (64, 128, 256, 512) for p in ("0.05", "0.2") for s in (False, True)
     }
     assert [r["n"] for r in data["saves"]] == [128, 256]
+
+
+def test_performance_x3d_quick(tmp_path):
+    out = tmp_path / "px"
+    script = str(ROOT / "benchmarks" / "performance_x3d.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--quick", "--out", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=ROOT,
+        env=_src_env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "performance_x3d.json").read_text(encoding="utf-8"))
+    md = (out / "performance_x3d.md").read_text(encoding="utf-8")
+    assert md.startswith("# Performance on this CPU")
+    assert data["placements_identical"] and data["padding_identical"] and data["gates_identical"]
+    assert data["topology"]["source"] in ("windows", "linux", "unknown")
+    assert {r["n"] for r in data["breakdown"]} == {16, 32}
+    assert all(r["trajectories_per_second"] > 0 for r in data["placements"])
+    assert [r["pad"] for r in data["padding"]] == [0, 1]  # n = 512: 16 words, padded to 17
+    for key in ("current_ns_per_gate", "in_loop_ns_per_gate", "compact_ns_per_gate"):
+        assert all(r[key] > 0 for r in data["gates"])
+    assert [r["chunksize"] for r in data["scheduling"]] == [0, 1, 16]
+    assert all(r["trajectories_per_second"] > 0 for r in data["end_to_end"])
+
+
+def test_committed_performance_report_is_the_rendering_of_its_results(tmp_path):
+    results = ROOT / "benchmarks" / "results"
+    script = str(ROOT / "benchmarks" / "performance_x3d.py")
+    proc = subprocess.run(
+        [sys.executable, script, "--from-json", str(results / "performance_x3d.json"),
+         "--out", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rendered = (tmp_path / "performance_x3d.md").read_text(encoding="utf-8")
+    assert rendered == (results / "performance_x3d.md").read_text(encoding="utf-8")
+    data = json.loads((results / "performance_x3d.json").read_text(encoding="utf-8"))
+    assert not data["quick"] and data["topology"]["x3d"]
+    assert data["placements_identical"] and data["padding_identical"] and data["gates_identical"]
+    assert {r["n"] for r in data["breakdown"]} == {64, 256, 1024}

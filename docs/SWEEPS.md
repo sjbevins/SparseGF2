@@ -59,7 +59,7 @@ per-size values resolved, tokens as canonical strings) and `SweepSpec.digest` it
 (`study/identity.py:json_digest`): two spellings of one sweep have one digest.
 
 The command line: `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K]
-[--compression fast|none|default] [--writers W]`,
+[--compression fast|none|default] [--writers W] [--performance 9950x3d|auto]`,
 `sparsegf2 sweep status DIR`, `sparsegf2 sweep replay DIR N BETA P U` (`cli.py:_cmd_sweep`;
 `--json` for one JSON object, exit codes 0, 2 for bad input, 1 for an internal error or a
 replay that differs, 130 for Ctrl-C). There are no MCP tools of the sweep's own: the existing
@@ -484,7 +484,7 @@ CPU-specific option:
 **Saving parts.** A part is saved on one of `writers` threads (default 4) while the next one
 computes (`study/sweep.py:_run_condition`, `_save_part`; the kernels and zlib release the GIL;
 at most `writers` saves wait, so at most `writers + 1` parts, each at most `PART_BYTES` =
-256 MB, are in memory). The compression of `EnsembleResult.save` is chosen per run
+256 MB or one trajectory per running thread (Chunks, below), are in memory). The compression of `EnsembleResult.save` is chosen per run
 (`run(..., compression=...)`, `--compression`; recorded per part in `provenance.json`, never
 part of the sweep's identity, and it changes no result). Saving one part with snapshots (the
 largest a sweep makes, p = 0.05), `fsync` included, against computing it:
@@ -508,13 +508,190 @@ collection.
 `estimate_ensemble`'s cost model (about 10 estimated seconds, `api.py:_default_chunk_size`),
 which overestimates the cost several times over (at n = 128 with snapshots it models 26.6 ms
 of one thread per trajectory where 4.4 ms of thread time, 0.14 ms of wall time on 32 threads,
-was measured); every later chunk holds about
-`CHUNK_SECONDS` = 10 s at the rate the previous chunk measured, and at most `PART_BYTES` of
-result. Chunk sizes never change a result.
+was measured); every later chunk holds about `CHUNK_SECONDS` = 10 s at the rate the previous
+chunk measured. A computed chunk is a whole number of rounds of the running threads, at least
+one (`study/sweep.py:_rounds`): a chunk ends with its slowest thread, so a last round of
+`r < threads` trajectories leaves the other threads idle for a whole trajectory. A part holds
+at most `PART_BYTES` of result, or one trajectory per running thread when that is more (at
+n = 1024 with snapshots a trajectory's result is about 14 MB, so the cap alone allowed 19
+trajectories for 32 threads). Chunk sizes never change a result.
 
 ### CPU-specific option
 
-(Left for the performance task.)
+`sparsegf2.performance` reads the CPU's topology and places the engine's threads:
+
+```python
+from sparsegf2 import performance
+
+topo = performance.cpu_topology()          # source "unknown" where the OS cannot be asked
+settings = performance.preset("auto", 2 * 1024, topo)   # n = 1024 with its references
+assert settings.placement in ("all", "physical")
+out = sweep.run(g8, "demo", performance="auto")         # complete already: nothing runs
+assert out["ran"] == 0
+```
+
+* `cpu_topology()`: logical processors, physical cores (SMT siblings), L1d and L2 per core and
+  each L3 domain with its processors (Windows `GetLogicalProcessorInformationEx`, Linux `/sys`;
+  elsewhere `source = "unknown"`, never an error). On the 9950X3D: 16 cores of 2 logical
+  processors (`2c`, `2c + 1`), L1d 48 KiB and L2 1 MiB per core, L3 96 MiB on processors 0-15
+  (the V-Cache CCD) and 32 MiB on 16-31.
+* `PerformanceSettings(threads, placement, writers)`: `placement` is `"all"`, `"physical"` (one
+  logical processor per core), `"vcache"` (the largest L3 domain), `"other_ccd"` or a list of
+  logical processors; `writers` the sweep's writer threads. `applied(settings)` confines the
+  process's threads to the placement (Windows `SetProcessAffinityMask`, which moves Numba's
+  running workers too; Linux `sched_setaffinity` on every thread) and sets Numba's thread count,
+  and restores both when the block ends, also on an exception. It is process-wide: one run at a
+  time.
+* `preset("9950x3d" | "auto", N)`: every logical processor (the default) unless the tableaux of
+  all logical processors would not fit in the largest L3 (`processors x tableau_bytes(N) >
+  largest L3`), then one thread per core. The rule is fitted to the measurements below, not
+  derived: on the 9950X3D it switches at `N >= 3521` (`n >= 1761`), and below that the preset
+  is the default. `"9950x3d"` refuses another layout; `"auto"` applies the rule to the detected
+  topology. Hooks: `MonitoredCircuit.run(..., performance=...)`, `sweep.run(...,
+  performance=...)` (per size) and `sparsegf2 sweep run --performance`.
+
+**The 720 classes.** Section 2: `j = 16 s + b` uniform on `[0, 11520)` gives
+`P(s) = #{b} / 11520 = 16 / 11520 = 1/720` for each `s`, and the phase-free kernel uses
+`LIN2[j >> 4]`, the symplectic matrix of class `s`, only (`apply_2q`; the sign bits `b` enter
+the sign row, which is off). The draw `next_below(11520)` is unchanged, so no realization
+changes. `tests/test_performance.py` checks, for every `j`, that `apply_2q` with `j` and with
+`16 (j >> 4)` give the same tableau and that it maps `(x_a, x_b, z_a, z_b)` to `v M_s` on 64
+generators; that a run whose gate set maps every `j` to `16 (j >> 4)` equals the run with the
+11,520 indices, bitwise; and that 102,400 classes drawn by the engine pass a chi-square test of
+uniformity on 720 cells at `ALPHA = 1e-6` (a correct sampler fails it at a fresh seed with
+probability 1e-6).
+
+**Cost model.** Per layer, with `N = 2n` qubits and `w = ceil(N / 64)` words per column (plus
+the padding below): the gates read and write `4 w` words each, `floor(n/2)` of them, plus 2
+draws each and `n` draws for the mask, `Theta(n w)`; each of the about `p n` measurements reads
+`w` words (the anticommuting rows) and, when its outcome is random, the pivot's word of all
+`2N` columns (stride `w`) and XORs `w` words into each of the `s <= 2N` columns of the pivot's
+support, `O(N + s w)`; `code_dimension` is `w` popcounts; a snapshot evaluation transposes the
+tableau, `O(N w + nnz)`. Measured on one thread (ms per trajectory, T = 4n,
+`benchmarks/results/performance_x3d.md`):
+
+| n | p | whole | gates and draws (p = 0) | measurements | `code_dimension` every layer | snapshots |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 0.05 / 0.2 | 0.49 / 0.74 | 0.20 | 0.23 / 0.51 | 0.06 / 0.05 | 0.07 / 0.03 |
+| 256 | 0.05 / 0.2 | 13.5 / 23.2 | 3.7 | 9.1 / 19.1 | 0.3 / 0.4 | 0.7 / 0.4 |
+| 1024 | 0.05 / 0.2 | 642 / 1319 | 55 | 573 / 1258 | 2 / 5 | 13 / 5 |
+
+(measurements: without snapshots minus p = 0; `code_dimension`: every layer minus the last
+layer only; snapshots: with minus without.) Measurements dominate from n = 256 on (68 to 95%)
+and grow about as `n^3` per trajectory (37 and 66 times from n = 64 to 256 to 1024 at
+p = 0.2); a `MonitoredCircuit.run` call costs 0.27 ms besides its trajectories.
+
+**Working set against the caches.** One trajectory's tableau is
+`tableau_bytes(N) = 8 (2N + 1)(w + pad)` bytes (`performance.tableau_bytes`, about `n^2`
+bytes); the engine also allocates scratch of about the same size, zeroed once and idle in this
+workload, and writes each snapshot once:
+
+| n | N | w + pad | tableau | where 2 threads per core keep it |
+|---:|---:|---:|---:|:---|
+| 64 | 128 | 2 | 4.1 KB | L1d (48 KiB) |
+| 256 | 512 | 8 | 66 KB | L2 (1 MiB per core) |
+| 512 | 1024 | 16 + 1 | 279 KB | L2 |
+| 1024 | 2048 | 32 + 1 | 1.08 MB | L3: 16 per CCD, 17 MB of 32 or 96 MiB |
+| 1536 | 3072 | 48 + 1 | 2.41 MB | L3: 39 MB per CCD, more than the 32 MiB CCD holds |
+| 1792 | 3584 | 56 | 3.21 MB | 32 tableaux, 103 MB, exceed the 96 MiB L3 |
+| 2048 | 4096 | 64 + 1 | 4.26 MB | neither: 32 tableaux, 136 MB, exceed the 128 MiB of L3 |
+
+**Two kernel changes, measured.** (1) *Tableau padding* (`mipt._row_padding`): a column of
+`w = 16 j` words is an even number of 64-byte lines, and a measurement reads one word of every
+column, at stride `w`, so those reads fall on `1 / (2 j)` of the cache sets and evict each other
+(a quarter of the sets at n = 1024). One zero word more per column spreads them over every set.
+All threads, p = 0.2: n = 512, 85.6 and 85.6 trajectories/s without and with (no change);
+n = 1024, 5.97 and 9.91 (1.66 times); n = 2048 (T = 256), 7.06 and 23.2 (3.3 times). With the
+padding, SMT pays again at n = 1024 (below). (2) *Gate masks before the loop* (`apply_2q`): read
+inside the word loop, the 16 masks are reloaded at every word, because the compiler cannot
+prove that the stores into the tableau leave the table unchanged, and the loop is not
+vectorized. The linear part alone: 21.6 against 281 ns per gate at 32 words (13 times),
+13.8 against 32.1 at 8 words, 8.4 against 7.2 at 2 words (17% slower). In the engine (one
+thread, the same replayed trajectories, gates without measurements; measured during
+development against a copy of the previous kernel): 0.105 against 0.092 ms at n = 64 (1.5% of
+a whole trajectory at p = 0.2), equal at n = 256, 7.2 against 18.7 ms at n = 512 and 34.5
+against 136 ms at n = 1024. A compact 16-bit table (720 entries, 1.4 KB, masks expanded
+in registers) is slower than the 92 KB table read before the loop (57 against 22 ns at 32
+words): the table's size was never the cost, so it was not adopted.
+
+**Why no setting changes a result.** Trajectory `u` draws its circuit from
+`stream_state(key_struct, u)` and each sampled probe evaluation from a stream keyed by `u`, the
+probe and the layer (section 4); it runs on graph `u // stride`; it writes row `t` of the
+outputs only, from its own tableau and buffers allocated inside the loop body
+(`_kernel/ensemble.py:run_ensemble`). Nothing else is shared or mutable between trajectories.
+Threads, placements, chunk sizes and Numba's scheduling choose only which thread runs which row
+and when; the writers and compression act on finished results. The padding words are zero and
+stay zero (a gate maps the zero words of its four columns to zero; measurements and probes read
+and write words `< w` only), so every word `< w` sees the same operations; the masks read before
+the loop are the same values, so every word is the same expression. Tests:
+`tests/test_performance.py` runs every setting (1, 2 and all threads, every placement, an
+explicit list, both presets) and paddings of 0, 1 and 3 words (and the padded run at N = 1024
+against no padding) and compares every value, snapshot word and snapshot digest with the
+default run; the placements, padding and gate sections of the benchmark compare their results
+too; `tests/test_sweep.py` covers thread counts and chunk sizes of sweeps.
+
+**Threads and placement** (all trajectories/s; T = 4n; `load` below 15% of the processors
+except where the report says):
+
+| n | p | 32 threads, every processor | 16, one per core | 16, V-Cache CCD | 16, other CCD | 1 thread |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 0.2 | 25,310 | 17,590 | 14,340 | 14,290 | 1,245 |
+| 256 | 0.2 | 758 | 542 | 421 | 435 | 40.7 |
+| 1024 | 0.2 | 10.7 | 9.94 | 6.13 | 6.18 | 0.718 |
+| 64 / 256 / 1024 | 0.05 | 35,190 / 1,252 / 23.0 | 26,770 / 826 / 21.3 | | | |
+
+Every logical processor is best at n = 64, 256 and 1024 at both rates (SMT adds 44%, 40% and
+8% at p = 0.2 over one thread per core; 32 threads run 20, 19 and 15 times one thread); the two
+CCDs alone are equal within 4% at n <= 1024, where 16 tableaux fit either L3. Fewer threads on
+every processor are left to the operating system's placement and vary from run to run (8
+threads at n = 1024: 5.5 and 3.3 trajectories/s in two runs). Larger tableaux (T = 256,
+p = 0.2):
+
+| n | 32 threads, every processor | 16, one per core | 16, V-Cache CCD | 16, other CCD |
+|---:|---:|---:|---:|---:|
+| 1280 | 101.3 | 99.3 | 59.3 | 60.4 |
+| 1536 | 61.8 | 59.9 | 37.2 | 36.0 |
+| 1792 | 40.2 | 43.8 | 24.8 | 20.3 |
+| 2048 | 22.9 | 30.0 | 17.3 | 7.63 |
+
+One thread per core starts to pay between n = 1536 and 1792 (four runs at n = 1536: 4% more,
+and 3%, 11% and 3% less than every processor; four runs at n = 2048: 19% to 31% more). The
+preset's rule puts the switch at `N >= 3521` (`n >= 1761`).
+
+The V-Cache CCD runs 1.2 and 2.3 times the other CCD at n = 1792 and 2048 when each holds 16
+threads (51 and 68 MB of tableaux: they fit its 96 MiB, not 32 MiB), but no placement that uses
+it beats one thread per core over both CCDs: 16 threads on the 8 V-Cache cores plus 8 single
+threads on the other CCD ran 29.4 and 29.7 against 30.5 and 29.7 trajectories/s at n = 2048
+(measured during development, static and dynamic scheduling), so there is no such
+placement. Numba's parallel chunk size (default 0: equal blocks) against 1 and 16 with
+`stop_when_purified` (n = 256, p = 0.2, final layers 84 to 1024): 691, 693 and 719
+trajectories/s, within the spread of repeated runs (771, 741 and 729 in an earlier run of the
+script): not adopted. One trajectory runs in 1.02 ms on one thread and 1.09 ms on 32; from two
+trajectories on, 32 threads are faster (1.11 against 2.00 ms): a serial path would save
+0.07 ms per single-trajectory call, so there is none.
+
+**End to end** (`sweep.run` of one condition with snapshots, `sweep_throughput.measure`):
+
+| n | p | setting | trajectories/s |
+|---:|---:|:---|---:|
+| 64 | 0.05 | every processor, 2 / 4 / 8 writers | 5,304 / 6,385 / 6,182 |
+| 64 | 0.05 | engine on the V-Cache CCD, 4 / 8 writers on the other CCD | 6,164 / 6,120 |
+| 256 | 0.05 | every processor, 2 / 4 / 8 writers | 584 / 798 / 796 |
+| 256 | 0.05 | engine on the V-Cache CCD, 4 / 8 writers on the other CCD | 636 / 638 |
+| 1024 | 0.2 | parts of 19 trajectories (the cap alone) / whole rounds of 32 | 8.02 / 9.89 |
+
+The default writers (4, unpinned) are best; separating the writers from the engine costs the
+engine half the cores and loses 3.5% at n = 64 and 20% at n = 256. Whole rounds gain 23% at
+n = 1024 with snapshots (22% in an earlier run).
+
+**Recommended setting.** The default (every logical processor, 4 writers, `fast`) at every n
+measured up to 1536, and by the rule up to 1760; it includes the padding, the gate change and the whole rounds, which are
+not options. Against the code before them (all threads, p = 0.2): n = 64 within 2% (the gate
+change costs 1.5% there), n = 256 unchanged, n = 1024 1.66 times in the engine (5.97 to 9.91
+trajectories/s; whole rounds add 23% end to end with snapshots), n = 2048 3.3 times.
+`--performance 9950x3d` (or `auto`) changes the placement only from n = 1761, to one thread per
+core: 9% more at n = 1792 and 19 to 31% more at n = 2048; below that it is the default and
+gains nothing. The V-Cache gives no measurable gain to this workload at any measured n.
 
 ## 13. Limits
 
