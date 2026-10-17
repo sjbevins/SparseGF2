@@ -1,10 +1,14 @@
 # Expectation values for depth scans
 
 What each average in a depth scan means, how to estimate it without bias, and how to get its
-uncertainty. The simulator produces per-trajectory values (`docs/SWEEPS.md`); everything here
-happens after that, in your analysis. The definitions follow the study specification
-(`docs/misc/watts_strogatz_study_spec_v1_4.md`, "v1.4") §5–§6. Section numbers below are this
-document's unless they say v1.4 or SWEEPS.
+uncertainty. **Division of labor:**
+- SparseGF2 records raw per-trajectory data (`docs/SWEEPS.md`).
+- It offers library functions for per-state quantities computed from saved tableaux (§6.7).
+- Everything in this document (averages, errors, T*, fits) happens afterwards, in your
+  analysis.
+
+The definitions follow the study specification (`docs/misc/watts_strogatz_study_spec_v1_4.md`,
+"v1.4") §5–§6. Section numbers below are this document's unless they say v1.4 or SWEEPS.
 
 ## 0. The rules
 
@@ -15,7 +19,7 @@ document's unless they say v1.4 or SWEEPS.
 | 3 | Uncertainty comes from **graphs**: SE = sd(graph means)/√N_G; for anything nonlinear or combining depths or rates, resample whole graphs (bootstrap). | 2.5, 8 |
 | 4 | First passages: use the **survival curve** P(τ_ℓ > t), the **restricted mean** E[min(τ_ℓ, T_max)] or quantiles; never average only the observed τ. | 5 |
 | 5 | Observables undefined at k = 0 (d_cyc, D): choose **zero-extended** or **conditional on a code**, and use the matching estimator. Convert the engine's k = 0 values first. | 6 |
-| 6 | T* is a per-trajectory random variable; E[T*] is not the peak of the mean curve. Record undefined and horizon-limited peaks. | 7 |
+| 6 | T* is a per-trajectory random variable. The primary target is the geometric mean exp E[ln T*], which is not the peak of the mean curve. Record undefined and horizon-limited peaks. | 7 |
 | 7 | Compare rates **within** the same graph and circuit (paired), then average graphs. | 3.1 |
 | 8 | For the ensemble mean, many graphs beat many circuits per graph. | 2.7 |
 
@@ -82,9 +86,16 @@ $$\widehat m_g=\frac1{C_g}\sum_{c=0}^{C_g-1}F_{g,c},\qquad
 *Unbiased.* $\mathbb E[\widehat m_g\mid G_g]=m_F(G_g)$, so
 $\mathbb E\widehat\mu_F=\mathbb E_G\,m_F(G)=\mu_F$. ∎
 
-The pooled mean over all rows, $\sum_{g,c}F_{g,c}/\sum_g C_g$, weights graph $g$ by $C_g$. It
-equals $\widehat\mu_F$ when every $C_g$ is equal and is biased otherwise, for example in an
-interrupted condition. Excluding rows by their values (censored, NaN) changes the target (§5, §6).
+The pooled mean over all rows, $\sum_{g,c}F_{g,c}/\sum_g C_g=\sum_g C_g\widehat m_g/\sum_g C_g$,
+weights graph $g$ by $C_g$. It equals $\widehat\mu_F$ when every $C_g$ is equal. With unequal
+$C_g$ fixed in advance it is **also unbiased**, being a fixed-weight average of unbiased graph
+means, and it has the smaller variance when $\sigma_w^2$ dominates.
+
+We use the equal-weight form because it is v1.4 §6.3's estimator and §2.5 gives its error
+directly. Any estimator becomes biased when the counts depend on the values. An interrupted
+`stop_when_purified` run can do that: its completed parts depend on run time, which depends on
+when trajectories purify. So analyze complete conditions only. Excluding rows by their values
+(censored, NaN) also changes the target (§5, §6).
 
 **2.4 Variance.** Let $\sigma_b^2=\operatorname{Var}_G m_F(G)$ (between graphs) and
 $\sigma_w^2=\mathbb E_G\operatorname{Var}(F_T\mid G)$ (within a graph, everything else: gates,
@@ -99,7 +110,10 @@ independent with common mean $\mu_F$ and variances $v_g$. Then
 $\mathbb E\sum_g(\widehat m_g-\widehat\mu_F)^2=\sum_g v_g-N_G\operatorname{Var}\widehat\mu_F=\frac{N_G-1}{N_G}\sum_g v_g$,
 and $\operatorname{Var}\widehat\mu_F=\sum_g v_g/N_G^2$. ∎
 
-It needs $N_G\ge2$. Treating the $N_GC$ rows as independent gives
+It needs $N_G\ge2$. At $\beta=0$ every graph is $C(n,2)$ and the label $g$ carries no
+randomness. All rows are then i.i.d., so use each trajectory as its own cluster:
+$\mathrm{sd}(\text{rows})/\sqrt{N_GC}$, with $N_GC-1$ degrees of freedom, here and in §8.
+Treating the $N_GC$ rows as independent when $\beta>0$ gives
 $(\sigma_b^2+\sigma_w^2)/(N_GC)$. That is too small by the factor
 $(C\sigma_b^2+\sigma_w^2)/(\sigma_b^2+\sigma_w^2)$ whenever graphs differ ($\sigma_b^2>0$).
 
@@ -132,10 +146,12 @@ the same gates, and nested masks (SWEEPS §5). Each rate's marginal law is exact
 different $p$ are dependent, usually positively. Pointwise errors follow §2. For a difference or
 slope in $p$, difference within the same row $u$ first, then use §2 on the differences.
 
-**3.2 Depths.** Values at different $t$ of one trajectory are dependent (§1.4). Any statistic
-that combines several depths or several rates needs the graph bootstrap (§8). That covers T*,
-quantiles, crossing points, areas under curves and collapse fits. A joint fit that treats the
-points $(n,p,t)$ as independent understates its errors.
+**3.2 Depths.** Values at different $t$ of one trajectory are dependent (§1.4).
+
+- A **mean of a per-trajectory scalar** uses §2.5 exactly, even when the scalar is built from
+  many depths: $T^*$, $\ln T^*$, $\min(\tau_\ell,T_{\max})$, $\mathbf 1\{\tau_\ell>t\}$.
+- **Quantiles, crossing points, and fits over several $(t,p)$** need the graph bootstrap (§8).
+  A joint fit that treats the points $(n,p,t)$ as independent understates its errors.
 
 **3.3 Sizes and β.** Seeds differ across $n$ and $\beta$ (SWEEPS §4), so their estimates are
 independent.
@@ -186,9 +202,26 @@ the nested mean of $\min(\tau_\ell,T_{\max})$, with censored entries set to $T_{
 If $S_\ell(T_{\max})>0$, $\mathbb E\tau_\ell$ is **not identified**. Two laws that agree on
 $[0,T_{\max}]$ and place the remaining mass at different depths beyond it give the same data and
 different means. The average of the observed $\tau$ only estimates
-$\mathbb E[\tau_\ell\mid\tau_\ell\le T_{\max}]$, which is smaller. Report the censored fraction
-$S_\ell(T_{\max})$ per condition. Fit $\mathbb E\tau_\ell$ (v1.4 §5.9) only where it is
-negligible; elsewhere use the restricted mean (a lower bound, say so) or quantiles.
+$\mathbb E[\tau_\ell\mid\tau_\ell\le T_{\max}]$, which is smaller.
+
+A small censored fraction does **not** make the gap small:
+$\mathbb E\tau_\ell-\mathbb E\min(\tau_\ell,T)=\sum_{t\ge T}S_\ell(t)=S_\ell(T)\,\mathbb E[\tau_\ell-T\mid\tau_\ell>T]$.
+For example, 1% censored with a mean residual time of $100T$ adds $T$. That is plausible where
+$\tau_0$ grows like $e^{an}$.
+
+**For finite-size scaling** (v1.4 §5.8–§5.9), with $\tau=n^zY(x)$:
+- $\mathbb E\min(\tau,T)=n^zF(x,T/n^z)$, so the restricted mean follows the ansatz only if
+  $T_{\max}\propto n^z$. With `layers: {"per_n": a}` that requires $z=1$; otherwise fitting it
+  biases $z$.
+- Quantiles carry no horizon, $t_q=n^zy_q(x)$, and neither does the survival curve
+  $S(t\,n^{-z};x)$. Collapse those when censoring is not negligible.
+- Fit $\mathbb E\tau_\ell$ only after **continuing** the censored trajectories: rerun those $u$
+  with a larger `layers` (`MonitoredCircuit.run(indices=..., seed=run seed)`, a new directory).
+  This is exact on the shared prefix by §1.4 and the stream identity (SWEEPS §4).
+- Alternatively, fit it under a declared tail bound that makes $\sum_{t\ge T_{\max}}S_\ell(t)$
+  small.
+
+Report the censored fraction $S_\ell(T_{\max})$ per $(n,\beta,p,\ell)$.
 
 **5.6 Quantiles.** $t_q=\min\{t:S_\ell(t)\le1-q\}$, for example the median $q=1/2$. It is
 identified when $S_\ell(T_{\max})\le1-q$. Plug in the graph-averaged $\widehat S_\ell$, and get
@@ -245,11 +278,23 @@ $D_t(J)=\sum_{m=0}^{n-1}(1-P_{t,G,J}(m))$ with $P(0)=0$, and $0$ when $k_t=0$. T
 $k_t=0$**. Summed unconverted, that gives $D=n$ for a purified trajectory. Convert:
 $\widehat D_t(J)=1+\sum_{m=1}^{n-1}(1-\widehat P(m))$ if $k_t>0$, else 0.
 
-- **Exact samplers** (a ring or path geometry, including $\beta=0$): $\widehat P(m)$ is unbiased
-  with variance $P(1-P)/S$.
-- **On rewired graphs**, a Metropolis swap chain: consistent after burn-in. Check mixing with
-  `sample_erasure_regions` on the campaign's graphs before a long run (AGENTS.md "Correlated
-  erasures").
+- **Exact samplers** exist only when the erasure graph is a single cycle or path. That means
+  `geometry: "cycle"` or `"path"`, whose boundary is counted on the 1-D ring of qubit labels, not
+  $b_G$ on $C(n,2)$ or a WS graph. There $\widehat P(m)$ is unbiased with variance $P(1-P)/S$.
+- **With `geometry: "interaction"`** (v1.4's $b_G$), every WS graph uses a Metropolis swap chain
+  with replica exchange, $\beta=0$ included (`_kernel/erasure_chain.py`, `geometry_order`), since
+  $C(n,2)$ has degree 4. It is consistent after burn-in. Its samples are autocorrelated, so the
+  variance exceeds $P(1-P)/S$.
+- **Chain bias.** Each chain starts from a uniform subset, so a finite burn-in pulls
+  $\widehat P_J$ toward $P_0$. The bias has the same sign in every trajectory and is invisible
+  to §2.5 and §8. Before production:
+  - compare with the exact $P_J(m)$ for $m\le w$ from saved codes
+    (`code.boundary_failure_counts(edges, w).exact(couplings)`);
+  - compare with a run at doubled `burn_in`;
+  - check mixing with `sample_erasure_regions` on the campaign's graphs (AGENTS.md "Correlated
+    erasures").
+
+  Report the remaining difference as a systematic error.
 - **Sizes not sampled** are interpolated, which adds bias. Sample every size, or the binomial
   window you need.
 
@@ -260,6 +305,22 @@ implemented.
 **6.6 Anything else from snapshots.** Any phase-free quantity of the state at a saved checkpoint
 is a per-trajectory value. Compute it per trajectory, then average by §2.
 
+**6.7 The library: per-state quantities from a saved snapshot.** `res.tableaux(...)` gives
+`PhaseFreeTableau` objects (`tableau.py`). Then `code = tab.physical_code(n)` gives a
+`StabilizerCode` (`codes.py`). Note the $k=0$ conventions, which differ from the probes':
+
+| quantity | call | value when $k=0$ | the probe's value when $k=0$ |
+|---|---|---|---|
+| $k$, code rate | `code.num_logical` | 0 | 0 (`code_dimension`) |
+| $d_{\mathrm{cyc}}$ | `code.contiguous_distance()` | **0** (already zero-extended) | NaN |
+| $M_\pi$ for $D(0)$ | `code.first_failure_sizes(S, seed=...)` | $n+1$ each: convert to $D=0$ | $n+1$ |
+| $\widehat P_J(m)$ for $D(J)$ | `code.correlated_failure(edges, couplings, sizes, S, ...)` | 0: convert to $D=0$ | 0 |
+| exact $P_J(m)$, $m\le w$ | `code.boundary_failure_counts(edges, w).exact(couplings)` | 0 | – |
+| $I(A{:}R)$, $S(A)$ | `code.lost_information(A)`, `tab.entropy(A)` | exact | – |
+
+Here `edges` is the trajectory's own graph (`build_graph(n, beta, g, master)`, SWEEPS §4) for
+v1.4's $b_G$.
+
 ## 7. The peak depth T*
 
 **7.1 Definition** (v1.4 §5.8), for a trajectory's trace $d(t)$ on $\mathcal T_+$ ($d^0$, or
@@ -267,13 +328,21 @@ $D$ with 0 at $k=0$): $d^*=\max d$, $\mathcal A=\{t\in\mathcal T_+:d(t)=d^*\}$, 
 $T^*=\exp\bigl(\tfrac1{|\mathcal A|}\sum_{t\in\mathcal A}\ln t\bigr)$. It is undefined when
 $d^*=0$.
 
-**7.2 Targets.** $T^*$ is a random variable of the trajectory. The targets are $\mathbb E T^*$,
-the geometric mean $\exp\mathbb E\ln T^*$, and its quantiles, each estimated per trajectory and
-then by §2.
+**7.2 Targets.** $T^*$ is a random variable of the trajectory.
 
-For $d^0$ and $D$, $d^*=0$ exactly when $k_1=0$ ($k$ never increases), so $T^*$ is undefined
-only for trajectories purified within the first layer. Report that fraction. Averaging over the
-defined ones conditions on $\tau_0>1$, which is a different target unless the fraction is 0.
+- **Primary target: the geometric mean** $\exp\mathbb E\ln T^*$. Estimate $\mathbb E\ln T^*$ as
+  the §2 mean of per-trajectory $\ln T^*$, with the §2.5 error. Then exponentiate: the interval
+  is $\exp$ of the interval, and the point estimate carries an $O(1/N_G)$ bias from Jensen's
+  inequality.
+- It suits log-spaced depths and the scaling form, where $\ln T^*=z\ln n+\ln Y(x)$.
+- $\mathbb E T^*$ is secondary. Quantiles of $T^*$ are nonlinear, so use §8 for them.
+
+$d^*=0$ exactly when $k_{t_1}=0$, where $t_1$ is the probe's smallest positive layer ($k$ never
+increases). On the sweep schedule $t_1=1$, since it always holds $0$, $1$ and $T$ (SWEEPS §6);
+a probe with its own `checkpoints` list need not include them. Give peak probes a list with 1
+and $T_{\max}$. $T^*$ is then undefined only for trajectories purified within the first layer.
+Report that fraction. Averaging over the defined ones conditions on $\tau_0>t_1$, which is a
+different target unless the fraction is 0.
 
 **7.3 Not the same statistics:** $\mathbb E T^*\ne T^*(\mathbb E d)$, the peak of the mean curve,
 and $\ne\mathbb E_G T^*(m_d(G,\cdot))$, the mean of per-graph peaks. $T^*$ is a nonlinear
@@ -303,7 +372,7 @@ An implementation of the plateau rule exists on branch `ws-study-full-archive`
 (`study/observables.py`).
 
 **7.6 Horizon.** If $T_{\max}\in\mathcal A$, the peak may lie beyond the horizon. Record a flag
-per trajectory. $\mathbb E T^*$ is meaningful only when that fraction is small, as with
+per trajectory; this needs $T_{\max}$ among the probe's layers. $\mathbb E T^*$ is meaningful only when that fraction is small, as with
 censoring.
 
 **7.7 With τ.** Joint per-trajectory statements ($T^*/\tau_1$, whether $t\ge\tau_1$ on
@@ -347,8 +416,10 @@ would understate the error.
   everything stored, including snapshot digests.
 - A new probe or an unsaved depth needs a replay from layer 0. The stream is sequential per
   trajectory, so a replay to depth $T$ costs $T$ layers.
-- Sampled probes draw from streams keyed by $(u,\text{probe name},\text{layer})$, so the same name
-  and sample count give the same draws.
+- Sampled probes draw from streams keyed by $(u,\text{probe name},\text{layer})$, and for
+  `correlated_erasure` also by the size $m$ (`_kernel/ensemble.py`). The same name and sample
+  count give the same draws. The key has no $p$, so these draws are paired across rates like
+  the gates (§3.1).
 - Growing a sweep (graphs, circuits, rates, sizes) never changes a saved trajectory. A later
   package version may grow it only after its replay check (SWEEPS §10).
 
@@ -356,11 +427,13 @@ would understate the error.
 
 - Engine values at $k=0$: `contiguous_distance` NaN, `erasure_first_failure` $n+1$,
   `correlated_erasure` 0 (so $D=n$ if summed). Convert to v1.4's $d^0=0$ and $D=0$ (§6).
-- Pooling rows when $C_g$ differ (§2.3). Treating circuits or checkpoints as independent for
-  errors (§2.5).
-- Averaging only the observed τ (§5.5). Taking the mean curve's peak for $\mathbb E T^*$ (§7.3).
-- At $\beta=0$ all graphs are equal, so $\sigma_b^2=0$. §2 still holds: the graph means are then
-  i.i.d. circuit averages.
+- Analyzing an incomplete condition: its counts can depend on the values (§2.3). Treating
+  circuits or checkpoints as independent for errors when $\beta>0$ (§2.5).
+- Averaging only the observed τ (§5.5). Fitting the restricted mean with $T_{\max}$ not
+  $\propto n^z$ (§5.5). Taking the mean curve's peak for the $T^*$ target (§7.3).
+- At $\beta=0$ all graphs are equal ($\sigma_b^2=0$): use each trajectory as its own cluster
+  (§2.5), and never bootstrap with $N_G=1$.
+- Calling the $D(J)$ chain exact, or ignoring its burn-in bias (§6.5).
 
 ## 12. Checks (synthetic data; they run in `tests/test_docs.py`)
 
