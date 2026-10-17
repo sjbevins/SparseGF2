@@ -65,6 +65,7 @@ __all__ = [
     "TrajectoryKey",
     "build_graph",
     "canonical_json",
+    "check_experiment_id",
     "circulant_edges",
     "edge_digest",
     "graph_seed",

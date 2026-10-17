@@ -8,13 +8,13 @@ Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored
   prefixes do not depend on the horizon; the native Clifford numbering is ``16 s + b``.
 * **Statistical**, at fixed seeds, with the false-alarm rate stated: every chi-square test
   passes when its p-value exceeds ``ALPHA = 1e-6``, every z-test when ``|z| < SIGMAS = 4.5``
-  (two-sided false alarm 6.8e-6). About 60 such tests run here, so a *correct* implementation
-  at fresh seeds would fail one with probability below 1e-3; at the fixed seeds the outcome is
-  deterministic. Statistics use exact reference laws: the occupancy law of with-replacement
-  edge draws, Binomial(2n, beta) rewiring counts, and the exact distribution of the rewiring
-  process for n = 6 and 7 (a dynamic program with no random numbers). The sensitivity of each
-  family is shown by negative controls (a wrong beta, a biased target sampler, a biased
-  Clifford sample, a wrong rate must fail).
+  (two-sided false alarm 6.8e-6). Roughly 80 such assertions run here (about 40 of each kind),
+  so a *correct* implementation at fresh seeds would fail one with probability below 4e-4; at
+  the fixed seeds the outcome is deterministic. Statistics use exact reference laws: the
+  occupancy law of with-replacement edge draws, Binomial(2n, beta) rewiring counts, and the
+  exact distribution of the rewiring process for n = 6 and 7 (a dynamic program with no random
+  numbers). The sensitivity of each family is shown by negative controls (a wrong beta, a
+  biased target sampler, a biased Clifford sample, a wrong rate must fail).
 
 What the existing tests already prove, and is not repeated here:
 
