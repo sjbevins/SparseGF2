@@ -12,7 +12,9 @@ import dataclasses
 import hashlib
 import json
 import math
+import re
 import struct
+import tracemalloc
 from fractions import Fraction
 
 import numpy as np
@@ -137,6 +139,13 @@ def test_the_catalog_has_one_entry_per_observable():
     assert {r["id"] for r in rows if r["retrospective"]} == RETROSPECTIVE
     table = ob.catalog_markdown().splitlines()
     assert len(table) == len(rows) + 2 and table[0].startswith("| id |")
+    # every row has the header's six cells: a "|" inside a cell is escaped as "\|"
+    for line, row in zip(table[2:], rows, strict=True):
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line)[1:-1]]
+        assert len(cells) == 6, line
+        assert cells[0] == f"`{row['id']}`"
+        assert cells[5].replace("\\|", "|") == row["definition"]
+    assert sum("|" in r["definition"] for r in rows) >= 4  # the case that broke the table
 
 
 def test_register_get_and_versions():
@@ -195,6 +204,100 @@ def test_parameters_are_resolved_and_keyed_canonically():
         ob.params_key("D_J")
 
 
+def test_numerically_equal_parameters_have_one_key():
+    """The key of a stored value is one text per parameter set, whatever the numeric types."""
+    one = ob.params_key("mean_leakage", {"m": 3, "J": 1.0})
+    assert json.loads(one)["J"] == 1.0 and '"J":1.0' in one
+    for j in (1, 1.0, np.float64(1), np.int64(1), np.float32(1)):
+        assert ob.params_key("mean_leakage", {"m": 3, "J": j}) == one
+    assert (
+        ob.params_key("mean_leakage", {"m": np.int64(3), "J": 1, "samples": np.int32(100)}) == one
+    )
+    zero = ob.params_key("mean_leakage", {"m": 3, "J": 0.0})
+    for j in (0, -0.0, np.float64(-0.0)):
+        assert ob.params_key("mean_leakage", {"m": 3, "J": j}) == zero
+    assert '"J":0.0' in zero
+    couplings = ob.params_key("D_J", {"couplings": [0.0, 1.0, 2.0]})
+    for c in ([0, 1, 2], (0, 1.0, 2), np.array([0.0, 1.0, 2.0]), np.arange(3)):
+        assert ob.params_key("D_J", {"couplings": c}) == couplings
+    assert ob.params_key("Phi", {"e": 0.1}) == ob.params_key("Phi", {"e": [0.1]})
+    assert ob.params_key("D_J", {"couplings": [1], "sizes": [1, 2]}) == ob.params_key(
+        "D_J", {"couplings": [1.0], "sizes": np.array([1, 2])}
+    )
+    # the design's manifest block analysis.peak (sensitivity_z as JSON ints) gives the default key
+    manifest_peak = {"rule": "plateau", "z": 1, "sensitivity_z": [0, 1, 2], "bootstrap": 200}
+    assert ob.params_key("peak_D", manifest_peak) == ob.params_key("peak_D")
+    # resolved values are in canonical form, so the computation sees one value too
+    resolved = ob.resolve_params("mean_leakage", {"m": np.int64(3), "J": 1})
+    assert type(resolved["m"]) is int and type(resolved["J"]) is float
+    # numeric parameters refuse strings, bools, fractions for ints and non-finite numbers
+    for params, message in (
+        ({"m": 3, "J": "1"}, "'J' of observable 'mean_leakage' must be a real number"),
+        ({"m": 3, "J": True}, "real number"),
+        ({"m": 3, "J": math.nan}, "finite"),
+        ({"m": 3.0, "J": 1.0}, "'m' of observable 'mean_leakage' must be an integer"),
+        ({"m": 3, "J": 1.0, "samples": 100.0}, "integer"),
+        ({"m": 3, "J": 1.0, "tempering": 1}, "True or False"),
+        ({"m": 3, "J": 1.0, "route": ""}, "non-empty string"),
+        ({"m": 3, "J": 1.0, "ladder": [[0.0]]}, "1-D"),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            ob.params_key("mean_leakage", params)
+    with pytest.raises(ValueError, match=r"item 1\) must be a real number"):
+        ob.params_key("D_J", {"couplings": [0.0, "1"]})
+    key = TrajectoryKey("ws-test", 4, "0", "0.1", 0, 0)
+    with pytest.raises(ValueError, match="must be a number"):  # the seed refuses a string J too
+        ob.region_seed(key, 0, 1, "1", "mean_leakage", "1")
+
+
+def test_entries_declare_the_kind_of_every_parameter():
+    entry = ob.get("d_conn")
+    assert dict(entry.kinds) == {"max_n": "int"} and entry.row()["kinds"] == {"max_n": "int"}
+    for e in (ob.get(r["id"], r["version"]) for r in ob.catalog()):
+        assert set(e.kinds) == set(e.params)
+        for name, kind in e.kinds.items():
+            assert kind.removesuffix("?") in ob.KINDS and ob.PARAM_KINDS[name] == kind
+    # defaults are stored in canonical form
+    custom = ob.ObservableDef(
+        "custom",
+        "1",
+        "trajectory",
+        ("trace:D",),
+        {"z": 1, "width": 2},
+        "test (v1.4 §5.8)",
+        ob.peak,
+        kinds={"width": "real?"},
+    )
+    assert type(custom.params["z"]) is float and custom.params["width"] == 2.0
+    assert custom.kinds == {"z": "real", "width": "real?"}
+    for kwargs, message in (
+        ({"params": {"width": 1}}, "has no kind"),
+        ({"params": {"z": 1}, "kinds": {"width": "real"}}, "not parameters"),
+        ({"params": {"width": 1}, "kinds": {"width": "complex"}}, "must be one of"),
+        ({"params": {"z": "wide"}}, "default of parameter 'z'"),
+    ):
+        args = {
+            "id": "custom",
+            "version": "1",
+            "level": "trajectory",
+            "inputs": ("trace:D",),
+            "definition": "test (v1.4 §5.8)",
+            "function": ob.peak,
+        }
+        args.update(kwargs)
+        with pytest.raises(ValueError, match=message):
+            ob.ObservableDef(**args)
+
+
+def test_peak_parameters_are_only_those_a_function_consumes():
+    """peak_D's bootstrap is run by bootstrap_peak (orderings); D(J) has no orderings, so
+    peak_D_J lists no bootstrap (its key would claim replicates that never ran)."""
+    assert set(ob.get("peak_D").params) == {"rule", "z", "sensitivity_z", "bootstrap"}
+    assert set(ob.get("peak_D_J").params) == {"rule", "z", "sensitivity_z", "J"}
+    assert "bootstrap" not in json.loads(ob.params_key("peak_D_J", {"J": 1.0}))
+    assert "probe:erasure_first_failure" in ob.get("peak_D").inputs  # what the bootstrap reads
+
+
 def test_compute_refuses_what_it_cannot_compute():
     code = StabilizerCode(["XXXX", "ZZZZ"])
     snap = ob.SnapshotInput(num_system=4, t=1, code=code)
@@ -219,6 +322,31 @@ def test_compute_refuses_what_it_cannot_compute():
         ob.SnapshotInput(4, 1, key=TrajectoryKey("ws-test", 5, "0", "0.1", 0, 0))
     with pytest.raises(ValueError, match="t must be"):
         ob.SnapshotInput(4, -1)
+
+
+def test_compute_hands_the_entry_to_its_compute_and_keys_the_value():
+    seen = []
+
+    def spy(snapshot, params, entry):
+        seen.append((entry.id, entry.version, dict(params)))
+        return ob.ObservableValue(1.0, 0.0, "spy", {})
+
+    entry = ob.ObservableDef(
+        "spy", "7", "snapshot", ("physical_code",), {"m": 2}, "a test (v1.4 §5.2)", spy, spy
+    )
+    ob.register(entry)
+    try:
+        snap = ob.SnapshotInput(4, 1, code=StabilizerCode(["XXXX", "ZZZZ"]))
+        value = ob.compute("spy", snap, {"m": np.int64(3)})
+        assert seen == [("spy", "7", {"m": 3})]
+        assert (value.observable_id, value.version, value.params_key) == ("spy", "7", '{"m":3}')
+        broken = dataclasses.replace(entry, version="8", compute=lambda s, p, e: 1.0)
+        ob.register(broken)
+        with pytest.raises(TypeError, match="not an ObservableValue"):
+            ob.compute("spy", snap, version="8")
+    finally:
+        ob._REGISTRY.pop(("spy", "7"), None)
+        ob._REGISTRY.pop(("spy", "8"), None)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -673,12 +801,57 @@ def test_uniform_channel_failure_formulas(rng):
             se = math.sqrt(sum((v - mean) ** 2 for v in z) / (len(z) - 1) / len(z))
             assert abs(phi.se[i] - se) < 1e-12
         assert not phi.interpolated_mass.any() and phi.e.tolist() == es
+        assert phi.se.shape == phi.value.shape == (len(es),)
     gone = ob.uniform_channel_failure([[8, 8, 8]], n, 0.5)
     assert gone.value.tolist() == [[0.0]] and gone.se.tolist() == [[0.0]]
     lone = ob.uniform_channel_failure([3], n, [0.5])
     assert math.isnan(float(lone.se[0]))
+    # one ordering and several rates: an error per rate (NaN: no spread from one ordering)
+    lone = ob.uniform_channel_failure([3], n, [0.1, 0.5])
+    assert lone.value.shape == lone.se.shape == (2,) and np.isnan(lone.se).all()
+    stacked = ob.uniform_channel_failure([[3], [8], [5]], n, [0.1, 0.3, 0.5])  # k = 0 in row 1
+    assert stacked.value.shape == stacked.se.shape == (3, 3)
+    assert np.isnan(stacked.se[[0, 2]]).all() and stacked.se[1].tolist() == [0.0, 0.0, 0.0]
     with pytest.raises(ValueError, match="probability"):
         ob.uniform_channel_failure([3, 4], n, 1.5)
+
+
+def test_channel_failure_never_shares_or_freezes_the_callers_rates():
+    """The result is read-only, but its rates are a copy: the caller's array stays writable and
+    a later edit of it (or of the array it is a view of) does not change the stored rates."""
+    first = [[2, 3, 4, 3], [5, 5, 3, 2]]
+    e = np.array([0.1, 0.3])
+    phi = ob.uniform_channel_failure(first, 6, e)
+    assert e.flags.writeable and not np.shares_memory(phi.e, e)
+    e[0] = 0.2
+    assert phi.e.tolist() == [0.1, 0.3] and not phi.e.flags.writeable
+    profile = ob.correlated_failure([[0.5, 1.0]], [0.0], [2, 4], 6, 1, samples=4)
+    base = np.array([0.0, 0.1, 0.3, 0.9])
+    channel = ob.correlated_channel_failure(profile, base[1:3])
+    assert base.flags.writeable and not np.shares_memory(channel.e, base)
+    base[1:3] = 0.5
+    assert channel.e.tolist() == [0.1, 0.3]
+
+
+def test_uniform_channel_failure_memory_does_not_grow_with_the_rate_count():
+    """The per-ordering terms Z_j are formed one rate at a time. With 40 rates the former dense
+    (codes, S, q) array and its variance temporary peaked at 82 times the input (measured); the
+    peak is now a few input copies (measured: 5.1 times, as uniform_failure's 5.0), and the bound
+    is 12 times. Allocation sizes are deterministic (no timing involved)."""
+    n, rates = 16, np.linspace(0.01, 0.6, 40)
+    rng = np.random.default_rng(3)
+    first = rng.integers(1, n + 1, size=(64, 200))
+    ob.uniform_channel_failure(first[:2], n, rates)  # warm up caches and lazy imports
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        phi = ob.uniform_channel_failure(first, n, rates)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    assert phi.se.shape == (64, 40)
+    assert peak <= 12 * first.nbytes, peak / first.nbytes
 
 
 def test_uniform_channel_failure_matches_the_exact_value(rng):
@@ -875,6 +1048,13 @@ def test_correlated_profile_bookkeeping():
     assert batch.sampler["method"] == "exact"
     with pytest.raises(TypeError):
         batch.sampler["method"] = "chain"
+    # se_exact: only an exact sampler makes the binomial errors the true ones
+    assert batch.se_exact and not prof.se_exact  # prof was given no sampler: not known exact
+    for method in ("chain", "mixed"):
+        chain = ob.correlated_failure(
+            values, [0.0, 1.0], [1, 2, 3, 4], n, 2, samples=samples, sampler={"method": method}
+        )
+        assert not chain.se_exact
     for kwargs, message in (
         ({"values": values[:, :3]}, "shape"),
         ({"values": values * 0.9}, "multiples"),
@@ -924,6 +1104,7 @@ def test_correlated_probe_matches_the_exact_law(n):
         sampler=result.spec.correlated_sampler("correlated_erasure"),
     )
     assert prof.complete and prof.sampler["method"] == "exact"
+    assert prof.se_exact  # independent samples: the binomial errors are the true ones
     channel = ob.correlated_channel_failure(prof, 0.3)
     assert not channel.interpolated_mass.any()
     ring = [(i, (i + 1) % n) for i in range(n)]
@@ -988,6 +1169,7 @@ def test_correlated_probe_on_interaction_graphs_is_unbiased_across_trajectories(
         sampler=result.spec.correlated_sampler("correlated_erasure"),
     )
     assert prof.sampler["method"] == "chain"
+    assert not prof.se_exact  # the chain: binomial errors are lower bounds
     deviations = {c: [] for c in couplings}
     for row in range(result.num_trajectories):
         if k[row, 0] == 0:
@@ -1095,6 +1277,67 @@ def test_region_seed_derivation():
         ob.region_seed(17, 0, 0, 0.0, "a", "1")
 
 
+def _reference_bootstrap_seed(key, ident, version):
+    """The peak-bootstrap seed written out: "WSRB", the key's fields, the id and the version."""
+
+    def w(text):
+        value = int.from_bytes(hashlib.blake2b(text.encode(), digest_size=8).digest(), "little")
+        return [value % 2**32, value // 2**32]
+
+    return (
+        int.from_bytes(b"WSRB", "big"),
+        *w(key.experiment_id),
+        key.n,
+        *w(key.beta.token),
+        *w(key.p.token),
+        key.g,
+        key.c,
+        key.r,
+        *w(ident),
+        *w(version),
+    )
+
+
+def test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy():
+    base = TrajectoryKey("ws-pilot-001", 16, "0.1", "0.2", 3, 1)
+    keys = [
+        base,
+        TrajectoryKey("ws-pilot-002", 16, "0.1", "0.2", 3, 1),
+        TrajectoryKey("ws-pilot-001", 24, "0.1", "0.2", 3, 1),
+        TrajectoryKey("ws-pilot-001", 16, "1/7", "0.2", 3, 1),
+        TrajectoryKey("ws-pilot-001", 16, "0.1", "0.25", 3, 1),
+        TrajectoryKey("ws-pilot-001", 16, "0.1", "0.2", 4, 1),
+        TrajectoryKey("ws-pilot-001", 16, "0.1", "0.2", 3, 0),
+        TrajectoryKey("ws-pilot-001", 16, "0.1", "0.2", 3, 1, 1),
+    ]
+    seeds = set()
+    for key in keys:
+        for ident in ("peak_D", "peak_D2"):
+            for version in ("1", "2"):
+                seed = ob.bootstrap_seed(key, ident, version)
+                assert seed == _reference_bootstrap_seed(key, ident, version)
+                assert len(seed) == ob.BOOTSTRAP_SEED_WORDS == 15
+                assert all(0 <= v < 2**32 for v in seed)
+                seeds.add(seed)
+    assert len(seeds) == len(keys) * 2 * 2  # every field changes the seed
+    assert {s[0] for s in seeds} == {ob.BOOTSTRAP_SEED_TAG}
+    # distinct from the region (WSRO), graph (WSG1) and run (WSC1) domains in the first word
+    assert ob.BOOTSTRAP_SEED_TAG not in {ob.REGION_SEED_TAG, 0x57534731, 0x57534331}
+    assert ob.bootstrap_seed(str(base), "peak_D", "1") == ob.bootstrap_seed(base, "peak_D", "1")
+    # the bootstrap: a recorded seed reproduces it; fresh entropy (None) and other types are refused
+    t = np.array([0, 1, 2, 4])
+    first = np.random.default_rng(1).integers(1, 7, size=(4, 30))
+    seed = ob.bootstrap_seed(base, "peak_D", "1")
+    boot = ob.bootstrap_peak(t, first, 6, z=1.0, replicates=20, seed=seed)
+    again = ob.bootstrap_peak(t, first, 6, z=1.0, replicates=20, seed=list(seed))
+    np.testing.assert_array_equal(boot.t_star, again.t_star)
+    assert boot.seed == again.seed == seed and isinstance(boot.seed, tuple)
+    assert ob.bootstrap_peak(t, first, 6, z=1.0, replicates=5, seed=np.int64(3)).seed == 3
+    for bad in (None, 1.5, "1", True, [1, -2], [], np.random.SeedSequence(1)):
+        with pytest.raises(ValueError, match="seed must"):
+            ob.bootstrap_peak(t, first, 6, z=1.0, replicates=5, seed=bad)
+
+
 def _engine_code(n, beta, p, layers, seed, want_code=True):
     """One stored code with k > 0 (if wanted) and its graph, from a short engine run."""
     result = _run(n, beta, p, layers, [mipt.tableau_snapshot(checkpoints=[layers])], seed=seed)
@@ -1159,6 +1402,67 @@ def test_mean_leakage_is_keyed_and_reproducible():
     assert exact.value == ob.mean_leakage_exact(code, edges, m, [coupling])[0]
     with pytest.raises(ValueError, match=r"size must be in \[0, 9\]"):
         ob.mean_leakage(code, edges, 10, 0.0, key=key, t=0)
+
+
+def test_a_registered_version_keeps_its_own_region_seeds():
+    """A changed setting becomes a new version (design §3, §5), registered beside the old one.
+    Values of version 1 must keep their seeds and values; version 2 and a renamed copy draw
+    their own regions (Proposition 18(c))."""
+    n, t = 8, 16
+    code, edges, _, _ = _engine_code(n, 0.3, 0.05, t, seed=5)
+    key = TrajectoryKey("ws-test", n, "0.3", "0.05", 0, 1)
+    snap = ob.SnapshotInput(num_system=n, t=t, key=key, code=code, edges=edges)
+    params = {"m": 3, "J": 1.0, "samples": 40}
+    before = ob.compute("mean_leakage", snap, params, version="1")
+    assert before.data["seed"] == list(ob.region_seed(key, t, 3, 1.0, "mean_leakage", "1"))
+    assert (before.observable_id, before.version) == ("mean_leakage", "1")
+    assert before.params_key == ob.params_key("mean_leakage", params)
+    v1 = ob.get("mean_leakage", "1")
+    v2 = dataclasses.replace(v1, version="2", definition=v1.definition + " (a new setting)")
+    copy = dataclasses.replace(v1, id="mean_leakage_copy")
+    ob.register(v2)
+    ob.register(copy)
+    try:
+        assert ob.get("mean_leakage") is v2  # the latest registered
+        after = ob.compute("mean_leakage", snap, params, version="1")
+        assert after.data["seed"] == before.data["seed"]
+        assert (after.value, after.se, after.version) == (before.value, before.se, "1")
+        latest = ob.compute("mean_leakage", snap, params)  # no version: the latest, and it says so
+        assert latest.version == "2"
+        assert latest.data["seed"] == list(ob.region_seed(key, t, 3, 1.0, "mean_leakage", "2"))
+        renamed = ob.compute("mean_leakage_copy", snap, params)
+        assert renamed.observable_id == "mean_leakage_copy"
+        assert renamed.data["seed"] == list(
+            ob.region_seed(key, t, 3, 1.0, "mean_leakage_copy", "1")
+        )
+        seeds = {tuple(v.data["seed"]) for v in (before, latest, renamed)}
+        assert len(seeds) == 3
+    finally:
+        del ob._REGISTRY[("mean_leakage", "2")]
+        del ob._REGISTRY[("mean_leakage_copy", "1")]
+    assert ob.get("mean_leakage") is v1
+
+
+def test_mean_leakage_caps_the_chain_ess_at_the_sample_count(monkeypatch):
+    """Sokal's window can estimate tau_int < 1 (ESS > S) for a fast-mixing tempered chain; the
+    error must then be the independent one, s / sqrt(S), never smaller (Proposition 17)."""
+    n, m, coupling, samples = 9, 3, 0.0, 60
+    code, edges, _, _ = _engine_code(n, 0.2, 0.05, 18, seed=3)
+    key = TrajectoryKey("ws-test", n, "0.2", "0.05", 0, 0)
+    seed = ob.region_seed(key, 18, m, coupling, "mean_leakage", "1")
+    drawn = erasures.sample_regions(edges, n, m, [coupling], samples, seed=list(seed))
+    infos = np.array([code.lost_information(r) for r in drawn.regions[0]], dtype=float)
+    raw = erasures.chain_diagnostics(infos)["ess"]
+    assert drawn.method == "chain" and raw > samples  # the case: the uncapped ESS exceeds S
+    est = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
+    assert est.method == "chain" and est.value == infos.mean()
+    assert est.ess == samples
+    assert abs(est.se - math.sqrt(infos.var(ddof=1) / samples)) < 1e-12
+    # whatever the diagnostic reports, the cap holds
+    real = erasures.chain_diagnostics
+    monkeypatch.setattr(erasures, "chain_diagnostics", lambda series: {**real(series), "ess": 1e9})
+    capped = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
+    assert capped.ess == samples and capped.se == est.se
 
 
 def test_mean_leakage_matches_the_exact_law_with_exact_samples(rng):
@@ -1352,6 +1656,28 @@ def test_compute_from_stored_snapshots_matches_the_engine_probes():
             assert conn.method == "enumeration" and conn.se == 0.0
 
 
+def test_a_snapshot_is_checked_against_its_n():
+    """A stored code or tableau paired with another n is refused, not computed into plausible
+    wrong values (k, rate, rank, half-cut entropy all depend on n)."""
+    n = 6
+    result = _run(n, 0.2, 0.1, n, [mipt.tableau_snapshot(checkpoints=[n])], graphs_count=1)
+    tableau, code = result.tableau(0, 0), result.code(0, 0)
+    assert tableau.num_qubits == 2 * n and code.num_qubits == n
+    assert ob.compute("k", ob.SnapshotInput(n, n, tableau=tableau)).value == code.num_logical
+    for wrong in (4, 5, 7, 8):  # 12 qubits are 2n only at n = 6, n + 1 at 11 and n at 12
+        with pytest.raises(ValueError, match="the joint tableau has 12 qubits"):
+            ob.SnapshotInput(wrong, n, tableau=tableau)
+    for other in (11, 12):  # one reference, no reference: widths a joint state can have
+        ob.SnapshotInput(other, n, tableau=tableau)
+    for wrong in (5, 8):
+        with pytest.raises(ValueError, match=f"the code has 6 qubits, not num_system = {wrong}"):
+            ob.SnapshotInput(wrong, n, code=code)
+    with pytest.raises(TypeError, match="StabilizerCode"):
+        ob.SnapshotInput(n, n, code="XXXXXX")
+    with pytest.raises(TypeError, match="PhaseFreeTableau"):
+        ob.SnapshotInput(n, n, tableau=code)
+
+
 # ---------------------------------------------------------------------------------------------
 # peaks (v1.4 §5.8; validation requirement 13)
 # ---------------------------------------------------------------------------------------------
@@ -1440,12 +1766,88 @@ def test_plateau_rule_hand_cases_and_nesting(rng):
         assert sets[0] == set(ob.peak(times, values, rule="exact").maximizing_set.tolist())
 
 
+def _reference_plateau(t, d, se, z):
+    """The plateau rule of design §5 written out with Python floats: over t > 0, d* the maximum,
+    t0 the first maximizer, A = {t : d(t) >= d* - z sqrt(se(t)^2 + se(t0)^2)}, and
+    T* = exp(mean of ln t over A) (a single checkpoint exactly; NaN when d* = 0)."""
+    points = [(int(a), float(b), float(c)) for a, b, c in zip(t, d, se, strict=True) if a > 0]
+    d_star = max(b for _, b, _ in points)
+    s_first = next(c for _, b, c in points if b == d_star)
+    chosen = [a for a, b, c in points if b >= d_star - z * math.sqrt(c * c + s_first * s_first)]
+    if d_star == 0:
+        return chosen, math.nan
+    if len(chosen) == 1:
+        return chosen, float(chosen[0])
+    return chosen, math.exp(sum(math.log(a) for a in chosen) / len(chosen))
+
+
+def _same_t_star(a, b):
+    return (math.isnan(a) and math.isnan(b)) or a == pytest.approx(b, rel=1e-12)
+
+
+def test_plateau_rule_uses_the_first_maximizers_error():
+    """Unequal errors, so that membership depends on se(t0), the first maximizer's error."""
+    # (a) a checkpoint at t = 0, and t0 = 2 is not the smallest positive depth: t = 1 stays in,
+    # 5.0 >= 5.3 - sqrt(0.01^2 + 0.3^2) = 4.99983 (with se(1) in place of se(t0) it would not)
+    t, d, se = [0, 1, 2, 4], [0, 5.0, 5.3, 5.2], [0, 0.01, 0.3, 0.3]
+    a = ob.peak(t, d, se, rule="plateau", z=1)
+    assert a.maximizing_set.tolist() == [1, 2, 4] and a.first_argmax == 2
+    assert a.t_star == pytest.approx(2.0, rel=1e-15)
+    assert _reference_plateau(t, d, se, 1) == ([1, 2, 4], a.t_star)
+    # (b) t0 = 4 with se 0.02: t = 2 is out, 3.7 < 4.2 - sqrt(0.05^2 + 0.02^2) = 4.146 (with the
+    # last checkpoint's error 0.5 in place of se(t0) it would be in: 3.7 >= 4.2 - 0.5025 = 3.6975)
+    t, d, se = [1, 2, 4, 8], [4.0, 3.7, 4.2, 3.9], [0.25, 0.05, 0.02, 0.5]
+    b = ob.peak(t, d, se, rule="plateau", z=1)
+    assert b.maximizing_set.tolist() == [1, 4, 8]
+    assert b.t_star == pytest.approx(32 ** (1 / 3), rel=1e-15)
+    assert _reference_plateau(t, d, se, 1)[0] == [1, 4, 8]
+
+
+def test_plateau_rule_matches_its_definition_on_random_traces(rng):
+    """400 random traces (some with t = 0, some with exact ties), unequal errors, several z:
+    the set and T* equal the rule written out (_reference_plateau)."""
+    for _ in range(400):
+        times = np.cumsum(rng.integers(1, 5, size=int(rng.integers(1, 10))))
+        if rng.random() < 0.5:
+            times = np.concatenate([[0], times])
+        values = rng.normal(5, 1, size=times.size).clip(0)
+        if rng.random() < 0.3:
+            values = np.round(values)  # exact ties
+        errors = rng.uniform(0, 0.6, size=times.size)
+        z = float(rng.choice([0.0, 0.5, 1.0, 2.0, 3.0]))
+        got = ob.peak(times, values, errors, rule="plateau", z=z)
+        chosen, t_star = _reference_plateau(times, values, errors, z)
+        assert got.maximizing_set.tolist() == chosen
+        assert _same_t_star(got.t_star, t_star)
+
+
+def test_peaks_record_whether_their_errors_are_true():
+    t, d, se = [1, 2, 4], [1.0, 2.0, 1.5], [0.1, 0.1, 0.1]
+    assert ob.peak(t, d, se, rule="plateau", z=1).se_exact is None  # not stated
+    chain = ob.peak(t, d, se, rule="plateau", z=1, se_exact=False)
+    assert chain.se_exact is False and chain.to_dict()["se_exact"] is False
+    assert ob.peak(t, d, se, rule="plateau", z=1, se_exact=True).to_dict()["se_exact"] is True
+    assert ob.peak(t, d, rule="exact", se_exact=True).se_exact is None  # no errors are used
+    invalid = ob.peak(t, [1.0, math.nan, 1.0], se, rule="plateau", z=1, se_exact=False)
+    assert invalid.missing and invalid.se_exact is False
+    zero = ob.peak(t, [0.0, 0.0, 0.0], se, rule="plateau", z=1, se_exact=False)
+    assert zero.missing and zero.se_exact is False
+    swept = ob.peak_sensitivity(t, d, se, [0, 1, 2], se_exact=False)
+    assert [p.se_exact for p in swept] == [False] * 3
+    with pytest.raises(ValueError, match="se_exact"):
+        ob.peak(t, d, se, rule="plateau", z=1, se_exact="no")
+    # the bootstrap of D(0): errors from independent orderings are the true ones
+    boot = ob.bootstrap_peak(t, [[2, 3, 2], [3, 4, 4], [3, 3, 2]], 5, z=1.0, replicates=3, seed=1)
+    assert boot.estimate.se_exact is True
+
+
 def test_plateau_rule_keeps_a_true_plateau_with_the_stated_probability(rng):
     """True trace 1, 2, 3, 3, 3, 2, 1 with N(0, 0.1^2) noise and z = 2.
 
     A plateau checkpoint j is left out only if some i has d_i - d_j > z sqrt(2) sigma; for two
-    plateau points that has probability Phi(-z) each, and the points one unit below are 7 sigma
-    away. So P(some plateau point left out) <= 6 Phi(-2) = 0.1365. Over 4000 trials the observed
+    plateau points that has probability Phi_N(-z) each (Phi_N the standard normal distribution
+    function), and the points one unit below are 7 sigma away. So P(some plateau point left out)
+    <= 6 Phi_N(-2) = 0.1365. The errors given are the true ones here. Over 4000 trials the observed
     fraction must stay below 0.1365 + 4 sqrt(0.1365 x 0.8635 / 4000) = 0.158 (false alarm below 4e-5,
     normal approximation of the binomial).
     """
@@ -1483,15 +1885,11 @@ def test_bootstrap_peak_reproduces_its_documented_draws():
             draw = first[e][picks[b, e]]
             values.append(draw.mean())
             errors.append(draw.std(ddof=1) / math.sqrt(samples))
-        reference = ob.peak(t, values, errors, rule="plateau", z=1.0)
-        assert (
-            math.isnan(reference.t_star) and math.isnan(boot.t_star[b])
-        ) or reference.t_star == pytest.approx(boot.t_star[b], rel=1e-12)
-    point = ob.integrated_robustness(first, n)
-    assert (
-        boot.estimate.maximizing_set.tolist()
-        == ob.peak(t, point.value, point.se, rule="plateau", z=1.0).maximizing_set.tolist()
-    )
+        _, reference = _reference_plateau(t, values, errors, 1.0)
+        assert _same_t_star(boot.t_star[b], reference)
+    point = [_reference_robustness(first[e].tolist(), n) for e in range(t.size)]
+    expected, _ = _reference_plateau(t, [v for v, _ in point], [s for _, s in point], 1.0)
+    assert boot.estimate.maximizing_set.tolist() == expected
     finite = boot.t_star[~np.isnan(boot.t_star)]
     assert np.all((finite >= 1) & (finite <= 8))
     lo, hi = boot.interval(0.9)
@@ -1500,6 +1898,44 @@ def test_bootstrap_peak_reproduces_its_documented_draws():
         boot.interval(1.0)
     other = ob.bootstrap_peak(t, first, n, z=1.0, replicates=replicates, seed=[11, 3])
     assert not np.array_equal(other.t_star, boot.t_star)
+
+
+def test_bootstrap_peak_keeps_the_exact_counts_in_every_replicate():
+    """Noisy orderings with exhaustive counts up to w = 2 (nonzero, so they never contradict the
+    samples). Each replicate's D(0) and error are rebuilt from the documented draws with the
+    hybrid estimator written out (_reference_robustness: Proposition 13) and peaked with the rule
+    written out (_reference_plateau). Replicates that dropped the counts would use the plain
+    estimator and its error; the test checks that this changes T* in some replicates, so it can
+    tell the two apart."""
+    n, samples, replicates = 8, 30, 60
+    rng = np.random.default_rng(12)
+    t = np.array([0, 1, 2, 4, 8, 16])
+    first = rng.integers(1, n + 1, size=(t.size, samples))
+    counts = np.array([[rng.integers(1, 9), rng.integers(1, 29)] for _ in t])
+    seed = ob.bootstrap_seed(TrajectoryKey("ws-test", n, "0.1", "0.1", 0, 0), "peak_D", "1")
+    boot = ob.bootstrap_peak(
+        t, first, n, z=1.0, replicates=replicates, seed=seed, exact_counts=counts
+    )
+    raw = np.random.PCG64(np.random.SeedSequence(seed)).random_raw(replicates * t.size * samples)
+    picks = np.floor((raw >> np.uint64(11)).astype(np.float64) * 2.0**-53 * samples).astype(int)
+    picks = picks.reshape(replicates, t.size, samples)
+    differs = 0
+    for b in range(replicates):
+        hybrid, plain = [], []
+        for e in range(t.size):
+            draw = first[e][picks[b, e]].tolist()
+            hybrid.append(_reference_robustness(draw, n, counts[e].tolist()))
+            plain.append(_reference_robustness(draw, n))
+        _, t_hybrid = _reference_plateau(t, *zip(*hybrid, strict=True), 1.0)
+        _, t_plain = _reference_plateau(t, *zip(*plain, strict=True), 1.0)
+        assert _same_t_star(boot.t_star[b], t_hybrid), b
+        differs += not _same_t_star(t_plain, t_hybrid)
+    assert differs >= 5, differs
+    point = [_reference_robustness(first[e].tolist(), n, counts[e].tolist()) for e in range(t.size)]
+    assert (
+        boot.estimate.maximizing_set.tolist()
+        == _reference_plateau(t, *zip(*point, strict=True), 1.0)[0]
+    )
 
 
 def test_bootstrap_peak_of_noiseless_samples_is_the_estimate():

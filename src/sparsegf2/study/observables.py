@@ -28,15 +28,18 @@ code and ``PhaseFreeTableau.mutual_information`` from the joint state.
   ``D(J)``), :func:`mean_leakage` and :func:`mean_leakage_exact` (``l(m, J)``), and
   :func:`region_seed` (the seed of a retrospective region sampler).
 * The joint state: :func:`half_cut_entropy`.
-* Peaks (v1.4 §5.8): :func:`peak`, :func:`peak_sensitivity`, :func:`bootstrap_peak`.
+* Peaks (v1.4 §5.8): :func:`peak`, :func:`peak_sensitivity`, :func:`bootstrap_peak` and its
+  seed :func:`bootstrap_seed`.
 * The registry: :class:`ObservableDef`, :func:`register`, :func:`get`, :func:`catalog`,
-  :func:`resolve_params`, :func:`params_key` and, for the observables computed later from a
-  stored snapshot, :func:`compute` with :class:`SnapshotInput` and :class:`ObservableValue`.
+  :func:`resolve_params`, :func:`params_key` (parameters in the canonical form of their kinds,
+  :data:`PARAM_KINDS`) and, for the observables computed later from a stored snapshot,
+  :func:`compute` with :class:`SnapshotInput` and :class:`ObservableValue`.
 
 **Versions.** An entry's ``version`` is part of every stored value's key (with the id and the
 canonical parameters, :func:`params_key`), so a changed implementation gets a new version and its
-values never mix with the old ones. A retrospective sampler's seed contains the version too
-(:func:`region_seed`).
+values never mix with the old ones. A retrospective sampler's seed contains the id and version of
+the entry being computed (:func:`region_seed`; :func:`compute` hands the entry to its
+``compute``), and so does the bootstrap of a peak (:func:`bootstrap_seed`).
 
 >>> fp = first_passage([3, 3, 1, 1, 0, 0])
 >>> fp.tau.tolist(), fp.observed.tolist()
@@ -52,7 +55,7 @@ import itertools
 import math
 import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -64,8 +67,12 @@ from sparsegf2.study.identity import TrajectoryKey, canonical_json, token_words
 from sparsegf2.tableau import PhaseFreeTableau
 
 __all__ = [
+    "BOOTSTRAP_SEED_TAG",
+    "BOOTSTRAP_SEED_WORDS",
     "INPUTS",
+    "KINDS",
     "LEVELS",
+    "PARAM_KINDS",
     "PEAK_RULES",
     "REGION_SEED_TAG",
     "REGION_SEED_WORDS",
@@ -83,6 +90,7 @@ __all__ = [
     "Robustness",
     "SnapshotInput",
     "bootstrap_peak",
+    "bootstrap_seed",
     "catalog",
     "catalog_markdown",
     "code_parameters",
@@ -756,10 +764,10 @@ def integrated_robustness(
 class ChannelFailure:
     """``Phi(e)``, the failure probability of the binomially mixed erasure channel (v1.4 §5.7).
 
-    * ``e``: float64 ``(q,)``, the erasure probabilities;
+    * ``e``: float64 ``(q,)``, the erasure probabilities (a copy of the caller's);
     * ``value``: float64 ``(..., q)`` (``(..., c, q)`` for a correlated profile), the estimate of
       ``Phi(e) = sum_{m=0}^{n} C(n, m) e^m (1 - e)^(n - m) P(m)``; 0 where ``k = 0``;
-    * ``se``: its standard error (same shape);
+    * ``se``: its standard error (the shape of ``value``);
     * ``interpolated_mass``: float64 ``(q,)``, ``sum_{m interpolated} C(n, m) e^m (1 - e)^(n-m)``:
       the binomial weight of the sizes whose ``P(m)`` was interpolated (always 0 for the uniform
       estimate); ``num_system``.
@@ -776,7 +784,8 @@ class ChannelFailure:
 
 
 def _rates(e: Any) -> np.ndarray:
-    es = np.atleast_1d(_numbers(e, "e"))
+    """The erasure probabilities as a new 1-D float64 array (a copy: the caller's array is never shared)."""
+    es = np.array(_numbers(e, "e"), dtype=np.float64, ndmin=1, copy=True)
     if es.ndim != 1 or es.size == 0 or not np.all((es >= 0) & (es <= 1)):
         raise ValueError("e must be a probability in [0, 1] or a 1-D list of them")
     return es
@@ -807,17 +816,24 @@ def uniform_channel_failure(
 
     ``b_m(e) = C(n, m) e^m (1 - e)^(n - m)``, ``T_e(d) = Pr[Bin(n, e) >= d]`` (``T_e(n + 1) = 0``),
     since ``sum_{m >= w+1} b_m 1[D_j <= m] = T_e(max(D_j, w + 1))``. Unbiased; its standard error
-    is ``s_Z / sqrt(S)`` with ``Z_j = T_e(max(D_j, w + 1))`` (the orderings are independent). A
-    code with ``k = 0`` gives 0. Inputs as :func:`uniform_failure`.
+    is ``s_Z / sqrt(S)`` with ``Z_j = T_e(max(D_j, w + 1))`` (the orderings are independent): NaN
+    for every rate with a single ordering. ``value`` and ``se`` have shape ``(..., q)``. A code
+    with ``k = 0`` gives 0. Inputs as :func:`uniform_failure`. The ``Z_j`` are formed one rate at
+    a time, so the memory is a few copies of ``first_failure``, not ``q`` of them.
     """
     n = _int(num_system, "num_system", minimum=1)
     d, counts = _erasure_data(first_failure, n, exact_counts, k)
     es = _rates(e)
     value = np.asarray(analysis.erasure_failure_probability(d, n, es, exact_counts=counts))
     w = 0 if counts is None else int(counts.shape[-1])
-    z = _binomial_tails(n, es)[np.maximum(d, w + 1)]  # (..., S, q)
     samples = int(d.shape[-1])
-    spread = np.sqrt(z.var(axis=-2, ddof=1) / samples) if samples >= 2 else np.nan
+    spread = np.full(d.shape[:-1] + (es.size,), np.nan)
+    if samples >= 2:
+        tails = _binomial_tails(n, es)  # (n + 2, q)
+        clipped = np.maximum(d, w + 1)  # (..., S)
+        for i in range(es.size):
+            z = tails[:, i][clipped]  # Z_j at rate e_i: (..., S)
+            spread[..., i] = np.sqrt(z.var(axis=-1, ddof=1) / samples)
     se = np.where((d[..., 0] <= n)[..., None], spread, 0.0)
     return ChannelFailure(
         num_system=n, e=es, value=value, se=se, interpolated_mass=np.zeros(es.size)
@@ -838,10 +854,17 @@ class CorrelatedProfile:
 
     * ``failure``: float64 ``(..., c, s)``, the probe's estimates ``P_hat_J(m)`` (the failing
       fraction of ``samples`` regions drawn from ``Q_{G,J}(. | m)``); ``se``: their binomial
-      errors ``sqrt(P (1 - P) / S)``: exact for independent samples (``sampler["method"]`` is
-      ``"exact"``), an underestimate by the factor ``sqrt(tau_int)`` for the chain, whose records
-      are correlated (the probe stores no ``tau_int``; the spread over trajectories, whose
-      chains are independent, is the valid error of an ensemble mean);
+      errors ``sqrt(P (1 - P) / S)``: the true standard errors for independent samples
+      (``sampler["method"]`` is ``"exact"``: :attr:`se_exact`), but for the chain, whose records
+      are correlated, an underestimate by about ``sqrt(tau_int)`` (the probe stores no
+      ``tau_int``), which grows with ``J`` and with ``n`` and falls with ``thin``. An ensemble
+      mean is different: the chains of different trajectories are independent, so the
+      graph-cluster error of the per-trajectory estimates
+      (:func:`sparsegf2.study.stats.graph_cluster_se`, v1.4 §6.4) contains the chain's variance
+      and is valid; the plain spread over trajectories is valid only with one circuit per graph
+      (trajectories that share a graph share its disorder). Neither contains the bias of an
+      incompletely equilibrated chain, which every trajectory run with one sampler setting
+      shares;
     * ``curve``: float64 ``(..., c, n + 1)``, ``P_J(m)`` for ``m = 0..n``: ``P(0) = 0``,
       ``P(n) = 1[k > 0]``, the sampled sizes, and linear interpolation in ``m`` at the other
       sizes (:func:`sparsegf2.analysis.correlated_failure_curve`); ``interpolated``: bool
@@ -877,6 +900,19 @@ class CorrelatedProfile:
         """The sizes ``m`` in ``1..n-1`` whose ``P_J(m)`` was interpolated, not sampled."""
         return np.flatnonzero(self.interpolated).astype(np.int64)
 
+    @property
+    def se_exact(self) -> bool:
+        """Whether ``se`` and ``robustness_se`` are the true standard errors given the code.
+
+        True only when ``sampler["method"]`` is ``"exact"`` (independent samples: one cycle or one
+        path through every qubit). For the chain (``"chain"``, or ``"mixed"`` in a collection of
+        graphs) and when no ``sampler`` was given they are binomial errors that understate the
+        error of chain estimates by about ``sqrt(tau_int)``: a plateau rule fed with them
+        (:func:`peak`, ``peak_D_J``) is narrower than its ``z`` says. Pass this flag to
+        :func:`peak` (``se_exact``) so the peak's record carries it.
+        """
+        return self.sampler is not None and self.sampler.get("method") == "exact"
+
 
 def correlated_failure(
     values: Any,
@@ -909,7 +945,9 @@ def correlated_failure(
     ``P_hat_J(m)`` of different sizes are independent; ``D_hat(J)`` is linear in them,
     ``D_hat = n - sum_j a_j P_hat_J(m_j)`` with ``a_j`` the weight of size ``m_j`` in the
     interpolated sum, so ``Var D_hat = sum_j a_j^2 Var P_hat_J(m_j)``, with the binomial
-    variances (see :class:`CorrelatedProfile` for the chain).
+    variances. These are the true errors only for exact samples
+    (:attr:`CorrelatedProfile.se_exact`); for the chain they are lower bounds (see
+    :class:`CorrelatedProfile`).
     """
     n = _int(num_system, "num_system", minimum=1)
     count = _int(samples, "samples", minimum=1)
@@ -1003,6 +1041,15 @@ run seeds' ``0x57534331`` (``"WSC1"``) of design §3 (ruling R-SEED)."""
 REGION_SEED_WORDS = 19
 """The length of every region-sampler seed (one fixed length: ``SeedSequence`` never pads it)."""
 
+BOOTSTRAP_SEED_TAG = 0x57535242
+"""The first word of every peak-bootstrap seed: ``"WSRB"`` read as a big-endian word.
+
+The domain of :func:`bootstrap_seed`, distinct from the region seeds' ``"WSRO"`` and the graph
+(``"WSG1"``) and run (``"WSC1"``) seeds of design §3."""
+
+BOOTSTRAP_SEED_WORDS = 15
+"""The length of every peak-bootstrap seed (one fixed length)."""
+
 
 def _label(value: Any, what: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
@@ -1037,12 +1084,12 @@ def _float_words(value: float) -> tuple[int, int]:
 
 
 def _coupling(value: Any) -> float:
-    if isinstance(value, (bool, np.bool_)):
+    """``J`` as a float: an int or a float (Python or numpy), never a bool or a string; ``-0.0`` as ``0.0``."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
         raise ValueError(f"a coupling J must be a number, got {value!r}")
-    try:
-        j = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"a coupling J must be a number, got {value!r}") from None
+    j = float(value)
     if not math.isfinite(j) or abs(j) > erasures.MAX_ABS_COUPLING:
         raise ValueError(erasures.coupling_bound_message(j))
     return 0.0 if j == 0 else j
@@ -1056,6 +1103,19 @@ def _trajectory(key: Any) -> TrajectoryKey:
     raise TypeError(
         f"key must be a TrajectoryKey (or its string form), got {type(key).__name__}: the seed of "
         "a retrospective sampler is derived from the trajectory's full identity"
+    )
+
+
+def _key_words(trajectory: TrajectoryKey) -> tuple[int, ...]:
+    """The 10 words of a trajectory key in a seed: ``w(experiment_id), n, w(beta), w(p), g, c, r``."""
+    return (
+        *_text_words(trajectory.experiment_id),
+        _seed_word(trajectory.n, "n"),
+        *token_words(trajectory.beta),
+        *token_words(trajectory.p),
+        _seed_word(trajectory.g, "g"),
+        _seed_word(trajectory.c, "c"),
+        _seed_word(trajectory.r, "r"),
     )
 
 
@@ -1089,12 +1149,13 @@ def region_seed(
     if two different strings of one field (experiment ids, tokens, ids or versions) share a 64-bit
     blake2b digest. *No collision with the graph and run seeds.* Those tuples start with
     ``0x57534731`` (``"WSG1"``) and ``0x57534331`` (``"WSC1"``) and these with ``0x5753524F``, so
-    no region seed equals a graph or run seed as a ``SeedSequence`` entropy, whatever the master
-    seeds; every one of these tuples has at least 4 words, so ``SeedSequence``'s zero padding
-    (to its 4-word pool) never applies. The streams then coincide only through a collision of
-    ``SeedSequence``'s 128-bit hash. The seed depends on every field of the key: two trajectories
-    (also the same ``(g, c)`` at two rates) draw independent regions; a new ``version`` draws new
-    ones.
+    no region seed equals a graph or run seed (nor a :func:`bootstrap_seed`, ``0x57535242``) as a
+    ``SeedSequence`` entropy, whatever the master seeds; every one of these tuples has at least 4
+    words, so ``SeedSequence``'s zero padding (to its 4-word pool) never applies. The streams then
+    coincide only through a collision of ``SeedSequence``'s 128-bit hash. The seed depends on
+    every field of the key: two trajectories (also the same ``(g, c)`` at two rates) draw
+    independent regions; a new ``version`` draws new ones. The registry passes the id and the
+    version of the entry being computed (:func:`compute`), never the latest registered one.
 
     >>> from sparsegf2.study.identity import TrajectoryKey
     >>> key = TrajectoryKey("demo", 8, "0.1", "0.2", 3, 1)
@@ -1105,13 +1166,7 @@ def region_seed(
     trajectory = _trajectory(key)
     words = (
         REGION_SEED_TAG,
-        *_text_words(trajectory.experiment_id),
-        _seed_word(trajectory.n, "n"),
-        *token_words(trajectory.beta),
-        *token_words(trajectory.p),
-        _seed_word(trajectory.g, "g"),
-        _seed_word(trajectory.c, "c"),
-        _seed_word(trajectory.r, "r"),
+        *_key_words(trajectory),
         _seed_word(t, "t"),
         _seed_word(m, "m"),
         *_float_words(_coupling(coupling)),
@@ -1119,6 +1174,39 @@ def region_seed(
         *_text_words(_label(version, "version")),
     )
     assert len(words) == REGION_SEED_WORDS
+    return tuple(int(w) for w in words)
+
+
+def bootstrap_seed(key: TrajectoryKey | str, observable_id: str, version: str) -> tuple[int, ...]:
+    """The seed of the bootstrap of ``T*`` of one trajectory (:func:`bootstrap_peak`): 15 words.
+
+    For the trajectory ``key = (experiment_id, n, beta, p, g, c, r)``, the peak observable
+    ``observable_id`` (``"peak_D"``) and its ``version``::
+
+        seed = (TAG, w(experiment_id), n, w(beta_token), w(p_token), g, c, r,
+                w(observable_id), w(version))                                  # 15 words
+
+    with ``TAG`` = :data:`BOOTSTRAP_SEED_TAG` (``0x57535242``, ``"WSRB"``) and the words as in
+    :func:`region_seed`. So a stored bootstrap is a function of the trajectory's data and its key
+    ``(id, version, params)``. The plateau width ``z`` and the replicate count are not in the
+    seed: the bootstrap at every ``z`` of ``sensitivity_z`` resamples the same orderings (paired
+    replicates), and ``B`` replicates are the first ``B`` of any larger count. *Distinct inputs,
+    distinct seeds; no collision* with the region (``"WSRO"``), graph (``"WSG1"``) or run
+    (``"WSC1"``) seeds: the argument of :func:`region_seed` (fixed positions in a fixed-length
+    tuple, a distinct first word, at least 4 words).
+
+    >>> from sparsegf2.study.identity import TrajectoryKey
+    >>> seed = bootstrap_seed(TrajectoryKey("demo", 8, "0.1", "0.2", 3, 1), "peak_D", "1")
+    >>> len(seed), hex(seed[0])
+    (15, '0x57535242')
+    """
+    words = (
+        BOOTSTRAP_SEED_TAG,
+        *_key_words(_trajectory(key)),
+        *_text_words(_label(observable_id, "observable_id")),
+        *_text_words(_label(version, "version")),
+    )
+    assert len(words) == BOOTSTRAP_SEED_WORDS
     return tuple(int(w) for w in words)
 
 
@@ -1345,7 +1433,11 @@ class Peak:
       invalid trace); ``t_star_is_checkpoint``: whether ``T*`` (the interpolated summary)
       equals one of the checkpoints (to a relative ``1e-12``), which it does when ``A`` has one
       element; otherwise ``k(T*)`` is undefined (v1.4 §5.8) and ``k_on_set`` is the record to use;
-    * ``rule`` and ``z``: the rule and the plateau width (None for ``"exact"``).
+    * ``rule`` and ``z``: the rule and the plateau width (None for ``"exact"``);
+    * ``se_exact``: for the plateau rule, whether the errors were the true standard errors (True:
+      ``D(0)`` from the orderings, ``D(J)`` from exact samples), known lower bounds (False:
+      ``D(J)`` from the chain, :attr:`CorrelatedProfile.se_exact`; the plateau is then narrower
+      than ``z`` true standard deviations), or not stated (None, and always for ``"exact"``).
     """
 
     rule: str
@@ -1360,6 +1452,7 @@ class Peak:
     k_on_set: np.ndarray | None
     first_argmax: int
     t_star_is_checkpoint: bool = False
+    se_exact: bool | None = None
 
     def __post_init__(self) -> None:
         _read_only(self)
@@ -1379,16 +1472,22 @@ class Peak:
             "k_on_set": None if self.k_on_set is None else self.k_on_set.tolist(),
             "first_argmax": self.first_argmax,
             "t_star_is_checkpoint": self.t_star_is_checkpoint,
+            "se_exact": self.se_exact,
         }
 
 
 def _invalid_peak(
-    rule: str, z: float | None, horizon: int, reason: str, k_given: bool, d_star: float = math.nan
+    rule: str,
+    z: float | None,
+    horizon: int,
+    reason: str,
+    k_given: bool,
+    se_exact: bool | None,
 ) -> Peak:
     return Peak(
         rule=rule,
         z=z,
-        d_star=d_star,
+        d_star=math.nan,
         maximizing_set=np.zeros(0, dtype=np.int64),
         t_star=math.nan,
         missing=True,
@@ -1397,6 +1496,7 @@ def _invalid_peak(
         horizon=horizon,
         k_on_set=np.zeros(0, dtype=np.int64) if k_given else None,
         first_argmax=-1,
+        se_exact=se_exact,
     )
 
 
@@ -1409,25 +1509,38 @@ def peak(
     z: float | None = None,
     k_at: Any = None,
     horizon: int | None = None,
+    se_exact: bool | None = None,
 ) -> Peak:
     """The peak depth of a nonnegative trace ``d(t)`` (v1.4 §5.8), with the rule fixed in advance.
 
     ``t`` are the checkpoints (strictly increasing depths ``>= 0``), ``d`` the trace there
     (for example the zero-extended ``d_cyc``, or ``D(J)``), ``se`` its standard errors for the
     plateau rule, ``k_at`` the ``k_t`` at the checkpoints (optional), ``horizon`` ``T_max``
-    (default ``max(t)``). Over ``T+ = {t in checkpoints : t > 0}``:
+    (default ``max(t)``), ``se_exact`` whether ``se`` are true standard errors (recorded, see
+    below). Over ``T+ = {t in checkpoints : t > 0}``:
 
     * ``d* = max_{T+} d(t)``;
     * ``rule="exact"`` (integer or exact traces): ``A = {t in T+ : d(t) = d*}``, exact ties;
     * ``rule="plateau"`` (Monte Carlo traces; ``se`` and ``z >= 0`` required):
       ``A = {t in T+ : d(t) >= d* - z sqrt(se(t)^2 + se(t*)^2)}`` with ``t*`` the first
-      maximizer. Conditional on the trajectory, the estimates at different depths come from
-      different probe streams and are independent, so ``d(t*) - d(t)`` has standard deviation
-      ``sqrt(se(t)^2 + se(t*)^2)``: ``t`` stays in ``A`` unless it is more than ``z`` such
-      standard deviations below the maximum. ``z = 0`` gives the exact rule; ``A`` grows with
-      ``z``.
+      maximizer. ``z = 0`` gives the exact rule; ``A`` grows with ``z``.
     * ``T* = exp(mean_{t in A} ln t)``, the log midpoint (geometric mean) of ``A``: it lies in
       ``[min A, max A]`` and is generally not a checkpoint.
+
+    **What the plateau means, and when.** Conditional on the trajectory, the estimates at
+    different depths come from different probe streams and are independent, so when ``se`` are
+    the true standard errors, ``d(t*) - d(t)`` has standard deviation
+    ``sqrt(se(t)^2 + se(t*)^2)`` and ``t`` stays in ``A`` unless it is more than ``z`` such
+    standard deviations below the maximum (about ``Phi_N(-z)`` per comparison, ``Phi_N`` the
+    standard normal distribution function). That holds for ``D(0)`` from the first-failure
+    orderings and for ``D(J)`` from exact samples (one cycle or one path). For ``D(J)`` from the
+    swap chain (every Watts–Strogatz interaction graph) the binomial errors understate the true
+    ones by about ``sqrt(tau_int)``, a factor that changes with ``J``, ``n``, ``beta`` and the
+    chain's ``thin``: the plateau then spans fewer than ``z`` true standard deviations, the
+    error rates above do not hold, and the effective width differs between conditions. Pass
+    ``se_exact`` (:attr:`CorrelatedProfile.se_exact`) so the record says so; a ``thin`` near the
+    chain's ``tau_int`` (measured on the graph with :func:`sparsegf2.erasures.sample_regions`)
+    brings the binomial errors near the true ones.
 
     ``T*`` is missing when ``d* = 0`` (no robustness to place in time: a purified trajectory)
     or when the trace is invalid: no positive checkpoint, a value in ``T+`` that is NaN,
@@ -1441,6 +1554,9 @@ def peak(
     """
     if rule not in PEAK_RULES:
         raise ValueError(f"rule must be 'exact' or 'plateau', got {rule!r}")
+    if se_exact is not None and not isinstance(se_exact, (bool, np.bool_)):
+        raise ValueError(f"se_exact must be True, False or None, got {se_exact!r}")
+    exact_errors = None if rule == "exact" or se_exact is None else bool(se_exact)
     times = _depths(t, "t")
     values = _numbers(d, "d")
     if values.shape != times.shape:
@@ -1473,7 +1589,7 @@ def peak(
     given = k_values is not None
     positive = times > 0
     if not positive.any():
-        return _invalid_peak(rule, width, int(end), "no positive checkpoint", given)
+        return _invalid_peak(rule, width, int(end), "no positive checkpoint", given, exact_errors)
     tp, dp = times[positive], values[positive]
     if not np.all(np.isfinite(dp)) or np.any(dp < 0):
         i = int(np.flatnonzero(~np.isfinite(dp) | (dp < 0))[0])
@@ -1484,6 +1600,7 @@ def peak(
             f"d({tp[i]}) = {dp[i]!r} is not a finite nonnegative number (pass the zero-extended "
             "trace, v1.4 §5.5)",
             given,
+            exact_errors,
         )
     d_star = float(dp.max())
     first = int(np.flatnonzero(dp == d_star)[0])
@@ -1497,6 +1614,7 @@ def peak(
                 int(end),
                 f"se({tp[i]}) = {ep[i]!r} is not a finite nonnegative number",
                 given,
+                exact_errors,
             )
         assert width is not None
         keep = dp >= d_star - width * np.sqrt(ep**2 + ep[first] ** 2)
@@ -1518,6 +1636,7 @@ def peak(
             horizon=int(end),
             k_on_set=k_set,
             first_argmax=int(tp[first]),
+            se_exact=exact_errors,
         )
     if chosen.size == 1:
         t_star = float(chosen[0])  # exactly the checkpoint, not exp(ln t) rounded
@@ -1536,6 +1655,7 @@ def peak(
         k_on_set=k_set,
         first_argmax=int(tp[first]),
         t_star_is_checkpoint=bool(np.any(np.abs(times - t_star) <= 1e-12 * t_star)),
+        se_exact=exact_errors,
     )
 
 
@@ -1547,16 +1667,22 @@ def peak_sensitivity(
     *,
     k_at: Any = None,
     horizon: int | None = None,
+    se_exact: bool | None = None,
 ) -> tuple[Peak, ...]:
     """The plateau-rule peak at every ``z`` of ``zs`` (v1.4 §5.8: report the rule's sensitivity).
 
     One :class:`Peak` per ``z``, in the order given. The maximizing sets are nested: a larger
-    ``z`` keeps every checkpoint a smaller one keeps.
+    ``z`` keeps every checkpoint a smaller one keeps. With errors that understate the true ones
+    (``se_exact`` False: a chain-sampled ``D(J)``) every ``z`` is effectively smaller than its
+    nominal value, so the sensitivity understates the rule's fragility (see :func:`peak`).
     """
     widths = [float(z) for z in zs]
     if not widths:
         raise ValueError("zs must list at least one plateau width")
-    return tuple(peak(t, d, se, rule="plateau", z=z, k_at=k_at, horizon=horizon) for z in widths)
+    return tuple(
+        peak(t, d, se, rule="plateau", z=z, k_at=k_at, horizon=horizon, se_exact=se_exact)
+        for z in widths
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -1567,7 +1693,8 @@ class PeakBootstrap:
     * ``t_star``: float64 ``(B,)``, ``T*`` of each replicate (NaN where its peak is missing);
     * ``at_horizon``: bool ``(B,)``; ``missing_fraction``, ``horizon_fraction``: their means
       (the latter over all replicates);
-    * ``replicates`` (``B``), ``seed``, ``z``.
+    * ``replicates`` (``B``), ``seed`` (the entropy used: an int or a tuple of ints, such as
+      :func:`bootstrap_seed`), ``z``.
 
     It describes the Monte Carlo uncertainty of ``T*`` given the trajectory's codes (the
     orderings), not the ensemble's: graphs and circuits are resampled by
@@ -1580,7 +1707,7 @@ class PeakBootstrap:
     missing_fraction: float
     horizon_fraction: float
     replicates: int
-    seed: Any
+    seed: int | tuple[int, ...]
     z: float
 
     def __post_init__(self) -> None:
@@ -1598,7 +1725,31 @@ class PeakBootstrap:
         return float(lo), float(hi)
 
 
-def _resample_indices(seed: Any, count: int, bound: int) -> np.ndarray:
+def _bootstrap_entropy(seed: Any) -> int | tuple[int, ...]:
+    """``seed`` as the entropy of a ``SeedSequence``: a non-negative int or a non-empty tuple of them.
+
+    ``None`` (fresh operating-system entropy, which would leave the result irreproducible), bools,
+    floats, strings and ``SeedSequence`` objects are refused, as in
+    :mod:`sparsegf2.study.stats`.
+    """
+
+    def word(s: Any) -> int:
+        if isinstance(s, (bool, np.bool_)) or not isinstance(s, (int, np.integer)) or s < 0:
+            raise ValueError(
+                "seed must be a non-negative integer or a sequence of them (the study's is "
+                f"bootstrap_seed(key, observable_id, version)), got {seed!r}"
+            )
+        return int(s)
+
+    if isinstance(seed, (list, tuple, np.ndarray)):
+        items = tuple(word(s) for s in np.asarray(seed, dtype=object).reshape(-1))
+        if not items:
+            raise ValueError("seed must not be an empty sequence")
+        return items
+    return word(seed)
+
+
+def _resample_indices(seed: int | tuple[int, ...], count: int, bound: int) -> np.ndarray:
     """``count`` indices in ``[0, bound)``: ``floor(u * bound)``, ``u`` the top 53 bits of PCG64's raw stream.
 
     numpy guarantees the raw output of ``PCG64(SeedSequence(seed))`` across versions; the map
@@ -1632,7 +1783,14 @@ def bootstrap_peak(
     kept), recomputes ``D(0)`` and its error, and takes the plateau peak. The indices are
     ``floor(u * S)`` from :func:`numpy.random.PCG64` seeded by ``SeedSequence(seed)`` (raw
     stream, ``u`` its top 53 bits), drawn in the order replicate, checkpoint, sample.
+
+    ``seed`` is a non-negative int or a sequence of them, recorded as given; the study's is
+    :func:`bootstrap_seed` of the trajectory key and the observable's id and version, so a stored
+    bootstrap is a function of the stored data and its key. ``None`` is refused: fresh entropy
+    would make the result irreproducible. The ``D(0)`` errors come from independent orderings,
+    so the peaks are recorded with ``se_exact`` True.
     """
+    entropy = _bootstrap_entropy(seed)
     times = _depths(t, "t")
     n = _int(num_system, "num_system", minimum=1)
     d = _first_failure(first_failure, n)
@@ -1650,8 +1808,10 @@ def bootstrap_peak(
     b = _int(replicates, "replicates", minimum=1)
     samples = d.shape[1]
     base = integrated_robustness(d, n, exact_counts=counts)
-    estimate = peak(times, base.value, base.se, rule="plateau", z=z, k_at=k_at, horizon=horizon)
-    picks = _resample_indices(seed, b * times.size * samples, samples).reshape(
+    estimate = peak(
+        times, base.value, base.se, rule="plateau", z=z, k_at=k_at, horizon=horizon, se_exact=True
+    )
+    picks = _resample_indices(entropy, b * times.size * samples, samples).reshape(
         b, times.size, samples
     )
     resampled = np.take_along_axis(np.broadcast_to(d, (b, *d.shape)), picks, axis=2)
@@ -1673,7 +1833,7 @@ def bootstrap_peak(
         missing_fraction=float(np.isnan(t_star).mean()),
         horizon_fraction=float(at_horizon.mean()),
         replicates=b,
-        seed=seed,
+        seed=entropy,
         z=float(z),
     )
 
@@ -1712,19 +1872,113 @@ INPUTS: Mapping[str, str] = MappingProxyType(
 )
 """The input kinds an entry may list (``trace:<id>`` names the observable whose trace it reads)."""
 
+KINDS = ("int", "real", "reals", "bool", "text", "sizes", "ladder")
+"""The kinds of parameter value, each with one canonical form; a kind written with a trailing
+``?`` (``"int?"``) also allows None.
+
+* ``int``: an int or numpy integer (never a bool, a float such as ``3.0`` or a string), as an int;
+* ``real``: an int, float or numpy number (never a bool or a string), finite, as a float with
+  ``-0.0`` written as ``0.0``: ``1``, ``1.0`` and ``numpy.float64(1)`` are one value;
+* ``reals``: a real or a 1-D list (tuple, array) of reals, as a tuple of floats;
+* ``bool``: True or False; ``text``: a non-empty string;
+* ``sizes``: a range string such as ``"1:31:2"`` (kept), or an int or a 1-D list of ints (a
+  tuple of ints);
+* ``ladder``: a string (``"auto"``, ``"given"``), or reals (a tuple of floats).
+"""
+
+PARAM_KINDS: Mapping[str, str] = MappingProxyType(
+    {
+        "J": "real",
+        "m": "int",
+        "samples": "int",
+        "exact_budget": "int",
+        "e": "reals",
+        "name": "text?",
+        "couplings": "reals",
+        "sizes": "sizes?",
+        "thin": "int",
+        "geometry": "text",
+        "method": "text",
+        "burn_in": "int?",
+        "tempering": "bool",
+        "ladder": "ladder",
+        "max_step": "real?",
+        "route": "text",
+        "budget": "int?",
+        "max_n": "int",
+        "rule": "text",
+        "z": "real",
+        "sensitivity_z": "reals",
+        "bootstrap": "int",
+    }
+)
+"""The kind (:data:`KINDS`) of every parameter name of the built-in entries.
+
+An entry's parameter takes its kind from ``ObservableDef.kinds`` or, failing that, from here; a
+parameter with neither is refused when the entry is built."""
+
+
+def _real(value: Any, what: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError(f"{what} must be a real number, got {value!r}")
+    x = float(value)
+    if not math.isfinite(x):
+        raise ValueError(f"{what} must be finite, got {value!r}")
+    return 0.0 if x == 0 else x
+
+
+def _normalize(kind: str, value: Any, what: str) -> Any:
+    """``value`` in the canonical form of ``kind`` (:data:`KINDS`), or a ValueError that names it."""
+    if kind.endswith("?"):
+        if value is None:
+            return None
+        kind = kind[:-1]
+    if kind == "int":
+        return _int(value, what)
+    if kind == "real":
+        return _real(value, what)
+    if kind == "bool":
+        if not isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{what} must be True or False, got {value!r}")
+        return bool(value)
+    if kind == "text" or (kind in ("sizes", "ladder") and isinstance(value, str)):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{what} must be a non-empty string, got {value!r}")
+        return value
+    if isinstance(value, (list, tuple, np.ndarray)):
+        items = np.asarray(value, dtype=object)
+        if items.ndim != 1:
+            raise ValueError(f"{what} must be a 1-D list, got shape {items.shape}")
+        labeled = [(f"{what} (item {i})", v) for i, v in enumerate(items.tolist())]
+    else:
+        labeled = [(what, value)]
+    if kind == "sizes":
+        return tuple(_int(v, label) for label, v in labeled)
+    if kind in ("reals", "ladder"):
+        return tuple(_real(v, label) for label, v in labeled)
+    raise AssertionError(f"unknown kind {kind!r}")
+
 
 @dataclass(frozen=True, eq=False)
 class ObservableValue:
     """One computed value of a snapshot observable, in the store's columns (design §4 ``observations``).
 
     ``value`` (float; NaN where undefined), ``se`` (its standard error, 0 when exact),
-    ``method`` (how it was computed) and ``data`` (everything else, plain Python values).
+    ``method`` (how it was computed) and ``data`` (everything else, plain Python values); and the
+    key it was computed under, filled by :func:`compute`: ``observable_id``, ``version`` (the
+    entry's own, also when :func:`compute` was given no version) and ``params_key``
+    (:func:`params_key` of the parameters used). The store keeps the value under exactly these.
     """
 
     value: float
     se: float
     method: str
     data: Mapping[str, Any]
+    observable_id: str | None = None
+    version: str | None = None
+    params_key: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -1734,9 +1988,12 @@ class SnapshotInput:
     ``num_system`` (``n``), ``t`` (the depth), ``key`` (the trajectory's
     :class:`~sparsegf2.study.identity.TrajectoryKey`, or its string form; needed by the sampled
     observables, whose seeds derive from it: :func:`region_seed`), and the stored data it has:
-    the physical ``code``, the joint ``tableau`` (system ``0..n-1``, then the references) and the
-    interaction graph ``edges``. :meth:`physical_code` falls back to the joint tableau's physical
-    code.
+    the physical ``code`` (a :class:`~sparsegf2.codes.StabilizerCode` on ``n`` qubits), the joint
+    ``tableau`` (a :class:`~sparsegf2.tableau.PhaseFreeTableau`, system ``0..n-1`` first, then
+    the references: ``n``, ``n + 1`` or ``2n`` qubits for no reference, one reference or the
+    purification picture) and the interaction graph ``edges``. Each is checked against ``n``
+    when given, so a snapshot paired with another condition's ``n`` is refused rather than
+    computed. :meth:`physical_code` falls back to the joint tableau's physical code.
     """
 
     num_system: int
@@ -1754,6 +2011,26 @@ class SnapshotInput:
             if key.n != n:
                 raise ValueError(f"the key is a trajectory of n = {key.n}, not num_system = {n}")
             object.__setattr__(self, "key", key)
+        if self.code is not None:
+            if not isinstance(self.code, StabilizerCode):
+                raise TypeError(f"code must be a StabilizerCode, got {type(self.code).__name__}")
+            if self.code.num_qubits != n:
+                raise ValueError(
+                    f"the code has {self.code.num_qubits} qubits, not num_system = {n}: give the "
+                    "physical code of this snapshot (one qubit per system qubit)"
+                )
+        if self.tableau is not None:
+            if not isinstance(self.tableau, PhaseFreeTableau):
+                raise TypeError(
+                    f"tableau must be a PhaseFreeTableau, got {type(self.tableau).__name__}"
+                )
+            widths = sorted({n, n + 1, 2 * n})
+            if self.tableau.num_qubits not in widths:
+                raise ValueError(
+                    f"the joint tableau has {self.tableau.num_qubits} qubits, but a joint state of "
+                    f"n = {n} system qubits has n, n + 1 or 2n = {widths} (no reference, one "
+                    "reference, purification): give the snapshot of a trajectory of this n"
+                )
 
     def trajectory(self) -> TrajectoryKey:
         if self.key is None:
@@ -1792,12 +2069,17 @@ class ObservableDef:
       needs a new version;
     * ``level``: one of :data:`LEVELS`; ``inputs``: kinds of :data:`INPUTS` (``trace:<id>`` for a
       trace of another observable);
-    * ``params``: each parameter's default (:data:`REQUIRED` when it must be given), read-only;
+    * ``params``: each parameter's default (:data:`REQUIRED` when it must be given), read-only,
+      in canonical form;
     * ``definition``: the formula and its v1.4 section, in words;
     * ``function``: the pure function of this module that computes it;
     * ``compute``: for an observable computed later from a stored snapshot,
-      ``compute(snapshot, params) -> ObservableValue`` with :class:`SnapshotInput` and the
-      resolved parameters (None for the observables computed from engine probes or traces).
+      ``compute(snapshot, params, entry) -> ObservableValue`` with :class:`SnapshotInput`, the
+      resolved parameters and this entry (so a sampled observable seeds itself with the id and
+      version it is computed under, never another entry's); None for the observables computed
+      from engine probes or traces;
+    * ``kinds``: the kind (:data:`KINDS`) of each parameter, where it is not the one of
+      :data:`PARAM_KINDS`; after construction, every parameter's kind.
     """
 
     id: str
@@ -1807,7 +2089,10 @@ class ObservableDef:
     params: Mapping[str, Any]
     definition: str
     function: Callable[..., Any]
-    compute: Callable[[SnapshotInput, Mapping[str, Any]], ObservableValue] | None = None
+    compute: Callable[[SnapshotInput, Mapping[str, Any], ObservableDef], ObservableValue] | None = (
+        None
+    )
+    kinds: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _label(self.id, "id")
@@ -1820,8 +2105,33 @@ class ObservableDef:
                 raise ValueError(
                     f"input {kind!r} is not one of {sorted(INPUTS)} (use trace:<id> for a trace)"
                 )
+        given = dict(self.kinds)
+        stray = sorted(set(given) - set(self.params))
+        if stray:
+            raise ValueError(f"kinds names {stray}, which are not parameters of {self.id!r}")
+        kinds: dict[str, str] = {}
+        for name in self.params:
+            declared = given.get(name, PARAM_KINDS.get(name))
+            if declared is None:
+                raise ValueError(
+                    f"parameter {name!r} of {self.id!r} has no kind: give kinds={{{name!r}: ...}} "
+                    f"with one of {list(KINDS)}, which fixes its canonical form in a key"
+                )
+            if not isinstance(declared, str) or declared.removesuffix("?") not in KINDS:
+                raise ValueError(
+                    f"the kind of parameter {name!r} must be one of {list(KINDS)} (with a "
+                    f"trailing ? to allow None), got {declared!r}"
+                )
+            kinds[name] = declared
+        params = {
+            name: value
+            if value is REQUIRED
+            else _normalize(kinds[name], value, f"the default of parameter {name!r} of {self.id!r}")
+            for name, value in self.params.items()
+        }
         object.__setattr__(self, "inputs", tuple(self.inputs))
-        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        object.__setattr__(self, "params", MappingProxyType(params))
+        object.__setattr__(self, "kinds", MappingProxyType(kinds))
 
     @property
     def retrospective(self) -> bool:
@@ -1836,6 +2146,7 @@ class ObservableDef:
             "level": self.level,
             "inputs": list(self.inputs),
             "params": {k: ("required" if v is REQUIRED else v) for k, v in self.params.items()},
+            "kinds": dict(self.kinds),
             "definition": self.definition,
             "function": self.function.__name__,
             "retrospective": self.retrospective,
@@ -1846,6 +2157,7 @@ class ObservableDef:
             self.level == other.level
             and self.inputs == other.inputs
             and dict(self.params) == dict(other.params)
+            and dict(self.kinds) == dict(other.kinds)
             and self.definition == other.definition
             and self.function is other.function
             and self.compute is other.compute
@@ -1878,7 +2190,11 @@ def register(entry: ObservableDef) -> ObservableDef:
 
 
 def get(observable_id: str, version: str | None = None) -> ObservableDef:
-    """The catalog entry ``observable_id`` (its latest registered version unless ``version`` is given)."""
+    """The catalog entry ``observable_id`` (the one registered last unless ``version`` is given).
+
+    Code that computes or stores a value names the version (as :func:`compute` does with the
+    entry it resolved): "the one registered last" changes when another version is registered.
+    """
     found = [e for (i, _), e in _REGISTRY.items() if i == observable_id]
     if not found:
         raise KeyError(
@@ -1899,26 +2215,46 @@ def catalog() -> tuple[dict[str, Any], ...]:
     return tuple(_REGISTRY[key].row() for key in sorted(_REGISTRY))
 
 
+def _cell(text: str) -> str:
+    """``text`` as one Markdown table cell: ``|`` escaped (it would end the cell), lines joined."""
+    return " ".join(str(text).split("\n")).replace("|", "\\|")
+
+
 def catalog_markdown() -> str:
-    """:func:`catalog` as a Markdown table (id, version, level, inputs, parameters, definition)."""
+    """:func:`catalog` as a Markdown table (id, version, level, inputs, parameters, definition).
+
+    Every cell escapes ``|`` as ``\\|``, so each row has the header's six cells.
+    """
     lines = [
         "| id | version | level | inputs | parameters | definition |",
         "|---|---|---|---|---|---|",
     ]
     for row in catalog():
         params = ", ".join(f"{k}={v!r}" for k, v in row["params"].items()) or "none"
-        lines.append(
-            f"| `{row['id']}` | {row['version']} | {row['level']}"
-            + (" (retrospective)" if row["retrospective"] else "")
-            + f" | {', '.join(row['inputs'])} | {params} | {row['definition']} |"
-        )
+        level = row["level"] + (" (retrospective)" if row["retrospective"] else "")
+        cells = [
+            f"`{row['id']}`",
+            row["version"],
+            level,
+            ", ".join(row["inputs"]),
+            params,
+            row["definition"],
+        ]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return "\n".join(lines)
 
 
 def resolve_params(
     observable_id: str, params: Mapping[str, Any] | None = None, *, version: str | None = None
 ) -> dict[str, Any]:
-    """The parameters of an observable with its defaults filled in; unknown or missing ones refused."""
+    """The parameters of an observable, each in its canonical form, with the defaults filled in.
+
+    Every given value is put in the canonical form of its kind (``ObservableDef.kinds``,
+    :data:`KINDS`): ``J`` = ``1``, ``1.0`` or ``numpy.float64(1)`` is ``1.0``, ``-0.0`` is
+    ``0.0``, a list of couplings is a tuple of floats, ``samples`` must be an int (``100.0`` is
+    refused), and a string where a number belongs is refused. Unknown or missing parameters are
+    refused.
+    """
     entry = get(observable_id, version)
     given = dict(params or {})
     unknown = sorted(set(given) - set(entry.params))
@@ -1927,7 +2263,14 @@ def resolve_params(
             f"unknown parameter(s) {unknown} for observable {entry.id!r}; its parameters are "
             f"{sorted(entry.params)}"
         )
-    out = {k: given.get(k, default) for k, default in entry.params.items()}
+    out = {
+        name: _normalize(
+            entry.kinds[name], given[name], f"parameter {name!r} of observable {entry.id!r}"
+        )
+        if name in given
+        else default
+        for name, default in entry.params.items()
+    }
     missing = sorted(k for k, v in out.items() if v is REQUIRED)
     if missing:
         raise ValueError(f"observable {entry.id!r} needs the parameter(s) {missing}")
@@ -1939,8 +2282,10 @@ def params_key(
 ) -> str:
     """The canonical JSON of the resolved parameters: the ``params`` part of a stored value's key.
 
-    Sorted keys, no spaces, tuples as lists (:func:`sparsegf2.study.identity.canonical_json`),
-    so equal parameters give equal text whatever their order or the defaults left out.
+    Sorted keys, no spaces, tuples as lists (:func:`sparsegf2.study.identity.canonical_json`) of
+    :func:`resolve_params`, whose values are in the canonical form of their kinds, so equal
+    parameters give equal text whatever their order, their numeric type (``1``, ``1.0``,
+    ``numpy.float64(1)``; ``[0, 1, 2]`` and ``[0.0, 1.0, 2.0]``) or the defaults left out.
     """
     return canonical_json(resolve_params(observable_id, params, version=version))
 
@@ -1955,7 +2300,11 @@ def compute(
     """Compute a retrospective snapshot observable from a stored snapshot (design §4 ``runner.compute``).
 
     Only entries with a ``compute`` (``ObservableDef.retrospective``) qualify; the others come
-    from engine probes or traces and are computed by their ``function`` from those arrays.
+    from engine probes or traces and are computed by their ``function`` from those arrays. The
+    entry is ``get(observable_id, version)`` (the one registered last when ``version`` is None);
+    its ``compute`` receives the entry itself, so a sampled observable is seeded with the id and
+    version it is computed under. The value carries that key (``observable_id``, ``version``,
+    ``params_key``) for the store.
     """
     entry = get(observable_id, version)
     if entry.compute is None:
@@ -1965,13 +2314,27 @@ def compute(
         )
     if not isinstance(snapshot, SnapshotInput):
         raise TypeError(f"snapshot must be a SnapshotInput, got {type(snapshot).__name__}")
-    return entry.compute(snapshot, resolve_params(entry.id, params, version=entry.version))
+    resolved = resolve_params(entry.id, params, version=entry.version)
+    value = entry.compute(snapshot, resolved, entry)
+    if not isinstance(value, ObservableValue):
+        raise TypeError(
+            f"the compute of {entry.id!r} version {entry.version!r} returned "
+            f"{type(value).__name__}, not an ObservableValue"
+        )
+    return replace(
+        value,
+        observable_id=entry.id,
+        version=entry.version,
+        params_key=canonical_json(resolved),
+    )
 
 
 # -- the retrospective computations -------------------------------------------------------------
 
 
-def _compute_k(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_k(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     code = snapshot.physical_code()
     k = code.num_logical
     return ObservableValue(
@@ -1982,17 +2345,23 @@ def _compute_k(snapshot: SnapshotInput, params: Mapping[str, Any]) -> Observable
     )
 
 
-def _compute_rate(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_rate(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     k = snapshot.physical_code().num_logical
     return ObservableValue(k / snapshot.num_system, 0.0, "stored-code", {"k": k})
 
 
-def _compute_rank(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_rank(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     k = snapshot.physical_code().num_logical
     return ObservableValue(float(snapshot.num_system - k), 0.0, "stored-code", {"k": k})
 
 
-def _compute_d_cyc(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_d_cyc(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     code = snapshot.physical_code()
     raw = cyclic_distance_from_code(code)
     has = code.num_logical > 0
@@ -2004,7 +2373,9 @@ def _compute_d_cyc(snapshot: SnapshotInput, params: Mapping[str, Any]) -> Observ
     )
 
 
-def _compute_d_conn(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_d_conn(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     code = snapshot.physical_code()
     value = connected_distance(code, snapshot.graph(), max_n=params["max_n"])
     return ObservableValue(
@@ -2012,12 +2383,16 @@ def _compute_d_conn(snapshot: SnapshotInput, params: Mapping[str, Any]) -> Obser
     )
 
 
-def _compute_half_cut(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_half_cut(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     value = half_cut_entropy(snapshot.joint(), snapshot.num_system)
     return ObservableValue(float(value), 0.0, "joint-tableau", {"qubits": snapshot.num_system // 2})
 
 
-def _compute_leakage(snapshot: SnapshotInput, params: Mapping[str, Any]) -> ObservableValue:
+def _compute_leakage(
+    snapshot: SnapshotInput, params: Mapping[str, Any], entry: ObservableDef
+) -> ObservableValue:
     code = snapshot.physical_code()
     route = params["route"]
     if route == "enumerate":
@@ -2043,8 +2418,8 @@ def _compute_leakage(snapshot: SnapshotInput, params: Mapping[str, Any]) -> Obse
         method=params["method"],
         ladder=params["ladder"],
         max_step=params["max_step"],
-        observable_id="mean_leakage",
-        version=get("mean_leakage").version,
+        observable_id=entry.id,  # the entry being computed, never the latest registered
+        version=entry.version,
     )
     return ObservableValue(
         est.value,
@@ -2079,7 +2454,7 @@ _CORRELATED = {
     "ladder": "auto",
     "max_step": None,
 }
-_PLATEAU = {"rule": "plateau", "z": 1.0, "sensitivity_z": (0.0, 1.0, 2.0), "bootstrap": 200}
+_PLATEAU = {"rule": "plateau", "z": 1.0, "sensitivity_z": (0.0, 1.0, 2.0)}
 
 for _entry in (
     ObservableDef(
@@ -2179,7 +2554,8 @@ for _entry in (
         ("probe:correlated_erasure", "probe:code_dimension"),
         _CORRELATED,
         "P_{C,G,J}(m) = sum_{|A|=m} Q_{G,J}(A|m) f(A), Q ∝ exp(-J b_G(A)), with binomial errors "
-        "per size; interpolated sizes flagged (v1.4 §5.7)",
+        "per size (the true errors for exact samples, lower bounds for the chain: se_exact); "
+        "interpolated sizes flagged (v1.4 §5.7)",
         correlated_failure,
     ),
     ObservableDef(
@@ -2189,7 +2565,7 @@ for _entry in (
         ("probe:correlated_erasure", "probe:code_dimension"),
         _CORRELATED,
         "D(J) = sum_{m=0}^{n-1} (1 - P_{C,G,J}(m)), 0 at k = 0; incomplete when a size was "
-        "interpolated (v1.4 §5.7)",
+        "interpolated; binomial error, a lower bound for the chain (se_exact) (v1.4 §5.7)",
         correlated_failure,
     ),
     ObservableDef(
@@ -2221,7 +2597,7 @@ for _entry in (
             "budget": None,
         },
         "l(m, J) = E_{A ~ Q_{G,J}(.|m)}[I(A:R)], regions seeded by (trajectory key, t, m, J, id, "
-        "version); "
+        "version) of the entry computed; "
         "route 'enumerate' for every region (v1.4 §5.7)",
         mean_leakage,
         _compute_leakage,
@@ -2262,10 +2638,12 @@ for _entry in (
         "peak_D",
         "1",
         "trajectory",
-        ("trace:D", "k_trace"),
-        _PLATEAU,
+        ("trace:D", "k_trace", "probe:erasure_first_failure", "probe:uncorrectable_region_counts"),
+        {**_PLATEAU, "bootstrap": 200},
         "the plateau peak of D(0)(t): A = {t : D(t) >= D* - z sqrt(se(t)^2 + se(t*)^2)}, "
-        "T* = exp(mean_A ln t), sensitivity over z, bootstrap of T* (v1.4 §5.8)",
+        "T* = exp(mean_A ln t), sensitivity over z, bootstrap of T* resampling each checkpoint's "
+        "orderings (bootstrap_peak, seeded by bootstrap_seed(trajectory key, id, version)) "
+        "(v1.4 §5.8)",
         peak,
     ),
     ObservableDef(
@@ -2274,7 +2652,9 @@ for _entry in (
         "trajectory",
         ("trace:D_J", "k_trace"),
         {**_PLATEAU, "J": REQUIRED},
-        "the plateau peak of D(J)(t) at one coupling J (v1.4 §5.8)",
+        "the plateau peak of D(J)(t) at one coupling J, sensitivity over z; no bootstrap of T* "
+        "(the probe keeps failing fractions only); its se are binomial, lower bounds for the "
+        "chain, so the plateau is narrower than z there: record se_exact (v1.4 §5.8)",
         peak,
     ),
     ObservableDef(
