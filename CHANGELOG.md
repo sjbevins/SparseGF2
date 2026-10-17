@@ -16,7 +16,10 @@
   `g` of `(n, beta)` from `(WSG1, master, n, beta, g)`, one run seed per `(n, beta)` shared by
   all rates (shared gates, nested masks), trajectory `u = g * stride + c`, and an outcome-seed
   domain (`WSO1`) for later signed runs (`study.identity`). `load`, `parts`, `rows`, `replay`,
-  `verify`; `sparsegf2 sweep run|status|replay`.
+  `verify`; `sparsegf2 sweep run|status|replay`. Parts are saved on writer threads while the
+  next one computes, with zlib level 1 by default (`--compression`, `--writers`), and chunks
+  follow the measured rate. `EnsembleResult.save(path, compression=...)` takes `"default"`,
+  `"fast"` or `"none"`.
 * **The joint phase-free state as data.** The probe `tableau_snapshot` saves every generator of
   the joint state (system and reference qubits); `EnsembleResult.tableau(t, c)` and
   `tableaux(c)` (in parallel) return `sparsegf2.tableau.PhaseFreeTableau`, a phase-free

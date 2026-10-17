@@ -58,7 +58,8 @@ Bell-paired with a system qubit drawn per trajectory; or `"none"`: the system al
 per-size values resolved, tokens as canonical strings) and `SweepSpec.digest` its SHA-256
 (`study/identity.py:json_digest`): two spellings of one sweep have one digest.
 
-The command line: `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K]`,
+The command line: `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K]
+[--compression fast|none|default] [--writers W]`,
 `sparsegf2 sweep status DIR`, `sparsegf2 sweep replay DIR N BETA P U` (`cli.py:_cmd_sweep`;
 `--json` for one JSON object, exit codes 0, 2 for bad input, 1 for an internal error or a
 replay that differs, 130 for Ctrl-C). There are no MCP tools of the sweep's own: the existing
@@ -346,7 +347,7 @@ DIR/
     result-000000000016.npz  named by its first stream index u, rows in increasing u
     spec.json                the condition's engine spec in the API's JSON form, its seed
     provenance.json          versions, platform, git commit, command; one entry per resume;
-                             parts: each saved part with the package version that wrote it
+                             parts: each saved part with the package version and compression
 ```
 
 `sweep.json` (`study/sweep.py:_index`): `format`, `digest`, the canonical `spec`, `versions`
@@ -374,10 +375,10 @@ the graph files (`_write_graphs`: every graph rebuilt from its seed; a recorded 
 no longer reproduces is refused), writes `sweep.json`, then runs each condition's missing
 indices (`_run_condition`: target `SweepSpec.indices(n)` minus the saved ones) in chunks with
 `MonitoredCircuit.run(indices=chunk, seed=run_seed)`, each saved atomically (temporary file,
-then rename; `api.py:_atomic_save_result`) as soon as it finishes. An interrupted run loses at
-most the chunk in flight; the next run deletes stray temporaries and resumes. Default chunks
-take about 10 estimated seconds (`api.py:_default_chunk_size`) and hold at most 512 MB of
-result (`PART_BYTES`).
+then `fsync`, then rename; `study/sweep.py:_save_part`) on a writer thread while the next chunk
+computes. An interrupted run waits for the saves in flight and loses at most the chunk being
+computed; the next run deletes stray temporaries and resumes. Chunk sizes, compression and
+writers: section 12.
 
 **Growing.** A new spec may add sizes, rewiring probabilities, rates, graphs and circuits per
 graph. It may not change `stride`, the master seeds, `picture`, `stop_when_purified`,
@@ -464,22 +465,47 @@ a value and say so, or record without stopping. `paired_se` against
 `benchmarks/sweep_throughput.py` times `sweep.run` on one condition at a time (results in
 `benchmarks/results/sweep_throughput.md`): beta = 0.1, the purification picture, T = 4n,
 `code_dimension` at every layer, without and with a `tableau_snapshot` on 12 geometric
-checkpoints, default threads and chunks. On an AMD Ryzen 9 9950X3D (16 cores, 32 threads,
-Windows 11, Numba 0.68 `omp`), sparsegf2 3.0.0.dev12, before any CPU-specific option:
+checkpoints, default threads, chunks, compression and writers. On an AMD Ryzen 9 9950X3D (16
+cores, 32 threads, Windows 11, Numba 0.68 `omp`), sparsegf2 3.0.0.dev12, before any
+CPU-specific option:
 
 | n | trajectories/s, k only (p = 0.05 / 0.2) | with snapshots (p = 0.05 / 0.2) | disk bytes per trajectory with snapshots (p = 0.05 / 0.2) |
 |---:|---:|---:|---:|
-| 64 | 11,800 / 9,620 | 1,030 / 1,170 | 18,875 / 7,877 |
-| 128 | 4,080 / 3,100 | 366 / 504 | 62,422 / 20,192 |
-| 256 | 1,010 / 580 | 122 / 171 | 232,114 / 63,792 |
-| 512 | 139 / 69 | 29 / 40 | 867,010 / 222,618 |
+| 64 | 13,580 / 10,980 | 7,200 / 8,540 | 25,483 / 14,949 |
+| 128 | 5,020 / 3,790 | 2,670 / 2,860 | 79,071 / 37,443 |
+| 256 | 1,130 / 661 | 802 / 566 | 280,250 / 109,399 |
+| 512 | 170 / 80 | 127 / 69 | 993,800 / 331,521 |
 
-Without snapshots the engine takes most of the wall time from n = 256 on (20.1 of 22.1 s at
-n = 512, p = 0.05); below that, building the graph files and saving the parts take as long as
-the simulation or longer (3.1 of 4.2 s at n = 64, p = 0.05), and every part stores the condition's whole graph collection (4,478 bytes per
-trajectory at n = 512, p = 0.05). With snapshots, compressing and writing the parts takes most
-of the time (the engine's share is 0.61 of 23.95 s at n = 64 and 5.11 of 26.07 s at n = 512,
-p = 0.05).
+**Saving parts.** A part is saved on one of `writers` threads (default 4) while the next one
+computes (`study/sweep.py:_run_condition`, `_save_part`; the kernels and zlib release the GIL;
+at most `writers` saves wait, so at most `writers + 1` parts, each at most `PART_BYTES` =
+256 MB, are in memory). The compression of `EnsembleResult.save` is chosen per run
+(`run(..., compression=...)`, `--compression`; recorded per part in `provenance.json`, never
+part of the sweep's identity, and it changes no result). Saving one part with snapshots (the
+largest a sweep makes, p = 0.05), `fsync` included, against computing it:
+
+| n | trajectories | compute | `none` | `fast` (zlib level 1, default) | `default` (zlib's default level) |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 1,235 | 0.15 s | 0.18 s, 269.8 MB | 0.74 s, 95.0 MB | 2.99 s, 77.0 MB |
+| 256 | 312 | 0.27 s | 0.19 s, 269.2 MB | 0.67 s, 84.9 MB | 2.21 s, 72.6 MB |
+
+`fast` is the default: it writes 2.8 to 3.2 times less than `none` and is 3 to 4 times faster
+than `default`, and with four writers the cores wait little on it from n = 256 on (the engine
+is 5.87 of 7.66 s at n = 256 and 11.18 of 12.11 s at n = 512, p = 0.05). Below that the data
+outruns zlib (the engine is 1.50 of 6.82 s at n = 64): choose `none` when disk is plentiful.
+Measured during the choice (n = 256, 9,216 trajectories with snapshots, 512 MB parts): 9.6 s with `none` and
+one writer, 17.1, 11.9 and 11.2 s with `fast` and 2, 4 and 6 writers (engine 8.1 to 8.9 s).
+Without snapshots the parts are small and the engine takes most of the wall time from
+n = 256 on (25.9 of 27.1 s at n = 512, p = 0.05); every part stores the condition's graph
+collection.
+
+**Chunks.** Without `chunk_size`, the first chunk of a condition is sized by
+`estimate_ensemble`'s cost model (about 10 estimated seconds, `api.py:_default_chunk_size`),
+which overestimates the cost several times over (at n = 128 with snapshots it models 26.6 ms
+of one thread per trajectory where 4.4 ms of thread time, 0.14 ms of wall time on 32 threads,
+was measured); every later chunk holds about
+`CHUNK_SECONDS` = 10 s at the rate the previous chunk measured, and at most `PART_BYTES` of
+result. Chunk sizes never change a result.
 
 ### CPU-specific option
 

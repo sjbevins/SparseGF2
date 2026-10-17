@@ -105,6 +105,7 @@ import operator
 import re
 import time
 import warnings
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -210,6 +211,13 @@ _CX_INDEX = _CX_CLIFFORD.index()
 #: rule never changes a saved run: its replay reproduces it and a resume under
 #: the new rule is refused as another protocol.
 RANDOMNESS_CONTRACT = 2
+
+#: The ``compression`` options of :meth:`EnsembleResult.save`: zip method and zlib level.
+SAVE_COMPRESSIONS = {
+    "none": (zipfile.ZIP_STORED, None),
+    "fast": (zipfile.ZIP_DEFLATED, 1),
+    "default": (zipfile.ZIP_DEFLATED, None),
+}
 
 #: Most working memory, in bytes, that the :func:`correlated_erasure` probes may hold in
 #: all running threads at once (one size's regions per thread, ``8 c S (m + 1)`` bytes):
@@ -2562,8 +2570,18 @@ class EnsembleResult:
 
     # -- persistence --------------------------------------------------------------------
 
-    def save(self, path: str | Path) -> None:
-        """Write the arrays and run metadata (spec, seed, package version) to a compressed ``.npz`` file."""
+    def save(self, path: str | Path, *, compression: str = "default") -> None:
+        """Write the arrays and run metadata (spec, seed, package version) to a ``.npz`` file.
+
+        ``compression``: ``"default"`` (``numpy.savez_compressed``, zlib's default level),
+        ``"fast"`` (zlib level 1: a few times faster, somewhat larger) or ``"none"`` (stored
+        uncompressed: fastest, largest). :meth:`load` reads all three; ``"fast"`` and
+        ``"none"`` write to ``path`` exactly as given.
+        """
+        if compression not in SAVE_COMPRESSIONS:
+            raise ValueError(
+                f"compression must be one of {list(SAVE_COMPRESSIONS)}, got {compression!r}"
+            )
         spec = self.spec
         meta = {
             "format": "sparsegf2.EnsembleResult/1",
@@ -2620,7 +2638,14 @@ class EnsembleResult:
         if self.purification_layer is not None:
             arrays["purification_layer"] = self.purification_layer
         text = json.dumps(meta, default=_json_default)
-        np.savez_compressed(path, __meta__=np.array(text), **arrays)
+        if compression == "default":
+            np.savez_compressed(path, __meta__=np.array(text), **arrays)
+            return
+        method, level = SAVE_COMPRESSIONS[compression]
+        with zipfile.ZipFile(path, "w", compression=method, compresslevel=level) as z:
+            for name, value in {"__meta__": np.array(text), **arrays}.items():
+                with z.open(f"{name}.npy", "w", force_zip64=True) as fh:
+                    np.lib.format.write_array(fh, np.asanyarray(value), allow_pickle=False)
 
     @classmethod
     def load(cls, path: str | Path) -> EnsembleResult:

@@ -279,6 +279,10 @@ def test_sweep_throughput_quick(tmp_path):
     plain = {(r["n"], r["p"]): r for r in data["rows"] if not r["snapshots"]}
     assert all(snap[k]["disk_bytes_per_trajectory"] > plain[k]["disk_bytes_per_trajectory"]
                for k in snap)  # fmt: skip
+    assert [r["n"] for r in data["saves"]] == [16, 24]
+    for r in data["saves"]:  # stored bytes are the largest
+        sizes = [r[c]["megabytes"] for c in ("none", "fast", "default")]
+        assert sizes[0] >= sizes[1] >= sizes[2] > 0 and r["compute_seconds"] > 0
 
 
 def test_committed_sweep_throughput_report_is_the_rendering_of_its_results(tmp_path):
@@ -301,3 +305,4 @@ def test_committed_sweep_throughput_report_is_the_rendering_of_its_results(tmp_p
     assert {(r["n"], r["p"], r["snapshots"]) for r in data["rows"]} == {
         (n, p, s) for n in (64, 128, 256, 512) for p in ("0.05", "0.2") for s in (False, True)
     }
+    assert [r["n"] for r in data["saves"]] == [128, 256]

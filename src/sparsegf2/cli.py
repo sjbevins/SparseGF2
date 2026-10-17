@@ -364,6 +364,13 @@ def _build_parser() -> _Parser:
     q.add_argument("directory", metavar="DIR")
     q.add_argument("--threads", type=int, default=None, help="threads (default: all)")
     q.add_argument("--chunk-size", type=int, default=None, help="trajectories per saved part")
+    q.add_argument(
+        "--compression",
+        choices=["fast", "none", "default"],
+        default="fast",
+        help="how saved parts are compressed (fast: zlib level 1, the default)",
+    )
+    q.add_argument("--writers", type=int, default=4, help="threads that save parts (4)")
     q = actions.add_parser("status", help="saved and target trajectories per condition")
     q.add_argument("directory", metavar="DIR")
     q = actions.add_parser("replay", help="rerun one trajectory and compare it with the saved one")
@@ -740,6 +747,8 @@ def _cmd_sweep(args: argparse.Namespace) -> _Outcome:
             args.directory,
             num_threads=args.threads,
             chunk_size=args.chunk_size,
+            compression=args.compression,
+            writers=args.writers,
             log=_log,
             command=_command_line(),
         )

@@ -13,11 +13,16 @@ per graph) without changing any saved trajectory. ``docs/SWEEPS.md`` is the full
 
 from __future__ import annotations
 
+import collections
+import concurrent.futures
+import contextlib
 import dataclasses
 import json
 import math
 import operator
+import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -56,7 +61,16 @@ DEFAULT_STRIDE = 1024
 DEFAULT_CHECKPOINTS = {"count": 12}
 PICTURES = ("purification", "single", "none")
 #: The largest result one saved part holds in memory (``api._result_bytes``).
-PART_BYTES = 2**29
+PART_BYTES = 2**28
+#: How parts are compressed by default (``EnsembleResult.save``): zlib level 1, measured in
+#: ``docs/SWEEPS.md`` section 12 against "none" and "default".
+DEFAULT_COMPRESSION = "fast"
+#: Writer threads that save parts while the next part computes; at most this many saves wait,
+#: so at most ``DEFAULT_WRITERS + 1`` parts (of at most :data:`PART_BYTES`) are in memory.
+DEFAULT_WRITERS = 4
+#: Without a chunk size, every chunk after the first holds about this many seconds of
+#: simulation at the rate the previous chunk measured.
+CHUNK_SECONDS = 10.0
 _PART = re.compile(r"result-(\d{12})\.npz")
 _REQUIRED = (
     "sizes",
@@ -536,6 +550,8 @@ def run(
     *,
     num_threads: int | None = None,
     chunk_size: int | None = None,
+    compression: str = DEFAULT_COMPRESSION,
+    writers: int = DEFAULT_WRITERS,
     log: Callable[[str], None] | None = None,
     command: str = "sweep.run",
 ) -> dict[str, Any]:
@@ -546,16 +562,25 @@ def run(
     tags) is equal and, before anything is written, this code replays the first and the last
     saved trajectory of each condition that grows identically (:func:`verify`). Every graph
     file is written first; then each condition runs its missing trajectories in chunks of
-    ``chunk_size`` (default: about 10 estimated seconds, at most :data:`PART_BYTES` of
-    result), each saved as soon as it finishes and listed with this package version under
-    ``parts`` in the condition's ``provenance.json``. Results do not depend on ``num_threads``
-    or ``chunk_size``. The directory's lock admits one writer.
+    ``chunk_size`` trajectories (default: the first chunk from ``estimate_ensemble``'s cost
+    model, each later one about :data:`CHUNK_SECONDS` at the rate the previous one measured;
+    at most :data:`PART_BYTES` of result). Each chunk is saved as a part on one of ``writers``
+    threads while the next one computes, with ``compression`` ``"fast"``, ``"none"`` or
+    ``"default"`` (``EnsembleResult.save``; not part of the sweep's identity), and listed with
+    this package version and its compression under ``parts`` in the condition's
+    ``provenance.json``. Results do not depend on ``num_threads``, ``chunk_size``,
+    ``compression`` or ``writers``. The directory's lock admits one writer.
     """
     sweep = spec if isinstance(spec, SweepSpec) else SweepSpec.from_json(spec)
     if num_threads is not None:
         num_threads = identity._integer(num_threads, "num_threads", minimum=1)
     if chunk_size is not None:
         chunk_size = identity._integer(chunk_size, "chunk_size", minimum=1)
+    writers = identity._integer(writers, "writers", minimum=1)
+    if compression not in mipt.SAVE_COMPRESSIONS:
+        raise ValueError(
+            f"compression must be one of {list(mipt.SAVE_COMPRESSIONS)}, got {compression!r}"
+        )
     root = api._output_dir(directory)
     lock = api._lock_output_dir(root)
     started, ran = time.perf_counter(), 0
@@ -578,8 +603,16 @@ def run(
             for beta in sweep.betas:
                 _write_graphs(root, sweep, n, beta)
         api._atomic_write_text(root / INDEX_FILE, json.dumps(_index(sweep), indent=1))
+        options = {
+            "num_threads": num_threads,
+            "chunk_size": chunk_size,
+            "compression": compression,
+            "writers": writers,
+            "log": log,
+            "command": command,
+        }
         for n, beta, p in sweep.conditions():
-            ran += _run_condition(root, sweep, n, beta, p, num_threads, chunk_size, log, command)
+            ran += _run_condition(root, sweep, n, beta, p, options)
     finally:
         lock.release()
     out = status(root)
@@ -604,12 +637,34 @@ def _replay_check(root: Path, n: int, beta: Token, p: Token, done: np.ndarray) -
             )
 
 
-def _record_part(folder: Path, name: str) -> None:
-    """Add ``name`` and this package version to the ``parts`` of ``provenance.json``."""
-    path = folder / "provenance.json"
-    record = json.loads(path.read_text(encoding="utf-8"))
-    record.setdefault("parts", {})[name] = __version__
-    api._atomic_write_text(path, json.dumps(record, indent=2))
+_PROVENANCE_LOCK = threading.Lock()
+
+
+def _record_part(folder: Path, name: str, compression: str) -> None:
+    """List ``name`` with this package version and its compression under ``parts`` in
+    ``provenance.json`` (the writers of one condition take turns)."""
+    with _PROVENANCE_LOCK:
+        path = folder / "provenance.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        entry = {"sparsegf2": __version__, "compression": compression}
+        record.setdefault("parts", {})[name] = entry
+        api._atomic_write_text(path, json.dumps(record, indent=2))
+
+
+def _save_part(result: mipt.EnsembleResult, folder: Path, name: str, compression: str) -> None:
+    """Save a part to a temporary file of this writer's own, then rename it (atomic)."""
+    path = folder / name
+    tmp = api._temporary(path)
+    try:
+        result.save(tmp, compression=compression)
+        with open(tmp, "r+b") as fh:  # on disk before the rename makes it a part
+            os.fsync(fh.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    api._replace(tmp, path)
+    _record_part(folder, name, compression)
 
 
 def _run_condition(
@@ -618,10 +673,7 @@ def _run_condition(
     n: int,
     beta: Token,
     p: Token,
-    num_threads: int | None,
-    chunk_size: int | None,
-    log: Callable[[str], None] | None,
-    command: str,
+    options: dict[str, Any],
 ) -> int:
     folder = root / _name(n, beta, p)
     folder.mkdir(exist_ok=True)
@@ -638,27 +690,42 @@ def _run_condition(
         engine,
         int(sweep.indices(n).size),
         cast(Any, list(sweep.run_seed(n, beta))),
-        command,
+        options["command"],
         resumed_from=int(done.size) if (folder / "spec.json").exists() else None,
         graph_file=api._graph_file_record(engine),
     )
     mc = sweep.monitored_circuit(n, beta, p, _collection(root, sweep, n, beta))
-    size = chunk_size or api._default_chunk_size(
-        mc, int(todo.size), api._running_threads(num_threads)
+    threads_, chosen = options["num_threads"], options["chunk_size"]
+    cap = max(1, PART_BYTES // max(1, api._result_bytes(mc, 1)))
+    size = min(
+        cap, chosen or api._default_chunk_size(mc, int(todo.size), api._running_threads(threads_))
     )
-    size = max(1, min(size, PART_BYTES // max(1, api._result_bytes(mc, 1))))
-    seed = list(sweep.run_seed(n, beta))
-    for start in range(0, todo.size, size):
-        chunk = todo[start : start + size]
-        result = mc.run(indices=chunk, seed=seed, num_threads=num_threads)
-        name = f"result-{int(chunk[0]):012d}.npz"
-        api._atomic_save_result(result, folder / name)
-        _record_part(folder, name)
-        if log is not None:
-            log(
-                f"n={n} beta={beta} p={p}: {done.size + start + chunk.size}/"
-                f"{done.size + todo.size} trajectories ({result.trajectories_per_second:.0f}/s)"
-            )
+    seed, writers, log = list(sweep.run_seed(n, beta)), options["writers"], options["log"]
+    start = 0
+    # Each part is saved on a writer thread while the next one computes (the kernels and
+    # zlib release the GIL); at most ``writers`` saves wait, so at most writers + 1 parts
+    # are in memory.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=writers) as pool:
+        pending: collections.deque[concurrent.futures.Future[None]] = collections.deque()
+        while start < todo.size:
+            chunk = todo[start : start + size]
+            result = mc.run(indices=chunk, seed=seed, num_threads=threads_)
+            while len(pending) >= writers:
+                pending.popleft().result()
+            name = f"result-{int(chunk[0]):012d}.npz"
+            pending.append(pool.submit(_save_part, result, folder, name, options["compression"]))
+            start += int(chunk.size)
+            if log is not None:
+                log(
+                    f"n={n} beta={beta} p={p}: {done.size + start}/{done.size + todo.size} "
+                    f"trajectories ({result.trajectories_per_second:.0f}/s)"
+                )
+            if chosen is None and result.elapsed_seconds > 0:  # chunks of CHUNK_SECONDS
+                rate = chunk.size / result.elapsed_seconds
+                size = max(1, min(cap, int(CHUNK_SECONDS * rate)))
+            del result
+        for future in pending:
+            future.result()
     return int(todo.size)
 
 

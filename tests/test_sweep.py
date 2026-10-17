@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import zipfile
 from decimal import Decimal, localcontext
 
 import numpy as np
@@ -334,7 +335,8 @@ def made_by_an_older_version(directory, old="3.0.0.dev0") -> None:
     index_path.write_text(json.dumps(index))
     for path in directory.glob("n*/provenance.json"):
         record = json.loads(path.read_text())
-        record["parts"] = {name: old for name in record["parts"]}
+        for entry in record["parts"].values():
+            entry["sparsegf2"] = old
         path.write_text(json.dumps(record))
 
 
@@ -349,7 +351,9 @@ def test_a_sweep_grows_across_package_versions_after_a_replay_check(reference, t
     versions = {mipt.EnsembleResult.load(p).version for p in folder.glob("result-*.npz")}
     assert versions == {"3.0.0.dev0", sparsegf2.__version__}
     parts = json.loads((folder / "provenance.json").read_text())["parts"]
-    assert set(parts.values()) == versions and len(parts) == len(list(folder.glob("result-*")))
+    assert {entry["sparsegf2"] for entry in parts.values()} == versions
+    assert {entry["compression"] for entry in parts.values()} == {"fast"}
+    assert len(parts) == len(list(folder.glob("result-*")))
     for key, old in expected.items():  # load reads parts of both versions; old rows unchanged
         new = sweep.load(directory, *key)
         keep = np.isin(new.trajectories, old.trajectories)
@@ -516,3 +520,21 @@ def test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits(pi
             assert res.values["code_dimension"][row].tolist() == k
             checked += 1
     assert checked == 8 * 2
+
+
+@pytest.mark.parametrize(("compression", "writers"), [("none", 1), ("default", 3)])
+def test_compression_and_writers_change_no_result(reference, tmp_path, compression, writers):
+    _, expected = reference
+    directory = tmp_path / compression
+    sweep.run(SPEC, directory, compression=compression, writers=writers, chunk_size=1)
+    for key, result in every_condition(directory).items():
+        assert_same(result, expected[key])
+    folder = directory / "n6_beta0_p0.1"
+    parts = json.loads((folder / "provenance.json").read_text())["parts"]
+    assert len(parts) == 4 and {e["compression"] for e in parts.values()} == {compression}
+    method = zipfile.ZIP_STORED if compression == "none" else zipfile.ZIP_DEFLATED
+    for path in folder.glob("result-*.npz"):
+        with zipfile.ZipFile(path) as z:
+            assert {info.compress_type for info in z.infolist()} == {method}
+    with pytest.raises(ValueError, match="compression must be one of"):
+        sweep.run(SPEC, directory, compression="best")

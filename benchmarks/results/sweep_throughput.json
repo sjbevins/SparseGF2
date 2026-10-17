@@ -18,193 +18,229 @@
    "p": "0.05",
    "snapshots": false,
    "layers": 256,
-   "trajectories": 49152,
+   "trajectories": 73728,
    "parts": 2,
-   "seconds": 4.165,
-   "trajectories_per_second": 11802.1,
-   "engine_seconds": 1.114,
-   "disk_bytes_per_trajectory": 79
+   "seconds": 5.43,
+   "trajectories_per_second": 13578.67,
+   "engine_seconds": 1.585,
+   "disk_bytes_per_trajectory": 327
   },
   {
    "n": 64,
    "p": "0.05",
    "snapshots": true,
-   "layers": 256,
-   "trajectories": 24576,
-   "parts": 3,
-   "seconds": 23.951,
-   "trajectories_per_second": 1026.09,
-   "engine_seconds": 0.61,
-   "disk_bytes_per_trajectory": 18875
-  },
-  {
-   "n": 64,
-   "p": "0.2",
-   "snapshots": false,
    "layers": 256,
    "trajectories": 49152,
-   "parts": 3,
-   "seconds": 5.107,
-   "trajectories_per_second": 9624.04,
-   "engine_seconds": 1.837,
-   "disk_bytes_per_trajectory": 96
+   "parts": 11,
+   "seconds": 6.824,
+   "trajectories_per_second": 7202.69,
+   "engine_seconds": 1.497,
+   "disk_bytes_per_trajectory": 25483
+  },
+  {
+   "n": 64,
+   "p": "0.2",
+   "snapshots": false,
+   "layers": 256,
+   "trajectories": 73728,
+   "parts": 2,
+   "seconds": 6.714,
+   "trajectories_per_second": 10981.32,
+   "engine_seconds": 2.645,
+   "disk_bytes_per_trajectory": 316
   },
   {
    "n": 64,
    "p": "0.2",
    "snapshots": true,
    "layers": 256,
-   "trajectories": 24576,
-   "parts": 3,
-   "seconds": 20.99,
-   "trajectories_per_second": 1170.86,
-   "engine_seconds": 0.987,
-   "disk_bytes_per_trajectory": 7877
-  },
-  {
-   "n": 128,
-   "p": "0.05",
-   "snapshots": false,
-   "layers": 512,
-   "trajectories": 24576,
-   "parts": 4,
-   "seconds": 6.017,
-   "trajectories_per_second": 4084.31,
-   "engine_seconds": 2.916,
-   "disk_bytes_per_trajectory": 234
-  },
-  {
-   "n": 128,
-   "p": "0.05",
-   "snapshots": true,
-   "layers": 512,
-   "trajectories": 6144,
-   "parts": 3,
-   "seconds": 16.796,
-   "trajectories_per_second": 365.8,
-   "engine_seconds": 0.759,
-   "disk_bytes_per_trajectory": 62422
-  },
-  {
-   "n": 128,
-   "p": "0.2",
-   "snapshots": false,
-   "layers": 512,
-   "trajectories": 24576,
-   "parts": 6,
-   "seconds": 7.94,
-   "trajectories_per_second": 3095.31,
-   "engine_seconds": 5.11,
-   "disk_bytes_per_trajectory": 318
-  },
-  {
-   "n": 128,
-   "p": "0.2",
-   "snapshots": true,
-   "layers": 512,
-   "trajectories": 6144,
-   "parts": 3,
-   "seconds": 12.194,
-   "trajectories_per_second": 503.86,
-   "engine_seconds": 1.196,
-   "disk_bytes_per_trajectory": 20192
-  },
-  {
-   "n": 256,
-   "p": "0.05",
-   "snapshots": false,
-   "layers": 1024,
-   "trajectories": 12288,
+   "trajectories": 49152,
    "parts": 11,
-   "seconds": 12.168,
-   "trajectories_per_second": 1009.84,
-   "engine_seconds": 9.255,
-   "disk_bytes_per_trajectory": 1159
+   "seconds": 5.757,
+   "trajectories_per_second": 8538.33,
+   "engine_seconds": 2.357,
+   "disk_bytes_per_trajectory": 14949
   },
   {
-   "n": 256,
+   "n": 128,
+   "p": "0.05",
+   "snapshots": false,
+   "layers": 512,
+   "trajectories": 36864,
+   "parts": 2,
+   "seconds": 7.34,
+   "trajectories_per_second": 5022.21,
+   "engine_seconds": 4.222,
+   "disk_bytes_per_trajectory": 616
+  },
+  {
+   "n": 128,
    "p": "0.05",
    "snapshots": true,
-   "layers": 1024,
-   "trajectories": 3072,
-   "parts": 5,
-   "seconds": 25.288,
-   "trajectories_per_second": 121.48,
-   "engine_seconds": 2.385,
-   "disk_bytes_per_trajectory": 232114
-  },
-  {
-   "n": 256,
-   "p": "0.2",
-   "snapshots": false,
-   "layers": 1024,
+   "layers": 512,
    "trajectories": 12288,
-   "parts": 15,
-   "seconds": 21.18,
-   "trajectories_per_second": 580.18,
-   "engine_seconds": 17.579,
-   "disk_bytes_per_trajectory": 1550
+   "parts": 10,
+   "seconds": 4.602,
+   "trajectories_per_second": 2670.12,
+   "engine_seconds": 1.937,
+   "disk_bytes_per_trajectory": 79071
+  },
+  {
+   "n": 128,
+   "p": "0.2",
+   "snapshots": false,
+   "layers": 512,
+   "trajectories": 36864,
+   "parts": 2,
+   "seconds": 9.733,
+   "trajectories_per_second": 3787.66,
+   "engine_seconds": 6.715,
+   "disk_bytes_per_trajectory": 603
+  },
+  {
+   "n": 128,
+   "p": "0.2",
+   "snapshots": true,
+   "layers": 512,
+   "trajectories": 12288,
+   "parts": 10,
+   "seconds": 4.302,
+   "trajectories_per_second": 2856.26,
+   "engine_seconds": 2.827,
+   "disk_bytes_per_trajectory": 37443
+  },
+  {
+   "n": 256,
+   "p": "0.05",
+   "snapshots": false,
+   "layers": 1024,
+   "trajectories": 18432,
+   "parts": 3,
+   "seconds": 16.332,
+   "trajectories_per_second": 1128.56,
+   "engine_seconds": 13.689,
+   "disk_bytes_per_trajectory": 1641
+  },
+  {
+   "n": 256,
+   "p": "0.05",
+   "snapshots": true,
+   "layers": 1024,
+   "trajectories": 6144,
+   "parts": 20,
+   "seconds": 7.659,
+   "trajectories_per_second": 802.15,
+   "engine_seconds": 5.874,
+   "disk_bytes_per_trajectory": 280250
+  },
+  {
+   "n": 256,
+   "p": "0.2",
+   "snapshots": false,
+   "layers": 1024,
+   "trajectories": 18432,
+   "parts": 4,
+   "seconds": 27.906,
+   "trajectories_per_second": 660.5,
+   "engine_seconds": 25.206,
+   "disk_bytes_per_trajectory": 2119
   },
   {
    "n": 256,
    "p": "0.2",
    "snapshots": true,
    "layers": 1024,
-   "trajectories": 3072,
-   "parts": 5,
-   "seconds": 17.939,
-   "trajectories_per_second": 171.25,
-   "engine_seconds": 4.286,
-   "disk_bytes_per_trajectory": 63792
+   "trajectories": 6144,
+   "parts": 20,
+   "seconds": 10.856,
+   "trajectories_per_second": 565.96,
+   "engine_seconds": 9.632,
+   "disk_bytes_per_trajectory": 109399
   },
   {
    "n": 512,
    "p": "0.05",
    "snapshots": false,
    "layers": 2048,
-   "trajectories": 3072,
-   "parts": 16,
-   "seconds": 22.055,
-   "trajectories_per_second": 139.29,
-   "engine_seconds": 20.075,
-   "disk_bytes_per_trajectory": 4478
+   "trajectories": 4608,
+   "parts": 4,
+   "seconds": 27.12,
+   "trajectories_per_second": 169.91,
+   "engine_seconds": 25.903,
+   "disk_bytes_per_trajectory": 4204
   },
   {
    "n": 512,
    "p": "0.05",
    "snapshots": true,
    "layers": 2048,
-   "trajectories": 768,
-   "parts": 5,
-   "seconds": 26.073,
-   "trajectories_per_second": 29.46,
-   "engine_seconds": 5.106,
-   "disk_bytes_per_trajectory": 867010
+   "trajectories": 1536,
+   "parts": 20,
+   "seconds": 12.106,
+   "trajectories_per_second": 126.88,
+   "engine_seconds": 11.179,
+   "disk_bytes_per_trajectory": 993800
   },
   {
    "n": 512,
    "p": "0.2",
    "snapshots": false,
    "layers": 2048,
-   "trajectories": 3072,
-   "parts": 24,
-   "seconds": 44.833,
-   "trajectories_per_second": 68.52,
-   "engine_seconds": 42.048,
-   "disk_bytes_per_trajectory": 6658
+   "trajectories": 4608,
+   "parts": 7,
+   "seconds": 57.431,
+   "trajectories_per_second": 80.24,
+   "engine_seconds": 56.226,
+   "disk_bytes_per_trajectory": 7128
   },
   {
    "n": 512,
    "p": "0.2",
    "snapshots": true,
    "layers": 2048,
-   "trajectories": 768,
-   "parts": 6,
-   "seconds": 19.41,
-   "trajectories_per_second": 39.57,
-   "engine_seconds": 9.797,
-   "disk_bytes_per_trajectory": 222618
+   "trajectories": 1536,
+   "parts": 20,
+   "seconds": 22.182,
+   "trajectories_per_second": 69.24,
+   "engine_seconds": 21.564,
+   "disk_bytes_per_trajectory": 331521
   }
  ],
- "total_seconds": 304.7
+ "saves": [
+  {
+   "n": 128,
+   "trajectories": 1235,
+   "compute_seconds": 0.154,
+   "none": {
+    "seconds": 0.182,
+    "megabytes": 269.8
+   },
+   "fast": {
+    "seconds": 0.745,
+    "megabytes": 95.0
+   },
+   "default": {
+    "seconds": 2.987,
+    "megabytes": 77.0
+   }
+  },
+  {
+   "n": 256,
+   "trajectories": 312,
+   "compute_seconds": 0.273,
+   "none": {
+    "seconds": 0.193,
+    "megabytes": 269.2
+   },
+   "fast": {
+    "seconds": 0.666,
+    "megabytes": 84.9
+   },
+   "default": {
+    "seconds": 2.212,
+    "megabytes": 72.6
+   }
+  }
+ ],
+ "total_seconds": 277.9
 }
