@@ -2,41 +2,6 @@
 
 ## Unreleased
 
-* **The Watts–Strogatz study from the command line, from MCP and from Python**
-  (`docs/study/09-cli-api-and-plots.md`). One JSON service layer, `sparsegf2.study.api`, with
-  the conventions of `sparsegf2.api` (results within 8000 characters, input errors as
-  `ValueError` with what to change), behind both front ends:
-  * `catalog`, `init`, `status`, `plan` (each remaining unit priced by `estimate_ensemble`,
-    scaled by a factor measured from the units the store has run or, with `benchmark`, from a
-    trial unit in a scratch store; storage from the measured bytes per snapshot; memory per
-    unit), `run` and `start_run_job` (a background run kept with the ensemble jobs, so
-    `job_status`, `cancel_job` and `list_jobs` follow it; both stop between units on
-    `max_units`, `max_seconds` or a cancel, and resume to exactly the records of an
-    uninterrupted run; a study job ends `completed`, `stopped`, `cancelled` or `failed`),
-    `extend`, `tableau` (stored or replayed, with digests, `k`, Pauli generators up to 32
-    qubits, `.npz` or `SGF2RS1` output), `compute`, `aggregate`, `fss`, `export`, `verify`
-    and `plot`.
-  * `aggregate`: nested equal-graph-weight means with graph-cluster errors per condition and
-    depth, undefined values refused unless a policy is named (`d_cyc`'s `zero_extended` field,
-    or `nan_policy="omit"`), paired rate differences, censoring-aware first passages
-    (censored fraction, Kaplan–Meier median, restricted mean; the mean only when nothing is
-    censored) and peak-time summaries under a stated horizon policy.
-  * `fss`: a scaling fit report at one `beta` (the fit, a graph-cluster bootstrap paired
-    across `p`, leave-one-size-out refits, diagnostics, every excluded point with its reason,
-    the sample hierarchy and depth schedules, an input digest) with identical bytes on a
-    rerun; points with censored first passages are excluded unless the restricted mean is
-    asked for by name, since the mean of a censored time is not identified; shared exponents
-    are reported as "consistent with" or "rejected at alpha". The peak rule's plateau width
-    is called `plateau_z` in every output.
-  * `sparsegf2 study COMMAND` for each function, with `--json` and the CLI's exit codes
-    (`verify` exits with 1 when a replay differs); MCP tools `study_status`, `study_catalog`,
-    `study_plan`, `study_aggregate`, `study_tableau`, `study_fss` (read-only) and
-    `study_start_run`.
-  * `sparsegf2.study.plots`: eight diagnostic figures (mean `k_t`, Kaplan–Meier survival with
-    censoring marked, zero-extended `d_cyc`, the distribution of `T*`, `T*` against `tau_1`,
-    an observable against `p`, graph measurements against `beta`, a scaling collapse), drawn
-    headless as SVG and PNG with the exact numbers each shows written beside it as CSV and
-    JSON. matplotlib is imported only when a figure is drawn.
 * **American spelling everywhere** (code, comments, docstrings, messages, private names and
   documents): neighbor, color, normalized, favors, behavior, analyze, centered, labeled and
   the rest. `tests/test_spelling.py` (Clank's word list plus the forms this repository had

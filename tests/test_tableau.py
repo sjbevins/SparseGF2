@@ -501,7 +501,7 @@ def test_multiword_joint_states_against_integer_ranks(n, pairs, rng):
     (every purification state with n >= 33), against the integer references: S_phys by the
     reference-first reduction, ranks by another elimination. Without enumeration (2^N
     elements), the identities are those of v1.4 §5.4 and §5.8 with ranks: S(X) = |X| - N +
-    rank(S|_Xbar) (Proposition 9 of docs/study/03), r(A) = r - rank(W_phys|_{V \\ A})."""
+    rank(S|_Xbar) (docs/SWEEPS.md section 2), r(A) = r - rank(W_phys|_{V \\ A})."""
     measured = list(rng.permutation(n)[: n // 3])
     rows = stim_joint_state(n, rng, measured, pairs)
     big = rows.shape[0]

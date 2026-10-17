@@ -1,6 +1,6 @@
 """Conformance of the Watts–Strogatz study's graph, gate and measurement sampling (v1.4 §2–§4, §7).
 
-Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored_circuit_kwargs``):
+Two kinds of checks, on the exact study protocol (the engine keywords of a sweep's condition):
 
 * **Exact** (deterministic): the native generator equals an independent reference rewiring
   trace for trace; the exported circuits equal both the protocol oracle and a direct
@@ -14,7 +14,7 @@ Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored
   misreading test repeat one test on the same graphs), 46 p-value tests and 149 z-tests run
   here, so a *correct* implementation at fresh seeds would fail one with probability at most
   46 x 1e-6 + 149 x 6.8e-6 = 1.1e-3 (the union bound, valid whatever the dependence between the
-  tests); docs/study/01-ensemble-and-sampling.md section 5.4 lists them. At the fixed seeds the
+  tests). At the fixed seeds the
   outcome is deterministic. Statistics use exact reference laws, means and variances (none is
   estimated from the sample): the occupancy law of with-replacement edge draws,
   Binomial(2n, beta) rewiring counts, uniform gate draws, Binomial(n, p) masks, and the exact
@@ -24,8 +24,8 @@ Two kinds of checks, on the exact study protocol (``ExperimentManifest.monitored
   sampler, a biased Clifford sample, a wrong rate, and seeds that are shared across sizes or
   rewiring probabilities must fail).
 
-Every graph and every circuit below is drawn from the study's own seeds (ruling R-SEED:
-``identity.graph_seed(master, n, beta, g)`` and ``identity.run_seed(master, n, beta, mode, p)``),
+Every graph and every circuit below is drawn from the study's own seeds
+(``identity.graph_seed(master, n, beta, g)`` and ``identity.run_seed(master, n, beta, mode, p)``),
 not from ad hoc seeds, so the conformance tests exercise the seed derivation too: the
 collections of different ``(n, beta)`` are independent samples, and only the rates of one
 ``(n, beta)`` are coupled (nested masks).
@@ -41,7 +41,7 @@ What the existing tests already prove, and is not repeated here:
   the earlier trajectories.
 * ``test_randomness_contract.py``: the pinned digests of the streams.
 
-This file adds the study protocol itself (manifest keywords, even and odd n), the full
+This file adds the study protocol itself (engine keywords, even and odd n), the full
 11,520-index and 720-class uniformity with the check of ``j // 16`` against ``clifford.py``,
 the with-replacement law, independence diagnostics, mask correlations, nesting over a grid of
 rates, horizon and probe independence, ``gate_mode="independent"``, the graph law, and the
@@ -66,7 +66,6 @@ from sparsegf2 import graphs, mipt
 from sparsegf2.clifford import Clifford, symplectic_group
 from sparsegf2.study import identity as ident
 from sparsegf2.study.identity import Token, build_graph
-from sparsegf2.study.manifest import ExperimentManifest
 
 ALPHA = 1e-6  # chi-square tests: p must exceed this
 SIGMAS = 4.5  # z-tests: |z| must stay below this
@@ -77,8 +76,37 @@ PROPERTY = settings(max_examples=200, deadline=None, database=None, derandomize=
 
 
 def graph_seed(n: int, beta, g: int) -> tuple[int, ...]:
-    """The study's seed of graph ``g`` of ``(n, beta)`` under the master graph seed (ruling R-SEED)."""
+    """The study's seed of graph ``g`` of ``(n, beta)`` under the master graph seed."""
     return ident.graph_seed(MASTER_GRAPH, n, beta, g)
+
+
+class Protocol:
+    """The study protocol at one size: the ``MonitoredCircuit`` keywords of a sweep's condition
+    (purification picture, ``n // 2`` uniform edge draws per layer, no scramble, low endpoint
+    first, every layer a checkpoint) and its seeds."""
+
+    def __init__(self, n, layers, stride, graphs_count, gate_mode):
+        self.n, self.layers, self.stride, self.graphs = n, layers, stride, graphs_count
+        self.gate_mode = gate_mode
+
+    def run_seed(self, n, beta, p):
+        return ident.run_seed(MASTER_CIRCUIT, n, beta, self.gate_mode, p)
+
+    def stream_index(self, g, c):
+        return ident.stream_index(g, c, self.stride)
+
+    def monitored_circuit_kwargs(self, n, beta, p):
+        return {
+            "num_system": n,
+            "circuits_per_graph": self.stride,
+            "layers": self.layers,
+            "measurement_rate": Token.parse(p).float64,
+            "reference": "purification",
+            "schedule": "random_edges",
+            "gates_per_layer": n // 2,
+            "random_orientation": False,
+            "checkpoints": "every_layer",
+        }
 
 
 def make_manifest(
@@ -90,29 +118,16 @@ def make_manifest(
     beta: str = "0.3",
     graphs_count: int = 1,
     gate_mode: str = "shared",
-) -> ExperimentManifest:
-    """A manifest with one condition block: the study protocol at size ``n``."""
-    return ExperimentManifest.from_json(
-        {
-            "experiment_id": "conformance",
-            "conditions": [{"n": [n], "beta": [beta], "p": ps}],
-            "depth": {"layers": {"fixed": layers}, "checkpoints": {"count": 3}},
-            "trials": {"graphs": graphs_count, "circuits_per_graph": stride},
-            "seeds": {
-                "master_graph_seed": MASTER_GRAPH,
-                "master_circuit_seed": MASTER_CIRCUIT,
-                "gate_mode": gate_mode,
-            },
-            "observables": {"uniform_erasure": None, "correlated_erasure": []},
-        }
-    )
+) -> Protocol:
+    """The study protocol at size ``n`` with ``graphs_count`` graphs and the circuit stride."""
+    return Protocol(n, layers, stride, graphs_count, gate_mode)
 
 
 def make_spec(
-    manifest: ExperimentManifest, n: int, p: str, *, beta: str = "0.3", probes=()
+    manifest: Protocol, n: int, p: str, *, beta: str = "0.3", probes=()
 ) -> tuple[mipt.MonitoredCircuit, list[ident.GraphRecord]]:
-    """The study's ``MonitoredCircuit`` for one condition, on the manifest's graph collection."""
-    records = [build_graph(n, beta, g, MASTER_GRAPH) for g in range(manifest.trials.graphs)]
+    """The study's ``MonitoredCircuit`` for one condition, on its graph collection."""
+    records = [build_graph(n, beta, g, MASTER_GRAPH) for g in range(manifest.graphs)]
     kwargs = manifest.monitored_circuit_kwargs(n, beta, p)
     return mipt.MonitoredCircuit(**kwargs, edges=[r.edges for r in records], probes=probes), records
 
@@ -1123,7 +1138,7 @@ def test_the_simulated_code_dimension_has_a_horizon_independent_prefix():
 
 
 # ---------------------------------------------------------------------------
-# the samples of different (n, beta) are independent; only the rates are coupled (ruling R-SEED)
+# the samples of different (n, beta) are independent; only the rates are coupled
 # ---------------------------------------------------------------------------
 #
 # v1.4 couples conditions across the rate p only (nested masks, shared gates). Graph g of (n, beta)

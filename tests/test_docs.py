@@ -45,14 +45,6 @@ def _blocks(path: Path) -> list[str]:
         "docs/observables/entanglement.md",
         "docs/observables/lost-information.md",
         "docs/observables/random-region-erasure.md",
-        "docs/study/01-ensemble-and-sampling.md",
-        "docs/study/02-identity-seeds-and-manifest.md",
-        "docs/study/03-phase-free-tableau.md",
-        "docs/study/04-observables.md",
-        "docs/study/05-store-and-reproducibility.md",
-        "docs/study/06-statistics.md",
-        "docs/study/07-finite-size-scaling.md",
-        "docs/study/09-cli-api-and-plots.md",
     ],
 )
 def test_doc_examples_run(doc, tmp_path, monkeypatch):

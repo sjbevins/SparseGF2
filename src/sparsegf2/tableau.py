@@ -20,7 +20,7 @@ Conventions
   canonical form is the reduced row echelon form over GF(2) for this column order: the first
   nonzero column of each row (its pivot) holds a 1, the pivots increase down the rows, every
   pivot column is zero in every other row, and zero rows are dropped. Every subspace has
-  exactly one such basis (``docs/study/03-phase-free-tableau.md`` has the proof).
+  exactly one such basis (``docs/SWEEPS.md`` §2 has the proof).
 * **Words.** :meth:`PhaseFreeTableau.from_words` and :attr:`PhaseFreeTableau.words` use the
   engine's packing: ``wq = ceil(N / 64)`` uint64 words of X bits (``x_q`` is bit ``q & 63`` of
   word ``q >> 6``), then ``wq`` words of Z bits (``z_q`` is bit ``q & 63`` of word
@@ -440,7 +440,7 @@ class PhaseFreeTableau:
         Reduces the rows to reduced row echelon form with the reference columns (the X and Z
         columns of qubits ``num_system .. N-1``) first: the rows whose pivot is a system column
         are zero on the reference and span every element of the row space that is
-        (``docs/study/03-phase-free-tableau.md`` has the proof). Restricted to the system
+        (``docs/SWEEPS.md`` §2 has the proof). Restricted to the system
         qubits ``0 .. num_system - 1`` they span ``S_phys`` (v1.4 §5), of dimension ``r_t``.
         """
         ns = operator.index(num_system)

@@ -865,7 +865,7 @@ def tableau_snapshot(name: str | None = None, *, checkpoints=None) -> Probe:
     At each evaluation the engine writes all ``N`` generators of the pure joint state
     over all ``N = num_system + num_reference`` qubits (system ``0 .. n-1``, then the
     references), so the state can be analyzed after the run: entropies of any region,
-    ``I(A:R)``, the physical code, digests (``docs/study/03-phase-free-tableau.md``).
+    ``I(A:R)``, the physical code, digests (``docs/SWEEPS.md`` §2).
     The recorded value is the number of generators, ``N``. The generators are in
     ``EnsembleResult.snapshots`` (row ``i``: X bits of the ``N`` qubits in the first
     ``ceil(N / 64)`` words, Z bits in the next as many), and

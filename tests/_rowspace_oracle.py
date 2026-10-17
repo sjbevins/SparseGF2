@@ -106,7 +106,7 @@ def rref_by_characterization(rows: list[int]) -> list[int]:
     The leading columns are the lowest set bits of the nonzero elements; for each leading
     column p the canonical row is the one element whose lowest set bit is p and which is zero
     at every other leading column (it exists and is unique: the proof is in
-    docs/study/03-phase-free-tableau.md). Exponential: small spaces only.
+    docs/SWEEPS.md section 2). Exponential: small spaces only.
     """
     elements = span(rows)
     leads = sorted({(v & -v).bit_length() - 1 for v in elements if v})

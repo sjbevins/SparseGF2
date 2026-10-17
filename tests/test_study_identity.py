@@ -1,8 +1,8 @@
 """Identities, seeds, graph records and canonical bytes of the Watts–Strogatz study.
 
-Covers ``sparsegf2.study.identity`` (design §3, v1.4 §2, §7.2, §8): exact rate tokens, the
-trajectory key, the seed hierarchy, the stream index, graph records and their digests, and
-canonical JSON. Everything here is deterministic; the statistical conformance of the graph
+Covers ``sparsegf2.study.identity`` (v1.4 §2, §7.2, §8; ``docs/SWEEPS.md`` §4): exact rate
+tokens, the seed hierarchy (graph, run and outcome seeds), the stream index, graph records and
+their digests, and canonical JSON. Everything here is deterministic; the statistical conformance of the graph
 and circuit sampling is in ``test_study_sampling.py``. Expected values are computed in the
 tests from the definitions (``fractions``, ``decimal``, ``hashlib``, ``struct``), not by the
 code under test, and golden vectors were computed from the independent reference in
@@ -30,7 +30,6 @@ from sparsegf2.study import identity as ident
 from sparsegf2.study.identity import (
     GraphRecord,
     Token,
-    TrajectoryKey,
     build_graph,
     canonical_json,
     circulant_edges,
@@ -242,89 +241,6 @@ def test_the_json_number_proposition_needs_the_normal_range():
 
 
 # ---------------------------------------------------------------------------
-# the trajectory key
-# ---------------------------------------------------------------------------
-
-
-def test_trajectory_key_has_a_canonical_string_and_parses_back():
-    key = TrajectoryKey("ws-pilot-001", 16, "0.1", 0.15, 3, 1)
-    assert str(key) == "ws-pilot-001:n=16:beta=0.1:p=0.15:g=3:c=1:r=0"
-    assert TrajectoryKey.parse(str(key)) == key
-    third = TrajectoryKey("e", 24, 0, "1/3", 0, 0)
-    assert str(third) == "e:n=24:beta=0:p=1/3:g=0:c=0:r=0"
-    assert TrajectoryKey.parse(str(third)) == third
-    assert key.stream_index(8) == 3 * 8 + 1
-
-
-def test_trajectory_key_is_frozen_hashable_and_normalizes_its_tokens():
-    a = TrajectoryKey("e", 16, "0.1", "1/10", 2, 0)
-    b = TrajectoryKey("e", np.int64(16), 0.1, Fraction(1, 10), np.int64(2), 0)
-    assert a == b and hash(a) == hash(b) and {a: 1}[b] == 1
-    assert isinstance(a.n, int) and isinstance(b.n, int) and isinstance(b.g, int)
-    with pytest.raises(AttributeError):
-        a.n = 17  # type: ignore[misc]
-    assert sorted([TrajectoryKey("e", 16, 0, "0.2", 0, 0), TrajectoryKey("e", 16, 0, "0.1", 1, 0)])[
-        0
-    ].p == Token.parse("0.1")
-
-
-@pytest.mark.parametrize(
-    "args, fragment",
-    [
-        (("", 16, 0, 0.1, 0, 0), "experiment_id"),
-        (("a b", 16, 0, 0.1, 0, 0), "experiment_id"),
-        (("-a", 16, 0, 0.1, 0, 0), "experiment_id"),
-        (("a:b", 16, 0, 0.1, 0, 0), "experiment_id"),
-        (("x" * 65, 16, 0, 0.1, 0, 0), "experiment_id"),
-        (("e", 0, 0, 0.1, 0, 0), "n must be at least 1"),
-        (("e", 16.0, 0, 0.1, 0, 0), "n must be an integer"),
-        (("e", 16, 2, 0.1, 0, 0), "beta"),
-        (("e", 16, 0, "x", 0, 0), "p must be"),
-        (("e", 16, 0, 0.1, -1, 0), "g must be at least 0"),
-        (("e", 16, 0, 0.1, 0, True), "c must be an integer"),
-    ],
-)
-def test_trajectory_key_refuses_bad_fields(args, fragment):
-    with pytest.raises(ValueError, match=fragment):
-        TrajectoryKey(*args)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",
-        "e:n=16:beta=0:p=0.1:g=0:c=0",
-        "e:n=16:beta=0:p=0.1:g=0:c=0:r=0:x=1",
-        "e:m=16:beta=0:p=0.1:g=0:c=0:r=0",
-        "e:n=:beta=0:p=0.1:g=0:c=0:r=0",
-        "e:n=-1:beta=0:p=0.1:g=0:c=0:r=0",
-        "e:n=sixteen:beta=0:p=0.1:g=0:c=0:r=0",
-    ],
-)
-def test_trajectory_key_parse_refuses_malformed_text(text):
-    with pytest.raises(ValueError, match="trajectory key"):
-        TrajectoryKey.parse(text)
-
-
-@PROPERTY
-@given(
-    st.from_regex(r"[A-Za-z0-9][A-Za-z0-9._-]{0,20}", fullmatch=True),
-    st.integers(1, 5000),
-    st.integers(0, 1000),
-    st.integers(1, 1000),
-    st.integers(0, 10**6),
-    st.integers(0, 10**6),
-    st.integers(0, 3),
-)
-def test_trajectory_key_round_trips(experiment, n, num, den, g, c, r):
-    p = Fraction(min(num, den), den)
-    key = TrajectoryKey(
-        experiment, n, p, Fraction(num % (den + 1), den) if num <= den else 0, g, c, r
-    )
-    assert TrajectoryKey.parse(str(key)) == key
-
-
-# ---------------------------------------------------------------------------
 # seeds and the stream index
 # ---------------------------------------------------------------------------
 
@@ -488,8 +404,8 @@ def test_graph_seed_is_injective_in_the_condition_and_the_graph(args, which, dat
 
 
 def test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds():
-    # ruling R-SEED: the tags make the two domains disjoint, so one master seed may serve both.
-    # Before it, graph 0 of master s was SeedSequence([s, 0]), which numpy pads to SeedSequence(s):
+    # the tags make the two domains disjoint, so one master seed may serve both. Without
+    # them, graph 0 of master s was SeedSequence([s, 0]), which numpy pads to SeedSequence(s):
     # the very words that key the circuit streams when the circuit seed was s.
     master = 17
     sizes, betas = (5, 16, 24), ("0", "0.1", "0.3", "1/3")
@@ -511,6 +427,35 @@ def test_graph_seeds_and_run_seeds_never_coincide_even_for_equal_master_seeds():
     # and the tag is what separates them: the same words under the other tag give another state
     g = graph_seed(master, 16, "0.1", 3)
     assert _state(g) != _state((CIRCUIT_TAG, *g[1:]))
+
+
+def test_the_outcome_seed_is_the_tagged_words_of_the_condition_and_the_trajectory():
+    seed = ident.outcome_seed(29, 16, "0.1", "1/3", 3, 1)
+    assert seed == (0x57534F31, 29, 16, *WORDS["0.1"], *WORDS["1/3"], 3, 1)
+    assert int.from_bytes(b"WSO1", "big") == ident.OUTCOME_SEED_TAG
+    assert seed == ident.outcome_seed(29, np.int64(16), 0.1, Fraction(1, 3), 3, 1)  # spelling-free
+    # every field names its own outcomes, and the domain is disjoint from the graph and run seeds
+    variants = [
+        ident.outcome_seed(*args)
+        for args in [
+            (30, 16, "0.1", "1/3", 3, 1),
+            (29, 24, "0.1", "1/3", 3, 1),
+            (29, 16, "0", "1/3", 3, 1),
+            (29, 16, "0.1", "0.15", 3, 1),
+            (29, 16, "0.1", "1/3", 4, 1),
+            (29, 16, "0.1", "1/3", 3, 0),
+        ]
+    ]
+    assert len({seed, *variants}) == 7 and all(len(s) == 9 for s in variants)
+    others = {graph_seed(29, 16, "0.1", 3), run_seed(29, 16, "0.1", "shared")}
+    assert not {_state(s) for s in [seed, *variants]} & {_state(s) for s in others}
+    for bad, fragment in [
+        ((29, 16, "0.1", "2", 0, 0), "p must"),
+        ((29, 16, "0.1", "0", -1, 0), "g must"),
+        ((2**32, 16, "0.1", "0", 0, 0), "master_circuit_seed"),
+    ]:
+        with pytest.raises(ValueError, match=fragment):
+            ident.outcome_seed(*bad)
 
 
 def test_seedsequence_pads_short_entropy_with_zeros_but_not_beyond_its_pool_of_four_words():
@@ -1036,7 +981,7 @@ def test_sha256_hex_matches_the_published_vectors():
 
 
 # ---------------------------------------------------------------------------
-# versions and identifiers
+# versions
 # ---------------------------------------------------------------------------
 
 
@@ -1047,20 +992,12 @@ def test_version_record_names_every_version_and_the_native_contract():
     assert record["clifford_enumeration"] == ident.CLIFFORD_ENUMERATION_VERSION
     assert record["dynamics"] == ident.DYNAMICS_VERSION
     assert record["rowspace_format"] == ident.ROWSPACE_FORMAT_VERSION == "SGF2RS1"
-    assert record["store_schema"] == ident.STORE_SCHEMA_VERSION
     # the seed derivation is versioned by its domain tags: a different derivation needs new tags
     assert record["graph_seed_tag"] == ident.GRAPH_SEED_TAG == 0x57534731
     assert record["circuit_seed_tag"] == ident.CIRCUIT_SEED_TAG == 0x57534331
+    assert record["outcome_seed_tag"] == ident.OUTCOME_SEED_TAG == 0x57534F31
+    assert ident.version_record("none")["dynamics"] == ident.PRODUCT_DYNAMICS_VERSION
+    with pytest.raises(ValueError, match="picture"):
+        ident.version_record("single")
     assert all(isinstance(v, (str, int)) and v != "" for v in record.values())
     json.dumps(record)
-
-
-@pytest.mark.parametrize("good", ["a", "ws-pilot-001", "A.b_c-9", "0", "x" * 64])
-def test_experiment_ids_accept_file_safe_names(good):
-    assert ident.check_experiment_id(good) == good
-
-
-@pytest.mark.parametrize("bad", ["", " a", "a b", "a/b", "a:b", ".a", "_a", "é", "x" * 65, None, 3])
-def test_experiment_ids_refuse_unsafe_names(bad):
-    with pytest.raises(ValueError, match="experiment_id"):
-        ident.check_experiment_id(bad)

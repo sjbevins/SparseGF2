@@ -1,7 +1,7 @@
-"""Identities, seeds and graph records of the Watts–Strogatz study (v1.4 §1–§3, §7.2, §8).
+"""Identities and seeds of the Watts–Strogatz sweeps (v1.4 §2, §7.2; ``docs/SWEEPS.md`` §4).
 
-Everything here is a pure function of its arguments, so any record of the study can be
-rebuilt from the manifest alone. Four things are defined:
+Everything here is a pure function of its arguments, so every graph and every trajectory of a
+sweep can be rebuilt from the sweep's spec alone. Four things are defined:
 
 **Tokens** (:class:`Token`). The measurement rate $p$ and the rewiring probability $\\beta$
 are identified by an exact rational number, never by a float. A token holds the
@@ -9,28 +9,29 @@ are identified by an exact rational number, never by a float. A token holds the
 without exponent or trailing zeros when $x$ has one, else ``"num/den"`` in lowest terms),
 the correctly rounded ``float64`` handed to the simulator, and ``float.hex()`` of that float.
 The ideal Bernoulli($x$) law and the law the simulator realizes differ by less than
-$2^{-52}$ (v1.4 §7.2, §9; ``docs/study/01-ensemble-and-sampling.md``).
+$2^{-52}$ (``docs/SWEEPS.md`` §3).
 
-**Seeds** (:func:`graph_seed`, :func:`run_seed`, :func:`stream_index`; ruling R-SEED). Every
-seed is a fixed-length tuple of 32-bit words that begins with a domain tag and names the
+**Seeds** (:func:`graph_seed`, :func:`run_seed`, :func:`outcome_seed`, :func:`stream_index`).
+Every seed is a fixed-length tuple of 32-bit words that begins with a domain tag and names the
 condition: graph $g$ of $(n, \\beta)$ is built from ``(GRAPH_SEED_TAG, master_graph_seed, n,
 *token_words(beta), g)``, so the graph collection does not depend on the measurement rate
 (one collection serves every $p$) and sizes and rewiring probabilities get independent
 collections. The run seed is ``(CIRCUIT_SEED_TAG, master_circuit_seed, n,
-*token_words(beta))`` in ``gate_mode="shared"``, the same for every $p$ (the native coupling:
-gates and mask uniforms are common to all rates, masks are nested), and that tuple followed
-by ``token_words(p)`` in ``"independent"``. The two tags make graph seeds and run seeds
-disjoint whatever the master seeds are. Trajectory $(g, c)$ has the native stream index
-$u = g \\bar C + c$, with the circuit index stride $\\bar C$ frozen in the manifest, so adding
-graphs or circuits never renumbers an existing trajectory.
+*token_words(beta))`` in ``gate_mode="shared"``, the same for every $p$ (gates and mask
+uniforms are common to all rates, masks are nested), and that tuple followed by
+``token_words(p)`` in ``"independent"``. The outcome seed of a later signed (phase-tracking)
+rerun has its own tag. The tags make the domains disjoint whatever the master seeds are.
+Trajectory $(g, c)$ has the native stream index $u = g \\bar C + c$, with the circuit index
+stride $\\bar C$ frozen in the sweep's spec, so adding graphs or circuits never renumbers an
+existing trajectory.
 
 **Graph records** (:class:`GraphRecord`, :func:`build_graph`). A record holds the
 Watts–Strogatz graph $G_g \\sim \\mu_{n,\\beta}$ of v1.4 §2 with the seed and generator version
 it came from, its canonical sorted edge list and the SHA-256 digest of that list.
 
 **Canonical bytes** (:func:`canonical_json`, :func:`sha256_hex`, :func:`json_digest`). The
-manifest digest and every later record digest are SHA-256 of canonical JSON (sorted keys, no
-spaces, tokens as strings, finite numbers only).
+digest of a sweep's spec is SHA-256 of its canonical JSON (sorted keys, no spaces, tokens as
+strings, finite numbers only).
 
 The version constants name the exact algorithms a record was produced under. Changing any
 algorithm they name needs a new constant: results saved under different values must not be
@@ -63,24 +64,20 @@ __all__ = [
     "GRAPH_GENERATOR_VERSION",
     "GRAPH_SEED_TAG",
     "ORIGINAL_EDGE_ORDER",
+    "OUTCOME_SEED_TAG",
     "PRODUCT_DYNAMICS_VERSION",
-    "PROTOCOLS",
     "ROWSPACE_FORMAT_VERSION",
     "SEED_LIMIT",
-    "STORE_SCHEMA_VERSION",
     "GraphRecord",
     "Token",
-    "TrajectoryKey",
     "build_graph",
     "canonical_json",
-    "check_experiment_id",
-    "check_protocol",
     "circulant_edges",
-    "dynamics_version",
     "edge_digest",
     "graph_seed",
     "json_digest",
     "original_edge_list",
+    "outcome_seed",
     "rate_hash",
     "run_seed",
     "sha256_hex",
@@ -112,21 +109,12 @@ CLIFFORD_ENUMERATION_VERSION = "sp4-sorted-rowmajor-x16-signs-1"
 DYNAMICS_VERSION = "monitored-random-edges-purification-phase-free-1"
 
 #: The same gates and measurements started from the pure product state |0...0> of the n system
-#: qubits, without a reference (protocol ``"P"`` of design §12; the queued study v0.3 §2).
+#: qubits, without a reference (the picture ``"none"`` of a sweep).
 PRODUCT_DYNAMICS_VERSION = "monitored-random-edges-product-state-phase-free-1"
 
-#: The two initial conditions of a trajectory (design §12): ``"F"``, the full reference of v1.4
-#: (n Bell pairs between the system and n reference qubits, ``reference="purification"``), and
-#: ``"P"``, the pure product state |0...0> of the system alone (``reference="none"``). Both draw
-#: the same gates and measurement masks from the same stream for the same graph, run seed and
-#: stream index, so a P trajectory replays its F partner's gate and mask history.
-PROTOCOLS = ("F", "P")
-
-#: The canonical phase-free row-space serialization (header ``b"SGF2RS1\0"``, design §2).
+#: The canonical phase-free row-space serialization (header ``b"SGF2RS1\0"``,
+#: :meth:`sparsegf2.tableau.PhaseFreeTableau.to_bytes`).
 ROWSPACE_FORMAT_VERSION = "SGF2RS1"
-
-#: The layout of the SQLite store (design §4).
-STORE_SCHEMA_VERSION = "sparsegf2.study.store/2"
 
 #: The ordered original-edge convention of v1.4 §2.2 recorded with every graph.
 ORIGINAL_EDGE_ORDER = "offset-major"
@@ -138,34 +126,44 @@ EDGE_DIGEST_MAGIC = b"SGF2EDGES1\x00"
 #: the seed tuples below (a larger value would be split into several words by ``SeedSequence``).
 SEED_LIMIT = 2**32
 
-#: The first word of every graph seed, ``b"WSG1"`` read as a big-endian integer (design §3,
-#: ruling R-SEED). Together with :data:`CIRCUIT_SEED_TAG` it makes the two seed domains disjoint
+#: The first word of every graph seed, ``b"WSG1"`` read as a big-endian integer. Together with
+#: :data:`CIRCUIT_SEED_TAG` and :data:`OUTCOME_SEED_TAG` it makes the seed domains disjoint
 #: whatever the master seeds are. A different derivation of the seeds needs different tags.
 GRAPH_SEED_TAG = 0x57534731
 
 #: The first word of every run (circuit) seed, ``b"WSC1"`` read as a big-endian integer.
 CIRCUIT_SEED_TAG = 0x57534331
 
+#: The first word of every outcome seed, ``b"WSO1"`` read as a big-endian integer: the Born
+#: outcomes of a signed (phase-tracking) rerun of a trajectory (:func:`outcome_seed`).
+OUTCOME_SEED_TAG = 0x57534F31
+
 _WORD_MASK = SEED_LIMIT - 1
 
-#: The two ways the circuit seed depends on the measurement rate (design §3).
+#: The two ways the circuit seed depends on the measurement rate (:func:`run_seed`).
 GATE_MODES = ("shared", "independent")
 
+_DYNAMICS = {"purification": DYNAMICS_VERSION, "none": PRODUCT_DYNAMICS_VERSION}
 
-def version_record() -> dict[str, Any]:
-    """Every version a record of the study depends on, as a plain dictionary.
 
-    The keys are the lower-case names of the constants in this module, the native
-    ``mipt.RANDOMNESS_CONTRACT`` and the package version.
+def version_record(picture: str = "purification") -> dict[str, Any]:
+    """Every version a sweep's records depend on, as a plain dictionary.
+
+    The keys are the lower-case names of the constants in this module (``dynamics`` is
+    :data:`DYNAMICS_VERSION` for the picture ``"purification"`` and
+    :data:`PRODUCT_DYNAMICS_VERSION` for ``"none"``), the native ``mipt.RANDOMNESS_CONTRACT``
+    and the package version.
     """
+    if picture not in _DYNAMICS:
+        raise ValueError(f"picture must be one of {sorted(_DYNAMICS)}, got {picture!r}")
     return {
         "graph_generator": GRAPH_GENERATOR_VERSION,
         "clifford_enumeration": CLIFFORD_ENUMERATION_VERSION,
-        "dynamics": DYNAMICS_VERSION,
+        "dynamics": _DYNAMICS[picture],
         "rowspace_format": ROWSPACE_FORMAT_VERSION,
-        "store_schema": STORE_SCHEMA_VERSION,
         "graph_seed_tag": GRAPH_SEED_TAG,
         "circuit_seed_tag": CIRCUIT_SEED_TAG,
+        "outcome_seed_tag": OUTCOME_SEED_TAG,
         "randomness_contract": int(mipt.RANDOMNESS_CONTRACT),
         "sparsegf2": __version__,
     }
@@ -256,7 +254,7 @@ class Token:
       such as ``"0.5"`` or $2^{-60}$; false for ``"0.1"`` and for the dyadic $1 - 2^{-60}$). The
       generator compares draws on the multiples of $2^{-53}$ with ``float64``, so the realized
       probability equals $x$ only for a multiple of $2^{-53}$, which ``is_exact`` does not test
-      ($2^{-60}$ is exact here and is realized as $2^{-53}$; document 01, Proposition 11).
+      ($2^{-60}$ is exact here and is realized as $2^{-53}$; ``docs/SWEEPS.md`` §3).
     """
 
     value: Fraction
@@ -331,7 +329,7 @@ class Token:
 
 
 def rate_hash(token: Token | str | float) -> int:
-    """The 64-bit hash that names a rate, or a rewiring probability, in a seed (design §3).
+    """The 64-bit hash that names a rate, or a rewiring probability, in a seed.
 
     The first 8 bytes of ``blake2b(token.encode("ascii"), digest_size=8)`` of the canonical
     token string, read little-endian: the same convention as the probe-name hash of
@@ -349,7 +347,7 @@ def token_words(token: Token | str | float) -> tuple[int, int]:
     ``lo = h mod 2**32`` and ``hi = h // 2**32`` for ``h = rate_hash(token)``. They name the
     rewiring probability $\beta$ (and, in ``gate_mode="independent"``, the rate $p$) inside a
     seed tuple. Two different tokens have different words unless their 64-bit hashes collide
-    (probability $2^{-64}$ for a given pair); the manifest refuses a collision among its own
+    (probability $2^{-64}$ for a given pair); a sweep refuses a collision among its own
     tokens.
     """
     value = rate_hash(token)
@@ -357,125 +355,14 @@ def token_words(token: Token | str | float) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# trajectory identity and seeds
+# seeds and stream indices
 # ---------------------------------------------------------------------------
-
-_EXPERIMENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-
-
-def check_experiment_id(value: Any, what: str = "experiment_id") -> str:
-    """``value`` if it is a valid experiment identifier, else ``ValueError``.
-
-    One to 64 characters from ``A-Z a-z 0-9 . _ -``, starting with a letter or digit, so that
-    it is safe in file names, SQL and the colon-separated form of :class:`TrajectoryKey`.
-    """
-    if not isinstance(value, str) or not _EXPERIMENT_ID.fullmatch(value):
-        raise ValueError(
-            f"{what} must be 1 to 64 characters from A-Z a-z 0-9 . _ - starting with a letter "
-            f"or digit, got {value!r}"
-        )
-    return value
-
-
-def check_protocol(value: Any, what: str = "protocol") -> str:
-    """``value`` if it names a protocol of :data:`PROTOCOLS` (``"F"`` or ``"P"``), else ``ValueError``."""
-    if not isinstance(value, str) or value not in PROTOCOLS:
-        raise ValueError(
-            f"{what} must be one of {list(PROTOCOLS)} ('F': full reference, the v1.4 protocol; "
-            f"'P': the pure product state without a reference), got {value!r}"
-        )
-    return value
-
-
-def dynamics_version(protocol: str = "F") -> str:
-    """The dynamics version of a protocol: :data:`DYNAMICS_VERSION` for ``"F"``,
-    :data:`PRODUCT_DYNAMICS_VERSION` for ``"P"``."""
-    return DYNAMICS_VERSION if check_protocol(protocol) == "F" else PRODUCT_DYNAMICS_VERSION
-
-
-@dataclass(frozen=True, order=True)
-class TrajectoryKey:
-    """The identity of one monitored trajectory, $(\\text{experiment}, n, \\beta, p, g, c, r)$ (v1.4 §8).
-
-    ``beta`` and ``p`` are tokens (anything :meth:`Token.parse` accepts is converted).
-    ``r`` is the measurement-replica label; the native engine draws gates and masks from one
-    stream, so the study uses $r = 0$ only (design D1) and the field keeps its place for a
-    future versioned extension. ``protocol`` is the initial condition (:data:`PROTOCOLS`, design
-    §12): ``"F"`` (the default, the v1.4 protocol with its full reference) or ``"P"`` (the pure
-    product state); it is the last field so that the seven-field form of v1.4 keeps meaning the
-    F trajectory. The key is frozen, hashable and has the canonical string form
-    ``"<id>:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"`` for protocol F and
-    ``"<id>:protocol=P:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"`` otherwise (:meth:`parse` inverts it).
-    """
-
-    experiment_id: str
-    n: int
-    beta: Token
-    p: Token
-    g: int
-    c: int
-    r: int = 0
-    protocol: str = "F"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "experiment_id", check_experiment_id(self.experiment_id))
-        object.__setattr__(self, "n", _integer(self.n, "n", minimum=1))
-        object.__setattr__(self, "beta", Token.parse(self.beta, what="beta"))
-        object.__setattr__(self, "p", Token.parse(self.p, what="p"))
-        for name in ("g", "c", "r"):
-            object.__setattr__(self, name, _integer(getattr(self, name), name, minimum=0))
-        check_protocol(self.protocol)
-
-    def __str__(self) -> str:
-        head = self.experiment_id
-        if self.protocol != "F":
-            head += f":protocol={self.protocol}"
-        return f"{head}:n={self.n}:beta={self.beta}:p={self.p}:g={self.g}:c={self.c}:r={self.r}"
-
-    @classmethod
-    def parse(cls, text: str) -> TrajectoryKey:
-        """The key whose canonical string is ``text``."""
-        parts = text.split(":") if isinstance(text, str) else []
-        names = ("n", "beta", "p", "g", "c", "r")
-        protocol = "F"
-        if len(parts) == 8 and parts[1].startswith("protocol="):
-            protocol = parts.pop(1).partition("=")[2]
-            if protocol == "F" or protocol not in PROTOCOLS:
-                raise ValueError(
-                    f"not a trajectory key: the protocol part names {list(PROTOCOLS[1:])} (an F "
-                    f"key has no protocol part), got {text!r}"
-                )
-        if len(parts) != 7:
-            raise ValueError(
-                f"not a trajectory key (expected '<id>:n=..:beta=..:p=..:g=..:c=..:r=..', or "
-                f"'<id>:protocol=P:n=..:...'): {text!r}"
-            )
-        fields: dict[str, Any] = {"protocol": protocol}
-        for name, part in zip(names, parts[1:], strict=True):
-            key, _, value = part.partition("=")
-            if key != name or not value:
-                raise ValueError(
-                    f"not a trajectory key: expected '{name}=...' but got {part!r} in {text!r}"
-                )
-            fields[name] = value
-        for name in ("n", "g", "c", "r"):
-            if not re.fullmatch(r"[0-9]+", fields[name]):
-                raise ValueError(
-                    f"not a trajectory key: {name} must be a non-negative integer in {text!r}"
-                )
-            fields[name] = int(fields[name])
-        return cls(parts[0], **fields)
-
-    def stream_index(self, stride: int) -> int:
-        """The native trajectory index $u = g \\bar C + c$ of this key for the circuit index stride
-        $\\bar C$ = ``stride``."""
-        return stream_index(self.g, self.c, stride)
 
 
 def graph_seed(
     master_graph_seed: int, n: int, beta_token: Token | str | float, g: int
 ) -> tuple[int, int, int, int, int, int]:
-    r"""The seed of graph $g$ of the condition $(n, \beta)$ (v1.4 §7.2, design §3, ruling R-SEED).
+    r"""The seed of graph $g$ of the condition $(n, \beta)$ (v1.4 §7.2).
 
     The six 32-bit words ``(GRAPH_SEED_TAG, master_graph_seed, n, lo, hi, g)`` with
     ``(lo, hi) = token_words(beta_token)``. It does not depend on the measurement rate $p$, so
@@ -500,7 +387,7 @@ def run_seed(
     gate_mode: str,
     p_token: Token | str | float | None = None,
 ) -> tuple[int, ...]:
-    r"""The seed passed to ``MonitoredCircuit.run`` for the condition $(n, \beta, p)$ (design §3).
+    r"""The seed passed to ``MonitoredCircuit.run`` for the condition $(n, \beta, p)$.
 
     * ``"shared"``: ``(CIRCUIT_SEED_TAG, master_circuit_seed, n, lo, hi)`` with
       ``(lo, hi) = token_words(beta_token)``: five words, the same for every rate, so trajectory
@@ -531,13 +418,46 @@ def run_seed(
     return (*base, *token_words(rate))
 
 
+def outcome_seed(
+    master_circuit_seed: int,
+    n: int,
+    beta_token: Token | str | float,
+    p_token: Token | str | float,
+    g: int,
+    c: int,
+) -> tuple[int, ...]:
+    r"""The seed of the Born outcomes of a signed (phase-tracking) rerun of trajectory $(g, c)$
+    of the condition $(n, \beta, p)$.
+
+    The nine 32-bit words ``(OUTCOME_SEED_TAG, master_circuit_seed, n, *token_words(beta),
+    *token_words(p), g, c)``. Phase-free runs draw no outcomes; a signed rerun replays the
+    trajectory's circuit (``spec.circuit(u, seed=run_seed)``) on ``Simulator(N, phases=True,
+    seed=numpy.random.SeedSequence(list(outcome_seed(...))))``. Its own tag and fixed length keep
+    it apart from every graph and run seed whatever the master seeds; it names $p$, $g$ and
+    $c$, so every trajectory of every rate has its own outcomes.
+    """
+    master = _seed_word(master_circuit_seed, "master_circuit_seed")
+    size = _seed_word(n, "n")
+    beta = Token.parse(beta_token, what="beta")
+    rate = Token.parse(p_token, what="p")
+    return (
+        OUTCOME_SEED_TAG,
+        master,
+        size,
+        *token_words(beta),
+        *token_words(rate),
+        _seed_word(g, "g"),
+        _seed_word(c, "c"),
+    )
+
+
 _MAX_INDEX = 2**63 - 1  # the engine takes int64 trajectory indices
 
 
 def stream_index(g: int, c: int, stride: int) -> int:
-    """The native trajectory index $u = g \\bar C + c$ of circuit $c$ on graph $g$ (v1.4 §7.2, design D2).
+    """The native trajectory index $u = g \\bar C + c$ of circuit $c$ on graph $g$ (v1.4 §7.2).
 
-    ``stride``, the circuit index stride $\\bar C$, is frozen in the manifest and $c < \\bar C$.
+    ``stride``, the circuit index stride $\\bar C$, is frozen in the sweep's spec and $c < \\bar C$.
     The engine runs with ``circuits_per_graph =`` $\\bar C$, so trajectory $u$ uses graph
     $\\lfloor u / \\bar C \\rfloor = g$ and the circuit stream $u$. $u$ depends on
     $(g, c, \\bar C)$ only: adding graphs or circuits (up to $\\bar C$) never changes the index,
@@ -549,8 +469,8 @@ def stream_index(g: int, c: int, stride: int) -> int:
     if c >= stride:
         raise ValueError(
             f"circuit label c = {c} must be below the circuit index stride {stride}: the stride "
-            "is frozen by the first manifest revision (it fixes every trajectory index), so "
-            "choose it at least as large as the most circuits per graph the study may ever use"
+            "is frozen by the sweep's spec (it fixes every trajectory index), so "
+            "choose it at least as large as the most circuits per graph the sweep may ever use"
         )
     u = g * stride + c
     if u > _MAX_INDEX:
@@ -612,7 +532,7 @@ def canonical_json(obj: Any) -> str:
     "Equal" includes the JSON type: booleans, integers and floats are kept apart, so ``1``,
     ``1.0`` and ``True`` (equal in Python) are three texts and three digests. A record whose
     numeric field is an integer on one code path and a float on another gets two digests for
-    one value: a writer fixes the type of each field (the manifest reads every real field as a
+    one value: a writer fixes the type of each field (a sweep's spec reads every real field as a
     float and refuses ``16.0`` in an integer field).
     """
     return json.dumps(
@@ -669,7 +589,7 @@ def original_edge_list(n: int) -> list[tuple[int, int]]:
 
 
 def edge_digest(edges: np.ndarray, n: int) -> str:
-    """The SHA-256 digest of a canonical edge list (design §3).
+    """The SHA-256 digest of a canonical edge list.
 
     The bytes are ``b"SGF2EDGES1\\0"``, then $n$ as an unsigned 32-bit little-endian integer,
     then the edge array ``(m, 2)`` as signed 32-bit little-endian integers in row-major order.
@@ -698,7 +618,7 @@ def validate_graph(edges: np.ndarray, n: int, beta: Token | str | float) -> None
     """Raise ``ValueError`` unless ``edges`` is a possible $G_g \\sim \\mu_{n,\\beta}$ (v1.4 §2.2, §7.4).
 
     Checks, in this order (each is a property of every graph the rewiring law produces for
-    $n \\ge 5$; the proofs are in ``docs/study/01-ensemble-and-sampling.md``):
+    $n \\ge 5$; ``docs/SWEEPS.md`` §3):
 
     1. canonical form: an ``(m, 2)`` integer array, ``0 <= a < b < n``, rows strictly
        increasing (so no loop and no repeated edge: the graph is simple);
@@ -736,7 +656,7 @@ def validate_graph(edges: np.ndarray, n: int, beta: Token | str | float) -> None
 
 @dataclass(frozen=True, eq=False)
 class GraphRecord:
-    """The record of graph $G_g$ for $(n, \\beta, g)$ (v1.4 §2.2 "Tracking", §8; design §3).
+    """The record of graph $G_g$ for $(n, \\beta, g)$ (v1.4 §2.2 "Tracking", §8).
 
     * ``n``, ``beta`` (a :class:`Token`), ``g``: the identity;
     * ``seed``: ``(GRAPH_SEED_TAG, master_graph_seed, n, lo, hi, g)`` (:func:`graph_seed`), the
@@ -839,7 +759,7 @@ def build_graph(
     $2^{-53}$ falls below the double $\\mathrm{fl}(\\beta)$ = ``beta.float64``. That has probability
     $\\beta' = \\lceil 2^{53} \\mathrm{fl}(\\beta) \\rceil / 2^{53}$, which is $\\beta$ when $\\beta$
     is a multiple of $2^{-53}$ and within $2^{-52}$ of it otherwise, so the graph has the law
-    $\\mu_{n,\\beta'}$ (document 01, Proposition 7(b')). The
+    $\\mu_{n,\\beta'}$ (``docs/SWEEPS.md`` §3). The
     result is then checked by :func:`validate_graph` (simple, $2n$ edges, $\\beta = 0$ gives
     $C(n, 2)$, $n = 5$ gives $K_5$) and recorded with the digest of its canonical edge list.
     $n \\ge 5$ (the native generator needs $k = 4 < n$). Nothing here depends on the rate $p$.

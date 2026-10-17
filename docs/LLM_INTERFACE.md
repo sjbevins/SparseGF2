@@ -725,78 +725,6 @@ couplings x (n + 1)) and the per-code tolerances at most 10^10 multiply-adds and
 codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
 `e_delta.codes`), and `elapsed_seconds` reports the time. Both tools write nothing.
 
-### 3.8 The Watts–Strogatz study (`sparsegf2.study.api`)
-
-The study pipeline of `docs/misc/watts_strogatz_study_spec_v1_4.md` has its own service layer,
-`sparsegf2.study.api`, with the same conventions as `sparsegf2.api` (JSON in, results within
-8000 characters, `ValueError` with a message that says what to change, a store record that does
-not exist included). A study is a **store**: a directory holding `study.sqlite`, made from a
-manifest (fields in `docs/study/02-identity-seeds-and-manifest.md`). Reading functions work
-while a run writes; writing functions take the store's lock (one writer at a time, the holder
-named in the refusal). `docs/study/09-cli-api-and-plots.md` has every result field and the
-mathematics of what is reported.
-
-| API function | CLI | MCP tool | Purpose |
-|---|---|---|---|
-| `catalog(observable=None)` | `sparsegf2 study catalog [--observable ID]` | `study_catalog` | the observables: ids, versions, levels, parameters, definitions |
-| `init(manifest, store)` | `sparsegf2 study init MANIFEST STORE` | | a new store (revision 1) and the planned work |
-| `status(store)` | `sparsegf2 study status STORE` | `study_status` | revisions, conditions, units and trajectories done and remaining, snapshots, storage, stored observable keys |
-| `plan(store, threads=None, benchmark=False)` | `sparsegf2 study plan STORE [--threads N] [--benchmark]` | `study_plan` | remaining units with `estimate_ensemble` engine time scaled by a measured factor, storage and memory |
-| `run(store, max_units=None, max_seconds=None, num_threads=None)` | `sparsegf2 study run STORE [...]` | | runs the plan; stops cleanly between units |
-| `start_run_job(store, max_units, max_seconds, num_threads)` | | `study_start_run` | the same in the background: `job_status`, `cancel_job`, `list_jobs` |
-| `extend(store, manifest)` | `sparsegf2 study extend STORE MANIFEST` | | a new revision (rates, graphs, circuits, depths, observables) |
-| `tableau(store, n, beta, p, g, c, t, protocol="F", replay=False, out=None)` | `sparsegf2 study tableau STORE --n --beta --p --g --c --t [--replay] [--out F]` | `study_tableau` | one stored or replayed phase-free tableau: rank, k, digests, generators (N <= 32) |
-| `compute(store, observable, params, ...)` | `sparsegf2 study compute STORE OBS [--params JSON]` | | a retrospective observable over the stored snapshots |
-| `aggregate(store, observable, params, where, ...)` | `sparsegf2 study aggregate STORE OBS [...]` | `study_aggregate` | nested means with graph-cluster errors, censoring-aware first passages, peak summaries, paired rate differences |
-| `fss(store, observable, beta, ...)` | `sparsegf2 study fss STORE --beta B --observable ID [...]` | `study_fss` | a finite-size-scaling fit report |
-| `export(store, directory)` | `sparsegf2 study export STORE DIR` | | CSV and NPZ tables |
-| `verify(store, sample=8, seed=0)` | `sparsegf2 study verify STORE [--sample K] [--seed S]` | | replays a sample and compares digests (exit 1 if anything differs) |
-| `plot(store, kind, out, options)` | `sparsegf2 study plot KIND --store STORE --out DIR` | | a diagnostic figure (SVG, PNG) and its numbers (CSV, JSON) |
-
-**`aggregate`** treats an observable by its kind. Snapshot observables (`k`, `d_cyc`, `D`,
-`half_cut_entropy`, ...): at every stored depth the nested equal-graph-weight mean and its
-graph-cluster standard error (v1.4 §6.3, §6.4), with the graphs and trajectories that
-contributed. `where` (`{"protocol", "n", "beta", "p", "t"}`, values or lists) selects;
-`params` matches a stored parameter set (an object such as `{"J": 1}`, or nothing when one is
-stored); `field` and `index` pick a data entry (`d_cyc` `field="zero_extended"`: 0 where the
-code is gone, the unconditional trace of v1.4 §5.5). A value that is not a finite number (raw
-`d_cyc` at `k = 0`, a state absent after a purification stop) is refused unless
-`nan_policy="omit"`, which changes the estimand and says so. `paired_rates: [p1, p2]` adds
-within-graph differences with their cluster error: compare rates this way, not by two
-independent errors (the rates of a condition share graphs, gates and mask uniforms).
-`first_passage` with `ell` (default `[0, 1]`): the censored fraction with its error, the
-Kaplan–Meier median, the restricted mean `E[min(tau, T_max)]` (a lower bound of `E[tau]`) and
-`mean` only when nothing is censored. `peak_d_cyc`, `peak_D`, `peak_D_J` (`params={"J": ...}`):
-`E[T*]`, `exp(E[ln T*])`, `argmax_t E[d(t)]`, `missing_fraction`, `horizon_fraction`, under
-`horizon_policy` `refuse` (default: the means are withheld when a peak is at `T_max`),
-`exclude` or `include` (lower bounds). `k_trace`: `k_t` at every layer (`normalized`: `k_t/n`).
-At most 24 conditions and 50 depths each are shown; `out=DIR` writes every number.
-
-**`fss`** fits `E[theta | n, beta, p] ~ n^z F((p - p_c) n^(1/nu))` at one `beta` (an unverified
-ansatz, v1.4 §5.9): `observable` `first_passage` with `ell` (or `ell_fraction`), `peak_d_cyc`,
-`peak_D`, or `peak_D_J` with `J`; or a list of objects for a shared-exponent test (worded
-"consistent with" or "rejected at alpha", never a confirmation). Points come from complete
-conditions only. By default a point with any censored trajectory is excluded and listed (the
-mean of `tau` is not identified there); `censoring="restricted_mean"` with
-`max_censored_fraction` admits `E[min(tau, T_max)]`, a lower bound. Peak points whose missing
-or horizon fraction exceeds `max_missing_fraction` or `max_horizon_fraction` (default 0) are
-excluded. `method` (`houdayer_hartmann` or `hh`, `polynomial`), `degree`, `window`, `bounds`
-(default `p_c` within the rates used, `z` in [0, 3], `nu` in [0.5, 5]), `starts`, `seed`,
-`bootstrap` (graph-cluster, paired across `p`), `leave_one_out`. The summary has the fit
-(`status` `ok`, `at_bound`, `not_converged`, `too_few_points`, `too_few_sizes`), the bootstrap
-errors and intervals, the leave-one-size-out spread, the diagnostics and every exclusion with
-its reason; `out=DIR` writes the full report (identical bytes on a rerun). The peak rule's
-plateau width is reported as `plateau_z`, never `z`.
-
-**Runs.** `run` and the job plan once, run units in order (each one engine call stored in one
-transaction) and stop between units on `max_units`, `max_seconds` or `cancel_job`; running
-again resumes, with exactly the records of one uninterrupted run. A study job's status ends
-`completed` (nothing left), `stopped` (a budget ended it; `stopped` says which and
-`units_remaining` what is left), `cancelled` or `failed`. `plan` reports the engine estimate
-and, once units have run (or with `benchmark=True`, which times a trial unit in a scratch
-store), a measured factor for the ingestion the engine estimate leaves out; without one
-`estimated_seconds` is null.
-
 ---
 
 ## 4. CLI details
@@ -832,10 +760,6 @@ store), a measured factor for the ingestion the engine estimate leaves out; with
 * `sparsegf2 curves RUN [--eps E [E ...]] [--delta D] [--layer L]` calls
   `erasure_curves`; without `--json` it prints Phi(e) and e_delta per channel and
   coupling.
-* `sparsegf2 study COMMAND` (section 3.8): one command per function of
-  `sparsegf2.study.api`, `--json` and the same exit codes; `study run` reports each finished
-  unit on stderr, and Ctrl-C leaves the store as after the last finished unit (rerun to
-  resume); `study verify` exits with 1 when a replay does not reproduce the store.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---
@@ -888,13 +812,6 @@ store), a measured factor for the ingestion the engine estimate leaves out; with
   (`phases`, `observe_ticks`) `true` or `false` (not `"false"` or `0`), and
   `max_seconds` and `wait_seconds` a number (not `"inf"` or `true`). Pydantic's default
   lax mode used to turn `true` into 1 and `"3"` into 3. The input schema is unchanged.
-* Study tools (section 3.8): `study_status`, `study_catalog`, `study_plan`,
-  `study_aggregate`, `study_tableau` and `study_fss` are read-only (marked so; no `out` or
-  `record` arguments, so they write nothing; `study_plan`'s `benchmark` uses a scratch
-  store); `study_start_run` starts a background run that `job_status`, `cancel_job` and
-  `list_jobs` follow (`kind: "study_run"`). `study_fss` refuses a call whose refits would
-  take more than about 50 s and names the shell command instead. A store is created and
-  extended in a shell (`sparsegf2 study init`, `extend`).
 * Resources: `docs://sparsegf2/quickstart` (Markdown guide) and
   `docs://sparsegf2/capabilities` (JSON).
 * Prompts: `study_purification_transition(num_system, graph_family, rates, trajectories)`
