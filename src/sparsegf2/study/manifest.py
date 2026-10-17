@@ -1160,20 +1160,52 @@ def _check_sections(manifest: ExperimentManifest) -> None:
     )
     for name, cls in sections:
         _reparsed(getattr(manifest, name), cls, f"manifest.{name}")
-    protocols = manifest.protocols  # design §12: the names are checked by the constructor
-    if isinstance(protocols, (str, bytes)) or not isinstance(protocols, Sequence):
-        raise ValueError("manifest.protocols: give a tuple of ProtocolSettings objects")
+    _check_protocols(manifest.protocols)
+
+
+def _check_protocols(protocols: Any) -> None:
+    """The rules of reading ``protocols`` (design §12), for a manifest built in code: a tuple of
+    :class:`ProtocolSettings`, each equal to what ``ProtocolSettings.from_dict`` reads back
+    from its own ``to_dict()`` (so protocol F carries no checkpoint rule, which ``to_dict``
+    would drop, and P's rule is in canonical form), in the order of :data:`PROTOCOLS`, which
+    is the order reading gives. The canonical JSON then reads back as the same protocols."""
+    if not isinstance(protocols, tuple):
+        raise ValueError(
+            f"manifest.protocols: give a tuple of ProtocolSettings objects, got {_kind(protocols)}"
+        )
     for i, settings in enumerate(protocols):
         if not isinstance(settings, ProtocolSettings):
             raise ValueError(
                 f"manifest.protocols[{i}]: expected a ProtocolSettings, got {_kind(settings)}"
             )
+        where = f"manifest.protocols[{i}]"
+        check_protocol(settings.name, f"{where}.name")
         if settings.checkpoints is not None:  # a protocol's own checkpoint rule
             _reparsed(
                 settings.checkpoints,
                 CheckpointRule,
                 f"manifest.protocols.{settings.name}.checkpoints",
             )
+        again = ProtocolSettings.from_dict(settings.name, settings.to_dict(), where)
+        if again != settings:
+            why = (
+                " (protocol F takes no settings of its own: depth.checkpoints, dynamics and "
+                "observables apply to it, and its canonical JSON {} would drop the rule)"
+                if settings.name == "F"
+                else ""
+            )
+            raise ValueError(
+                f"manifest.protocols.{settings.name}: {settings!r} is not in the canonical form "
+                f"that reading it gives ({again!r}){why}; build the manifest with "
+                "ExperimentManifest.from_json"
+            )
+    names = [s.name for s in protocols]
+    order = sorted(names, key=PROTOCOLS.index)
+    if names != order:
+        raise ValueError(
+            f"manifest.protocols: give the protocols in the order of PROTOCOLS {PROTOCOLS}, "
+            f"which is the order reading gives: {order}, got {names}"
+        )
 
 
 class _Resolved(NamedTuple):
@@ -1228,9 +1260,11 @@ class ExperimentManifest:
 
     Build it with :meth:`from_json` (a dict, JSON text or a ``Path``). ``to_json()`` is the
     canonical text and ``digest()`` its SHA-256. The constructor first reads every section back
-    through its ``from_dict`` (so a manifest built directly or with ``dataclasses.replace`` obeys
-    the same rules as one read from JSON, and its canonical JSON reads back as itself), then
-    validates the cross-field rules: no duplicate condition, a layer table and a checkpoint
+    through its ``from_dict``, each entry of ``protocols`` included (a tuple in the order of
+    :data:`PROTOCOLS`; protocol F with no checkpoint rule), so a manifest built directly or with
+    ``dataclasses.replace`` obeys the same rules as one read from JSON, and its canonical JSON
+    reads back as itself; then it validates the cross-field rules: no duplicate condition,
+    each protocol once, a layer table and a checkpoint
     table that cover exactly the sizes in use, table entries within $[0, T_{\\max}(n)]$,
     correlated-erasure sizes within $[1, n - 1]$, an exact-count budget of at least $n$, and
     tokens ($\\beta$ and $p$) whose 64-bit seed hashes are all different (so that different

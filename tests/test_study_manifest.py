@@ -1186,6 +1186,68 @@ def test_direct_construction_and_replace_obey_the_rules_of_reading(manifest):
     assert ExperimentManifest.from_json(built.to_json()) == built
 
 
+def test_protocols_built_in_code_obey_the_rules_of_reading(manifest):
+    # The protocols section (design §12) is read back entry by entry like every other section:
+    # a manifest built in code that the constructor accepts has protocols that its canonical JSON
+    # reads back as, so a store never records a revision whose reloaded schedule differs from the
+    # one the run used.
+    replace = dataclasses.replace
+    F, P, rule = mf.ProtocolSettings, mf.ProtocolSettings, mf.CheckpointRule
+    cases = [
+        # F takes no settings: to_dict writes {} and the reloaded F would use depth.checkpoints
+        (
+            (F("F", rule("count", count=3)),),
+            r"manifest.protocols.F: .* is not in the canonical form that reading it gives "
+            r".*protocol F takes no settings of its own",
+        ),
+        (
+            (F("F", rule("count", count=3)), P("P", rule("list", depths=(4,)))),
+            r"manifest.protocols.F: .*protocol F takes no settings of its own",
+        ),
+        # reading sorts by PROTOCOLS, so another order would read back as another tuple
+        (
+            (P("P"), F("F")),
+            r"manifest.protocols: give the protocols in the order of PROTOCOLS \('F', 'P'\), "
+            r"which is the order reading gives: \['F', 'P'\], got \['P', 'F'\]",
+        ),
+        # a list reads back as a tuple (unequal) and cannot be hashed
+        (
+            [F("F"), P("P")],
+            r"manifest.protocols: give a tuple of ProtocolSettings objects, got list",
+        ),
+        ((P("Q"),), r"manifest.protocols\[0\].name must be one of \['F', 'P'\]"),
+        (
+            (F("F"), P("P", rule("list", depths=(9, 3)))),
+            r"manifest.protocols.P.checkpoints: .* is not in the canonical form",
+        ),
+        ((F("F"), F("F")), r"manifest.protocols: give each protocol once"),
+        ((), r"manifest.protocols: give each protocol once, got \[\]"),
+    ]
+    for protocols, fragment in cases:
+        with pytest.raises(ValueError, match=fragment):
+            replace(manifest, protocols=protocols)
+    # what is accepted reads back as itself, with the schedules the run used, and is hashable
+    for protocols in [
+        (F("F"),),
+        (F("F"), P("P")),
+        (P("P"),),
+        (F("F"), P("P", rule("count", count=3))),
+        (F("F"), P("P", rule("list", depths=(3, 9)))),
+    ]:
+        built = replace(manifest, protocols=protocols)
+        again = ExperimentManifest.from_json(built.to_json())
+        assert again == built and hash(again) == hash(built) and again.digest() == built.digest()
+        for name in built.protocol_names:
+            for c in built.conditions():
+                assert again.checkpoints(c.n, c.beta, name) == built.checkpoints(c.n, c.beta, name)
+    # the scenario of the review: an F rule would have given (0, 1, 11, 128) in memory and the
+    # depth rule's twelve depths after reloading; P's own rule is kept and used
+    own = replace(manifest, protocols=(F("F"), P("P", rule("count", count=3))))
+    assert own.checkpoints(16, "0.1", "P") == (0, 1, 11, 128)
+    assert own.checkpoints(16, "0.1", "F") == (0, 1, 2, 4, 6, 9, 14, 22, 34, 53, 82, 128)
+    assert check_extension(manifest, own) is None
+
+
 def test_the_conditions_are_resolved_once_per_manifest(monkeypatch, manifest):
     calls = []
     real = mf._resolve_conditions
