@@ -649,7 +649,9 @@ and without the purification reference). The kernels are compiled on first
 use and cached on disk, so later runs start immediately.
 
 `EnsembleResult` holds `values`, `snapshots`, `purification_layer`,
-`final_layer`, `num_measurements`, the trajectory indices, the exact seed used
+`final_layer`, `num_measurements`, `first_passage` (with a reference: the exact
+first layer with code dimension at most ell, ell = 0..n, from k read after
+every layer whatever the checkpoints), the trajectory indices, the exact seed used
 (`seed_sequence` repeats the run) and the package version. `survival()` gives
 P(tau > layer) at the checkpoints, `mean(name)` averages ignoring NaN,
 `save(path)` writes a compressed `.npz` with the spec and seed, `load` reads

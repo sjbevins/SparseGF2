@@ -187,7 +187,9 @@ Summarize a saved ensemble: an output directory (including partial chunks of a r
 canceled job) or a result .npz file. Same summary format as run_ensemble, plus the stored
 spec, exactly as saved: pass it to start_ensemble_job to resume or extend the run, and
 storage, the disk use in megabytes of each file and each array (compressed). A "merge
-pending" left by a finished job is completed here.
+pending" left by a finished job is completed here. A sweep's directory (sweep.json) gives its
+index (conditions with path, saved and target trajectories; versions; spec); one of its
+condition folders gives the summary of all its saved parts.
 
 Example: {"path": "runs/n128_p012"}"""
 

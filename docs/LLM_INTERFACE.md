@@ -115,9 +115,12 @@ equivalently `sparsegf2 mcp` or `python -m sparsegf2.mcp_server`.
 | `job_status(job_id, wait_seconds)` | (shown as progress) | progress, throughput, ETA |
 | `cancel_job(job_id)` | Ctrl-C | stop after the current chunk |
 | `list_jobs()` | | jobs in this process |
-| `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks) |
+| `load_results(path)` | `sparsegf2 results PATH` | summarize a saved run (file or directory, including partial chunks; a sweep or one of its conditions, section 3.8) |
 | `sample_erasure_regions(graph, size, couplings, samples=200, num_nodes=None, burn_in=None, thin=1, tempering=True, chains=4, seed=None, method="auto", ladder="auto", max_step=None)` | `sparsegf2 regions --family F --n N ... --size M --couplings J... [...]` | read-only: geometry-correlated erasure regions on a graph alone (no circuit), with mixing diagnostics against exact values (section 3.7) |
 | `erasure_curves(path, e=None, delta=0.01, layer=None)` | `sparsegf2 curves RUN [--eps E...] [--delta D] [--layer L]` | read-only: Phi(e) and e_delta of a saved run's erasure probes, independent and correlated (section 3.7) |
+| `study.sweep.run(spec, directory, num_threads, chunk_size, compression, writers)` (Python only, no MCP tool) | `sparsegf2 sweep run SPEC.json DIR [--threads N] [--chunk-size K] [--compression C] [--writers W]` | generate, resume or grow a Watts–Strogatz sweep (section 3.8) |
+| `study.sweep.status(directory)` | `sparsegf2 sweep status DIR` | saved and target trajectories per condition |
+| `study.sweep.verify(directory, n, beta, p, u)` | `sparsegf2 sweep replay DIR N BETA P U` | rerun one trajectory and compare it with its saved row |
 
 `trajectories` may be omitted for a collection of graphs (`graph.realizations`, or a
 graph file holding several graphs), which then runs all of its circuits, and when
@@ -228,7 +231,7 @@ defaults by `capabilities(section="ensemble_spec")`). JSON forms:
 | `scramble_gates`, `scramble_matchings`, `scramble_layers` | ints: random all-to-all gates, layers on random perfect matchings, then gate-only layers on the graph |
 | `gate_set` | list of two-qubit gate names (`["CX", "SWAP"]`) or CLIFFORD_2Q indices |
 | `checkpoints` | `"final"`, `"every_layer"`, an int stride, or a list of layers: where purification is tested and where probes without their own `checkpoints` are evaluated |
-| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`, `correlated_erasure` with `couplings` (required), `sizes`, `samples` (default 100), `geometry` and the sampler's settings (section 3.7)). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
+| `probes` | `[{"kind": K, params...}]`; `K` is a `sparsegf2.mipt` probe function (`code_dimension`, `half_cut_entropy`, `entropy` with `region`, `mutual_information` with `a` and `b`, `tripartite_information` (optional `a`, `b`, `c`), `contiguous_distance`, `lost_information` with `region`, `entropy_profile`, `erasure_lost_profile` with `samples` (default 10), `erasure_first_failure` with `samples` (default 100), `uncorrectable_region_counts` with `max_size` w (default 2) or `budget` B, either one integer or an object per system size such as `{"64": 3, "128": 2}` (key `uncorrectable_region_counts[w]`; see below), `code_snapshot`, `tableau_snapshot`, `correlated_erasure` with `couplings` (required), `sizes`, `samples` (default 100), `geometry` and the sampler's settings (section 3.7)). Every probe takes an optional `name`, its key in the results, and optional `checkpoints`, its own layers in the same forms as the spec's (default: the spec's); `capabilities(section="probes")` lists the other parameters |
 | types | checked before running: booleans must be `true`/`false` (not `"false"`), counts must be integers (`4.0` is accepted, `2.5` is not), `measurement_rate` a number in [0, 1], `reference_partner` an int or `"random"`, `num_system` at most `MAX_QUBITS` (65,536, checked before any graph is generated). Errors name the key. The MCP tools check their own arguments the same way (section 5) |
 | `stop_when_purified`, `system_order`, `periodic`, `random_orientation` | as in the library |
 
@@ -246,12 +249,14 @@ What each probe records per evaluation (n system qubits), and its value after
 | `erasure_first_failure` | `samples` numbers: for each random ordering of the system qubits, the smallest m such that erasing the first m loses logical information (n + 1 if k = 0) | n + 1 |
 | `uncorrectable_region_counts` | w numbers (w = `max_size`, or the cutoff a `budget` allows): the number of uncorrectable m-qubit erasures for m = 1..w, by exhaustion | 0 |
 | `code_snapshot` | n - k, the number of stabilizer generators; the generators are stored in the saved result | n (no code stored) |
+| `tableau_snapshot` | N, the number of generators of the joint state (system and reference qubits); the generators are stored in the saved result (`EnsembleResult.tableau(t, c)`, `tableaux(c)`: `PhaseFreeTableau`) | N (nothing stored: row count -1) |
 | `correlated_erasure` | len(couplings) x len(sizes) numbers, coupling-major: for coupling J and size m, the fraction of `samples` m-qubit regions, drawn with probability proportional to exp(-J b(A)), whose erasure loses logical information (0 if k = 0) | 0 |
 
-All probes except the entanglement ones and `code_snapshot` need a reference. Code
+All probes except the entanglement ones, `code_snapshot` and `tableau_snapshot` need a reference. Code
 probes are exact after a stop, so their averages need no correction; entanglement probes
 and `contiguous_distance` are NaN there and drop out of the means. At most one
-`code_snapshot` per spec; give it its own `"checkpoints": "final"`, since codes are large.
+snapshot probe (`code_snapshot` or `tableau_snapshot`) per spec; give it its own
+`"checkpoints"`, since codes and tableaux are large.
 The cost of `uncorrectable_region_counts` grows like C(n, w): measured one-thread costs
 per evaluation at n = 256 are about 1 ms for w = 2, about 20 ms for w = 3 and about 4 s
 for w = 4, against about 2 ms for `erasure_first_failure` with 100 samples
@@ -365,7 +370,8 @@ adds `by_threads`, `[{"threads", "estimated_seconds"}, ...]` in the order given;
 beyond the trajectory count stay idle. It always adds `layout`: `arrays` (`name`, `shape`,
 `dtype`, uncompressed `megabytes` of each array that `output_dir` will hold, as
 `EnsembleResult.save` writes them: `value::<probe>`, `snapshot::` and `snapshot_counts::`
-for a `code_snapshot`, the graph arrays and the run's own), `files` (`result.npz`,
+for a `code_snapshot`, the graph arrays and the run's own, among them, with a reference,
+`purification_layer` and `first_passage`), `files` (`result.npz`,
 `spec.json`, `provenance.json`) and a `note`. Disk use is lower, because the file is
 compressed, and a `snapshot::` array is an upper bound (each code fills only its first
 rows); `benchmark_ensemble` and `load_results` measure it. `run_ensemble`,
@@ -725,6 +731,30 @@ couplings x (n + 1)) and the per-code tolerances at most 10^10 multiply-adds and
 codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
 `e_delta.codes`), and `elapsed_seconds` reports the time. Both tools write nothing.
 
+### 3.8 Watts–Strogatz sweeps (`sparsegf2.study.sweep`)
+
+A sweep is a grid of conditions `(n, beta, p)` generated into a directory with seeds derived
+from two master seeds; [`SWEEPS.md`](SWEEPS.md) describes the spec, the protocol, the seeds,
+the files and the estimators. The spec is a JSON object: `sizes`, `betas` and `rates` (exact
+tokens such as `"0.1"` or `"1/3"`; `rates` may be a per-size table), `graphs` and
+`circuits_per_graph` (ints or per-size tables), `layers` (`{"per_n": a}` or a per-size table),
+`master_graph_seed`, `master_circuit_seed`, and optionally `stride` (1024), `checkpoints`
+(`{"count": 12}`, or `{"list": [...]}`), `probes` (engine JSON; default `code_dimension` and
+`tableau_snapshot` at the checkpoints; sweeps made before first passages were recorded had
+`code_dimension` at every layer), `picture` (`"purification"`,
+`"single"` or `"none"`) and `stop_when_purified` (false). Errors start `sweep spec:` and name the field.
+Running again resumes; a spec that adds sizes, betas, rates, graphs or circuits grows the
+sweep without changing a saved trajectory, and one that would change saved data is refused.
+With a reference every result holds the exact first passages of the code dimension,
+`first_passage[t, ell] = min{layer : k <= ell}` for `ell = 0..n` (int64, -1 where not reached
+by `final_layer`, the censoring depth), read after every layer whatever the checkpoints
+(SWEEPS.md section 7). `sweep replay` prints `identical` and the saved tableau digests, and
+exits with 1 when the rerun differs. There is no sweep tool: `load_results(DIR)` returns the index (`kind:
+"sweep"`, every condition with its `path`, `saved` and target `trajectories`, the `versions`
+and the `spec`); `load_results(DIR/<path>)` the usual summary of all the condition's saved
+parts together (refused above the memory limit, with the Python call `sweep.parts` that reads
+them one at a time); and `load_results` of one part file (`result-*.npz`) that part.
+
 ---
 
 ## 4. CLI details
@@ -760,6 +790,10 @@ codes; beyond that evenly spaced codes are used and a note says so (`phi.codes`,
 * `sparsegf2 curves RUN [--eps E [E ...]] [--delta D] [--layer L]` calls
   `erasure_curves`; without `--json` it prints Phi(e) and e_delta per channel and
   coupling.
+* `sparsegf2 sweep run|status|replay` (section 3.8): `run` logs each computed part on stderr
+  and saves parts on `--writers` threads (4) with `--compression` `fast` (zlib level 1, the
+  default), `none` or `default`; neither changes a result. Ctrl-C (exit 130) waits for the
+  saves in flight and keeps every saved part, so running again resumes.
 * Without `--json`, the same data is printed as indented `key: value` lines.
 
 ---

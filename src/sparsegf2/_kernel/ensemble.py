@@ -3,10 +3,13 @@
 Each trajectory generates its own random circuit layer by layer from its own
 random stream and simulates it immediately (phase-free: entanglement does not
 depend on measurement outcomes), evaluating probes at checkpoint layers. The
-outer loop over trajectories runs in parallel (``prange``); trajectory ``t``
-draws its circuit from stream ``first + t`` of the circuit key, and each of its
+outer loop over the rows of the output runs in parallel (``prange``); row ``t``
+simulates trajectory ``u = indices[t]`` (``indices``: distinct trajectory
+indices in any order; ``first, first + 1, ...`` for a range of trajectories),
+draws its circuit from stream ``u`` of the circuit key, and each of its
 sampled-probe evaluations from a stream of its own under the probe key (see
-Probes), so results never depend on the thread count.
+Probes), so results never depend on the thread count, on the order of
+``indices`` or on the other trajectories run beside it.
 
 The generator functions (:func:`gen_layer`, :func:`gen_scramble_pairs`) are
 shared with :func:`generate_ops`, which records the same draws as operations
@@ -15,8 +18,8 @@ operations, so an exported circuit is exactly what trajectory ``t`` simulated.
 
 Graphs: ``edges`` holds one or more graphs back to back (graph ``g`` is
 ``edges[graph_ptr[g]:graph_ptr[g + 1]]``, with its edge coloring and edge
-weights stored the same way). With several graphs, trajectory ``t`` runs on
-graph ``t // circuits_per_graph``: each graph carries a block of
+weights stored the same way). With several graphs, trajectory ``u`` runs on
+graph ``u // circuits_per_graph``: each graph carries a block of
 ``circuits_per_graph`` consecutive trajectories. This is how graph disorder
 enters without touching the random streams.
 
@@ -43,6 +46,14 @@ dimension S(R) is then a popcount, and the lost information I(R:E) of an
 erasure costs two column ranks over E only (see the ``*_rows`` routines in
 :mod:`~sparsegf2._kernel.entropy`).
 
+First passages: the engine reads ``k = S(R)`` after every completed layer
+(and at layer 0, after setup and scramble), whatever the checkpoints, and
+records ``tau_ell = min{t : k_t <= ell}`` for ``ell = 0 .. n`` in
+``out_first`` (-1 where ``k`` stayed above ``ell`` through the last
+completed layer, ``out_final``). Only measurements change ``k``, and never
+upward, so a drop from ``a`` to ``b`` sets ``tau_ell = t`` for
+``ell = b .. a - 1``. This draws nothing and changes no other output.
+
 Probes
 ------
 Every probe writes ``plen[j]`` numbers each time it is evaluated, into its own
@@ -57,10 +68,17 @@ trajectory never reaches (``stop_when_purified``) are filled with ``pfill[j]``,
 the probe's exact value once the reference is pure, or NaN where that value
 is not determined.
 
+Snapshots: at most one probe per run writes generators into ``snap``, a
+``code_snapshot`` (the rows outside ``ref_rows`` over the system qubits, the
+code's stabilizers) or a ``tableau_snapshot`` (every row over every qubit, the
+joint phase-free state); ``snap_rows[t, c]`` says how many rows evaluation
+``c`` wrote, or -1 for an evaluation the trajectory never reached. Neither
+draws random numbers.
+
 Probe streams (randomness contract 2): the sampled probes
 (``erasure_lost_profile``, ``erasure_first_failure``) draw at each evaluation
-from a fresh stream, ``stream_state(key_probe, mix(first + t, phash[j], L))``
-for probe ``j`` evaluated at layer ``L`` of trajectory ``first + t``, where
+from a fresh stream, ``stream_state(key_probe, mix(u, phash[j], L))`` for
+probe ``j`` evaluated at layer ``L`` of trajectory ``u = indices[t]``, where
 ``mix(a, b, c) = sm(sm(sm(a) ^ b) ^ c)`` is chained splitmix64
 (:mod:`~sparsegf2._kernel.rng`) and ``phash[j]`` is the first 8 bytes of
 ``blake2b(name.encode("utf-8"), digest_size=8)`` of the probe's name, read
@@ -77,7 +95,7 @@ checkpoints reproduces them, and fewer samples are a prefix of more.
 
 The ``correlated_erasure`` probe (:func:`correlated_erasure_rows`) adds one
 stream per size: at the evaluation whose stream index is
-``index = mix(first + t, phash[j], L)``, size ``m`` draws from
+``index = mix(u, phash[j], L)``, size ``m`` draws from
 ``stream_state(key_probe, mix(index, m, 0))``, and from nothing else: the
 draws of ``erasures.sample_regions`` (the exact ring or path sampler, or the
 swap chain with its ladder, every chain started afresh) from that state. A
@@ -98,6 +116,7 @@ from sparsegf2._kernel.entropy import (
     contiguous_distance_rows,
     erasure_profile_rows,
     first_failure_samples,
+    joint_snapshot_rows,
     lost_information_rows,
     prefix_entropies,
     reference_rows,
@@ -140,6 +159,7 @@ PROBE_FIRST_FAILURE = 8
 PROBE_UNCORRECTABLE_COUNTS = 9
 PROBE_CODE_SNAPSHOT = 10
 PROBE_CORRELATED_ERASURE = 11
+PROBE_TABLEAU_SNAPSHOT = 12
 
 # Columns of ce_param (one row per probe; see correlated_erasure_rows): offsets into the
 # flat ce_int and ce_float tables, and the chain's settings.
@@ -297,9 +317,10 @@ def eval_probe(
 
     ``s_ref`` is the reference entropy S(R) = k, read once per checkpoint by
     the caller. Code and erasure probes take their trivial values when k = 0.
-    ``snap_out`` receives the code's generators for a snapshot probe. A
-    sampled probe draws from ``prng``, which the caller seeds for this
-    evaluation alone (module docstring, Probe streams).
+    ``snap_out`` receives the generators for a snapshot probe: the code's
+    (``code_snapshot``) or the joint state's, every row over every qubit
+    (``tableau_snapshot``). A sampled probe draws from ``prng``, which the
+    caller seeds for this evaluation alone (module docstring, Probe streams).
     """
     starts = np.zeros(3, dtype=np.int64)
     lens = np.zeros(3, dtype=np.int64)
@@ -363,8 +384,10 @@ def eval_probe(
         else:  # the row is float64: the exact int64 counts arrive rounded once
             exact = np.zeros(size_param[j], dtype=np.int64)
             uncorrectable_counts_rows(tab, ws, order, ref_rows, size_param[j], row, exact)
-    else:  # PROBE_CODE_SNAPSHOT: the generators go to snap_out, the row holds their number
+    elif kind == PROBE_CODE_SNAPSHOT:  # the generators go to snap_out, the row holds their number
         row[0] = code_snapshot_rows(tab, n_sys, n, ref_rows, snap_out)
+    else:  # PROBE_TABLEAU_SNAPSHOT: all n rows over all n qubits (a pure state has n generators)
+        row[0] = joint_snapshot_rows(tab, n, n, snap_out)
 
 
 @njit(cache=True)
@@ -460,13 +483,17 @@ def run_ensemble(
     scramble_gates, scramble_matchings, scramble_layers, orient, gck, detect, stop_purified,
     pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
     order, periodic, key_struct, key_probe, phash, ce_param, ce_int, ce_float, geo_indptr,
-    geo_indices, geo_order, geo_kind, ce_need_graph, first, out, snap, snap_rows, out_tau,
-    out_final, out_meas, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
+    geo_indices, geo_order, geo_kind, ce_need_graph, indices, out, snap, snap_rows, out_tau,
+    out_final, out_meas, out_first, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
 ):  # fmt: skip
-    """Simulate ``out.shape[0]`` trajectories; see the module docstring.
+    """Simulate trajectory ``indices[t]`` into row ``t`` of the outputs, for every row ``t``.
 
-    ``phash[j]`` (uint64) is the hash of probe ``j``'s name, which keys its
-    sampling streams.
+    ``indices`` (int64, one entry per row of ``out``) holds distinct non-negative
+    trajectory indices in any order; trajectory ``u`` runs on graph
+    ``u // circuits_per_graph``, draws its circuit from stream ``u`` and its
+    sampled-probe evaluations from streams keyed by ``u`` (module docstring),
+    exactly as it would in any other run. ``phash[j]`` (uint64) is the hash of
+    probe ``j``'s name, which keys its sampling streams.
 
     The correlated_erasure probes read their tables from ``ce_param``, ``ce_int``
     and ``ce_float`` (the ``CE_*`` columns; built by ``mipt._correlated_tables``)
@@ -475,9 +502,16 @@ def run_ensemble(
     its own interaction graph in CSR form once, with its order and kind
     (:func:`~sparsegf2._kernel.erasure_chain.geometry_order`), for the probes on it.
 
-    ``snap`` (trajectories, evaluations, n_sys, 2 wsys) and ``snap_rows``
-    receive the code snapshots of the (at most one) snapshot probe; rows of
-    evaluations a trajectory never reaches are marked -1 in ``snap_rows``.
+    ``snap`` and ``snap_rows`` receive the snapshots of the (at most one)
+    snapshot probe: ``snap`` is (trajectories, evaluations, n_sys, 2 wsys)
+    for a code snapshot (``wsys = ceil(n_sys / 64)``) and (trajectories,
+    evaluations, n, 2 wq) for a tableau snapshot (``n = n_sys + n_ref`` qubits,
+    ``wq = ceil(n / 64)``); evaluations a trajectory never reaches are marked
+    -1 in ``snap_rows``.
+
+    ``out_first`` (int64, ``(trajectories, n_sys + 1)`` filled with -1, or
+    ``(trajectories, 0)`` without a reference) receives the first passages
+    (module docstring).
     """
     num_traj = out.shape[0]
     num_gck = gck.shape[0]
@@ -487,14 +521,15 @@ def run_ensemble(
     max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
     num_graphs = graph_ptr.shape[0] - 1
     for t in prange(num_traj):
-        g = 0 if num_graphs == 1 else (first + t) // circuits_per_graph
+        u = indices[t]  # the trajectory this row simulates
+        g = 0 if num_graphs == 1 else u // circuits_per_graph
         g_edges = edges[graph_ptr[g] : graph_ptr[g + 1]]
         g_cum = edge_cum[graph_ptr[g] : graph_ptr[g + 1]]  # empty when unweighted
         g_cidx = color_idx[graph_ptr[g] : graph_ptr[g + 1]]
         g_cptr = color_ptr[color_ptr_ptr[g] : color_ptr_ptr[g + 1]]
         rng = np.empty(4, dtype=np.uint64)
         prng = np.empty(4, dtype=np.uint64)  # seeded per sampled evaluation
-        stream_state(key_struct, first + t, rng)
+        stream_state(key_struct, u, rng)
         tab = np.zeros((2 * n + 1, ws), dtype=np.uint64)
         init_zero(tab, n, ws, False)
         anti = np.zeros(ws, dtype=np.uint64)
@@ -563,6 +598,7 @@ def run_ensemble(
         num_meas = 0
         final = 0
         stopped = False
+        k_prev = n_sys + 1  # above every threshold: layer 0 sets tau_ell = 0 for ell >= k_0
         for layer in range(layers + 1):
             if layer > 0:
                 # the matching schedule's color cycle continues from the scramble layers
@@ -576,10 +612,14 @@ def run_ensemble(
                     measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
                 num_meas += nm
                 final = layer
+            s_ref = -n_ref  # k = S(R) after this layer (0 without a reference)
+            for w in range(ws):
+                s_ref += np.int64(popcount(ref_rows[w]))
+            if ref_mode != REF_NONE and s_ref < k_prev:  # k fell: these thresholds are crossed
+                for ell in range(s_ref, k_prev):
+                    out_first[t, ell] = layer
+                k_prev = s_ref
             if ci < num_gck and gck[ci] == layer:
-                s_ref = -n_ref
-                for w in range(ws):
-                    s_ref += np.int64(popcount(ref_rows[w]))
                 for j in range(num_probes):
                     c = next_eval[j]
                     if c < pck_ptr[j + 1] - pck_ptr[j] and pck[pck_ptr[j] + c] == layer:
@@ -592,7 +632,7 @@ def run_ensemble(
                                     j, out[t, base : base + plen[j]], tab, ws, n_sys,
                                     ref_rows, s_ref, sample_param[j], ce_param, ce_int,
                                     ce_float, g, g_indptr, g_indices, g_order, g_kind,
-                                    key_probe, mix(first + t, phash[j], layer), prng,
+                                    key_probe, mix(u, phash[j], layer), prng,
                                     erase_scratch,
                                 )  # fmt: skip
                             else:
@@ -602,12 +642,12 @@ def run_ensemble(
                                     ce_float, 0, geo_indptr[geometry - 1],
                                     geo_indices[geometry - 1], geo_order[geometry - 1],
                                     geo_kind[geometry - 1], key_probe,
-                                    mix(first + t, phash[j], layer), prng, erase_scratch,
+                                    mix(u, phash[j], layer), prng, erase_scratch,
                                 )  # fmt: skip
                             next_eval[j] = c + 1
                             continue
                         if sample_param[j] > 0:  # every sampled kind has samples >= 1
-                            stream_state(key_probe, mix(first + t, phash[j], layer), prng)
+                            stream_state(key_probe, mix(u, phash[j], layer), prng)
                         eval_probe(
                             j, pkind[j], out[t, base : base + plen[j]], tab, n, ws, n_sys,
                             ref_rows, n_ref, s_ref, ptr, region_len, idx, size_param,
@@ -615,7 +655,7 @@ def run_ensemble(
                             union_buf, perm, erase_scratch, work,
                             snap[t, min(c, snap.shape[1] - 1)],
                         )  # fmt: skip
-                        if pkind[j] == PROBE_CODE_SNAPSHOT:
+                        if pkind[j] == PROBE_CODE_SNAPSHOT or pkind[j] == PROBE_TABLEAU_SNAPSHOT:
                             snap_rows[t, c] = np.int64(out[t, base])
                         next_eval[j] = c + 1
                 if detect[ci] and ref_mode != REF_NONE and tau < 0 and s_ref == 0:
@@ -629,8 +669,8 @@ def run_ensemble(
                 base = poff[j] + c * plen[j]
                 for i in range(plen[j]):
                     out[t, base + i] = pfill[j]
-                if pkind[j] == PROBE_CODE_SNAPSHOT:
-                    snap_rows[t, c] = -1
+                if pkind[j] == PROBE_CODE_SNAPSHOT or pkind[j] == PROBE_TABLEAU_SNAPSHOT:
+                    snap_rows[t, c] = -1  # not evolved past the stop: nothing written
         out_tau[t] = tau
         out_final[t] = final
         out_meas[t] = num_meas

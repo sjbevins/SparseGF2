@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+* **Exact first passages, online.** With a reference, the ensemble engine reads the code
+  dimension k after every layer (a popcount, whatever the checkpoints) and records
+  `EnsembleResult.first_passage`, int64 `(trajectories, n + 1)`: the first layer with
+  `k <= ell` for `ell = 0..n` (v1.4 §5.2), or -1 where k stayed above `ell` through
+  `final_layer`, the censoring depth; `first_passage_times()` gives `(time, observed)` for
+  Kaplan–Meier. Saved, loaded, concatenated (None when a chunk saved before lacks them) and
+  replayed; `estimate_ensemble`'s layout lists the array. It draws nothing: every random
+  stream and every other output is bitwise unchanged (pinned digests in
+  `tests/test_first_passage.py`), and `stop_when_purified` still stops at the first
+  purification checkpoint. The sweep's default probes are now `code_dimension` and
+  `tableau_snapshot` on the sparse checkpoints (`code_dimension` at every layer took 8 MB per
+  trajectory at `T = 10^6`); a sweep written before names its probes in `sweep.json` and keeps
+  working (grow it with that stored spec). Tests compare the first passages with dense
+  every-layer traces (33 rates, `T` up to `10^5`) and with Stim `10^4` layers deep.
+* **Watts–Strogatz sweeps** (`sparsegf2.study`, [`docs/SWEEPS.md`](docs/SWEEPS.md)). A
+  `SweepSpec` names a grid of conditions `(n, beta, p)` (exact rate tokens), the graphs and
+  circuits per graph, the depth, the checkpoints (the geometric rule of v1.4 §9 or a list) and
+  the probes; `sweep.run` generates it into a directory (one graph file per `(n, beta)`, the
+  `EnsembleResult` parts of each condition saved as they finish, an index `sweep.json`), resumes
+  it, and grows it (sizes, rates, graphs, circuits per graph) without changing a saved
+  trajectory; a change that would alter saved data is refused naming the field. A later
+  package version may grow a sweep when the randomness contract and the algorithm versions are
+  equal and the first and last saved trajectory of each growing condition replay exactly
+  (`EnsembleResult.concatenate(..., same_version=False)` joins parts of several versions for
+  the sweep only). Seeds: graph
+  `g` of `(n, beta)` from `(WSG1, master, n, beta, g)`, one run seed per `(n, beta)` shared by
+  all rates (shared gates, nested masks), trajectory `u = g * stride + c`, and an outcome-seed
+  domain (`WSO1`) for later signed runs (`study.identity`). `load`, `parts`, `rows`, `replay`,
+  `verify`; `sparsegf2 sweep run|status|replay`. Parts are saved on writer threads while the
+  next one computes, with zlib level 1 by default (`--compression`, `--writers`), and chunks
+  follow the measured rate. `EnsembleResult.save(path, compression=...)` takes `"default"`,
+  `"fast"` or `"none"`.
+* **The joint phase-free state as data.** The probe `tableau_snapshot` saves every generator of
+  the joint state (system and reference qubits); `EnsembleResult.tableau(t, c)` and
+  `tableaux(c)` (in parallel) return `sparsegf2.tableau.PhaseFreeTableau`, a phase-free
+  stabilizer group in canonical form (reduced row echelon form; `to_bytes`, `digest`,
+  `entropy`, `mutual_information`, `physical_code`), with batch functions
+  `physical_tableaux` and `to_bytes_batch`. `estimate_ensemble` prices the snapshot and its
+  storage.
+* **`MonitoredCircuit.run(indices=...)`** runs exactly the listed trajectory indices; row `i`
+  is trajectory `indices[i]`, identical to what a range run gives it.
+* **Parallel launches from several Python threads** take turns under Numba's `workqueue`
+  threading layer instead of terminating the process (`sparsegf2._parallel.threads`).
 * **American spelling everywhere** (code, comments, docstrings, messages, private names and
   documents): neighbor, color, normalized, favors, behavior, analyze, centered, labeled and
   the rest. `tests/test_spelling.py` (Clank's word list plus the forms this repository had

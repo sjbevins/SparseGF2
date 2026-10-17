@@ -163,6 +163,13 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
     n - k. At most one per spec; give it its own `"checkpoints": "final"`, since codes are
     large. The summary shows only the generator count; the codes are in the saved result
     (`output_dir`; `EnsembleResult.code(t, c)` in Python);
+  * `tableau_snapshot`: saves the joint phase-free state itself, all N generators over all
+    N qubits (system first, then the references); its value is N. At most one snapshot
+    probe (this or `code_snapshot`) per spec; give it few checkpoints (N x 2 ceil(N/64)
+    words per evaluation). In Python `EnsembleResult.tableau(t, c)` and, for a whole
+    evaluation in parallel, `EnsembleResult.tableaux(c)` return `PhaseFreeTableau`s in
+    canonical form: `digest()`, `entropy(A)`, `mutual_information(A, R)`,
+    `physical_code(n)` (`docs/SWEEPS.md` section 8);
   * `correlated_erasure` (needs a reference; `couplings` required): for each coupling J and
     size m, the fraction of `samples` m-qubit regions, drawn with probability proportional
     to exp(-J b(A)) (b(A): edges of the erasure graph leaving A), whose erasure loses
@@ -186,6 +193,12 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * **Purification time tau:** the first of the spec's checkpoints at which the reference
   is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
   never purified within the horizon.
+* **First passages:** with a reference, the engine also reads k after every layer, whatever
+  the checkpoints, and saves `first_passage` (int64, trajectories x (n + 1)):
+  `first_passage[t, ell]` is the exact first layer with k <= ell, or `-1` if k stayed above
+  ell through `final_layer`, the censoring depth (`result.first_passage_times()` gives
+  `(time, observed)` for `analysis.kaplan_meier`). Column 0 is the exact purification time;
+  the columns together give k at every layer (`docs/SWEEPS.md` section 7).
 
 ## Conventions
 
@@ -499,6 +512,45 @@ crosscheck.compare_measurements(circuit, seed=0)
 * `graphs.stats` uses dense linear algebra, so it is limited to `graphs.MAX_STATS_NODES`
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbors
   per side).
+* `spec.run(indices=[...], seed=...)` runs exactly the listed trajectory indices (distinct,
+  any order): row `i` is trajectory `indices[i]`, identical to what a range run gives it.
+
+## Watts–Strogatz sweeps
+
+`sparsegf2.study.sweep` generates a grid of conditions `(n, beta, p)` on Watts–Strogatz graphs
+(k = 4, `n // 2` random edges per layer, the purification picture, phase-free) into a
+directory, with every seed derived from two master seeds, and reads it back.
+[`docs/SWEEPS.md`](docs/SWEEPS.md) has every detail: the update rules, the laws, the seeds,
+the files, how to grow a sweep and how to take expectation values.
+
+```sh
+sparsegf2 sweep run sweep.json runs/ws --threads 32   # generate; rerun to resume or grow
+sparsegf2 sweep status runs/ws --json
+sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # rerun trajectory u = 3, compare
+```
+
+```json
+{"sizes": [16, 24, 32], "betas": ["0", "0.1"], "rates": ["0.1", "0.15", "0.2"],
+ "graphs": 50, "circuits_per_graph": 4, "stride": 1024, "layers": {"per_n": 8},
+ "checkpoints": {"count": 12}, "master_graph_seed": 17, "master_circuit_seed": 29}
+```
+
+* Default probes: `code_dimension` and `tableau_snapshot` on the geometric checkpoints, plus
+  the exact first passages `first_passage` (k read at every layer, n + 1 numbers per
+  trajectory); purification is tested at every layer, so `purification_layer` is exact.
+  Sweeps made before first passages were recorded had `code_dimension` at every layer; their
+  `sweep.json` names it, so grow them with that stored spec.
+* Rates of one `(n, beta)` share the graphs, the gates and the mask uniforms (masks nested
+  in p); different `(n, beta)` are independent. Trajectory `u = g * stride + c` runs on
+  graph `g`; growing a sweep (sizes, betas, rates, graphs, circuits per graph) never changes
+  a saved trajectory, and a spec change that would is refused naming the field.
+* In Python: `sweep.load(dir, n, beta, p)` (an `EnsembleResult`, rows sorted by `u`),
+  `sweep.parts(...)` (one saved part at a time), `sweep.rows(...)` (`g`, `c`, `u` and the
+  seeds of every row), `sweep.replay(...)`, `sweep.verify(...)`. Average with equal weight per
+  graph (`result.graph_index`) and never average a censored purification time (`-1`).
+* No MCP tools of its own: `load_results(DIR)` gives the index (every condition's saved and
+  target trajectories, the versions, the spec), `load_results(DIR/<condition>)` the summary of
+  all its saved parts, and `load_results` of one part file (`result-*.npz`) that part.
 
 ## Where things are
 
@@ -515,6 +567,9 @@ crosscheck.compare_measurements(circuit, seed=0)
 | `src/sparsegf2/graphs.py` | graph families, statistics, graph files (`.json`, `.npz`) |
 | `src/sparsegf2/crosscheck.py` | tick-by-tick comparison of any circuit with Stim |
 | `src/sparsegf2/observables.py` | entanglement, code and erasure observables of one state |
+| `src/sparsegf2/tableau.py` | `PhaseFreeTableau`: a phase-free stabilizer group as a canonical GF(2) row space (bytes, digest, entropies, physical code) |
+| `src/sparsegf2/study/` | Watts–Strogatz sweeps: `identity.py` (exact tokens, graph, run and outcome seeds, graph records), `sweep.py` (spec, generation, reading) |
+| `docs/SWEEPS.md` | sweeps from the update rules to expectation values |
 | `docs/LLM_INTERFACE.md` | full CLI and MCP reference |
 | `docs/LITERATURE.md` | which observables the literature uses, and why |
 | `docs/DESIGN.md` | architecture and the reasons behind it |
