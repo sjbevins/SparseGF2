@@ -79,7 +79,7 @@ mathematics, the independent reference implementations and conformance tests
 | $g$, $G_g$ | a graph label and the graph drawn for it | integer, graph | `graph_seed(master, g)` |
 | $E_g$ | the edge set of $G_g$, sorted, $a < b$ | set of pairs | the rows of `edges` |
 | $h(n)$ | gates per layer, $\lfloor n/2\rfloor$ | integer | `gates_per_layer` |
-| $e_{t,a}$, $Q_{t,a}$ | the edge and the Clifford of gate $a$ of layer $t$ | $E_g$, $\lbrace 0, \dots, 11519\rbrace$ | `next_below(\lvert E\rvert)`, `next_below(11520)` |
+| $e_{t,a}$, $Q_{t,a}$ | the edge and the Clifford of gate $a$ of layer $t$ | $E_g$, $\lbrace 0, \dots, 11519\rbrace$ | `next_below(rng, len(edges))`, `next_below(rng, 11520)` |
 | $\Gamma$ | the gate schedule $((e_{t,a}, Q_{t,a}))_{t,a}$ (v1.4 writes $u$; here $u$ is the trajectory index) | element of $(E_g \times \mathcal K)^{T h(n)}$ | |
 | $\mathcal K$, $j$ | the native two-qubit Clifford indices $\lbrace 0, \dots, 11519\rbrace$ | integers | `Clifford.from_index(2, j)` |
 | $s$, $b$ | $j = 16 s + b$: symplectic class $s \in \lbrace 0, \dots, 719\rbrace$, sign bits $b \in \lbrace 0, \dots, 15\rbrace$ | integers | `j >> 4`, `j & 15` |
@@ -175,8 +175,8 @@ The generator is `graphs.py::watts_strogatz(n, 4, beta, seed=...)`. For graph $g
 all-zero state would become $(1,0,0,0)$) and two draws:
 
 * `next_double(rng)` $= k\,2^{-53}$ with $k$ the top 53 bits of `next_u64`, so $B_j = [\texttt{next\_double} < \beta]$;
-* `next_below(rng, bound)` (Lemire's method on the top 32 bits of `next_u64`, §4.5): a uniform integer in
-  $[0, \text{bound})$.
+* `next_below(rng, bound)` (Lemire's method on the top 32 bits of `next_u64`, Proposition 5): a uniform
+  integer in $[0, \text{bound})$.
 
 For each visit $(a, b)$ in the order of $L_n$ it draws the double; if it is below $\beta$ and
 $\deg(a) < n-1$ (equivalently $A_j \ne \varnothing$) it repeats `w = next_below(rng, n)` until
@@ -231,7 +231,8 @@ approximates it (§9).
 
 *Proof.* $\mu_{n,\beta}$ is the law of a random graph, $\kappa_{g,T}$ is a product of uniform pmfs and
 $\nu_{p,T}$ a product of Bernoulli pmfs, so each sums to 1 over its own set. It remains to show
-$\sum_o \pi_{g,\gamma,m}(o) = 1$ for fixed $g, \gamma, m$.
+$\sum_o \pi_{g,\gamma,m}(o) = 1$ for fixed $g, \gamma, m$. Write $\psi_0 = \lvert\Psi_0\rangle$ and let every
+operator act as itself tensored with $I_R$.
 
 For one layer, the operators $\Pi_{o}$, $o \in \lbrace\pm1\rbrace^{S_t}$, are orthogonal projectors that sum to $I$:
 two different outcome vectors differ at a site $i$, where $\frac{I+Z_i}{2}\frac{I-Z_i}{2} = 0$, and
@@ -265,9 +266,9 @@ physical operators commuting: $\overline F$ is evaluated for each $(\gamma, m)$ 
 physical order.
 
 *Consequence.* The simulator may produce the schedule and the mask from one stream, in the order of §3.7,
-and may couple its random numbers across different $p$ (Proposition 11) without changing any
+and may couple its random numbers across different $p$ (Proposition 12) without changing any
 fixed-$p$ expectation, because those expectations depend only on the marginal law of $(G, \Gamma, M)$ at
-that $p$, which Proposition 11 shows is the product law.
+that $p$, which Proposition 12 shows is the product law.
 
 ### 4.2 The graphs
 
@@ -381,11 +382,12 @@ of the generator output (different bounds, a different number of generator steps
 produced from a seed by one is in general not the graph produced by the other.
 
 *Proof.* Equality of laws: each decision and each target is, conditional on the past, as in §3.3.
-Different functions: example (d) of §7 builds the same seeds with both mappings, and none of 200 graphs
-at $n = 24$ and $\beta = 1/2$ coincides (each has about 24 rewirings; for a given rewiring the two samplers
-agree on the target with probability about $1/\lvert A\rvert$, and a mismatch also shifts every later
-generator position). ∎ Hence "the same law" does not give "the same graph from the same seed", and a graph
-record is reproducible only under the mapping named by its `generator` field.
+Different functions: from one 32-bit word $x$ the rejection sampler proposes $v = \lfloor xn/N\rfloor$ and
+accepts it only if $v \in A$ (otherwise it draws again, which moves every later generator position), whereas the
+index sampler takes the position $\lfloor x\lvert A\rvert/N\rfloor$ of the sorted $A$. Example (d) of §7 builds the same
+seeds with both mappings, and none of 200 graphs at $n = 24$ and $\beta = 1/2$ coincides (each has about 24
+rewirings). ∎ Hence "the same law" does not give "the same graph from the same seed", and a graph record
+is reproducible only under the mapping named by its `generator` field.
 
 ### 4.3 The gates
 
@@ -566,7 +568,7 @@ lines and an `M` line of the measured sites before each `TICK`.
 
 ## 7. Worked examples
 
-All blocks are self-contained apart from the names they define; they run in order in one namespace.
+The blocks share one namespace and run in order; a block may use the names an earlier one defined.
 
 ### (a) The exact law at n = 6, against the native generator
 
@@ -919,5 +921,3 @@ generic draws), `tests/test_invariance.py` (chunks, threads, replay), `tests/tes
 * **The mapping is frozen.** A different but equally valid target sampler would give a valid ensemble and other
   graphs; it needs a new `GRAPH_GENERATOR_VERSION` and cannot be mixed with records made under this one
   (Proposition 8).
-* **Spelling of the specification.** `docs/misc/watts_strogatz_study_spec_v1_4.md` line 600 uses a British spelling,
-  which `tests/test_spelling.py` flags; the specification is the owner's text and is not edited here.

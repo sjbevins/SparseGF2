@@ -131,12 +131,9 @@ larger frozen $s$ lets circuits $C, \dots, s-1$ be added later without renumberi
 (`validate_graph`: canonical sorted form, $2n$ edges, minimum degree 2, $C(n,2)$ at $\beta = 0$; for $n = 5$ the checks leave $K_5$) and returns a
 `GraphRecord`: $n$, the token $\beta$, $g$, the seed pair, the `generator` version string
 (`GRAPH_GENERATOR_VERSION = "ws-offset-major-reject-1"`), the `edge_order` (`"offset-major"`), the read-only edge array of shape $(2n, 2)$
-and the **edge digest**
-$$
-\operatorname{dig}\big(\texttt{b"SGF2EDGES1\textbackslash x00"} \,\Vert\, n_{\mathrm{u32,LE}} \,\Vert\, e_{1,a}\,e_{1,b}\,e_{2,a}\,e_{2,b} \cdots\big),
-$$
-the edge rows in the canonical order ($a < b$, rows increasing) as signed 32-bit little-endian integers. `GraphRecord.verify` re-checks the
-digest and the graph; `regenerate` rebuilds the graph from the seed and requires the same record.
+and the **edge digest**: the SHA-256 of the bytes `b"SGF2EDGES1\x00"` (11 bytes), then $n$ as an unsigned 32-bit little-endian integer,
+then the edge rows $a_1, b_1, a_2, b_2, \dots$ as signed 32-bit little-endian integers, in the canonical order ($a < b$, rows increasing).
+`GraphRecord.verify` re-checks the digest and the graph; `regenerate` rebuilds the graph from the seed and requires the same record.
 
 The other version constants of `study/identity.py`: `CLIFFORD_ENUMERATION_VERSION` (the numbering $j = 16 s + b$), `DYNAMICS_VERSION`,
 `ROWSPACE_FORMAT_VERSION` (`"SGF2RS1"`), `STORE_SCHEMA_VERSION`; `version_record()` collects them with `mipt.RANDOMNESS_CONTRACT` and the package version.
@@ -199,7 +196,7 @@ where the expensive probes run. For `{"count": N_T}` and $T = T_{\max}(n)$, with
 1. if $N_T \ge 2$, for $j = 0, \dots, q$ let $a_j = \exp(j \ln T / q) = T^{j/q}$ and $k_j = \lfloor a_j + \tfrac12\rfloor$ (nearest integer, **ties upward**), clamped to $[0, T]$;
 2. $\mathcal T = \lbrace 0, 1, T\rbrace \cup \lbrace k_j\rbrace$, sorted, without repeats. For $N_T = 1$ it is $\lbrace 0, 1, T\rbrace$.
 
-The rounding is computed exactly in integers (Proposition 10, `manifest.round_half_up_power`). For `{"list": [...]}` it is the sorted union of the list and $\lbrace 0, 1, T\rbrace$.
+The rounding is computed exactly in integers (Proposition 10, `study/manifest.py::round_half_up_power`). For `{"list": [...]}` it is the sorted union of the list and $\lbrace 0, 1, T\rbrace$.
 The manifest refuses a list that exceeds some $T_{\max}(n)$.
 
 ### 3.10 The engine keywords (v1.4 §8.1)
