@@ -38,6 +38,7 @@ def _blocks(path: Path) -> list[str]:
     "doc",
     [
         "README.md",
+        "docs/EXPECTATION_VALUES.md",
         "docs/GETTING_STARTED.md",
         "docs/HOW_IT_WORKS.md",
         "docs/SWEEPS.md",
