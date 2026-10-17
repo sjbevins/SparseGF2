@@ -61,7 +61,7 @@ from typing import Any
 
 import numpy as np
 
-from sparsegf2 import analysis, erasures, graphs
+from sparsegf2 import analysis, erasures, graphs, mipt
 from sparsegf2.codes import StabilizerCode
 from sparsegf2.study.identity import TrajectoryKey, canonical_json, token_words
 from sparsegf2.tableau import PhaseFreeTableau
@@ -1089,7 +1089,10 @@ def _coupling(value: Any) -> float:
         value, (int, float, np.integer, np.floating)
     ):
         raise ValueError(f"a coupling J must be a number, got {value!r}")
-    j = float(value)
+    try:
+        j = float(value)
+    except OverflowError:  # an int beyond float64: far above the bound
+        j = math.inf if value > 0 else -math.inf
     if not math.isfinite(j) or abs(j) > erasures.MAX_ABS_COUPLING:
         raise ValueError(erasures.coupling_bound_message(j))
     return 0.0 if j == 0 else j
@@ -1107,7 +1110,9 @@ def _trajectory(key: Any) -> TrajectoryKey:
 
 
 def _key_words(trajectory: TrajectoryKey) -> tuple[int, ...]:
-    """The 10 words of a trajectory key in a seed: ``w(experiment_id), n, w(beta), w(p), g, c, r``."""
+    """The 10 words of a trajectory key in a seed: ``w(experiment_id), n, w(beta), w(p), g, c, r``.
+
+    The key's ``protocol`` is deliberately not among them (see :func:`region_seed`)."""
     return (
         *_text_words(trajectory.experiment_id),
         _seed_word(trajectory.n, "n"),
@@ -1129,10 +1134,10 @@ def region_seed(
 ) -> tuple[int, ...]:
     """The seed of a retrospective region sampler: a fixed-length, domain-tagged tuple of 32-bit words.
 
-    For the trajectory ``key = (experiment_id, n, beta, p, g, c, r)`` (a
-    :class:`~sparsegf2.study.identity.TrajectoryKey`), the depth ``t``, the region size ``m``, the
-    coupling ``J``, the observable ``observable_id`` and its ``version`` (design §3, ruling
-    R-SEED)::
+    For the trajectory ``key`` (a :class:`~sparsegf2.study.identity.TrajectoryKey`, of which the
+    seed reads ``(experiment_id, n, beta, p, g, c, r)``: every field but ``protocol``, see
+    below), the depth ``t``, the region size ``m``, the coupling ``J``, the observable
+    ``observable_id`` and its ``version`` (design §3, ruling R-SEED)::
 
         seed = (TAG, w(experiment_id), n, w(beta_token), w(p_token), g, c, r, t, m,
                 bits(J), w(observable_id), w(version))                       # 19 words
@@ -1153,9 +1158,18 @@ def region_seed(
     ``SeedSequence`` entropy, whatever the master seeds; every one of these tuples has at least 4
     words, so ``SeedSequence``'s zero padding (to its 4-word pool) never applies. The streams then
     coincide only through a collision of ``SeedSequence``'s 128-bit hash. The seed depends on
-    every field of the key: two trajectories (also the same ``(g, c)`` at two rates) draw
-    independent regions; a new ``version`` draws new ones. The registry passes the id and the
-    version of the entry being computed (:func:`compute`), never the latest registered one.
+    every field of the key except the protocol: two trajectories of one protocol (also the same
+    ``(g, c)`` at two rates) draw independent regions; a new ``version`` draws new ones. The
+    registry passes the id and the version of the entry being computed (:func:`compute`), never
+    the latest registered one.
+
+    *The protocol is not a field, deliberately.* As in the graph and run seeds (design §3, §12),
+    the F and P trajectories of one ``(experiment_id, n, beta, p, g, c, r)`` share their graph,
+    gates and measurement masks, and a sampler run on both draws the same regions (common random
+    numbers, so their difference has no region noise). Nothing is drawn for P today: a P state
+    has no reference, so its physical code has ``k = 0`` and :func:`mean_leakage` returns 0
+    without drawing, and P records no orderings for a bootstrap. Adding the protocol would change
+    the length and value of every seed.
 
     >>> from sparsegf2.study.identity import TrajectoryKey
     >>> key = TrajectoryKey("demo", 8, "0.1", "0.2", 3, 1)
@@ -1180,8 +1194,9 @@ def region_seed(
 def bootstrap_seed(key: TrajectoryKey | str, observable_id: str, version: str) -> tuple[int, ...]:
     """The seed of the bootstrap of ``T*`` of one trajectory (:func:`bootstrap_peak`): 15 words.
 
-    For the trajectory ``key = (experiment_id, n, beta, p, g, c, r)``, the peak observable
-    ``observable_id`` (``"peak_D"``) and its ``version``::
+    For the trajectory ``key`` (its fields ``(experiment_id, n, beta, p, g, c, r)``; not the
+    protocol, as in :func:`region_seed`), the peak observable ``observable_id`` (``"peak_D"``)
+    and its ``version``::
 
         seed = (TAG, w(experiment_id), n, w(beta_token), w(p_token), g, c, r,
                 w(observable_id), w(version))                                  # 15 words
@@ -1877,12 +1892,15 @@ KINDS = ("int", "real", "reals", "bool", "text", "sizes", "ladder")
 ``?`` (``"int?"``) also allows None.
 
 * ``int``: an int or numpy integer (never a bool, a float such as ``3.0`` or a string), as an int;
-* ``real``: an int, float or numpy number (never a bool or a string), finite, as a float with
-  ``-0.0`` written as ``0.0``: ``1``, ``1.0`` and ``numpy.float64(1)`` are one value;
+* ``real``: an int, float or numpy number (never a bool or a string), finite as a float64, as a
+  float with ``-0.0`` written as ``0.0``: ``1``, ``1.0`` and ``numpy.float64(1)`` are one value;
 * ``reals``: a real or a 1-D list (tuple, array) of reals, as a tuple of floats;
 * ``bool``: True or False; ``text``: a non-empty string;
-* ``sizes``: a range string such as ``"1:31:2"`` (kept), or an int or a 1-D list of ints (a
-  tuple of ints);
+* ``sizes``: an int or a 1-D list of ints, as a tuple of ints; or a range string
+  ``"a:b[:step]"`` (Python slice semantics, ``step >= 1``, at least one size), read by the
+  engine's parser (:func:`sparsegf2.mipt._size_tuple`) and stored as its expansion
+  ``tuple(range(a, b, step))``: a range does not depend on ``n``, so ``"1:4:2"`` and ``[1, 3]``
+  are one value, as in the manifest (``CorrelatedErasure.from_dict``) and the engine;
 * ``ladder``: a string (``"auto"``, ``"given"``), or reals (a tuple of floats).
 """
 
@@ -1918,12 +1936,23 @@ An entry's parameter takes its kind from ``ObservableDef.kinds`` or, failing tha
 parameter with neither is refused when the entry is built."""
 
 
+def _as_float(value: int | float | np.integer | np.floating, what: str) -> float:
+    """``float(value)``, with an integer too large for a float64 refused by a ValueError naming
+    ``what`` (``float(10**400)`` raises OverflowError)."""
+    try:
+        return float(value)
+    except OverflowError:
+        raise ValueError(
+            f"{what} must be finite as a float64, got an integer of {int(value).bit_length()} bits"
+        ) from None
+
+
 def _real(value: Any, what: str) -> float:
     if isinstance(value, (bool, np.bool_)) or not isinstance(
         value, (int, float, np.integer, np.floating)
     ):
         raise ValueError(f"{what} must be a real number, got {value!r}")
-    x = float(value)
+    x = _as_float(value, what)
     if not math.isfinite(x):
         raise ValueError(f"{what} must be finite, got {value!r}")
     return 0.0 if x == 0 else x
@@ -1943,7 +1972,12 @@ def _normalize(kind: str, value: Any, what: str) -> Any:
         if not isinstance(value, (bool, np.bool_)):
             raise ValueError(f"{what} must be True or False, got {value!r}")
         return bool(value)
-    if kind == "text" or (kind in ("sizes", "ladder") and isinstance(value, str)):
+    if kind == "sizes" and isinstance(value, str):
+        try:  # the engine's parser: one expansion for every spelling of the same sizes
+            return mipt._size_tuple(value)
+        except ValueError as exc:
+            raise ValueError(f"{what}: {exc}") from None
+    if kind == "text" or (kind == "ladder" and isinstance(value, str)):
         if not isinstance(value, str) or not value:
             raise ValueError(f"{what} must be a non-empty string, got {value!r}")
         return value
@@ -1988,12 +2022,26 @@ class SnapshotInput:
     ``num_system`` (``n``), ``t`` (the depth), ``key`` (the trajectory's
     :class:`~sparsegf2.study.identity.TrajectoryKey`, or its string form; needed by the sampled
     observables, whose seeds derive from it: :func:`region_seed`), and the stored data it has:
-    the physical ``code`` (a :class:`~sparsegf2.codes.StabilizerCode` on ``n`` qubits), the joint
-    ``tableau`` (a :class:`~sparsegf2.tableau.PhaseFreeTableau`, system ``0..n-1`` first, then
-    the references: ``n``, ``n + 1`` or ``2n`` qubits for no reference, one reference or the
-    purification picture) and the interaction graph ``edges``. Each is checked against ``n``
-    when given, so a snapshot paired with another condition's ``n`` is refused rather than
-    computed. :meth:`physical_code` falls back to the joint tableau's physical code.
+    the physical ``code`` (a :class:`~sparsegf2.codes.StabilizerCode`), the joint ``tableau`` (a
+    :class:`~sparsegf2.tableau.PhaseFreeTableau`, system ``0..n-1`` first, then the references)
+    and the interaction graph ``edges``. :meth:`physical_code` falls back to the joint
+    tableau's physical code.
+
+    **What is checked** when the object is built (a ``ValueError`` names the mismatch):
+
+    * the key's ``n`` is ``num_system``;
+    * the code has exactly ``n`` qubits (one per system qubit, in every protocol);
+    * the joint tableau has exactly the width of the key's protocol (design §12): ``2n`` for
+      ``"F"`` (the system and its ``n`` references) and ``n`` for ``"P"`` (the pure system
+      state). Without a key the protocol is unknown and any width a joint state of ``n``
+      system qubits can have is accepted: ``n``, ``n + 1`` or ``2n`` (no reference, one
+      reference, purification), so give the key to make the check exact;
+    * every edge endpoint lies in ``0..n-1`` (no self-loops; the list is normalized once).
+
+    What no check can see: an edge list carries no node count, so the graph of a smaller size
+    whose endpoints are all below ``n`` passes; and an F state of ``n`` qubits and a P state of
+    ``2n`` have the same width. The caller pairs the data by the trajectory's key, as the store
+    does (snapshots by trajectory, graphs by ``(n, beta, g)``).
     """
 
     num_system: int
@@ -2024,13 +2072,38 @@ class SnapshotInput:
                 raise TypeError(
                     f"tableau must be a PhaseFreeTableau, got {type(self.tableau).__name__}"
                 )
-            widths = sorted({n, n + 1, 2 * n})
-            if self.tableau.num_qubits not in widths:
+            width = self.tableau.num_qubits
+            if isinstance(self.key, TrajectoryKey):
+                protocol = self.key.protocol
+                expected = 2 * n if protocol == "F" else n
+                if width != expected:
+                    what = (
+                        "2n: the system and its n reference qubits"
+                        if protocol == "F"
+                        else "n: the pure system state, no reference"
+                    )
+                    raise ValueError(
+                        f"the joint tableau has {width} qubits, but a protocol-{protocol} "
+                        f"snapshot of n = {n} system qubits has {expected} ({what}): give the "
+                        f"snapshot of the trajectory {self.key}"
+                    )
+            else:
+                widths = sorted({n, n + 1, 2 * n})
+                if width not in widths:
+                    raise ValueError(
+                        f"the joint tableau has {width} qubits, but a joint state of n = {n} "
+                        f"system qubits has n, n + 1 or 2n = {widths} (no reference, one "
+                        "reference, purification): give the snapshot of a trajectory of this n"
+                    )
+        if self.edges is not None:
+            try:
+                edges = graphs.from_edges(self.edges, n)
+            except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"the joint tableau has {self.tableau.num_qubits} qubits, but a joint state of "
-                    f"n = {n} system qubits has n, n + 1 or 2n = {widths} (no reference, one "
-                    "reference, purification): give the snapshot of a trajectory of this n"
-                )
+                    f"edges must be the interaction graph of the n = {n} system qubits (endpoints "
+                    f"0..{n - 1}): {exc}"
+                ) from None
+            object.__setattr__(self, "edges", edges)
 
     def trajectory(self) -> TrajectoryKey:
         if self.key is None:
@@ -2215,15 +2288,28 @@ def catalog() -> tuple[dict[str, Any], ...]:
     return tuple(_REGISTRY[key].row() for key in sorted(_REGISTRY))
 
 
-def _cell(text: str) -> str:
-    """``text`` as one Markdown table cell: ``|`` escaped (it would end the cell), lines joined."""
-    return " ".join(str(text).split("\n")).replace("|", "\\|")
+def _cell(text: str, *, code: bool = False) -> str:
+    """``text`` as one GitHub Markdown table cell, lines joined.
+
+    A table row is split at every ``|`` that does not follow a backslash, the backslash of an
+    escaped ``\\|`` is removed, and the cell is then read as inline Markdown, where ``\\\\`` is
+    one backslash. So plain text writes each ``\\`` as ``\\\\`` and then each ``|`` as ``\\|``:
+    a backslash before a pipe survives as itself and never escapes the pipe's escape. Inside a
+    code span (``code=True``, wrapped in backticks) backslashes are literal, so only ``|`` is
+    escaped.
+    """
+    one = " ".join(str(text).split("\n"))
+    if code:
+        return "`" + one.replace("|", "\\|") + "`"
+    return one.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def catalog_markdown() -> str:
     """:func:`catalog` as a Markdown table (id, version, level, inputs, parameters, definition).
 
-    Every cell escapes ``|`` as ``\\|``, so each row has the header's six cells.
+    Every cell is escaped by ``_cell`` (``\\`` as ``\\\\``, ``|`` as ``\\|``; the id is a code
+    span, where only ``|`` is escaped), so each row has the header's six cells and every cell
+    reads back as its text.
     """
     lines = [
         "| id | version | level | inputs | parameters | definition |",
@@ -2233,14 +2319,19 @@ def catalog_markdown() -> str:
         params = ", ".join(f"{k}={v!r}" for k, v in row["params"].items()) or "none"
         level = row["level"] + (" (retrospective)" if row["retrospective"] else "")
         cells = [
-            f"`{row['id']}`",
-            row["version"],
-            level,
-            ", ".join(row["inputs"]),
-            params,
-            row["definition"],
+            _cell(row["id"], code=True),
+            *(
+                _cell(c)
+                for c in (
+                    row["version"],
+                    level,
+                    ", ".join(row["inputs"]),
+                    params,
+                    row["definition"],
+                )
+            ),
         ]
-        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

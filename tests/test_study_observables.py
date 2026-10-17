@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import string
 import struct
 import tracemalloc
 from fractions import Fraction
@@ -25,6 +26,7 @@ from sparsegf2 import StabilizerCode, erasures, graphs, mipt
 from sparsegf2.study import identity
 from sparsegf2.study import observables as ob
 from sparsegf2.study.identity import TrajectoryKey
+from sparsegf2.study.manifest import CorrelatedErasure
 from sparsegf2.tableau import PhaseFreeTableau
 
 # ---------------------------------------------------------------------------------------------
@@ -139,13 +141,65 @@ def test_the_catalog_has_one_entry_per_observable():
     assert {r["id"] for r in rows if r["retrospective"]} == RETROSPECTIVE
     table = ob.catalog_markdown().splitlines()
     assert len(table) == len(rows) + 2 and table[0].startswith("| id |")
-    # every row has the header's six cells: a "|" inside a cell is escaped as "\|"
+    # every row has the header's six cells, and each cell reads back as its text
     for line, row in zip(table[2:], rows, strict=True):
-        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line)[1:-1]]
+        cells = _gfm_row(line)
         assert len(cells) == 6, line
-        assert cells[0] == f"`{row['id']}`"
-        assert cells[5].replace("\\|", "|") == row["definition"]
+        assert cells[0] == ("code", row["id"])
+        assert cells[5] == ("text", row["definition"])
     assert sum("|" in r["definition"] for r in rows) >= 4  # the case that broke the table
+
+
+def _gfm_row(line):
+    """A GitHub table row as (kind, rendered text) per cell, written from the GFM rules: the row
+    is split at every "|" not preceded by a backslash; the backslash of an escaped "\\|" is
+    dropped; the cell is then inline Markdown, where a backslash before ASCII punctuation is an
+    escape (it shows the punctuation), except inside a code span, where text is literal."""
+    cells, current, previous = [], "", ""
+    for ch in line.strip()[1:-1] + "|":
+        if ch == "|" and previous != "\\":
+            cells.append(current.strip())
+            current = ""
+        elif ch == "|":
+            current = current[:-1] + "|"
+        else:
+            current += ch
+        previous = ch
+    out = []
+    for cell in cells:
+        if len(cell) >= 2 and cell[0] == cell[-1] == "`":
+            out.append(("code", cell[1:-1]))
+            continue
+        text, i = "", 0
+        while i < len(cell):
+            if cell[i] == "\\" and i + 1 < len(cell) and cell[i + 1] in string.punctuation:
+                text += cell[i + 1]
+                i += 2
+            else:
+                text += cell[i]
+                i += 1
+        out.append(("text", text))
+    return out
+
+
+def test_the_catalog_table_keeps_backslashes_and_pipes():
+    """A definition with a backslash before a pipe, a doubled backslash and a lone one reads back
+    exactly (escaping only the pipe drops the backslash: "a\\|b" would show as "a|b"); so does an
+    id with a pipe and a backslash before a pipe, in its code span (where backslashes are
+    literal, so doubling them would show two)."""
+    hard = "P(A\\|m) and a\\|b, then c\\\\|d, a lone \\ and Q(A|m) (v1.4 §5.7)"
+    ident = "t|ab\\|le"
+    entry = ob.ObservableDef(
+        ident, "1", "snapshot", ("physical_code",), {}, hard, ob.code_parameters
+    )
+    ob.register(entry)
+    try:
+        line = next(r for r in ob.catalog_markdown().splitlines() if r.startswith("| `t\\|ab"))
+        cells = _gfm_row(line)
+        assert len(cells) == 6, line
+        assert cells[0] == ("code", ident) and cells[5] == ("text", hard)
+    finally:
+        del ob._REGISTRY[(ident, "1")]
 
 
 def test_register_get_and_versions():
@@ -224,6 +278,32 @@ def test_numerically_equal_parameters_have_one_key():
     assert ob.params_key("D_J", {"couplings": [1], "sizes": [1, 2]}) == ob.params_key(
         "D_J", {"couplings": [1.0], "sizes": np.array([1, 2])}
     )
+    # a range string of sizes is its expansion (Python slice semantics, no n): one key with the
+    # list, as in the engine and the manifest (which stores the expansion)
+    odd = ob.params_key("D_J", {"couplings": [0, 1.5], "sizes": [1, 3]})
+    assert json.loads(odd)["sizes"] == [1, 3]
+    for spelling in ("1:4:2", " 1 : 4 : 2 ", "1:5:2", (1, 3), np.array([1, 3])):
+        assert ob.params_key("D_J", {"couplings": [0, 1.5], "sizes": spelling}) == odd
+    for spelling, expansion in (("1:4", [1, 2, 3]), ("3:4", [3]), ("1:31:2", [*range(1, 31, 2)])):
+        params = {"couplings": [1], "e": 0.1, "sizes": spelling}
+        assert json.loads(ob.params_key("Phi_J", params))["sizes"] == expansion
+    assert json.loads(ob.params_key("D_J", {"couplings": [0], "sizes": None}))["sizes"] is None
+    for bad, message in (
+        ("1:4:0", "step must be positive"),
+        ("5:5", "at least one size"),
+        ("a:b", "range like"),
+        ("1-4", "range like"),
+        ("", "range like"),
+    ):
+        with pytest.raises(ValueError, match=f"parameter 'sizes' of observable 'D_J': .*{message}"):
+            ob.params_key("D_J", {"couplings": [0], "sizes": bad})
+    # the manifest's entry and the file's spelling of it key alike (the store's lookup by either)
+    raw = {"couplings": [0, 1.5], "sizes": "1:31:2", "samples": 8, "name": "ring"}
+    parsed = CorrelatedErasure.from_dict(raw, "observables.correlated_erasure[0]")
+    assert ob.params_key("D_J", parsed.to_dict()) == ob.params_key("D_J", raw)
+    assert ob.params_key("correlated_failure", parsed.to_dict()) == ob.params_key(
+        "correlated_failure", raw
+    )
     # the design's manifest block analysis.peak (sensitivity_z as JSON ints) gives the default key
     manifest_peak = {"rule": "plateau", "z": 1, "sensitivity_z": [0, 1, 2], "bootstrap": 200}
     assert ob.params_key("peak_D", manifest_peak) == ob.params_key("peak_D")
@@ -248,6 +328,14 @@ def test_numerically_equal_parameters_have_one_key():
     key = TrajectoryKey("ws-test", 4, "0", "0.1", 0, 0)
     with pytest.raises(ValueError, match="must be a number"):  # the seed refuses a string J too
         ob.region_seed(key, 0, 1, "1", "mean_leakage", "1")
+    # an integer beyond float64 is a ValueError naming the parameter, not an OverflowError
+    for huge in (10**400, -(10**400)):
+        with pytest.raises(ValueError, match="'J' of observable 'mean_leakage' must be finite"):
+            ob.params_key("mean_leakage", {"m": 3, "J": huge})
+        with pytest.raises(ValueError, match=r"'couplings' of observable 'D_J' \(item 1\)"):
+            ob.params_key("D_J", {"couplings": [0, huge]})
+        with pytest.raises(ValueError, match=r"\|J\| <= 1,000,000"):
+            ob.region_seed(key, 0, 1, huge, "mean_leakage", "1")
 
 
 def test_entries_declare_the_kind_of_every_parameter():
@@ -1260,6 +1348,10 @@ def test_region_seed_derivation():
     assert ob.region_seed(base, 2, 3, -0.0, "a", "1") == ob.region_seed(base, 2, 3, 0.0, "a", "1")
     assert ob.region_seed(base, 2, 3, 1, "a", "1") == ob.region_seed(base, 2, 3, 1.0, "a", "1")
     assert ob.region_seed(base, 2, 3, 0.5, "a", "1") != ob.region_seed(base, 2, 3, 0.5, "b", "1")
+    # the protocol is deliberately not a field (as in the graph and run seeds): F and P share
+    product = dataclasses.replace(base, protocol="P")
+    assert product != base and str(product) != str(base)
+    assert ob.region_seed(product, 2, 3, 0.5, "a", "1") == ob.region_seed(base, 2, 3, 0.5, "a", "1")
     for args, message in (
         ((base, -1, 0, 0.0, "a", "1"), "t must be at least 0"),
         ((base, 2**32, 0, 0.0, "a", "1"), r"below 2\*\*32"),
@@ -1324,6 +1416,8 @@ def test_bootstrap_seed_derivation_and_the_bootstrap_refuses_fresh_entropy():
     # distinct from the region (WSRO), graph (WSG1) and run (WSC1) domains in the first word
     assert ob.BOOTSTRAP_SEED_TAG not in {ob.REGION_SEED_TAG, 0x57534731, 0x57534331}
     assert ob.bootstrap_seed(str(base), "peak_D", "1") == ob.bootstrap_seed(base, "peak_D", "1")
+    product = dataclasses.replace(base, protocol="P")  # not a field, as in region_seed
+    assert ob.bootstrap_seed(product, "peak_D", "1") == ob.bootstrap_seed(base, "peak_D", "1")
     # the bootstrap: a recorded seed reproduces it; fresh entropy (None) and other types are refused
     t = np.array([0, 1, 2, 4])
     first = np.random.default_rng(1).integers(1, 7, size=(4, 30))
@@ -1444,25 +1538,33 @@ def test_a_registered_version_keeps_its_own_region_seeds():
 
 
 def test_mean_leakage_caps_the_chain_ess_at_the_sample_count(monkeypatch):
-    """Sokal's window can estimate tau_int < 1 (ESS > S) for a fast-mixing tempered chain; the
-    error must then be the independent one, s / sqrt(S), never smaller (Proposition 17)."""
-    n, m, coupling, samples = 9, 3, 0.0, 60
+    """Sokal's window can estimate tau_int < 1 (ESS > S) for a fast-mixing chain; the error
+    must then be the independent one, s / sqrt(S), never smaller (Proposition 17). Two real
+    cases: the swap chain at J = 0, which has one rung and so no replica exchange (untempered;
+    raw ESS 106.7 at S = 60), and a tempered chain at J = 0.5 (replica exchange on; raw ESS
+    91.8); then a diagnostic forced to report a huge ESS."""
+    n, m, samples = 9, 3, 60
     code, edges, _, _ = _engine_code(n, 0.2, 0.05, 18, seed=3)
     key = TrajectoryKey("ws-test", n, "0.2", "0.05", 0, 0)
-    seed = ob.region_seed(key, 18, m, coupling, "mean_leakage", "1")
-    drawn = erasures.sample_regions(edges, n, m, [coupling], samples, seed=list(seed))
-    infos = np.array([code.lost_information(r) for r in drawn.regions[0]], dtype=float)
-    raw = erasures.chain_diagnostics(infos)["ess"]
-    assert drawn.method == "chain" and raw > samples  # the case: the uncapped ESS exceeds S
-    est = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
-    assert est.method == "chain" and est.value == infos.mean()
-    assert est.ess == samples
-    assert abs(est.se - math.sqrt(infos.var(ddof=1) / samples)) < 1e-12
+    estimates = {}
+    for coupling, tempered in ((0.0, False), (0.5, True)):
+        seed = ob.region_seed(key, 18, m, coupling, "mean_leakage", "1")
+        drawn = erasures.sample_regions(edges, n, m, [coupling], samples, seed=list(seed))
+        infos = np.array([code.lost_information(r) for r in drawn.regions[0]], dtype=float)
+        raw = erasures.chain_diagnostics(infos)["ess"]
+        # the case: the uncapped ESS exceeds S (asserted, so a changed stream fails loudly)
+        assert drawn.method == "chain" and drawn.tempering is tempered and raw > samples
+        est = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
+        assert est.method == "chain" and est.tempering is tempered and est.value == infos.mean()
+        assert est.ess == samples
+        assert abs(est.se - math.sqrt(infos.var(ddof=1) / samples)) < 1e-12
+        estimates[coupling] = est
     # whatever the diagnostic reports, the cap holds
     real = erasures.chain_diagnostics
     monkeypatch.setattr(erasures, "chain_diagnostics", lambda series: {**real(series), "ess": 1e9})
-    capped = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
-    assert capped.ess == samples and capped.se == est.se
+    for coupling, est in estimates.items():
+        capped = ob.mean_leakage(code, edges, m, coupling, key=key, t=18, samples=samples)
+        assert capped.ess == samples and capped.se == est.se
 
 
 def test_mean_leakage_matches_the_exact_law_with_exact_samples(rng):
@@ -1656,22 +1758,72 @@ def test_compute_from_stored_snapshots_matches_the_engine_probes():
             assert conn.method == "enumeration" and conn.se == 0.0
 
 
+def _key(n, protocol="F"):
+    return TrajectoryKey("ws-test", n, "0.2", "0.1", 0, 0, 0, protocol)
+
+
 def test_a_snapshot_is_checked_against_its_n():
     """A stored code or tableau paired with another n is refused, not computed into plausible
-    wrong values (k, rate, rank, half-cut entropy all depend on n)."""
+    wrong values (k, rate, rank, half-cut entropy all depend on n). With the trajectory's key
+    the joint width is exact for its protocol (2n for F, n for P); without one, any width a
+    joint state of n system qubits can have is accepted."""
     n = 6
     result = _run(n, 0.2, 0.1, n, [mipt.tableau_snapshot(checkpoints=[n])], graphs_count=1)
     tableau, code = result.tableau(0, 0), result.code(0, 0)
     assert tableau.num_qubits == 2 * n and code.num_qubits == n
+    keyed = ob.SnapshotInput(n, n, key=_key(n), tableau=tableau)
+    assert ob.compute("k", keyed).value == code.num_logical
     assert ob.compute("k", ob.SnapshotInput(n, n, tableau=tableau)).value == code.num_logical
+    # with a key: an F snapshot of n = 6 under any other n, or under a P key, is refused (n' = 2n
+    # and n' = n + 1, the widths the unkeyed check cannot tell apart, included)
+    for wrong in (4, 5, 7, 8, 11, 12):
+        with pytest.raises(
+            ValueError, match=f"protocol-F snapshot of n = {wrong} .* has {2 * wrong}"
+        ):
+            ob.SnapshotInput(wrong, n, key=_key(wrong), tableau=tableau)
+    for wrong in (6, 11):
+        with pytest.raises(ValueError, match=f"protocol-P snapshot of n = {wrong} .* has {wrong}"):
+            ob.SnapshotInput(wrong, n, key=_key(wrong, "P"), tableau=tableau)
+    # without a key: n, n + 1 or 2n
     for wrong in (4, 5, 7, 8):  # 12 qubits are 2n only at n = 6, n + 1 at 11 and n at 12
         with pytest.raises(ValueError, match="the joint tableau has 12 qubits"):
             ob.SnapshotInput(wrong, n, tableau=tableau)
     for other in (11, 12):  # one reference, no reference: widths a joint state can have
         ob.SnapshotInput(other, n, tableau=tableau)
+    # a P snapshot (the pure n-qubit state): k = 0; refused under an F key of its n or of n - 1
+    m = 8
+    pure = mipt.MonitoredCircuit(
+        num_system=m,
+        edges=[_edges(m, 0.2, 0)],
+        layers=4,
+        measurement_rate=0.1,
+        reference="none",
+        schedule="random_edges",
+        checkpoints=[4],
+        probes=[mipt.tableau_snapshot(checkpoints=[4])],
+    ).run(seed=3)
+    state = pure.tableau(0, 0)
+    assert state.num_qubits == m
+    p_snap = ob.SnapshotInput(m, 4, key=_key(m, "P"), tableau=state)
+    assert ob.compute("k", p_snap).value == 0.0
+    for wrong in (m, m - 1):
+        with pytest.raises(ValueError, match=f"protocol-F snapshot of n = {wrong}"):
+            ob.SnapshotInput(wrong, 4, key=_key(wrong), tableau=state)
+    # what a width cannot see: an F state of n = 4 has the width of this P state of n = 8
+    ob.SnapshotInput(m // 2, 4, key=_key(m // 2), tableau=state)
+    # the code: exactly n qubits, with or without a key
     for wrong in (5, 8):
         with pytest.raises(ValueError, match=f"the code has 6 qubits, not num_system = {wrong}"):
             ob.SnapshotInput(wrong, n, code=code)
+        with pytest.raises(ValueError, match=f"the code has 6 qubits, not num_system = {wrong}"):
+            ob.SnapshotInput(wrong, n, key=_key(wrong), code=code)
+    # the graph: endpoints in 0..n-1, checked when the snapshot is built and normalized once
+    with pytest.raises(ValueError, match=r"edges must be .*\(endpoints 0\.\.5\): edge endpoint 7"):
+        ob.SnapshotInput(n, n, code=code, edges=graphs.cycle(8))
+    with pytest.raises(ValueError, match="self-loops"):
+        ob.SnapshotInput(n, n, code=code, edges=[(0, 1), (2, 2)])
+    snap = ob.SnapshotInput(n, n, code=code, edges=[(1, 0), (2, 1), (0, 1)])
+    assert snap.edges.tolist() == [[0, 1], [1, 2]] and snap.graph().tolist() == [[0, 1], [1, 2]]
     with pytest.raises(TypeError, match="StabilizerCode"):
         ob.SnapshotInput(n, n, code="XXXXXX")
     with pytest.raises(TypeError, match="PhaseFreeTableau"):
