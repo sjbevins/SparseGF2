@@ -500,6 +500,81 @@ crosscheck.compare_measurements(circuit, seed=0)
   (4096) nodes. In Watts–Strogatz graphs `k` is the total degree (k = 4: two neighbors
   per side).
 
+## The Watts–Strogatz study: a store of trajectories
+
+`sparsegf2.study` runs the study of `docs/misc/watts_strogatz_study_spec_v1_4.md`: a grid of
+conditions `(n, beta, p)` on Watts–Strogatz graphs, every trajectory stored with its `k_t` at
+every layer, exact first passages, phase-free tableaux at checkpoints and its observables, in
+one SQLite **store** (a directory). The same functions are the CLI's `sparsegf2 study`
+commands, the Python `sparsegf2.study.api` and, for the agent-facing part, the MCP `study_*`
+tools. `docs/study/09-cli-api-and-plots.md` lists every result field; `docs/study/02` the
+manifest; `docs/study/04` the observables.
+
+The workflow (shell; the MCP tool in brackets):
+
+```sh
+sparsegf2 study init manifest.json studies/ws1       # a new store; nothing runs
+sparsegf2 study plan studies/ws1 --benchmark         # [study_plan] units, time, storage, memory
+sparsegf2 study run studies/ws1 --max-seconds 28800  # [study_start_run + job_status] resumable
+sparsegf2 study status studies/ws1 --json            # [study_status] done, left, failed units
+sparsegf2 study aggregate studies/ws1 first_passage --ell 0 1 --json   # [study_aggregate]
+sparsegf2 study fss studies/ws1 --beta 0.1 --observable first_passage --ell 1 --out fits  # [study_fss]
+sparsegf2 study export studies/ws1 exported/         # CSV and NPZ tables
+sparsegf2 study verify studies/ws1 --sample 16       # replay a sample, compare digests
+```
+
+A manifest (every field: `docs/study/02-identity-seeds-and-manifest.md`):
+
+```json
+{"experiment_id": "ws1", "label": "exploratory",
+ "conditions": [{"n": [16, 24, 32], "beta": ["0", "0.1"], "p": ["0.1", "0.15", "0.2"]}],
+ "depth": {"layers": {"per_n": 8}, "checkpoints": {"count": 12}},
+ "trials": {"graphs": 20, "circuits_per_graph": 2},
+ "seeds": {"master_graph_seed": 17, "master_circuit_seed": 29},
+ "observables": {"tableau_snapshots": true, "contiguous_distance": true,
+                 "uniform_erasure": {"samples": 200, "exact_budget": 5000}}}
+```
+
+* **Runs** stop only between units (each unit is one engine call stored in one transaction),
+  on `max_units`, `max_seconds` or `cancel_job`; running again resumes and gives exactly the
+  records of an uninterrupted run. A study job ends `completed` (nothing left), `stopped` (a
+  budget ended it: run again), `cancelled` or `failed`. One writer per store; reading
+  commands work while a run writes. `plan` without a measured factor has
+  `estimated_seconds: null`: run `--benchmark` (or a few units) before trusting a time.
+* **A tableau:** `sparsegf2 study tableau STORE --n 16 --beta 0.1 --p 0.15 --g 3 --c 1 --t 8`
+  (`[study_tableau]`) gives the stored joint state's rank, `k`, digests and, up to 32 qubits,
+  its generators; `--replay` reruns the trajectory to any depth and checks it against the store;
+  `--out FILE` writes it (`.npz`, or the canonical `SGF2RS1` bytes).
+* **Adding an observable later:** a retrospective one (`k`, `d_cyc`, `d_conn`,
+  `half_cut_entropy`, `mean_leakage`) is computed from the stored snapshots, without simulating:
+  `sparsegf2 study compute STORE half_cut_entropy`. Anything else (a probe, more depths, more
+  rates, graphs or circuits, a larger horizon) is a new manifest revision:
+  `sparsegf2 study extend STORE manifest_v2.json`, then `run`; the store refuses a revision that
+  changes seeds, the gate mode, the stride or a recorded observable's settings, naming the change.
+
+Pitfalls of the study, on top of those above:
+
+* **Censoring.** `tau_ell` not reached by `T_max` is censored, never a number. `aggregate` gives
+  the censored fraction, the Kaplan–Meier median and the restricted mean `E[min(tau, T_max)]`
+  (a lower bound), and `mean` only when nothing is censored; `fss` excludes a censored point and
+  says why. Raise `T_max` with `extend` rather than averaging what was observed.
+* **Graph weighting.** Every estimate gives each graph the same weight and its error comes from
+  the spread between graphs (v1.4 §6.3, §6.4); 20 graphs of 2 circuits is not 40 independent
+  samples. Do not average stored rows yourself.
+* **Paired rates.** The rates of a condition share graphs, gates and mask uniforms, so their
+  values are correlated: compare two rates with `aggregate(..., paired_rates=[p1, p2])`, not
+  by two independent error bars.
+* **Peaks.** `T*` at the horizon is a lower bound: `aggregate` withholds the peak means under
+  the default `horizon_policy="refuse"`; choose `exclude` or `include` and say which. The peak
+  rule's plateau width is `plateau_z` (manifest `analysis.peak.z`), not the dynamical `z` of
+  `fss`.
+* **Never a fabricated value.** A missing record is an error, an undefined value (raw `d_cyc` at
+  `k = 0`) is refused unless you name a policy (`field="zero_extended"` or `nan_policy="omit"`),
+  and every `fss` result is labeled an unverified ansatz; report what the tools return, with
+  their errors and exclusions.
+* **Threads.** Results are identical at any thread count; on a machine other jobs keep busy,
+  `--threads 1` can be faster than all of them.
+
 ## Where things are
 
 | Path | What |
@@ -515,6 +590,8 @@ crosscheck.compare_measurements(circuit, seed=0)
 | `src/sparsegf2/graphs.py` | graph families, statistics, graph files (`.json`, `.npz`) |
 | `src/sparsegf2/crosscheck.py` | tick-by-tick comparison of any circuit with Stim |
 | `src/sparsegf2/observables.py` | entanglement, code and erasure observables of one state |
+| `src/sparsegf2/study/` | the Watts–Strogatz study: manifest, store, runner, observables, statistics, scaling fits; `api.py` its JSON service layer, `plots.py` its figures |
+| `docs/study/` | one document per part of the study, from definition to code (`09-cli-api-and-plots.md` for the commands and tools) |
 | `docs/LLM_INTERFACE.md` | full CLI and MCP reference |
 | `docs/LITERATURE.md` | which observables the literature uses, and why |
 | `docs/DESIGN.md` | architecture and the reasons behind it |
