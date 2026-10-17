@@ -13,6 +13,7 @@ import json
 import zipfile
 from decimal import Decimal, localcontext
 
+import numba
 import numpy as np
 import pytest
 
@@ -244,7 +245,12 @@ def test_chunked_and_interrupted_runs_equal_one_run(reference, tmp_path):
 
 def test_results_do_not_depend_on_the_thread_count(reference, tmp_path):
     _, expected = reference
-    for threads in (1, 3):
+    most = numba.config.NUMBA_NUM_THREADS
+    if most < 2:
+        pytest.skip("this process may use one thread only: there is no other count to compare")
+    counts = [1, min(3, most)]  # what run(num_threads=...) uses: at most NUMBA_NUM_THREADS
+    assert len({*counts, numba.get_num_threads()}) >= 2  # the reference ran on the default
+    for threads in counts:
         directory = tmp_path / f"t{threads}"
         sweep.run(SPEC, directory, num_threads=threads, chunk_size=3)
         for key, result in every_condition(directory).items():
@@ -603,3 +609,56 @@ def test_the_records_carry_the_doubles_of_beta_and_p(reference):
     records = json.loads((directory / "graphs" / "n8_beta0.2.json").read_text())
     assert records["beta_float64"] == (0.2).hex()
     assert all(r["beta_float64"] == (0.2).hex() for r in records["graphs"])
+
+
+def test_a_stray_temporary_is_deleted_and_changes_nothing(reference, tmp_path):
+    _, expected = reference
+    directory = tmp_path / "stray"
+    sweep.run(SPEC, directory)
+    folder = directory / "n6_beta0_p0.1"
+    stray = folder / "result-000000000004.npz.4242.deadbeef.tmp.npz"  # a killed writer's
+    stray.write_bytes(b"half a part")
+    assert sweep.status(directory)["saved"] == 32  # never read as a part
+    assert sweep.run(SPEC, directory)["ran"] == 0
+    assert not stray.exists()
+    for key, result in every_condition(directory).items():
+        assert_same(result, expected[key])
+
+
+def test_growing_by_a_size_keeps_the_saved_one(reference, tmp_path):
+    _, expected = reference
+    directory = tmp_path / "sizes"
+    sweep.run(spec_with(sizes=[6]), directory)
+    before = every_condition(directory)
+    out = sweep.run(SPEC, directory)  # adds n = 8
+    assert out["complete"] and out["ran"] == 4 * 4
+    after = every_condition(directory)
+    for key, result in before.items():
+        assert_same(after[key], result)
+    for key, result in expected.items():  # equal to the sweep run in one go
+        assert_same(after[key], result)
+
+
+def test_a_sweep_that_stops_at_purification_grows_and_replays(tmp_path):
+    stopping = spec_with(sizes=[6], betas=["0.2"], rates=["0.3", "0.6"], stop_when_purified=True)
+    grown = {**stopping, "graphs": 3}
+    directory, fresh = tmp_path / "grown", tmp_path / "fresh"
+    sweep.run(stopping, directory)
+    sweep.run(grown, directory)
+    sweep.run(grown, fresh)
+    stopped = 0
+    for p in ("0.3", "0.6"):
+        result = sweep.load(directory, 6, "0.2", p)
+        assert_same(result, sweep.load(fresh, 6, "0.2", p))
+        layers = result.layers("tableau_snapshot")
+        for row, u in enumerate(result.trajectories.tolist()):
+            tau = int(result.purification_layer[row])
+            digests = sweep.verify(directory, 6, "0.2", p, u)["tableau_digests"]
+            assert sweep.verify(directory, 6, "0.2", p, u)["identical"]
+            for e, layer in enumerate(layers.tolist()):
+                assert (digests[e] is None) == (0 <= tau < layer)  # nothing saved after the stop
+            if 0 <= tau < layers[-1]:
+                stopped += 1
+                k = result.values["code_dimension"][row]
+                assert k[tau] == 0 and np.all(k[tau:] == 0)  # exact values after the stop
+    assert stopped > 0  # the test saw trajectories stop before their last checkpoint
