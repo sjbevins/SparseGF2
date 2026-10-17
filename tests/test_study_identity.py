@@ -997,7 +997,8 @@ def test_version_record_names_every_version_and_the_native_contract():
     assert record["circuit_seed_tag"] == ident.CIRCUIT_SEED_TAG == 0x57534331
     assert record["outcome_seed_tag"] == ident.OUTCOME_SEED_TAG == 0x57534F31
     assert ident.version_record("none")["dynamics"] == ident.PRODUCT_DYNAMICS_VERSION
+    assert ident.version_record("single")["dynamics"] == ident.SINGLE_REFERENCE_DYNAMICS_VERSION
     with pytest.raises(ValueError, match="picture"):
-        ident.version_record("single")
+        ident.version_record("pure")
     assert all(isinstance(v, (str, int)) and v != "" for v in record.values())
     json.dumps(record)

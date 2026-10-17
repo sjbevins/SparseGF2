@@ -51,8 +51,9 @@ outside `[0, 2^32)` and per-n tables that miss a size are refused with a message
 probe (`mipt.py:MonitoredCircuit.__post_init__`, `api.py:_build_probe`) runs before anything
 is written. Optional keys and their defaults: `stride` 1024, `checkpoints` `{"count": 12}`,
 `probes` `[{"kind": "code_dimension", "checkpoints": "every_layer"}, {"kind":
-"tableau_snapshot"}]`, `picture` `"purification"` (or `"none"`: the system alone, from
-`|0...0>`; then name the probes, since `code_dimension` needs a reference),
+"tableau_snapshot"}]`, `picture` `"purification"` (or `"single"`: one reference qubit
+Bell-paired with a system qubit drawn per trajectory; or `"none"`: the system alone, from
+`|0...0>`, and then name the probes, since `code_dimension` needs a reference),
 `stop_when_purified` `false`. `SweepSpec.to_json` is the canonical form (defaults written out,
 per-size values resolved, tokens as canonical strings) and `SweepSpec.digest` its SHA-256
 (`study/identity.py:json_digest`): two spellings of one sweep have one digest.
@@ -69,7 +70,7 @@ summary of all its parts, through `sweep.load`; above the memory limit it refuse
 ## 2. The phase-free state and its update rules
 
 **Representation.** A trajectory on `N = n + n_ref` qubits (`n_ref = n` in the purification
-picture, `0` for `"none"`) holds one `uint64` array `tab` of shape `(2N + 1, ceil(N/64))`:
+picture, `1` for `"single"`, `0` for `"none"`) holds one `uint64` array `tab` of shape `(2N + 1, ceil(N/64))`:
 `tab[2q]` is the X column of qubit `q` (bit `r` set iff stabilizer `r` has X or Y on `q`),
 `tab[2q+1]` its Z column; the sign row is never read in phase-free mode, and there are no
 destabilizers (`_kernel/tableau.py`, module docstring; `_kernel/ensemble.py:run_ensemble` calls
@@ -79,7 +80,9 @@ over GF(2) of the `N` rows `(x_0..x_{N-1}, z_0..z_{N-1})`, an isotropic subspace
 
 **Start.** `_kernel/ensemble.py:_setup`: from `|0...0>` (`init_zero`), for the purification
 picture `H` on system qubit `i` then `CX(i, n + i)` for `i = 0..n-1`: `n` Bell pairs, system
-qubit `i` with reference `n + i`.
+qubit `i` with reference `n + i`; for `"single"`, `H` on the partner `a` then `CX(a, n)`, with
+`a = next_below(n)` the first draw of the trajectory's stream (`run_ensemble`), before any
+gate, so it does not depend on `p` either.
 
 **A gate is its symplectic matrix.** A two-qubit Clifford has the index `j = 16 s + b`
 (`clifford.py`, module docstring): `s` is the position of its symplectic matrix `M` in the
@@ -143,6 +146,12 @@ column and span every element of `S` that is (an element zero on the reference i
 combination of reduced rows; the smallest pivot used would be a reference column if any row
 with a reference pivot were used, and it is not). Restricted to the system they span `S_phys`
 of dimension `r_t`, and `k_t = n - r_t` (`physical_code(n).num_logical`) equals `S(R)`.
+
+**Checked against Stim.** `tests/test_sweep.py::test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits`
+runs every saved trajectory of two sweeps (purification and single pictures, `n = 7, 8`,
+`beta = 0, 0.3`, two rates) in Stim from its exported circuit (section 14) and finds the same
+canonical joint state, signs dropped, at every saved checkpoint and the same `k` at every
+layer.
 
 ## 3. The laws as generated
 

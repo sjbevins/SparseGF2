@@ -17,7 +17,9 @@ import pytest
 
 import _ws_reference as wsref
 import sparsegf2
-from sparsegf2 import api, cli, graphs, mipt
+from _rowspace_oracle import canonical, int_rows, stim_tick_states
+from _rowspace_oracle import rank as oracle_rank
+from sparsegf2 import PhaseFreeTableau, api, cli, graphs, mipt
 from sparsegf2.study import identity as ident
 from sparsegf2.study import sweep
 from sparsegf2.study.identity import Token
@@ -139,7 +141,7 @@ def test_the_engine_spec_is_the_protocol_of_v1_4():
         ({"master_graph_seed": 2**32}, "master_graph_seed"),
         ({"probes": [{"kind": "nope"}]}, "unknown probe kind"),
         ({"probes": [{"kind": "code_dimension"}] * 2}, "unique"),
-        ({"picture": "single"}, "picture"),
+        ({"picture": "pure"}, "picture"),
         ({"picture": "none", "stop_when_purified": True}, "needs a reference"),
     ],
 )
@@ -474,3 +476,43 @@ def test_load_results_reads_a_sweep_and_its_conditions(reference, monkeypatch):
     monkeypatch.setattr(api, "MAX_RESULT_GB", 1e-9)
     with pytest.raises(ValueError, match=r"memory limit.*sweep\.parts"):
         api.load_results(str(directory / first["path"]))
+
+
+# ---------------------------------------------------------------------------
+# Stim, on the trajectories of real sweeps
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("picture", ["purification", "single"])
+def test_saved_states_and_code_dimensions_equal_stim_on_the_exported_circuits(picture, tmp_path):
+    """Every saved trajectory of a sweep (odd and even n, beta 0 and 0.3, two rates), its
+    circuit exported and run in Stim: the canonical joint state (signs dropped) at every saved
+    checkpoint, and k = S(R) = rank of the reference columns - |R| at every layer, from Stim's
+    state by the independent elimination of tests/_rowspace_oracle.py."""
+    spec = spec_with(
+        sizes=[7, 8], betas=["0", "0.3"], graphs=2, circuits_per_graph=1, picture=picture
+    )
+    directory = tmp_path / picture
+    sweep.run(spec, directory)
+    sweep_spec = SweepSpec.from_json(spec)
+    checked = 0
+    for n, beta, p in sweep_spec.conditions():
+        res = sweep.load(directory, n, beta, p)
+        _, collection, _ = graphs.load(sweep._graph_file(directory, n, beta))
+        mc = sweep_spec.monitored_circuit(n, beta, p, collection)
+        num_qubits = mc.num_qubits  # 2n, or n + 1 with a single reference
+        reference = list(range(n, num_qubits))
+        columns = reference + [num_qubits + q for q in reference]
+        saved_layers = res.layers("tableau_snapshot").tolist()
+        for row, u in enumerate(res.trajectories.tolist()):
+            circuit = mc.circuit(u, seed=list(sweep_spec.run_seed(n, beta))).to_stim()
+            states = stim_tick_states(circuit, num_qubits, seed=u)
+            assert len(states) == sweep_spec.layers[n] + 1
+            for e, layer in enumerate(saved_layers):
+                tab = res.tableau(row, e)
+                np.testing.assert_array_equal(tab.canonical(), canonical(states[layer]))
+                assert tab.digest() == PhaseFreeTableau(states[layer]).digest()
+            k = [oracle_rank(int_rows(state[:, columns])) - len(reference) for state in states]
+            assert res.values["code_dimension"][row].tolist() == k
+            checked += 1
+    assert checked == 8 * 2

@@ -739,8 +739,8 @@ tokens such as `"0.1"` or `"1/3"`; `rates` may be a per-size table), `graphs` an
 `circuits_per_graph` (ints or per-size tables), `layers` (`{"per_n": a}` or a per-size table),
 `master_graph_seed`, `master_circuit_seed`, and optionally `stride` (1024), `checkpoints`
 (`{"count": 12}`, or `{"list": [...]}`), `probes` (engine JSON; default `code_dimension` at
-every layer and `tableau_snapshot` at the checkpoints), `picture` (`"purification"` or
-`"none"`) and `stop_when_purified` (false). Errors start `sweep spec:` and name the field.
+every layer and `tableau_snapshot` at the checkpoints), `picture` (`"purification"`,
+`"single"` or `"none"`) and `stop_when_purified` (false). Errors start `sweep spec:` and name the field.
 Running again resumes; a spec that adds sizes, betas, rates, graphs or circuits grows the
 sweep without changing a saved trajectory, and one that would change saved data is refused.
 `sweep replay` prints `identical` and the saved tableau digests, and exits with 1 when the

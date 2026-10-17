@@ -54,7 +54,7 @@ DEFAULT_PROBES = (
 )
 DEFAULT_STRIDE = 1024
 DEFAULT_CHECKPOINTS = {"count": 12}
-PICTURES = ("purification", "none")
+PICTURES = ("purification", "single", "none")
 #: The largest result one saved part holds in memory (``api._result_bytes``).
 PART_BYTES = 2**29
 _PART = re.compile(r"result-(\d{12})\.npz")
@@ -316,12 +316,14 @@ class SweepSpec:
         graph: the protocol of v1.4 §8.1 and the probes with the sparse checkpoints filled in."""
         Token.parse(beta, what="beta")
         sparse = list(self.checkpoints_at(n))
+        partner = {"reference_partner": "random"} if self.picture == "single" else {}
         return {
             "num_system": n,
             "circuits_per_graph": self.stride,
             "layers": self.layers[n],
             "measurement_rate": Token.parse(p, what="p").float64,
             "reference": self.picture,
+            **partner,
             "schedule": "random_edges",
             "gates_per_layer": n // 2,
             "random_orientation": False,

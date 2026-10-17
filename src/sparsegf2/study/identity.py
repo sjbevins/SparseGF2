@@ -66,6 +66,7 @@ __all__ = [
     "ORIGINAL_EDGE_ORDER",
     "OUTCOME_SEED_TAG",
     "PRODUCT_DYNAMICS_VERSION",
+    "SINGLE_REFERENCE_DYNAMICS_VERSION",
     "ROWSPACE_FORMAT_VERSION",
     "SEED_LIMIT",
     "GraphRecord",
@@ -112,6 +113,10 @@ DYNAMICS_VERSION = "monitored-random-edges-purification-phase-free-1"
 #: qubits, without a reference (the picture ``"none"`` of a sweep).
 PRODUCT_DYNAMICS_VERSION = "monitored-random-edges-product-state-phase-free-1"
 
+#: The same gates and measurements with one reference qubit Bell-paired with a system qubit
+#: drawn uniformly per trajectory (the first draw of its stream; the picture ``"single"``).
+SINGLE_REFERENCE_DYNAMICS_VERSION = "monitored-random-edges-single-reference-phase-free-1"
+
 #: The canonical phase-free row-space serialization (header ``b"SGF2RS1\0"``,
 #: :meth:`sparsegf2.tableau.PhaseFreeTableau.to_bytes`).
 ROWSPACE_FORMAT_VERSION = "SGF2RS1"
@@ -143,14 +148,19 @@ _WORD_MASK = SEED_LIMIT - 1
 #: The two ways the circuit seed depends on the measurement rate (:func:`run_seed`).
 GATE_MODES = ("shared", "independent")
 
-_DYNAMICS = {"purification": DYNAMICS_VERSION, "none": PRODUCT_DYNAMICS_VERSION}
+_DYNAMICS = {
+    "purification": DYNAMICS_VERSION,
+    "single": SINGLE_REFERENCE_DYNAMICS_VERSION,
+    "none": PRODUCT_DYNAMICS_VERSION,
+}
 
 
 def version_record(picture: str = "purification") -> dict[str, Any]:
     """Every version a sweep's records depend on, as a plain dictionary.
 
     The keys are the lower-case names of the constants in this module (``dynamics`` is
-    :data:`DYNAMICS_VERSION` for the picture ``"purification"`` and
+    :data:`DYNAMICS_VERSION` for the picture ``"purification"``,
+    :data:`SINGLE_REFERENCE_DYNAMICS_VERSION` for ``"single"`` and
     :data:`PRODUCT_DYNAMICS_VERSION` for ``"none"``), the native ``mipt.RANDOMNESS_CONTRACT``
     and the package version.
     """
