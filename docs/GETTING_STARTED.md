@@ -121,7 +121,8 @@ right setting on a machine you have to yourself. On a shared machine, or
 when running several jobs side by side, set `NUMBA_NUM_THREADS` to each job's
 share of the logical processors. The `omp` and `tbb` layers are safe to call
 from several Python threads at once (as the MCP server's background jobs do);
-`workqueue` is not.
+`workqueue` is not: it cannot run two parallel regions at once, so under it
+the package's parallel kernels, called from several threads, take turns.
 
 ---
 

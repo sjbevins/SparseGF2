@@ -23,11 +23,14 @@ run them at once. :func:`rref_batch`, :func:`physical_rows_batch` and
 :func:`pack_msb_first_batch` work on many row spaces in one call, in parallel over them
 (``prange``, every Numba thread): the canonicalization and serialization of a whole
 evaluation of snapshots (:meth:`sparsegf2.tableau.PhaseFreeTableau.from_words_batch`,
-:func:`sparsegf2.tableau.physical_tableaux`, :func:`sparsegf2.tableau.to_bytes_batch`). They
-keep the GIL, as the engine's parallel kernels do: two parallel launches from two Python
-threads at once abort the process under Numba's ``workqueue`` threading layer, and holding the
-GIL makes such calls take turns. Each item of a batch goes through the same :func:`rref` and
-:func:`pack_msb_first` as one row space alone, so the results are the same bit for bit.
+:func:`sparsegf2.tableau.physical_tableaux`, :func:`sparsegf2.tableau.to_bytes_batch`). Like
+the engine's parallel kernels they run without the GIL: Numba releases it while a parallel
+region runs, whatever ``nogil`` says. Two parallel regions launched from two Python threads at
+once run side by side under Numba's ``omp`` and ``tbb`` threading layers and terminate the
+process under ``workqueue``, so the callers launch them inside
+:func:`sparsegf2._parallel.threads`, which makes the launches take turns under ``workqueue``.
+Each item of a batch goes through the same :func:`rref` and :func:`pack_msb_first` as one row
+space alone, so the results are the same bit for bit.
 """
 
 from __future__ import annotations

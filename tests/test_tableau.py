@@ -263,8 +263,10 @@ def test_rref_kernel_for_any_column_order(n, rng):
 def test_the_kernels_release_the_gil():
     """The one-row-space kernels run on other threads while Python runs (a thread pool, or
     the store's hashing and compression): compiled with nogil. The batch kernels run on every
-    Numba thread (parallel) and keep the GIL, so that two Python threads calling them take
-    turns (concurrent parallel launches abort under Numba's workqueue threading layer)."""
+    Numba thread (parallel). Numba releases the GIL while a parallel region runs, whatever
+    nogil says, so the GIL cannot make two launches take turns; under the workqueue layer,
+    which cannot run two at once, ``_parallel.threads`` does
+    (tests/test_parallel_launches.py runs them from several threads under that layer)."""
     if numba.config.DISABLE_JIT:
         pytest.skip("the kernels run as Python without the JIT")
     for kernel in (
@@ -281,7 +283,6 @@ def test_the_kernels_release_the_gil():
         rowspace.pack_msb_first_batch,
     ):
         assert kernel.targetoptions.get("parallel") is True, kernel.__name__
-        assert not kernel.targetoptions.get("nogil"), kernel.__name__
 
 
 def random_items(rng, n: int, items: int, rows: int):

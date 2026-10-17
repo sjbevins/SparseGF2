@@ -469,8 +469,8 @@ def test_after_a_stop_nothing_is_saved():
 
 @pytest.mark.parametrize("n", [6, 40])
 def test_tableaux_of_an_evaluation_are_the_tableaux_one_by_one(n):
-    """EnsembleResult.tableaux and physical_tableaux (in parallel, without the GIL) give
-    exactly tableau(t, e) and its physical code, None where a stopped row saved nothing."""
+    """EnsembleResult.tableaux and physical_tableaux (parallel kernels on every Numba thread)
+    give exactly tableau(t, e) and its physical code, None where a stopped row saved nothing."""
     spec = mipt.MonitoredCircuit(
         num_system=n,
         edges=graphs.cycle(n),

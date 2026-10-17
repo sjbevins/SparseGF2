@@ -41,6 +41,9 @@ Many row spaces are canonicalized at once, in parallel over them, by
 :meth:`PhaseFreeTableau.from_words_batch` (which :meth:`sparsegf2.mipt.EnsembleResult.tableaux`
 uses for a whole evaluation of snapshots) and :func:`physical_tableaux`, and serialized at once
 by :func:`to_bytes_batch`; they give exactly the objects and bytes of the one-at-a-time methods.
+They may be called from several Python threads: their parallel kernels run side by side under
+Numba's ``omp`` and ``tbb`` threading layers and take turns under ``workqueue``, which cannot
+run two at once (:func:`sparsegf2._parallel.threads`, as for the ensemble engine).
 """
 
 from __future__ import annotations
