@@ -63,6 +63,8 @@ __all__ = [
     "GRAPH_GENERATOR_VERSION",
     "GRAPH_SEED_TAG",
     "ORIGINAL_EDGE_ORDER",
+    "PRODUCT_DYNAMICS_VERSION",
+    "PROTOCOLS",
     "ROWSPACE_FORMAT_VERSION",
     "SEED_LIMIT",
     "STORE_SCHEMA_VERSION",
@@ -72,7 +74,9 @@ __all__ = [
     "build_graph",
     "canonical_json",
     "check_experiment_id",
+    "check_protocol",
     "circulant_edges",
+    "dynamics_version",
     "edge_digest",
     "graph_seed",
     "json_digest",
@@ -106,6 +110,17 @@ CLIFFORD_ENUMERATION_VERSION = "sp4-sorted-rowmajor-x16-signs-1"
 #: layer on uniformly drawn edges with uniformly drawn Cliffords, then Z measurements with
 #: probability p per site, phase-free (v1.4 §3, §4, §9).
 DYNAMICS_VERSION = "monitored-random-edges-purification-phase-free-1"
+
+#: The same gates and measurements started from the pure product state |0...0> of the n system
+#: qubits, without a reference (protocol ``"P"`` of design §12; the queued study v0.3 §2).
+PRODUCT_DYNAMICS_VERSION = "monitored-random-edges-product-state-phase-free-1"
+
+#: The two initial conditions of a trajectory (design §12): ``"F"``, the full reference of v1.4
+#: (n Bell pairs between the system and n reference qubits, ``reference="purification"``), and
+#: ``"P"``, the pure product state |0...0> of the system alone (``reference="none"``). Both draw
+#: the same gates and measurement masks from the same stream for the same graph, run seed and
+#: stream index, so a P trajectory replays its F partner's gate and mask history.
+PROTOCOLS = ("F", "P")
 
 #: The canonical phase-free row-space serialization (header ``b"SGF2RS1\0"``, design §2).
 ROWSPACE_FORMAT_VERSION = "SGF2RS1"
@@ -358,6 +373,22 @@ def check_experiment_id(value: Any, what: str = "experiment_id") -> str:
     return value
 
 
+def check_protocol(value: Any, what: str = "protocol") -> str:
+    """``value`` if it names a protocol of :data:`PROTOCOLS` (``"F"`` or ``"P"``), else ``ValueError``."""
+    if not isinstance(value, str) or value not in PROTOCOLS:
+        raise ValueError(
+            f"{what} must be one of {list(PROTOCOLS)} ('F': full reference, the v1.4 protocol; "
+            f"'P': the pure product state without a reference), got {value!r}"
+        )
+    return value
+
+
+def dynamics_version(protocol: str = "F") -> str:
+    """The dynamics version of a protocol: :data:`DYNAMICS_VERSION` for ``"F"``,
+    :data:`PRODUCT_DYNAMICS_VERSION` for ``"P"``."""
+    return DYNAMICS_VERSION if check_protocol(protocol) == "F" else PRODUCT_DYNAMICS_VERSION
+
+
 @dataclass(frozen=True, order=True)
 class TrajectoryKey:
     """The identity of one monitored trajectory, $(\\text{experiment}, n, \\beta, p, g, c, r)$ (v1.4 §8).
@@ -365,8 +396,12 @@ class TrajectoryKey:
     ``beta`` and ``p`` are tokens (anything :meth:`Token.parse` accepts is converted).
     ``r`` is the measurement-replica label; the native engine draws gates and masks from one
     stream, so the study uses $r = 0$ only (design D1) and the field keeps its place for a
-    future versioned extension. The key is frozen, hashable and has the canonical string
-    form ``"<id>:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"`` (:meth:`parse` inverts it).
+    future versioned extension. ``protocol`` is the initial condition (:data:`PROTOCOLS`, design
+    §12): ``"F"`` (the default, the v1.4 protocol with its full reference) or ``"P"`` (the pure
+    product state); it is the last field so that the seven-field form of v1.4 keeps meaning the
+    F trajectory. The key is frozen, hashable and has the canonical string form
+    ``"<id>:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"`` for protocol F and
+    ``"<id>:protocol=P:n=16:beta=0.1:p=1/3:g=3:c=1:r=0"`` otherwise (:meth:`parse` inverts it).
     """
 
     experiment_id: str
@@ -376,6 +411,7 @@ class TrajectoryKey:
     g: int
     c: int
     r: int = 0
+    protocol: str = "F"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "experiment_id", check_experiment_id(self.experiment_id))
@@ -384,23 +420,33 @@ class TrajectoryKey:
         object.__setattr__(self, "p", Token.parse(self.p, what="p"))
         for name in ("g", "c", "r"):
             object.__setattr__(self, name, _integer(getattr(self, name), name, minimum=0))
+        check_protocol(self.protocol)
 
     def __str__(self) -> str:
-        return (
-            f"{self.experiment_id}:n={self.n}:beta={self.beta}:p={self.p}"
-            f":g={self.g}:c={self.c}:r={self.r}"
-        )
+        head = self.experiment_id
+        if self.protocol != "F":
+            head += f":protocol={self.protocol}"
+        return f"{head}:n={self.n}:beta={self.beta}:p={self.p}:g={self.g}:c={self.c}:r={self.r}"
 
     @classmethod
     def parse(cls, text: str) -> TrajectoryKey:
         """The key whose canonical string is ``text``."""
         parts = text.split(":") if isinstance(text, str) else []
         names = ("n", "beta", "p", "g", "c", "r")
+        protocol = "F"
+        if len(parts) == 8 and parts[1].startswith("protocol="):
+            protocol = parts.pop(1).partition("=")[2]
+            if protocol == "F" or protocol not in PROTOCOLS:
+                raise ValueError(
+                    f"not a trajectory key: the protocol part names {list(PROTOCOLS[1:])} (an F "
+                    f"key has no protocol part), got {text!r}"
+                )
         if len(parts) != 7:
             raise ValueError(
-                f"not a trajectory key (expected '<id>:n=..:beta=..:p=..:g=..:c=..:r=..'): {text!r}"
+                f"not a trajectory key (expected '<id>:n=..:beta=..:p=..:g=..:c=..:r=..', or "
+                f"'<id>:protocol=P:n=..:...'): {text!r}"
             )
-        fields: dict[str, Any] = {}
+        fields: dict[str, Any] = {"protocol": protocol}
         for name, part in zip(names, parts[1:], strict=True):
             key, _, value = part.partition("=")
             if key != name or not value:

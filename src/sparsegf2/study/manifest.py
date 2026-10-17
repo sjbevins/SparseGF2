@@ -28,6 +28,11 @@ Sections (all keys are listed in ``docs/study/02-identity-seeds-and-manifest.md`
   manifest methods ``graph_seed(n, beta, g)`` and ``run_seed(n, beta, p)`` give them.
 * ``dynamics``, ``observables``, ``storage``, ``resources``, ``analysis``: typed settings with
   the defaults of the design example; a later task may add fields.
+* ``protocols`` (design §12, optional): ``["F"]`` by default; ``["F", "P"]`` or
+  ``{"F": {}, "P": {"checkpoints": {...}}}`` adds the pure-product-state protocol P with its
+  own checkpoint rule (:class:`ProtocolSettings`). It is written in the canonical JSON only when
+  it is not the default, as is ``resources.max_unit_bytes``, so the digests of manifests
+  without them did not change when they were added.
 
 How the manifest drives the engine. ``monitored_circuit_kwargs(n, beta, p)`` is the exact
 keyword set of ``mipt.MonitoredCircuit`` for one condition (v1.4 §8.1) except ``edges`` (the
@@ -81,11 +86,13 @@ from typing import Any, NamedTuple
 from sparsegf2 import erasures, mipt
 from sparsegf2.study.identity import (
     GATE_MODES,
+    PROTOCOLS,
     SEED_LIMIT,
     Token,
     TrajectoryKey,
     canonical_json,
     check_experiment_id,
+    check_protocol,
     graph_seed,
     run_seed,
     sha256_hex,
@@ -107,6 +114,7 @@ __all__ = [
     "Layers",
     "Observables",
     "Peak",
+    "ProtocolSettings",
     "Resources",
     "Seeds",
     "Storage",
@@ -892,23 +900,97 @@ class Storage:
 
 @dataclass(frozen=True)
 class Resources:
+    """Threads and the size of a work unit (they never change a recorded value).
+
+    ``max_unit_bytes`` bounds the memory of one engine call: the snapshot buffer and the probe
+    values the engine holds until the call returns (the runner splits units to fit; ``None``
+    is the runner's default, ``runner.DEFAULT_UNIT_BYTES``). It is written in the canonical
+    JSON only when set, so manifests written before it existed keep their digests.
+    """
+
     num_threads: int | None = None
     max_unit_trajectories: int = 4096
+    max_unit_bytes: int | None = None
 
     @classmethod
     def from_dict(cls, data: Any, where: str) -> Resources:
-        d = _object(data, where, optional=("num_threads", "max_unit_trajectories"))
+        d = _object(
+            data, where, optional=("num_threads", "max_unit_trajectories", "max_unit_bytes")
+        )
         threads = d.get("num_threads")
+        limit = d.get("max_unit_bytes")
         return cls(
             None if threads is None else _int(threads, f"{where}.num_threads", minimum=1),
             _int(d.get("max_unit_trajectories", 4096), f"{where}.max_unit_trajectories", minimum=1),
+            None if limit is None else _int(limit, f"{where}.max_unit_bytes", minimum=1),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "num_threads": self.num_threads,
             "max_unit_trajectories": self.max_unit_trajectories,
         }
+        if self.max_unit_bytes is not None:
+            out["max_unit_bytes"] = self.max_unit_bytes
+        return out
+
+
+@dataclass(frozen=True)
+class ProtocolSettings:
+    """One protocol of the study (design §12) and its own settings.
+
+    ``name`` is ``"F"`` (the full reference of v1.4: the manifest's ``depth.checkpoints``,
+    ``dynamics`` and ``observables`` apply to it, so it takes no settings here) or ``"P"`` (the
+    pure product state |0...0> of the system, ``reference="none"``: no reference, so no code
+    probes and no ``stop_when_purified``; the runner records its joint tableau, the pure
+    n-qubit state, at ``checkpoints``). ``checkpoints`` is P's own checkpoint rule (the forms of
+    ``depth.checkpoints``), ``None`` meaning the manifest's rule. P runs the same graphs, run
+    seeds, stream indices and horizon as F, so its gates and measurement masks are F's.
+    """
+
+    name: str
+    checkpoints: CheckpointRule | None = None
+
+    @classmethod
+    def from_dict(cls, name: Any, data: Any, where: str) -> ProtocolSettings:
+        check_protocol(name, f"{where} key")
+        if name == "F":  # F takes its settings from the manifest's sections
+            if not isinstance(data, Mapping) or data:
+                raise ValueError(
+                    f"{where}.F: protocol F takes no settings of its own (depth.checkpoints, "
+                    "dynamics and observables apply to it); give {}"
+                )
+            return cls("F")
+        d = _object(data, f"{where}.{name}", optional=("checkpoints",))
+        rule = d.get("checkpoints")
+        return cls(
+            name,
+            None if rule is None else CheckpointRule.from_dict(rule, f"{where}.{name}.checkpoints"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.name == "F":
+            return {}
+        return {"checkpoints": None if self.checkpoints is None else self.checkpoints.to_dict()}
+
+
+def _protocols(value: Any, where: str) -> tuple[ProtocolSettings, ...]:
+    """``protocols``: a list of names (``["F", "P"]``) or an object of settings (``{"F": {}, "P":
+    {"checkpoints": {"count": 8}}}``); sorted by name, each once."""
+    if isinstance(value, Mapping):
+        if not value:
+            raise ValueError(f"{where}: give at least one protocol")
+        entries = [ProtocolSettings.from_dict(k, v, f"{where}") for k, v in value.items()]
+    else:
+        names = _list(value, where)
+        entries = [ProtocolSettings.from_dict(v, {}, f"{where}[{i}]") for i, v in enumerate(names)]
+        if len({e.name for e in entries}) != len(entries):
+            twice = next(e.name for e in entries if names.count(e.name) > 1)
+            raise ValueError(f"{where}: protocol {twice!r} appears twice")
+    return tuple(sorted(entries, key=lambda e: PROTOCOLS.index(e.name)))
+
+
+_DEFAULT_PROTOCOLS = (ProtocolSettings("F"),)
 
 
 @dataclass(frozen=True)
@@ -1155,6 +1237,7 @@ class ExperimentManifest:
     resources: Resources = field(default_factory=Resources)
     analysis: Analysis = field(default_factory=Analysis)
     schema: str = MANIFEST_SCHEMA
+    protocols: tuple[ProtocolSettings, ...] = _DEFAULT_PROTOCOLS
 
     def __post_init__(self) -> None:
         _check_sections(self)  # the rules of from_dict, also for direct construction and replace
@@ -1164,6 +1247,11 @@ class ExperimentManifest:
             )
         check_experiment_id(self.experiment_id, "manifest.experiment_id")
         _choice(self.label, "manifest.label", LABELS)
+        names = [s.name for s in self.protocols]
+        if not names or len(set(names)) != len(names):
+            raise ValueError(f"manifest.protocols: give each protocol once, got {names}")
+        for name in names:
+            check_protocol(name, "manifest.protocols")
         conditions = self.conditions()  # refuses duplicates
         object.__setattr__(self, "blocks", _canonical_blocks(conditions))
         _distinct_seed_words((c.beta for c in conditions), "beta")
@@ -1179,26 +1267,30 @@ class ExperimentManifest:
                 raise ValueError(
                     f"manifest.depth.layers.table: n = {extra} is not in any condition"
                 )
-        rule = self.depth.checkpoints
-        if rule.kind == "table":
-            listed = [n for n, _ in rule.table]
-            missing = [n for n in sizes if n not in listed]
-            extra = [n for n in listed if n not in sizes]
-            if missing:
-                raise ValueError(f"manifest.depth.checkpoints.table: no entry for n = {missing}")
-            if extra:
-                raise ValueError(
-                    f"manifest.depth.checkpoints.table: n = {extra} is not in any condition"
-                )
+        rules = [(self.depth.checkpoints, "manifest.depth.checkpoints")] + [
+            (s.checkpoints, f"manifest.protocols.{s.name}.checkpoints")
+            for s in self.protocols
+            if s.checkpoints is not None
+        ]
+        for rule, where in rules:
+            if rule.kind == "table":
+                listed = [n for n, _ in rule.table]
+                missing = [n for n in sizes if n not in listed]
+                extra = [n for n in listed if n not in sizes]
+                if missing:
+                    raise ValueError(f"{where}.table: no entry for n = {missing}")
+                if extra:
+                    raise ValueError(f"{where}.table: n = {extra} is not in any condition")
         for n in sizes:
             t_max = self.depth.layers.t_max(n)
-            if rule.kind == "table":
-                depths = dict(rule.table)[n]
-                if depths and depths[-1] > t_max:
-                    raise ValueError(
-                        f"manifest.depth.checkpoints.table[{n}]: checkpoint {depths[-1]} "
-                        f"exceeds T_max = {t_max} for n = {n}"
-                    )
+            for rule, where in rules:
+                if rule.kind == "table":
+                    depths = dict(rule.table)[n]
+                    if depths and depths[-1] > t_max:
+                        raise ValueError(
+                            f"{where}.table[{n}]: checkpoint {depths[-1]} "
+                            f"exceeds T_max = {t_max} for n = {n}"
+                        )
             for entry in self.observables.correlated_erasure:
                 bad = [m for m in entry.expand_sizes(n) if not 1 <= m <= n - 1]
                 if bad or not entry.expand_sizes(n):
@@ -1271,6 +1363,7 @@ class ExperimentManifest:
                 "storage",
                 "resources",
                 "analysis",
+                "protocols",
             ),
         )
         schema = d.get("schema", MANIFEST_SCHEMA)
@@ -1295,13 +1388,19 @@ class ExperimentManifest:
             resources=Resources.from_dict(d.get("resources", {}), "manifest.resources"),
             analysis=Analysis.from_dict(d.get("analysis", {}), "manifest.analysis"),
             schema=schema,
+            protocols=_protocols(d.get("protocols", ["F"]), "manifest.protocols"),
         )
 
     # -- the canonical form -------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """The manifest as plain JSON data with every default written out."""
-        return {
+        """The manifest as plain JSON data with every default written out.
+
+        ``protocols`` and ``resources.max_unit_bytes`` were added after the first version of
+        the schema: they are written only when they differ from their defaults (``["F"]``,
+        unset), so every manifest written before them keeps its canonical text and digest.
+        """
+        out = {
             "schema": self.schema,
             "experiment_id": self.experiment_id,
             "label": self.label,
@@ -1315,6 +1414,9 @@ class ExperimentManifest:
             "resources": self.resources.to_dict(),
             "analysis": self.analysis.to_dict(),
         }
+        if self.protocols != _DEFAULT_PROTOCOLS:
+            out["protocols"] = {s.name: s.to_dict() for s in self.protocols}
+        return out
 
     def to_json(self, *, indent: int | None = None) -> str:
         """The canonical JSON text (sorted keys, no spaces); ``indent`` pretty-prints it instead."""
@@ -1368,7 +1470,9 @@ class ExperimentManifest:
         n, _, _ = self._condition(n, beta)
         return self.depth.layers.t_max(n)
 
-    def checkpoints(self, n: int, beta: Token | str | float) -> tuple[int, ...]:
+    def checkpoints(
+        self, n: int, beta: Token | str | float, protocol: str = "F"
+    ) -> tuple[int, ...]:
         """The schedule $S(n, \\beta)$ of **this revision**: sorted, unique, containing $0, 1, T_{\\max}$.
 
         The geometric rule of v1.4 §9 (``geometric_checkpoints``), the list (entries above this
@@ -1376,10 +1480,28 @@ class ExperimentManifest:
         lie in $[0, T_{\\max}]$). The schedule used for work under a revision that follows
         earlier ones is the union of the schedules of all of them,
         :func:`effective_checkpoints`. Expensive probes run at those depths; the reference
-        purification and the code dimension are observed at every layer.
+        purification and the code dimension are observed at every layer. For ``protocol="P"``
+        the rule is P's own (:class:`ProtocolSettings`), or the manifest's rule if P has none.
         """
         n, _, _ = self._condition(n, beta)
-        return self.depth.checkpoints.resolve(self.depth.layers.t_max(n), n)
+        rule = self.protocol_settings(protocol).checkpoints or self.depth.checkpoints
+        return rule.resolve(self.depth.layers.t_max(n), n)
+
+    @property
+    def protocol_names(self) -> tuple[str, ...]:
+        """The protocols of the study (design §12), in the order of :data:`PROTOCOLS`."""
+        return tuple(s.name for s in self.protocols)
+
+    def protocol_settings(self, protocol: str) -> ProtocolSettings:
+        """The settings of ``protocol``; ``ValueError`` if the study does not run it."""
+        check_protocol(protocol)
+        for s in self.protocols:
+            if s.name == protocol:
+                return s
+        raise ValueError(
+            f"protocol {protocol!r} is not run by experiment {self.experiment_id!r} "
+            f"(manifest.protocols is {list(self.protocol_names)})"
+        )
 
     def has_condition(self, n: int, beta: Token | str | float) -> bool:
         """Whether $(n, \\beta)$ is a condition of this manifest (with at least one rate)."""
@@ -1416,14 +1538,21 @@ class ExperimentManifest:
         return stream_index(g, c, self.stride)
 
     def trajectory_key(
-        self, n: int, beta: Token | str | float, p: Token | str | float, g: int, c: int
+        self,
+        n: int,
+        beta: Token | str | float,
+        p: Token | str | float,
+        g: int,
+        c: int,
+        protocol: str = "F",
     ) -> TrajectoryKey:
         n, beta_t, p_t = self._condition(n, beta, p)
         assert p_t is not None
-        return TrajectoryKey(self.experiment_id, n, beta_t, p_t, g, c)
+        self.protocol_settings(protocol)
+        return TrajectoryKey(self.experiment_id, n, beta_t, p_t, g, c, 0, protocol)
 
     def monitored_circuit_kwargs(
-        self, n: int, beta: Token | str | float, p: Token | str | float
+        self, n: int, beta: Token | str | float, p: Token | str | float, protocol: str = "F"
     ) -> dict[str, Any]:
         """The ``mipt.MonitoredCircuit`` keywords of v1.4 §8.1 for the condition $(n, \\beta, p)$.
 
@@ -1433,16 +1562,21 @@ class ExperimentManifest:
         ``schedule="random_edges"``, ``gates_per_layer=n // 2``, ``random_orientation=False``,
         no scramble, ``periodic=True``, ``checkpoints="every_layer"`` and
         ``stop_when_purified`` from ``dynamics``. Trajectory $u = g s + c$ then runs on graph
-        $g$ (``u // stride``).
+        $g$ (``u // stride``). For ``protocol="P"`` (design §12) the only differences are
+        ``reference="none"`` (the system starts in |0...0>) and ``stop_when_purified=False``
+        (there is no reference to purify): the engine draws nothing that depends on the
+        reference in these two pictures, so P's gates and masks are F's.
         """
         n, beta_t, p_t = self._condition(n, beta, p)
         assert p_t is not None
+        self.protocol_settings(protocol)
+        full = protocol == "F"
         return {
             "num_system": n,
             "circuits_per_graph": self.stride,
             "layers": self.depth.layers.t_max(n),
             "measurement_rate": p_t.float64,
-            "reference": "purification",
+            "reference": "purification" if full else "none",
             "schedule": "random_edges",
             "gates_per_layer": n // 2,
             "random_orientation": False,
@@ -1451,7 +1585,7 @@ class ExperimentManifest:
             "scramble_layers": 0,
             "periodic": True,
             "checkpoints": "every_layer",
-            "stop_when_purified": self.dynamics.stop_when_purified,
+            "stop_when_purified": self.dynamics.stop_when_purified if full else False,
         }
 
     @property
@@ -1508,11 +1642,12 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
     larger $T_{\\max}$ (per size; a lower one is forbidden), **any** change of the checkpoint
     rule (the schedule used for work is the union of the schedules of all revisions,
     :func:`effective_checkpoints`, so no stored depth is dropped), more observables (every old
-    observable keeps its settings), and any change of ``storage``, ``resources`` and
-    ``analysis`` (they do not touch recorded data). Forbidden: a change of ``schema``,
-    ``experiment_id``, ``label``, the seeds, ``gate_mode``, the stride, ``dynamics`` or the
-    number of measurement replicas, and any removal or change of what the old manifest
-    recorded. The checks run in the order of this list.
+    observable keeps its settings), a new protocol (design §12) or a new checkpoint rule for
+    protocol P, and any change of ``storage``, ``resources`` and ``analysis`` (they do not
+    touch recorded data). Forbidden: a change of ``schema``, ``experiment_id``, ``label``, the
+    seeds, ``gate_mode``, the stride, ``dynamics`` or the number of measurement replicas, the
+    removal of a protocol, and any removal or change of what the old manifest recorded. The
+    checks run in the order of this list.
     """
     if not isinstance(old, ExperimentManifest) or not isinstance(new, ExperimentManifest):
         raise TypeError("check_extension compares two ExperimentManifest objects")
@@ -1555,6 +1690,12 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
             old.trials.measurement_replicas,
             new.trials.measurement_replicas,
             "replicas are not available (design D1)",
+        )
+    dropped = [name for name in old.protocol_names if name not in new.protocol_names]
+    if dropped:
+        return (
+            f"protocol {dropped[0]!r} of the old manifest is missing from the new one: a revision "
+            "may add a protocol (design section 12), not remove one"
         )
     if new.trials.graphs < old.trials.graphs:
         return changed(
@@ -1639,7 +1780,10 @@ def check_extension(old: ExperimentManifest, new: ExperimentManifest) -> str | N
 
 
 def effective_checkpoints(
-    revisions: Sequence[ExperimentManifest], n: int, beta: Token | str | float
+    revisions: Sequence[ExperimentManifest],
+    n: int,
+    beta: Token | str | float,
+    protocol: str = "F",
 ) -> tuple[int, ...]:
     r"""The checkpoints used for work under the last of ``revisions`` at $(n, \beta)$ (ruling R-CK).
 
@@ -1656,7 +1800,12 @@ def effective_checkpoints(
     $E_r = S_1 \cup \cdots \cup S_r$ and $E_r \supseteq E_{r-1}$: a depth stored under an
     earlier revision is never dropped, and it contains $0, 1, T_{\max,r}$. For one revision it
     is that revision's own schedule.
+
+    ``protocol`` (design §12) selects whose schedules are united: each revision's own schedule
+    for that protocol (:meth:`ExperimentManifest.checkpoints`); a revision that does not run the
+    protocol contributes nothing, and the last revision must run it.
     """
+    check_protocol(protocol)
     chain = list(revisions)
     if not chain:
         raise ValueError("effective_checkpoints needs at least one revision")
@@ -1668,8 +1817,9 @@ def effective_checkpoints(
         if message is not None:
             raise ValueError(f"revision {k} does not extend revision {k - 1}: {message}")
     horizon = chain[-1].layers(n, beta)  # ValueError unless (n, beta) is a condition of the last
+    chain[-1].protocol_settings(protocol)  # ValueError unless the last revision runs the protocol
     points: set[int] = set()
     for manifest in chain:
-        if manifest.has_condition(n, beta):
-            points.update(manifest.checkpoints(n, beta))
+        if manifest.has_condition(n, beta) and protocol in manifest.protocol_names:
+            points.update(manifest.checkpoints(n, beta, protocol))
     return tuple(sorted(p for p in points if 0 <= p <= horizon))
