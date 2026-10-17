@@ -597,7 +597,7 @@ For long campaigns use `EnsembleResult.save/load` or the chunked CLI; store sepa
 10. Native random-edge draws use SparseGF2's `next_below`; masks use `next_double < float(p)`. Verify both against the frozen RNG contract and record float representations. The ideal Bernoulli\((p)\) law is defined mathematically, while actual finite-precision sampling is implementation dependent.
 11. Under shared-uniform mask coupling, all sitewise masks are nested across measurement rates, using aligned `(g,c)` and native trajectory index `u`.
 12. For every tested subset and complement, \(I_t(A:R)+I_t(V\setminus A:R)=2k_t\); boundary-biased ensemble averages satisfy the identities of §5.8.
-13. The observable catalogue records missing thresholds, peak-at-boundary flags, and differences between checkpoint peak and interpolated peak summaries.
+13. The observable catalog records missing thresholds, peak-at-boundary flags, and differences between checkpoint peak and interpolated peak summaries.
 
 ## 9. Fixed conventions and rationale
 

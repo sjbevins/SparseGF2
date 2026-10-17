@@ -641,14 +641,18 @@ def test_every_probe_accepts_a_name():
     caps = api.capabilities("probes")["probes"]
     spec = dict(SMALL_SPEC, reference="purification", stop_when_purified=False, layers=4)
     spec["checkpoints"] = "final"
-    probes = []
+    probes, alone = [], []
     for kind, info in caps.items():
         assert "name" in info["params"]
         args = {k: v for k, v in info["params"].items() if v == "required"}
         params = {"region": [0, 1], "a": [0, 1], "b": [2, 3], "size": 2, "couplings": [0.0, 1.0]}
-        probes.append({"kind": kind, "name": f"my_{kind}", **{k: params[k] for k in args}})
-    out = api.run_ensemble(dict(spec, probes=probes), 2, seed=1)
-    assert set(out["probes"]) == {f"my_{kind}" for kind in caps}
+        probe = {"kind": kind, "name": f"my_{kind}", **{k: params[k] for k in args}}
+        # a spec holds one snapshot probe: the joint tableau snapshot runs in a spec of its own
+        (alone if kind == "tableau_snapshot" else probes).append(probe)
+    names = set(api.run_ensemble(dict(spec, probes=probes), 2, seed=1)["probes"])
+    for probe in alone:
+        names |= set(api.run_ensemble(dict(spec, probes=[probe]), 2, seed=1)["probes"])
+    assert names == {f"my_{kind}" for kind in caps}
 
 
 def test_vector_probe_with_stop_when_purified_has_data_and_depth_grid():
