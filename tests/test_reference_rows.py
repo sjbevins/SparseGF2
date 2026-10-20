@@ -116,3 +116,50 @@ def test_tracked_measurement_without_references_is_the_plain_one(rng):
         kt.measure_1q_phase_free_tracked(a, n, ws, q, code, anti, supp, none)
         kt.measure_1q_phase_free(b, n, ws, q, code, anti, supp)
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize(
+    "n_sys, partners, local, rate, reached",
+    [
+        (96, list(range(96)), True, 0.12, {"single", "gauge"}),  # purification, ring-local gates
+        (64, list(range(64)), False, 0.05, {"single", "short"}),  # many logical qubits
+        (80, list(range(0, 80, 4)), False, 0.12, {"gauge"}),  # a quarter of the system paired
+        (33, [7], False, 0.12, {"gauge"}),  # one reference qubit
+    ],
+)
+def test_contiguous_distance_rows_matches_the_scan(n_sys, partners, local, rate, reached, rng):
+    """The clipped-gauge contiguous distance equals the scan it replaced, along whole trajectories.
+
+    The cases reach every path of the kernel between them (``reached``): a failing single qubit,
+    short runs when there are many logical qubits, and the gauges. Each state is checked periodic
+    and open, in the ring order and in a random order.
+    """
+    tab, n, ws = _bell_paired(n_sys, partners)
+    refs = np.arange(n_sys, n, dtype=np.int64)
+    ref_rows = np.zeros(ws, dtype=np.uint64)
+    ke.reference_rows(tab, ws, refs, ref_rows)
+    anti = np.zeros(ws, dtype=np.uint64)
+    supp = np.zeros(n, dtype=np.int64)
+    orders = (np.arange(n_sys, dtype=np.int64), rng.permutation(n_sys).astype(np.int64))
+    paths = set()
+    for _ in range(6 * n_sys):
+        for _ in range(n_sys // 2):
+            if local:
+                a = int(rng.integers(n_sys))
+                b = (a + int(rng.integers(1, 3))) % n_sys
+            else:
+                a, b = (int(x) for x in rng.choice(n_sys, 2, replace=False))
+            kt.apply_2q(tab, a, b, int(rng.integers(11520)), LIN2, ANF2, IDENTITY_SYM2, ws, False)
+        for q in np.flatnonzero(rng.random(n_sys) < rate):
+            kt.measure_1q_phase_free_tracked(tab, n, ws, q, 2, anti, supp, ref_rows)
+        k = sum(bin(int(w)).count("1") for w in ref_rows) - len(refs)
+        for order in orders:
+            for periodic in (True, False):
+                d = ke.contiguous_distance_rows(tab, ws, order, ref_rows, len(refs), periodic)
+                assert d == ke.contiguous_distance_rows_scan(
+                    tab, ws, order, ref_rows, len(refs), periodic
+                )
+                if k > 0:
+                    short = 8 * k >= n_sys and d <= min(8, k // 12)
+                    paths.add("single" if d == 1 else "short" if short else "gauge")
+    assert reached <= paths

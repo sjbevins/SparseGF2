@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+* **Exact contiguous distance, 14–36x faster near the transition**
+  (`_kernel/entropy.contiguous_distance_rows`, the engine's `contiguous_distance` probe).
+  - **Same values:** every-layer d_cont arrays are bitwise identical to the old kernel's at
+    n = 256 and 512, and 74,592 states were compared.
+  - **No scan of every start:**
+    - a single failing qubit is settled by the n single-qubit informations (two columns each);
+    - with many logical qubits (k >= n/8), runs of up to min(8, k/12) qubits are checked
+      bottom-up;
+    - otherwise the code S (the rows outside the reference rows) and its centralizer N are put
+      in clipped gauges (Nahum et al.). There I(A:R) = dim N_A - dim S_A of an interval is a
+      count of basis vectors inside it, a wrapping arc uses I = 2k - I(complement), and two
+      monotone sweeps give the shortest failing run.
+  - **Cost:** two eliminations of at most n + k rows, instead of about n d^2 column reductions.
+    With d_cont at every layer on one thread:
+
+    | condition | per layer, before | per layer, now |
+    |---|---|---|
+    | n = 256, beta = 0, p = 0.13 | 1.53 ms | 0.11 ms |
+    | n = 512, beta = 1, p = 0.25 | 19.9 ms | 0.55 ms |
+
+    The mixed phase is 1.1–1.8x faster.
+  - **The old kernel** stays as `contiguous_distance_rows_scan`. `tests/test_reference_rows.py`
+    compares the two along whole trajectories that reach every path.
 * **Depth scans to 10^6, priced** (`benchmarks/depth_scan.py`, `results/depth_scan.{json,md}`,
   SWEEPS.md section 12 "Depth scans to 10^6"): the owner's workload at n = 32 to 512, p = 0.02
   to 0.5, beta = 0 and 0.1, on every thread: layers per second by depth (to 10^6 where
