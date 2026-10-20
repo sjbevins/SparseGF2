@@ -420,11 +420,12 @@ def erasure_profile_rows(tab, ws, order, ref_rows, out):
 
 
 @njit(cache=True)
-def contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic):
-    """:func:`contiguous_distance` for the engine: smallest run of ``system`` with I(R:A) > 0.
+def contiguous_distance_rows_scan(tab, ws, system, ref_rows, num_ref, periodic):
+    """:func:`contiguous_distance_rows` by scanning every start (the reference implementation).
 
     Returns 0 if the code dimension is 0. Each start grows its run one qubit
-    at a time and stops once it cannot beat the best length so far.
+    at a time and stops once it cannot beat the best length so far: about
+    ``n d^2`` column reductions of ``ws`` words for a distance ``d``.
     """
     k = -num_ref
     for w in range(ws):
@@ -458,6 +459,344 @@ def contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic):
                 best = length
                 break
     return best
+
+
+# -- contiguous distance from clipped gauges ------------------------------------------------
+#
+# With S the code's stabilizer group (the rows outside ref_rows) and N its centralizer (spanned
+# by the system parts of all rows), erasing a set A of system qubits loses
+# I(A:R) = dim N_A - dim S_A, where H_A is the subgroup of H supported inside A. In a clipped
+# gauge along the order (Nahum et al., PRX 7, 031016), dim H_A for an interval A is the number of
+# basis vectors with both endpoints in A; an arc that wraps around the end of the order has an
+# interval as complement, and I(A:R) = 2k - I(complement:R). Two eliminations then give every arc.
+
+
+@njit(cache=True)
+def _transpose64(a):
+    """Transpose the 64 x 64 bit matrix ``a`` in place (bit j of a[i] <-> bit i of a[j])."""
+    width = 32
+    mask = np.uint64(0x00000000FFFFFFFF)
+    while width > 0:
+        for k in range(64):
+            if (k & width) == 0:
+                t = ((a[k] >> np.uint64(width)) ^ a[k + width]) & mask
+                a[k] ^= t << np.uint64(width)
+                a[k + width] ^= t
+        width >>= 1
+        mask ^= mask << np.uint64(width)
+
+
+@njit(cache=True)
+def _system_parts(tab, ws, system, num_rows, rows):
+    """``rows[r]``: the system part of stabilizer row ``r``, bit ``2 s`` (``2 s + 1``) the X (Z) bit of ``system[s]``."""
+    ncols = 2 * system.shape[0]
+    blk = np.zeros(64, dtype=np.uint64)
+    for rw in range((num_rows + 63) >> 6):
+        for cb in range(rows.shape[1]):
+            for i in range(64):
+                col = (cb << 6) + i
+                blk[i] = tab[2 * system[col >> 1] + (col & 1), rw] if col < ncols else ZERO
+            _transpose64(blk)
+            for i in range(64):
+                r = (rw << 6) + i
+                if r < num_rows:
+                    rows[r, cb] = blk[i]
+
+
+@njit(cache=True)
+def _lowest_bit(row, start, width):
+    for w in range(start, width):
+        if row[w] != ZERO:
+            return (w << 6) + np.int64(ctz(row[w]))
+    return -1
+
+
+@njit(cache=True)
+def _insert_left(rows, r, owner, left_col):
+    """Reduce ``rows[r]`` against the rows owning its leading columns; returns 1 if it is independent."""
+    width = rows.shape[1]
+    c = _lowest_bit(rows[r], 0, width)
+    while c >= 0:
+        o = owner[c]
+        if o < 0:
+            owner[c] = r
+            left_col[r] = c
+            return 1
+        for w in range(c >> 6, width):
+            rows[r, w] ^= rows[o, w]
+        c = _lowest_bit(rows[r], c >> 6, width)
+    left_col[r] = -1
+    return 0
+
+
+@njit(cache=True)
+def _clip_right(rows, m, left_col, left, right, head, nxt):
+    """Clip the left-reduced rows[:m] from the right; site endpoints of the basis into left/right, returns the rank.
+
+    Among rows sharing a rightmost column the one with the largest leftmost column is kept and
+    added to the others, which moves no left endpoint (the leftmost columns are distinct).
+    """
+    for c in range(head.shape[0]):
+        head[c] = -1
+    for r in range(m):
+        if left_col[r] >= 0:
+            c = _rightmost_bit(rows[r], rows.shape[1])
+            nxt[r] = head[c]
+            head[c] = r
+    rank = 0
+    for c in range(head.shape[0] - 1, -1, -1):
+        best = head[c]
+        if best < 0:
+            continue
+        r = nxt[best]
+        while r >= 0:
+            if left_col[r] > left_col[best]:
+                best = r
+            r = nxt[r]
+        top = (c >> 6) + 1
+        r = head[c]
+        head[c] = -1
+        while r >= 0:
+            after = nxt[r]
+            if r != best:
+                for w in range(top):
+                    rows[r, w] ^= rows[best, w]
+                rc = _rightmost_bit(rows[r], top)
+                nxt[r] = head[rc]
+                head[rc] = r
+            r = after
+        left[rank] = left_col[best] >> 1
+        right[rank] = c >> 1
+        rank += 1
+    return rank
+
+
+@njit(cache=True)
+def _endpoint_lists(ends, count, head, nxt):
+    for s in range(head.shape[0]):
+        head[s] = -1
+    for v in range(count):
+        nxt[v] = head[ends[v]]
+        head[ends[v]] = v
+
+
+@njit(cache=True)
+def _count_in(head, nxt, other, bound, from_below):
+    """Vectors of one endpoint list whose other endpoint is >= bound (from_below) or <= bound."""
+    total = 0
+    v = head
+    while v >= 0:
+        if (other[v] >= bound) if from_below else (other[v] <= bound):
+            total += 1
+        v = nxt[v]
+    return total
+
+
+@njit(cache=True)
+def single_qubit_lost(tab, ws, q, ref_rows):
+    """I({q}:R): the rank of qubit ``q``'s two columns over all rows minus over the rows outside ``ref_rows``."""
+    a_nz = False
+    b_nz = False
+    same = True
+    fa_nz = False
+    fb_nz = False
+    fsame = True
+    for w in range(ws):
+        a = tab[2 * q, w]
+        b = tab[2 * q + 1, w]
+        fa = a & ~ref_rows[w]
+        fb = b & ~ref_rows[w]
+        a_nz |= a != ZERO
+        b_nz |= b != ZERO
+        same &= a == b
+        fa_nz |= fa != ZERO
+        fb_nz |= fb != ZERO
+        fsame &= fa == fb
+    r_all = np.int64(a_nz) + np.int64(b_nz) - np.int64(a_nz and b_nz and same)
+    r_free = np.int64(fa_nz) + np.int64(fb_nz) - np.int64(fa_nz and fb_nz and fsame)
+    return r_all - r_free
+
+
+@njit(cache=True)
+def _echelon_add(vec, basis, pw, pm, top, ws):
+    """:func:`_small_add` for a basis whose rows are views: reduce ``vec`` and append it if independent."""
+    for b in range(top):
+        if vec[pw[b]] & pm[b]:
+            for w in range(ws):
+                vec[w] ^= basis[b, w]
+    for w in range(ws):
+        x = vec[w]
+        if x != ZERO:
+            for v in range(ws):
+                basis[top, v] = vec[v]
+            pw[top] = w
+            pm[top] = x & (~x + np.uint64(1))
+            return top + 1
+    return top
+
+
+@njit(cache=True)
+def shortest_short_run(tab, ws, system, ref_rows, periodic, max_len):
+    """The smallest L in 2 .. ``max_len`` such that some run of L qubits loses information, else 0.
+
+    Bottom-up over L for every start at once: each start keeps echelon bases of its run's columns
+    over all rows and over the rows outside ``ref_rows`` and adds one qubit per step, so no run is
+    ever recomputed and no run longer than the answer is looked at. Assumes no single qubit loses
+    information (checked first).
+    """
+    n = system.shape[0]
+    max_len = min(max_len, n - 1)
+    if max_len < 2:
+        return 0
+    cap = 2 * max_len
+    ball = np.empty((n, cap, ws), dtype=np.uint64)
+    bfree = np.empty((n, cap, ws), dtype=np.uint64)
+    pwa = np.empty((n, cap), dtype=np.int64)
+    pma = np.empty((n, cap), dtype=np.uint64)
+    pwf = np.empty((n, cap), dtype=np.int64)
+    pmf = np.empty((n, cap), dtype=np.uint64)
+    ta = np.zeros(n, dtype=np.int64)
+    tf = np.zeros(n, dtype=np.int64)
+    vec = np.empty(ws, dtype=np.uint64)
+    for length in range(1, max_len + 1):
+        starts = n if periodic else n - length + 1
+        for s in range(starts):
+            q = system[(s + length - 1) % n]
+            for col in range(2):
+                for w in range(ws):
+                    vec[w] = tab[2 * q + col, w]
+                ta[s] = _echelon_add(vec, ball[s], pwa[s], pma[s], ta[s], ws)
+                for w in range(ws):
+                    vec[w] = tab[2 * q + col, w] & ~ref_rows[w]
+                tf[s] = _echelon_add(vec, bfree[s], pwf[s], pmf[s], tf[s], ws)
+            if length >= 2 and ta[s] > tf[s]:
+                return length  # every shorter run was checked at the previous steps
+    return 0
+
+
+@njit(cache=True)
+def contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic):
+    """:func:`contiguous_distance` for the engine: smallest run of ``system`` with I(R:A) > 0.
+
+    Returns 0 if the code dimension is 0. ``system`` must hold every qubit outside the reference
+    (as in the engine); otherwise this is :func:`contiguous_distance_rows_scan`.
+
+    * d = 1 is settled by the n single-qubit informations (two columns each).
+    * With many logical qubits (k >= n / 8, where the gauge of N is the costly part and the
+      distance is short), runs of 2 .. k / 12 qubits (at most 8) are checked bottom-up first
+      (:func:`shortest_short_run`).
+    * Otherwise S and N are put in clipped gauges (module comment above). N starts from S's
+      left-reduced basis and takes reference rows only until its rank is n + k, so the
+      reference rows that are dependent are mostly never reduced.
+    * Two sweeps give the shortest failing interval and the shortest failing wrapping arc (the
+      longest interval J in [1, n - 2] with I(J:R) < 2k); each moves its two ends forward only,
+      since I grows with the region.
+
+    Cost: two eliminations of at most n + k rows of 2n bits, independent of the distance.
+    """
+    k = -num_ref
+    for w in range(ws):
+        k += np.int64(popcount(ref_rows[w]))
+    if k == 0:
+        return 0
+    n = system.shape[0]
+    num_rows = n + num_ref
+    if tab.shape[0] // 2 != num_rows:
+        return contiguous_distance_rows_scan(tab, ws, system, ref_rows, num_ref, periodic)
+    for s in range(n):
+        if single_qubit_lost(tab, ws, system[s], ref_rows) > 0:
+            return 1
+    if 8 * k >= n:  # many logical qubits: short distances, and a costly gauge of N
+        short = shortest_short_run(tab, ws, system, ref_rows, periodic, min(8, k // 12))
+        if short > 0:
+            return short
+    ncols = 2 * n
+    width = (ncols + 63) >> 6
+    parts = np.empty((((num_rows + 63) >> 6) << 6, width), dtype=np.uint64)
+    _system_parts(tab, ws, system, num_rows, parts)
+    num_s = n - k
+    num_n = n + k
+    srows = np.empty((num_s, width), dtype=np.uint64)
+    nrows = np.empty((num_n, width), dtype=np.uint64)
+    i = 0
+    for r in range(num_rows):
+        if not (ref_rows[r >> 6] >> np.uint64(r & 63)) & np.uint64(1):
+            for w in range(width):
+                srows[i, w] = parts[r, w]
+            i += 1
+    owner = np.full(ncols, -1, dtype=np.int64)
+    lcol_s = np.empty(num_s, dtype=np.int64)
+    for r in range(num_s):
+        _insert_left(srows, r, owner, lcol_s)
+    lcol_n = np.full(num_n, -1, dtype=np.int64)
+    for r in range(num_s):
+        lcol_n[r] = lcol_s[r]
+        for w in range(width):
+            nrows[r, w] = srows[r, w]
+    rank = num_s
+    for r in range(num_rows):
+        if rank == num_n:
+            break
+        if (ref_rows[r >> 6] >> np.uint64(r & 63)) & np.uint64(1):
+            for w in range(width):
+                nrows[rank, w] = parts[r, w]
+            rank += _insert_left(nrows, rank, owner, lcol_n)
+    head = np.empty(ncols, dtype=np.int64)
+    nxt = np.empty(num_n, dtype=np.int64)
+    ls = np.empty(num_s, dtype=np.int64)
+    rs = np.empty(num_s, dtype=np.int64)
+    ln = np.empty(num_n, dtype=np.int64)
+    rn = np.empty(num_n, dtype=np.int64)
+    cs = _clip_right(srows, num_s, lcol_s, ls, rs, head, nxt)
+    cn = _clip_right(nrows, num_n, lcol_n, ln, rn, head, nxt)
+    # the basis vectors listed by left and by right endpoint
+    rhs = np.empty(n, dtype=np.int64)
+    rns = np.empty(max(cs, 1), dtype=np.int64)
+    lhs = np.empty(n, dtype=np.int64)
+    lns = np.empty(max(cs, 1), dtype=np.int64)
+    rhn = np.empty(n, dtype=np.int64)
+    rnn = np.empty(cn, dtype=np.int64)
+    lhn = np.empty(n, dtype=np.int64)
+    lnn = np.empty(cn, dtype=np.int64)
+    _endpoint_lists(rs, cs, rhs, rns)
+    _endpoint_lists(ls, cs, lhs, lns)
+    _endpoint_lists(rn, cn, rhn, rnn)
+    _endpoint_lists(ln, cn, lhn, lnn)
+    # the shortest interval [a, b] with I > 0; I = (N-vectors inside) - (S-vectors inside)
+    best = n
+    b = -1
+    inside = 0
+    for a in range(n):
+        if a > 0:
+            inside -= _count_in(lhn[a - 1], lnn, rn, b, False) - _count_in(
+                lhs[a - 1], lns, rs, b, False
+            )
+        while inside <= 0 and b < n - 1:
+            b += 1
+            inside += _count_in(rhn[b], rnn, ln, a, True) - _count_in(rhs[b], rns, ls, a, True)
+        if inside <= 0:
+            break  # no interval from a or later fails
+        best = min(best, b - a + 1)
+    if not periodic or n < 3:
+        return best
+    # wrapping arcs: the arc around a complement J = [a, b] in [1, n - 2] fails iff I(J:R) < 2k
+    longest = 0
+    b = 0
+    inside = 0
+    for a in range(1, n - 1):
+        if a > 1:
+            inside -= _count_in(lhn[a - 1], lnn, rn, b, False) - _count_in(
+                lhs[a - 1], lns, rs, b, False
+            )
+        b = max(b, a - 1)
+        while b + 1 <= n - 2:
+            step = _count_in(rhn[b + 1], rnn, ln, a, True) - _count_in(rhs[b + 1], rns, ls, a, True)
+            if inside + step >= 2 * k:
+                break
+            inside += step
+            b += 1
+        longest = max(longest, b - a + 1)
+    return min(best, n - longest)
 
 
 @njit(cache=True)
