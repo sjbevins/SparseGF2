@@ -15,8 +15,13 @@ different simulator.
 and data only):** all three layers go into SparseGF2 (launching in the core; figures and analyses as an optional
 layer), and the study system supersedes `sparsegf2 sweep`.
 
-**Status:** written 2026-10-23 by Claude. Built on branch `studies` (worktree `../SparseGF2-studies`), pushed after
-each task; merged into `main` only when the owner says.
+**Owner's ruling on the extent (2026-10-23, later):** "if this is going to take a lot of time, let's put this off and
+make sure we are only designing it based on what we have built for the SmallWorldMIPT study we have been conducting so
+far." So the port is deferred, and its scope is exactly what the survey framework does today (R3, R4, R8 below); any
+generalization beyond it waits until the owner asks for it.
+
+**Status:** design only (2026-10-23, by Claude); deferred. When resumed, built on branch `studies` (worktree
+`../SparseGF2-studies`), pushed after each task, merged into `main` only when the owner says.
 
 ## 1. What a study is
 
@@ -48,30 +53,25 @@ each task; merged into `main` only when the owner says.
 - **R2 (no engine change).** No edit to `mipt.py`, `graphs.py` or `_kernel/`: they are fingerprinted in every stored
   trajectory's engine record and in the randomness contract (now 2). New graph laws (the Watts-Strogatz bank's
   vertex-major law) live in `study/laws.py`. Why: existing data folders (sweeps, the survey, the bank) stay valid.
-- **R3 (generality).** The axes are sizes x points x rates. The graph comes from a law: any family of
-  `sparsegf2.graphs` (with its parameters) or a registered law (`laws.py`); the points are values of the law's main
-  parameter. The circuit is any `MonitoredCircuit` protocol the config can describe (schedule, gates per layer,
-  picture, periodicity, orientation, stopping at purification). Recorded observables: `k` (always; its first
-  passages store it exactly) and any scalar per-layer probe (stored as change-point runs: `d_cont` first, then
-  `code_dimension`-like probes as they are needed). Why: the survey's Watts-Strogatz choices become defaults, not
-  assumptions.
-- **R4 (sampling).** Direct sampling first: `G` graphs per `(n, point)`, `C` circuits per graph. The bank's mixture
-  design (fixed-rewiring-count strata with exact reweighting, quotas, coverage) is a second sampling mode, ported after
-  direct sampling works. Why: direct sampling is general; the mixture is Watts-Strogatz specific and larger.
+- **R3 (scope).** Exactly the survey's: Watts-Strogatz graphs drawn by the bank's laws (vertex-major, and
+  offset-major for comparisons); points are rewiring probabilities `beta` (lists, theta grids, irrational anchors);
+  rates as lists or decimal ranges per `(n, beta)`; depth laws `c x {1, log2 n, sqrt n, n, n^2}`; the circuit of the
+  survey (purification picture, `random_edges` with `n/2` gates per layer, periodic, every layer a checkpoint, stopped
+  at purification); recorded observables `k` (first passages) and `d_cont` (change-point runs). Other graph families
+  and other observables are out of scope until the owner asks.
+- **R4 (sampling).** The survey's two modes: direct (`G` graphs per `(n, beta)`) and the bank's mixture (fixed-m
+  strata with exact reweighting, quotas, coverage), both as they are.
 - **R5 (optional layer).** Plots and analyses import matplotlib (and CMasher for its colormaps) only when used; they
   are declared as kinds in registries (`heatmap`, `condition`, `curves`; `onset`), each with its options declared once.
   An install group `sparsegf2[study]` brings their dependencies. Why: the core stays lean and the layer is extensible.
-- **R6 (analyses).** The scaling machinery is general: the loss of Houdayer and Hartmann with linear parameters in
-  closed form (prefactor exponents, corrections), loss landscapes on a grid refined by Nelder-Mead and confined to the
-  rates fitted, bootstrap refits, systematics, crossings and their drift, extrapolations in `n` with model comparison.
-  The `onset` kind (the first depth at which an observable passes a threshold, such as `d_cont >= 2`) is its first
-  user; `tau_l` and `<T*>` follow. Each analysis writes numbered figure folders, a README with every table,
-  `summary.json` and a printable `report.pdf`.
+- **R6 (analyses).** The survey's analysis kind `onset` as it is (Kaplan-Meier medians of the first depth with
+  `d_cont >= 2`, the fit of `tau_0` applied to it with its landscape, every version of the collapse, crossings, the
+  front extrapolations, the depth collapse), with its README, `summary.json` and `report.pdf`.
 - **R7 (fingerprints).** The engine record of a data folder and the code fingerprint of each figure and analysis are
   taken when the code is loaded, so a long-lived process never stamps results with the fingerprint of files edited
   after it started (a bug found in the survey on 2026-10-23).
-- **R8 (agents).** Every command has `--json`; the MCP server gets `study_plan`, `study_start` (a background job),
-  `study_status`, `study_plot`, `study_analyze` and `study_results`, sharing `api.py` as the other tools do.
+- **R8 (commands).** The survey's commands, as `sparsegf2 study plan|run|plot|analyze|all|verify|config|options`,
+  with the same progress displays and `RUN.md`-style copy-and-paste guide. MCP tools are out of scope until asked.
 - **R9 (supersede sweep).** `sparsegf2 sweep` keeps reading and growing its existing directories; the docs mark it as
   the older path; `sparsegf2 study adopt` can later convert a sweep or a survey data folder after checking a sample of
   its trajectories bit for bit.
@@ -83,11 +83,13 @@ each task; merged into `main` only when the owner says.
 - **R12 (checks).** Every module is typed (mypy reports Success), formatted (ruff), spelled in American English, and
   tested (an end-to-end test runs a tiny study through plan, run, plot and analyze); the coverage floor holds.
 
-## 3. Phases
+## 3. Phases (when resumed)
 
-1. Core: options, config, laws, plan, store, engine, run (direct sampling), progress, verify; `sparsegf2 study
-   plan|run|status|verify|config|options`; docs `docs/STUDIES.md`.
-2. Figures: plot kinds and options; `study plot`.
-3. Analyses: `fss` and the `onset` kind; `study analyze`, `study all`.
-4. Agents: `api.py` functions, MCP tools, AGENTS.md.
-5. Mixture sampling; `study adopt` for survey and sweep folders; sweep marked as the older path.
+1. Core, ported as is: options, config, laws, points, plan, store, engine, simulate (direct and mixture), progress,
+   verify; `sparsegf2 study plan|run|verify|config|options`.
+2. Figures: the survey's plot kinds (`heatmap`, `condition`, `curves`) and options; `study plot`.
+3. Analyses: the survey's `onset` kind; `study analyze`, `study all`.
+4. `study adopt` for the survey's data folders (R9, R10); sweep marked as the older path in the docs.
+
+Estimated effort: several long sessions (about 8,800 lines to port to the repository's checks: typing, formatting,
+tests, documentation).
