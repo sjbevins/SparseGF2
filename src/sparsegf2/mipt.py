@@ -374,14 +374,33 @@ def code_dimension(*, checkpoints=None) -> Probe:
     return Probe("code_dimension", "code_dimension", checkpoints=_schedule(checkpoints))
 
 
-def contiguous_distance(*, checkpoints=None) -> Probe:
+def contiguous_distance(
+    *, cap: int | None = None, name: str | None = None, checkpoints=None
+) -> Probe:
     """Shortest contiguous run (in ``system_order``, wrapping if ``periodic``) whose erasure loses logical info; NaN without a code.
 
     The distance is undefined without a code: where the code dimension is 0 the
     probe records NaN, so means (:meth:`EnsembleResult.mean`, the API
     summaries) average only over trajectories that still hold a code.
+
+    ``cap`` (an integer of at least 2) records ``min(d, cap)`` instead of d: exactly d below the
+    cap, and ``cap`` for every distance at or above it. It answers questions that only need to
+    know whether d reaches ``cap`` -- ``cap=2`` asks whether no single qubit carries logical
+    information -- without the two gauge eliminations of the full distance, whose cost grows
+    as ``n**3`` and dominates a trajectory at large n. The capped check costs about
+    ``n * cap**2``, so it is used only for ``(cap - 1)**2 <= 2 * num_system``; a larger cap
+    takes the full distance and caps it (the values are the same either way). The default name
+    is ``contiguous_distance`` without a cap and ``contiguous_distance[cap=c]`` with one.
     """
-    return Probe("contiguous_distance", "contiguous_distance", checkpoints=_schedule(checkpoints))
+    size = 0
+    if cap is not None:
+        size = _integer(cap, "cap")
+        if size < 2:
+            raise ValueError(f"cap must be at least 2 (min(d, 1) is 1 for every code), got {cap}")
+    default = "contiguous_distance" if cap is None else f"contiguous_distance[cap={size}]"
+    return Probe(
+        "contiguous_distance", name or default, size=size, checkpoints=_schedule(checkpoints)
+    )
 
 
 def lost_information(region: Sequence[int], name: str | None = None, *, checkpoints=None) -> Probe:

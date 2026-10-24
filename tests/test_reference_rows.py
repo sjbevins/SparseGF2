@@ -7,6 +7,7 @@ the stabilizer group is unchanged and that S(R), I(R:E), erasure profiles and
 contiguous distances computed from ``ref_rows`` equal the generic computations.
 """
 
+import numba
 import numpy as np
 import pytest
 
@@ -163,3 +164,63 @@ def test_contiguous_distance_rows_matches_the_scan(n_sys, partners, local, rate,
                     short = 8 * k >= n_sys and d <= min(8, k // 12)
                     paths.add("single" if d == 1 else "short" if short else "gauge")
     assert reached <= paths
+
+
+@pytest.mark.parametrize(
+    "n_sys, partners, local, rate, reached",
+    [
+        (96, list(range(96)), True, 0.12, {"one", "short", "long"}),  # ring-local gates
+        (64, list(range(64)), False, 0.05, {"one", "short"}),  # many logical qubits
+        (33, [7], False, 0.01, {"long"}),  # one reference qubit, kept by a low rate
+    ],
+)
+def test_capped_contiguous_distance_is_the_full_one_capped(
+    n_sys, partners, local, rate, reached, rng
+):
+    """contiguous_distance_rows_capped(..., cap) == min(contiguous_distance_rows(...), cap) at every
+    step of whole trajectories, periodic and open, in two orders, for caps from 2 to above n (the
+    full distance), and 0 without a code; the trajectories reach d = 1, d below the caps and d above
+    them. Caps up to sqrt(2 n) + 1 check short runs, larger ones take the full distance. A system
+    that leaves a qubit out (not the engine's layout) gives the reference scan, capped, as the full
+    distance does. Without the JIT (the weekly job) fewer caps and one order are checked."""
+    tab, n, ws = _bell_paired(n_sys, partners)
+    refs = np.arange(n_sys, n, dtype=np.int64)
+    ref_rows = np.zeros(ws, dtype=np.uint64)
+    ke.reference_rows(tab, ws, refs, ref_rows)
+    anti = np.zeros(ws, dtype=np.uint64)
+    supp = np.zeros(n, dtype=np.int64)
+    orders = (np.arange(n_sys, dtype=np.int64), rng.permutation(n_sys).astype(np.int64))
+    jit_free = numba.config.DISABLE_JIT
+    caps = (
+        (2, 3, 8, 16, n_sys) if jit_free else (2, 3, 4, 5, 8, 14, 16, n_sys - 1, n_sys, n_sys + 5)
+    )
+    seen = set()
+    for _ in range(4 * n_sys):
+        for _ in range(n_sys // 2):
+            if local:
+                a = int(rng.integers(n_sys))
+                b = (a + int(rng.integers(1, 3))) % n_sys
+            else:
+                a, b = (int(x) for x in rng.choice(n_sys, 2, replace=False))
+            kt.apply_2q(tab, a, b, int(rng.integers(11520)), LIN2, ANF2, IDENTITY_SYM2, ws, False)
+        for q in np.flatnonzero(rng.random(n_sys) < rate):
+            kt.measure_1q_phase_free_tracked(tab, n, ws, q, 2, anti, supp, ref_rows)
+        for order in orders[:1] if jit_free else orders:
+            for periodic in (True, False):
+                d = ke.contiguous_distance_rows(tab, ws, order, ref_rows, len(refs), periodic)
+                for cap in caps:
+                    got = ke.contiguous_distance_rows_capped(
+                        tab, ws, order, ref_rows, len(refs), periodic, cap
+                    )
+                    assert got == min(d, cap), (d, cap, periodic)
+                part = order[1:]
+                scan = ke.contiguous_distance_rows_scan(
+                    tab, ws, part, ref_rows, len(refs), periodic
+                )
+                for cap in (2, 3, 5):
+                    got = ke.contiguous_distance_rows_capped(
+                        tab, ws, part, ref_rows, len(refs), periodic, cap
+                    )
+                    assert got == min(scan, cap), (scan, cap, periodic)
+                seen.add("none" if d == 0 else "one" if d == 1 else "short" if d < 8 else "long")
+    assert reached <= seen, seen

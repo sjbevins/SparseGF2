@@ -513,7 +513,7 @@ higher one (common random numbers across a rate scan). In the JSON interface,
 A probe is a frozen `Probe` (kind, name, regions, size, samples, checkpoints)
 made by a factory: `entropy`, `half_cut_entropy`, `mutual_information`,
 `tripartite_information`, `entropy_profile`, `code_dimension`,
-`contiguous_distance`, `lost_information(region)`,
+`contiguous_distance(cap=None)`, `lost_information(region)`,
 `erasure_lost_profile(samples=10)`, `erasure_first_failure(samples=100)`,
 `uncorrectable_region_counts(max_size=2)` and `code_snapshot()`. Every factory
 takes `checkpoints=` in the same forms as the spec's (`"final"`,

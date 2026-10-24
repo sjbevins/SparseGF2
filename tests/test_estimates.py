@@ -143,6 +143,10 @@ def _cases(n: int) -> list[tuple[dict, str, int]]:
         ({"kind": "lost_information", "region": f"0:{n // 2}"}, "single", 8),
         ({"kind": "contiguous_distance"}, "single", 1),
         ({"kind": "contiguous_distance"}, "monitored", 2),
+        # capped: no gauge, so the single-qubit checks and the short runs are all there is
+        ({"kind": "contiguous_distance", "cap": 2}, "single", 256),
+        ({"kind": "contiguous_distance", "cap": 3}, "monitored", 16),
+        ({"kind": "contiguous_distance", "cap": 8}, "single", 4),
         ({"kind": "entropy_profile"}, "purification", 4),
         ({"kind": "erasure_lost_profile", "samples": 10}, "purification", 1),
         ({"kind": "erasure_lost_profile", "samples": 10}, "single", 1),
@@ -187,8 +191,8 @@ def test_every_probe_costs_at_most_its_estimate():
     reference_times.append(_median_seconds(_reference_workload, 5))
     speed = REFERENCE_SECONDS / statistics.median(reference_times)  # < 1 on a slower machine
     lines = [
-        f"{p['kind']} {p.get('max_size', '')} ({state}): estimate {est * 1e3:.3g} ms, measured "
-        f"{meas * 1e3:.3g} ms here = {meas * speed * 1e3:.3g} ms on the fitting machine "
+        f"{p['kind']} {p.get('max_size', p.get('cap', ''))} ({state}): estimate "
+        f"{est * 1e3:.3g} ms, measured {meas * 1e3:.3g} ms here = {meas * speed * 1e3:.3g} ms on the fitting machine "
         f"(ratio {est / max(meas * speed, 1e-12):.2f})"
         for p, state, est, meas in rows
     ]
