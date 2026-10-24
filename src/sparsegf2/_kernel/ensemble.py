@@ -114,6 +114,7 @@ from sparsegf2._kernel.bits import popcount
 from sparsegf2._kernel.entropy import (
     code_snapshot_rows,
     contiguous_distance_rows,
+    contiguous_distance_rows_capped,
     erasure_profile_rows,
     first_failure_samples,
     joint_snapshot_rows,
@@ -338,6 +339,10 @@ def eval_probe(
     elif kind == PROBE_CONTIGUOUS_DISTANCE:
         if s_ref == 0:
             row[0] = np.nan  # no code, no distance (never averaged as 0)
+        elif size_param[j] > 0:  # capped: min(d, cap), without the gauge eliminations
+            row[0] = contiguous_distance_rows_capped(
+                tab, ws, order, ref_rows, n_ref, periodic, size_param[j]
+            )
         else:
             row[0] = contiguous_distance_rows(tab, ws, order, ref_rows, n_ref, periodic)
     elif kind == PROBE_LOST_INFORMATION:

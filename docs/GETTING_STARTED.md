@@ -282,6 +282,7 @@ The probes:
 | `entropy_profile()` | vector, S of the first m system qubits for m = 0..n | no |
 | `code_dimension()` | k = S(R) | yes |
 | `contiguous_distance()` | shortest contiguous run whose erasure loses information; NaN when k = 0 | yes |
+| `contiguous_distance(cap=c)` | min(d, c), from the runs shorter than c only: far cheaper for small c (`cap=2`: is d >= 2?) | yes |
 | `lost_information(region)` | I(A:R) for a fixed region A | yes |
 | `erasure_lost_profile(samples)` | vector, mean I(A_m:R) over random erasures of each size m = 0..n | yes |
 | `erasure_first_failure(samples=M)` | vector of M first-failure sizes, one per random ordering of the qubits (n + 1 when k = 0) | yes |
@@ -290,6 +291,7 @@ The probes:
 
 Probe names default to the factory's name, except
 `uncorrectable_region_counts(w)`, whose name is `"uncorrectable_region_counts[w]"`,
+`contiguous_distance(cap=c)`, whose name is `"contiguous_distance[cap=c]"`,
 and probes on explicit regions, whose names include the region. Pass `name=` to
 choose your own.
 

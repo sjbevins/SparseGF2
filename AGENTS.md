@@ -147,7 +147,13 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
     of `system_order`, m = 0..n);
   * code (need a reference): `code_dimension` (k = S(R)), `contiguous_distance`,
     `lost_information` (one fixed region), and the vector `erasure_lost_profile` (mean
-    bits lost by a random m-qubit erasure, m = 0..n);
+    bits lost by a random m-qubit erasure, m = 0..n). `contiguous_distance` with `"cap": c`
+    (at least 2) records min(d, c) without the two eliminations of the full distance:
+    `"cap": 2` (key `contiguous_distance[cap=2]`) says whether d >= 2. On one thread at
+    n = 1024 (beta = 1, p = 0.01, layers 1 to 128) a trajectory-layer took 0.124 ms with it,
+    16.3 ms with the full distance and 0.119 ms with k alone. The check of the runs shorter
+    than c costs about n c^2, so a cap with (c - 1)^2 > 2n takes the full distance instead
+    (the same values);
   * erasure (need a reference): `erasure_first_failure` (`samples`, default 100) records,
     for each of `samples` random orderings of the system qubits, the first-failure size D:
     the smallest m such that erasing the first m qubits loses logical information (n + 1

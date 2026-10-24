@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+* **Capped contiguous distance** (`mipt.contiguous_distance(cap=c)`, `{"kind":
+  "contiguous_distance", "cap": c}`): records min(d, c), exactly d below the cap and c at or
+  above it, for questions that only ask whether d reaches c (`cap=2`: does any single qubit
+  carry logical information?).
+  - **Cost:** the n single-qubit informations, then the runs of 2 .. c - 1 qubits one start at
+    a time (`_kernel/entropy.contiguous_distance_rows_capped`, `_shortest_run_below`; bases of
+    at most 2 (c - 1) rows), and none of the full distance's gauge eliminations. The runs cost
+    about n c^2 row operations, so they are used only for (c - 1)^2 <= 2n
+    (`capped_by_runs`; measured, the full distance is cheaper above about c = 1.2 to 1.5
+    sqrt(n)); a larger cap takes the full distance and caps it, with the same values. One
+    thread, n = 1024, beta = 1, p = 0.01, layers 1 to 128, purification picture, eight
+    trajectories (the machine was busy: a reference workload ran at 0.61 of its idle speed):
+
+    | probes | per trajectory-layer |
+    |---|---|
+    | `code_dimension` only | 0.119 ms |
+    | + `contiguous_distance(cap=2)` | 0.124 ms |
+    | + `contiguous_distance(cap=3)` | 0.216 ms |
+    | + `contiguous_distance(cap=8)` | 0.714 ms |
+    | + `contiguous_distance()` | 16.3 ms |
+  - **Names and storage:** the default key is `contiguous_distance[cap=c]`; the cap is the
+    probe's `size`, saved and loaded with the result and used by `replay`. Results without a
+    cap are unchanged.
+  - **Estimates and summaries:** `api._probe_us` prices the short runs from measurements in
+    the states of `tests/test_estimates.py`, which now times caps 2, 3 and 8, and a larger
+    cap as the full distance; short runs add no note on scans that stop at the first failure.
+    A summary notes that a capped probe's mean is of min(d, c). `capabilities("probes")` lists
+    the forms.
+  - **Tests:** `tests/test_reference_rows.py` checks min(d, c) against the full kernel along
+    whole trajectories (caps 2 to n + 5 on both sides of the switch to the full distance,
+    periodic and open, two orders, and the reference scan for a system that leaves a qubit
+    out); `tests/test_capped_distance.py` covers the engine (ring, open chain, permuted order,
+    single reference), validation, save, load, replay, the JSON API, the summary note and the
+    pricing.
 * **Exact contiguous distance, 14–36x faster near the transition**
   (`_kernel/entropy.contiguous_distance_rows`, the engine's `contiguous_distance` probe).
   - **Same values:** every-layer d_cont arrays are bitwise identical to the old kernel's at

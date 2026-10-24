@@ -1408,3 +1408,95 @@ def generators_commute(rows):
             if parity:
                 return False
     return True
+
+
+@njit(cache=True)
+def capped_by_runs(n, cap):
+    """Whether :func:`contiguous_distance_rows_capped` settles ``cap`` by short runs alone.
+
+    The runs cost about ``n (cap - 1)**2`` row reductions; the full distance's two eliminations
+    do not depend on the cap. Measured on one thread at n = 256 and 1024, the runs are slower
+    above about cap = 1.2 to 1.5 sqrt(n). So the runs are used for ``2 <= cap < n`` with
+    ``(cap - 1)**2 <= 2 n``; any other cap takes the full distance, capped.
+    """
+    return 2 <= cap < n and (cap - 1) * (cap - 1) <= 2 * n
+
+
+@njit(cache=True)
+def _shortest_run_below(tab, ws, system, ref_rows, periodic, cap):
+    """The smallest L in 2 .. ``cap`` - 1 such that some run of L qubits loses information, else 0.
+
+    One start at a time: each start grows its run until it fails or reaches the shortest failing
+    length found so far (or ``cap``), so the echelon bases hold at most ``2 (cap - 1)`` rows
+    whatever n (:func:`shortest_short_run` keeps bases for every start at once). Assumes no single
+    qubit loses information (checked first).
+    """
+    n = system.shape[0]
+    best = min(cap, n)
+    if best <= 2:
+        return 0
+    rows = 2 * (best - 1)
+    ball = np.empty((rows, ws), dtype=np.uint64)
+    bfree = np.empty((rows, ws), dtype=np.uint64)
+    pwa = np.empty(rows, dtype=np.int64)
+    pma = np.empty(rows, dtype=np.uint64)
+    pwf = np.empty(rows, dtype=np.int64)
+    pmf = np.empty(rows, dtype=np.uint64)
+    vec = np.empty(ws, dtype=np.uint64)
+    starts = n if periodic else n - 1
+    for s in range(starts):
+        ta = 0
+        tf = 0
+        length = 1
+        while length < best and (periodic or s + length <= n):
+            q = system[(s + length - 1) % n]
+            for col in range(2):
+                for w in range(ws):
+                    vec[w] = tab[2 * q + col, w]
+                ta = _echelon_add(vec, ball, pwa, pma, ta, ws)
+                for w in range(ws):
+                    vec[w] = tab[2 * q + col, w] & ~ref_rows[w]
+                tf = _echelon_add(vec, bfree, pwf, pmf, tf, ws)
+            if ta > tf:
+                best = length  # every later start only looks at shorter runs
+                break
+            length += 1
+        if best == 2:
+            break
+    return best if best < min(cap, n) else 0
+
+
+@njit(cache=True)
+def contiguous_distance_rows_capped(tab, ws, system, ref_rows, num_ref, periodic, cap):
+    """``min(d, cap)`` for the contiguous distance d of :func:`contiguous_distance_rows`; 0 if k = 0.
+
+    For a question that only needs to know whether d reaches ``cap`` (``cap >= 2``), such as
+    whether no single qubit carries logical information (``cap = 2``):
+
+    * d = 1 is settled by the n single-qubit informations (two columns each), as in the full
+      distance;
+    * runs of 2 .. cap - 1 qubits are checked one start at a time
+      (:func:`_shortest_run_below`), which returns the shortest failing run among them;
+    * if none fails, d >= cap and the answer is ``cap``.
+
+    The answer is exactly ``min(d, cap)``. Cost: n single-qubit checks of ``ws`` words, then at
+    most about ``n (cap - 1)**2`` row reductions of ``ws`` words, and bases of at most
+    ``2 (cap - 1)`` rows; no gauge elimination (whose ``O(n**3 / 64)`` dominates the full
+    distance). A cap for which the full distance is cheaper (:func:`capped_by_runs`), or of at
+    least the number of system qubits, takes the full distance and caps it.
+    """
+    k = -num_ref
+    for w in range(ws):
+        k += np.int64(popcount(ref_rows[w]))
+    if k == 0:
+        return 0
+    n = system.shape[0]
+    if not capped_by_runs(n, cap):
+        return min(contiguous_distance_rows(tab, ws, system, ref_rows, num_ref, periodic), cap)
+    if tab.shape[0] // 2 != n + num_ref:  # as in the full distance: the reference scan
+        return min(contiguous_distance_rows_scan(tab, ws, system, ref_rows, num_ref, periodic), cap)
+    for s in range(n):
+        if single_qubit_lost(tab, ws, system[s], ref_rows) > 0:
+            return 1
+    short = _shortest_run_below(tab, ws, system, ref_rows, periodic, cap)
+    return short if short > 0 else cap

@@ -80,6 +80,7 @@ import numpy as np
 
 from sparsegf2 import __version__, analysis, erasures, graphs, mipt, observables
 from sparsegf2._compile import DEFAULT_MAX_OPS
+from sparsegf2._kernel.entropy import capped_by_runs
 from sparsegf2.circuit import Circuit, Instruction, RepeatBlock, _strip_comment
 from sparsegf2.errors import PhaseFreeError
 from sparsegf2.gates import KINDS, all_gates, gate
@@ -1898,6 +1899,10 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
         a, b, c = sizes
         return _entropy_us([a, b, c, a + b, a + c, b + c, a + b + c], num_qubits, words)
     if p.kind == "contiguous_distance":
+        if _capped_by_runs(p, mc):  # n single-qubit checks, then runs of 2 .. cap - 1 qubits
+            m = p.size - 1 if p.size > 2 else 0  # from each of the n starts
+            return 12.0 + 1.5e-3 * n * words + n * m * (0.15 + 0.05 * m + 5e-4 * words * m)
+        # without a cap, or with one the kernel settles by the full distance
         if single:  # n starts, each grown to about n / 2 qubits: O(n**3 W)
             return 20.0 + 1e-3 * n**3 * (7.8 + 0.6 * words)
         return 50.0 + 0.03 * n**2.25
@@ -2511,6 +2516,12 @@ def benchmark_ensemble(
 _SCAN_KINDS = ("contiguous_distance", "erasure_first_failure")  # stop at the first failure
 
 
+def _capped_by_runs(p: mipt.Probe, mc: mipt.MonitoredCircuit) -> bool:
+    """A contiguous_distance probe whose cap the kernel settles by short runs alone
+    (``_kernel.entropy.capped_by_runs``), priced for the codes where no shorter run fails."""
+    return p.kind == "contiguous_distance" and p.size > 0 and capped_by_runs(mc.num_system, p.size)
+
+
 def _estimate_notes(mc: mipt.MonitoredCircuit) -> list[str]:
     """Where the estimate of ``mc`` can be too low, one sentence each.
 
@@ -2518,7 +2529,7 @@ def _estimate_notes(mc: mipt.MonitoredCircuit) -> list[str]:
     single reference (:func:`_probe_us`); in the purification picture, a code whose first
     failures are near n / 2 makes them cost up to their single-reference price.
     """
-    scans = [p for p in mc.probes if p.kind in _SCAN_KINDS]
+    scans = [p for p in mc.probes if p.kind in _SCAN_KINDS and not _capped_by_runs(p, mc)]
     if not scans or mc.reference == "single":
         return []
     priced = worst = 0.0
@@ -3013,6 +3024,11 @@ def _summarize_ensemble(
                         f"{keys[name]}: the distance is undefined without a code, so it averages "
                         "only trajectories whose code dimension is above 0 (see 'count')"
                     )
+            if probe.kind == "contiguous_distance" and 0 < probe.size < result.spec.num_system:
+                notes.append(
+                    f"{keys[name]}: min(d, {probe.size}), the contiguous distance capped at "
+                    f"{probe.size}: a mean of capped values, not of distances"
+                )
             if probe.kind == "code_snapshot":
                 notes.append(
                     f"{keys[name]}: the mean number of stabilizer generators (n - k); the codes "
@@ -6304,6 +6320,18 @@ _DETAIL_SECTIONS = ("probes", "observables", "instructions", "ensemble_spec", "g
 # What a probe's signature does not show: defaults chosen inside the function, and the
 # argument forms beyond plain numbers.
 _PROBE_EXTRAS: dict[str, dict[str, Any]] = {
+    "contiguous_distance": {
+        "forms": [{"cap": 2}, {"cap": 3, "name": "d3"}],
+        "note": (
+            "cap c (at least 2) records min(d, c): exactly d below c and c for every distance at "
+            "or above it; cap 2 asks whether no single qubit carries logical information. A cap "
+            "with (c - 1)**2 <= 2 num_system checks only the runs shorter than c, about n c**2 "
+            "row operations, and skips the full distance's gauge eliminations, whose cost grows "
+            "as n**3 and dominates a trajectory at large n; a larger cap takes the full "
+            "distance and caps it. The key is contiguous_distance, or "
+            "contiguous_distance[cap=c] with a cap, unless 'name' is given"
+        ),
+    },
     "uncorrectable_region_counts": {
         "params": {"max_size": 2},
         "forms": [
