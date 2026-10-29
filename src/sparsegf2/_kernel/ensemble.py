@@ -589,6 +589,11 @@ def run_ensemble(
     ws = (n + 63) // 64
     max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
     num_graphs = graph_ptr.shape[0] - 1
+    # The stop probe's place in the output, read here and only with the rule on: the parallel
+    # loop hoists reads that do not depend on t out of their conditions, and stop_probe is -1
+    # without the rule (poff may even be empty).
+    stop_j = stop_probe if stop_distance > 0 else 0
+    stop_base = poff[stop_j] if stop_distance > 0 else 0
     for t in prange(num_traj):
         u = indices[t]  # the trajectory this row simulates
         g = 0 if num_graphs == 1 else u // circuits_per_graph
@@ -739,7 +744,7 @@ def run_ensemble(
                     stopped = stop_purified
                 if stop_distance > 0 and not stopped:
                     # stop_probe runs at every layer: its evaluation here is the latest one
-                    if out[t, poff[stop_probe] + next_eval[stop_probe] - 1] >= stop_distance:
+                    if out[t, stop_base + next_eval[stop_j] - 1] >= stop_distance:
                         reached = True  # NaN (no code) never compares >= c
                     if reached and layer >= stop_not_before and s_ref > 0:
                         stopped = True
