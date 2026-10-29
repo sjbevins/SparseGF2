@@ -286,6 +286,18 @@ rows, the lightest-pivot rule becomes cheap again and can be re-evaluated.
 For n ≤ 512 the plain column layout is already the fastest by a wide margin,
 so milestone 2 started with that layout, the simplest correct design.
 
+A first, exact step against that scan, short of the cache: an unmarked pivot
+(a code row) has no support on R, and R is every qubit from `n_sys` on, so
+`measure_1q_phase_free_tracked(..., n_sys)` scans the n_sys system qubits only
+for it, the same support in fewer reads. In the purification picture that is
+half the qubits, and nearly every random pivot is a code row (99.7% or more at
+n = 256 to 1024 in the Watts–Strogatz study's volume-law phase); with one
+reference or none it saves one qubit or nothing. There the support search had
+been 36 to 61% of a measurement's time on one thread, although the pivots'
+supports average only 8 to 88 qubits, and whole runs on 32 threads became 1.5
+to 1.8 times faster at n = 512 and 1024 for p from 0.065 to 0.235 (less at
+lower p). Every output is unchanged.
+
 ### 5.4 Signs
 
 Signs live in one more bitset over rows. Gate sign updates are word-parallel

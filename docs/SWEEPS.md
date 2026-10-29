@@ -641,11 +641,14 @@ probability 1e-6).
 **Cost model.** Per layer, with `N = 2n` qubits and `w = ceil(N / 64)` words per column (plus
 the padding below): the gates read and write `4 w` words each, `floor(n/2)` of them, plus 2
 draws each and `n` draws for the mask, `Theta(n w)`; each of the about `p n` measurements reads
-`w` words (the anticommuting rows) and, when its outcome is random, the pivot's word of all
-`2N` columns (stride `w`) and XORs `w` words into each of the `s <= 2N` columns of the pivot's
+`w` words (the anticommuting rows) and, when its outcome is random, the pivot's word of the
+columns of the qubits it may touch (stride `w`): the `2n` system columns when the pivot is a code
+row, as nearly every random pivot is here (`measure_1q_phase_free_tracked` with `n_sys`), all `2N`
+for a reference row; then it XORs `w` words into each of the `s` columns of the pivot's
 support, `O(N + s w)`; `code_dimension` is `w` popcounts; a snapshot evaluation transposes the
 tableau, `O(N w + nnz)`. Measured on one thread (ms per trajectory, T = 4n,
-`benchmarks/results/performance_x3d.md`):
+`benchmarks/results/performance_x3d.md`; before the search was limited to the system's columns,
+which made whole runs 1.5 to 1.8 times faster at n = 512 and 1024, CHANGELOG):
 
 | n | p | whole | gates and draws (p = 0) | measurements | `code_dimension` every layer | snapshots |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -675,8 +678,9 @@ workload, and writes each snapshot once:
 
 **Two kernel changes, measured.** (1) *Tableau padding* (`mipt._row_padding`): a column of
 `w = 16 j` words is an even number of 64-byte lines, and a measurement reads one word of every
-column, at stride `w`, so those reads fall on `1 / (2 j)` of the cache sets and evict each other
-(a quarter of the sets at n = 1024). One zero word more per column spreads them over every set.
+column it searches, at stride `w`, so those reads fall on `1 / (2 j)` of the cache sets and
+evict each other (a quarter of the sets at n = 1024). One zero word more per column spreads them
+over every set.
 All threads, p = 0.2: n = 512, 85.6 and 85.6 trajectories/s without and with (no change);
 n = 1024, 5.97 and 9.91 (1.66 times); n = 2048 (T = 256), 7.06 and 23.2 (3.3 times). With the
 padding, SMT pays again at n = 1024 (below). (2) *Gate masks before the loop* (`apply_2q`): read

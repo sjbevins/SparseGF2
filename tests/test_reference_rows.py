@@ -120,6 +120,75 @@ def test_tracked_measurement_without_references_is_the_plain_one(rng):
 
 
 @pytest.mark.parametrize(
+    "n_sys, partners, local, rate",
+    [
+        (96, list(range(96)), True, 0.12),  # purification, ring-local gates
+        (70, list(range(70)), False, 0.2),  # purification, all-to-all gates
+        (64, list(range(64)), False, 0.05),  # many logical qubits: many reference pivots
+        (80, list(range(0, 80, 4)), False, 0.12),  # a quarter of the system paired
+        (33, [7], False, 0.12),  # one reference qubit
+        (130, list(range(130)), False, 0.12),  # rows over five words
+    ],
+)
+def test_searching_the_system_only_changes_nothing(n_sys, partners, local, rate, rng):
+    """With ``n_sys`` given (the references follow the system, as in the engine) the tracked
+    measurement seeks an unmarked pivot's support among the system qubits only. Along whole
+    trajectories every measurement leaves the tableau, the reference rows and the return value bit
+    for bit as the search over every qubit does. Both kinds of pivot occur: the first measurement,
+    Z on a Bell-paired qubit before any gate, anticommutes only with the marked row X_q X_r."""
+    tab, n, ws = _bell_paired(n_sys, partners)
+    other = tab.copy()
+    refs = np.arange(n_sys, n, dtype=np.int64)
+    ref_rows = np.zeros(ws, dtype=np.uint64)
+    ke.reference_rows(tab, ws, refs, ref_rows)
+    other_rows = ref_rows.copy()
+    anti = np.zeros(ws, dtype=np.uint64)
+    supp = np.zeros(n, dtype=np.int64)
+    pivots = set()
+
+    def measure(q):
+        before = ref_rows.copy()
+        r1 = kt.measure_1q_phase_free_tracked(tab, n, ws, q, 2, anti, supp, ref_rows, n_sys)
+        r2 = kt.measure_1q_phase_free_tracked(other, n, ws, q, 2, anti, supp, other_rows)
+        assert r1 == r2
+        np.testing.assert_array_equal(ref_rows, other_rows)
+        np.testing.assert_array_equal(tab, other)
+        if r1:  # a marked pivot leaves ref_rows; an unmarked one changes nothing there
+            pivots.add("reference row" if (ref_rows != before).any() else "code row")
+
+    measure(partners[0])
+    assert pivots == {"reference row"}
+    for _ in range(4 * n_sys):
+        for _ in range(n_sys // 2):
+            if local:
+                a = int(rng.integers(n_sys))
+                b = (a + int(rng.integers(1, 3))) % n_sys
+            else:
+                a, b = (int(x) for x in rng.choice(n_sys, 2, replace=False))
+            g = int(rng.integers(11520))
+            for t in (tab, other):
+                kt.apply_2q(t, a, b, g, LIN2, ANF2, IDENTITY_SYM2, ws, False)
+        for q in np.flatnonzero(rng.random(n_sys) < rate):
+            measure(q)
+    assert pivots == {"reference row", "code row"}
+
+
+def test_the_search_bound_is_used():
+    """``n_sys`` is trusted, not checked. With the precondition broken on purpose (the reference rows
+    left empty, so the pivot X_1 X_4 counts as a code row although it acts on reference qubit 4), the
+    search stopped at qubit 4 misses that support and the tableau differs from the full search. This
+    only shows that the bound is applied: a change that ignored it would pass every exactness test."""
+    tab, n, ws = _bell_paired(4, [1])
+    other = tab.copy()
+    anti = np.zeros(ws, dtype=np.uint64)
+    supp = np.zeros(n, dtype=np.int64)
+    empty = np.zeros(ws, dtype=np.uint64)
+    assert kt.measure_1q_phase_free_tracked(tab, n, ws, 1, 2, anti, supp, empty.copy(), 4) == 2
+    assert kt.measure_1q_phase_free_tracked(other, n, ws, 1, 2, anti, supp, empty.copy()) == 2
+    assert not np.array_equal(tab, other)
+
+
+@pytest.mark.parametrize(
     "n_sys, partners, local, rate, reached",
     [
         (96, list(range(96)), True, 0.12, {"single", "gauge"}),  # purification, ring-local gates
