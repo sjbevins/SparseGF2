@@ -594,7 +594,7 @@ made by a factory (`mipt.code_dimension()`, `mipt.erasure_first_failure(100)`,
 
 The fields are the kernel code that `eval_probe` in `_kernel/ensemble.py`
 branches on, whether a reference is needed, how many numbers one evaluation
-writes (`"one"`, `"profile"` = n + 1, `"samples"`, `"size"`), the value
+writes (`"one"`, `"profile"` = n + 1, `"sites"` = n, `"samples"`, `"size"`), the value
 recorded after a stop at purification, and whether the probe draws random
 orderings. Everything else is derived from this table when the spec compiles
 itself into arrays (`MonitoredCircuit._arrays`):
@@ -624,6 +624,28 @@ itself into arrays (`MonitoredCircuit._arrays`):
   `contiguous_distance` are NaN there, since the system keeps evolving and
   the stopped trajectory no longer follows it. Code-rate and erasure averages
   over all trajectories therefore need no special handling.
+* **Stopping on distance.** With `stop_when_distance = c` and
+  `stop_not_before = H`, a trajectory that still holds a code ends at the
+  first layer L >= H by which its contiguous distance (a `contiguous_distance`
+  probe evaluated at every layer, uncapped or capped at c or more) has
+  reached c. Up to L it is exactly the trajectory without the rule; after L
+  every probe is NaN (unknown: the code was not followed), the purification
+  time is censored at the stop and the first passages are censored at L
+  (`final_layer`). `result.stopped_on_distance` marks these trajectories.
+* **Weight-one logical operators.** `logical_sites` counts the system qubits
+  i with I(i:R) > 0 (N_log) and `site_information` records every I(i:R).
+  With the reference rows of §5, I(i:R) is the rank of qubit i's two columns
+  over all rows minus over the unmarked rows, two rank-at-most-2 tests on
+  2 W words; one pass over the n qubits costs O(n W), the price of the cap-2
+  contiguous distance on a code without such a qubit (it stops at the first
+  one), and no elimination. d_cont >= 2 exactly when k > 0 and N_log = 0
+  ([observables/logical-sites.md](observables/logical-sites.md)).
+* **First touches.** `record_first_touch=True` also saves, per trajectory,
+  the first layer in which each system qubit was in a drawn gate or measured
+  (0 for the scramble, -1 if never through `final_layer`), read from the
+  gate and measurement lists the layer has already drawn: nothing is drawn
+  and nothing else changes. `bare_counts` and `bare_times` turn it into
+  N_bare(T) and tau_bare.
 * **Code snapshots.** `code_snapshot` writes the code's generators (the
   unmarked rows, packed as X words then Z words over the system) into a
   separate buffer of shape `(trajectories, evaluations, n, 2·ceil(n/64))`, and
@@ -651,7 +673,8 @@ use and cached on disk, so later runs start immediately.
 `EnsembleResult` holds `values`, `snapshots`, `purification_layer`,
 `final_layer`, `num_measurements`, `first_passage` (with a reference: the exact
 first layer with code dimension at most ell, ell = 0..n, from k read after
-every layer whatever the checkpoints), the trajectory indices, the exact seed used
+every layer whatever the checkpoints), `first_touch` (with `record_first_touch`),
+the trajectory indices, the exact seed used
 (`seed_sequence` repeats the run) and the package version. `survival()` gives
 P(tau > layer) at the checkpoints, `mean(name)` averages ignoring NaN,
 `save(path)` writes a compressed `.npz` with the spec and seed, `load` reads

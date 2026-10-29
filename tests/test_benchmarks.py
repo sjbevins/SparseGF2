@@ -108,6 +108,31 @@ def test_erasure_cost_quick(tmp_path):
     assert study["wall_seconds_low"] <= study["wall_seconds_high"]
 
 
+def test_logical_sites_cost_quick(tmp_path):
+    out = tmp_path / "ls"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "benchmarks" / "logical_sites_cost.py"), "--quick", "--out",
+         str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=ROOT,
+        env=_src_env(),
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads((out / "logical_sites_cost.json").read_text(encoding="utf-8"))
+    md = (out / "logical_sites_cost.md").read_text(encoding="utf-8")
+    assert md.startswith("# Cost of the weight-one logical-operator checks")
+    assert data["quick"] is True and data["environment"]["threads"] == 1
+    assert {r["n"] for r in data["rows"]} == {32, 64}
+    for r in data["rows"]:
+        assert set(r["seconds"]) == {"cap2", "logical_sites", "site_information", "full"}
+        assert all(s > 0 for s in r["seconds"].values()) and r["layer_seconds"] >= 0
+        if r["k"] > 0:  # the script checks the kernels against each other on every state
+            assert (r["cap2"] == 2) == (r["n_log"] == 0)
+            assert (r["distance"] == 1) == (r["n_log"] > 0)
+
+
 def test_probe_cost_quick(tmp_path):
     out = tmp_path / "pc"
     proc = subprocess.run(

@@ -1906,6 +1906,11 @@ def _probe_us(p: mipt.Probe, mc: mipt.MonitoredCircuit, single: bool | None = No
         if single:  # n starts, each grown to about n / 2 qubits: O(n**3 W)
             return 20.0 + 1e-3 * n**3 * (7.8 + 0.6 * words)
         return 50.0 + 0.03 * n**2.25
+    if p.kind in ("logical_sites", "site_information"):
+        # two columns of W words per qubit, no elimination: the n single-qubit checks of the
+        # cap-2 contiguous distance, priced as that probe (plus n stored numbers per vector)
+        stored = 0.01 * n if p.kind == "site_information" else 0.0
+        return 12.0 + 1.5e-3 * n * words + stored
     if p.kind == "entropy_profile":  # one incremental pass over the n qubits: O(n**2 W)
         return 5.0 + 1e-3 * n * n * (18.0 + 1.5 * words)
     if p.kind == "erasure_lost_profile":  # two such passes per sample
@@ -2003,8 +2008,9 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
     were 1x to 3x faster. On an AMD Ryzen 9 9950X3D (one thread, n = 64 to
     2048) they are 3.3 to 33 times the measured cost
     (benchmarks/results/probe_cost.md). The probe terms are
-    :func:`_probe_us`. Trajectories that stop early (``stop_when_purified``)
-    make real runs faster still.
+    :func:`_probe_us`. Trajectories that stop early (``stop_when_purified``,
+    ``stop_when_distance``) make real runs faster still; the estimate prices
+    every trajectory to ``layers``.
     """
     n, words = mc.num_system, (mc.num_qubits + 63) // 64
     gate_us = 0.2 + 0.04 * words
@@ -2015,6 +2021,8 @@ def _trajectory_us(mc: mipt.MonitoredCircuit) -> float:
     else:
         gates_per_layer = max(1, n // 2)
     layer = 1.0 + gates_per_layer * gate_us + mc.measurement_rate * n * 0.15 * words
+    if mc.record_first_touch:  # two tests per gate and one per measured qubit
+        layer += 0.01 * (gates_per_layer + mc.measurement_rate * n)
     scramble_gates = (
         mc.scramble_gates + mc.scramble_matchings * (n // 2) + mc.scramble_layers * gates_per_layer
     )
@@ -2111,7 +2119,8 @@ def _estimate_seconds(
 def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
     """Memory of the run's result: every probe value (float64) plus the saved codes or tableaux
     (uint64 words: ``n x 2 ceil(n / 64)`` per code, ``N x 2 ceil(N / 64)`` per joint tableau)
-    and, with a reference, the ``n + 1`` first passages (int64)."""
+    and, with a reference, the ``n + 1`` first passages (int64), and with
+    ``record_first_touch`` the ``n`` first touches (int64)."""
     n = mc.num_system
     values = sum(len(mc.probe_layers(p.name)) * mipt._probe_length(p, n) for p in mc.probes)
     snapshots = 0
@@ -2120,7 +2129,8 @@ def _result_bytes(mc: mipt.MonitoredCircuit, trajectories: int) -> int:
             _, evaluations, rows, words = mipt._snapshot_shape(mc, p, 1)
             snapshots += evaluations * rows * words
     first = n + 1 if mc.reference != "none" else 0
-    return trajectories * 8 * (values + snapshots + first + 4)
+    touches = n if mc.record_first_touch else 0
+    return trajectories * 8 * (values + snapshots + first + touches + 4)
 
 
 def _trajectory_count(mc: mipt.MonitoredCircuit, trajectories: Any) -> int:
@@ -2215,6 +2225,8 @@ def _result_layout(mc: mipt.MonitoredCircuit, trajectories: int) -> dict[str, An
     if mc.reference != "none":
         rows.append(_array_row("purification_layer", (trajectories,), np.int64))
         rows.append(_array_row("first_passage", (trajectories, n + 1), np.int64))
+    if mc.record_first_touch:
+        rows.append(_array_row("first_touch", (trajectories, n), np.int64))
     note = (
         "Sizes are uncompressed. The file is saved with np.savez_compressed, so the disk use "
         "is lower (benchmark_ensemble measures it), and a small __meta__ record holds the "
@@ -2249,9 +2261,9 @@ def estimate_ensemble(
     assumes, whether a synchronous run fits within
     :data:`SYNC_ENSEMBLE_MAX_SECONDS`, the trajectory count (every circuit of a
     graph collection when ``trajectories`` is omitted) and the memory the
-    result needs. Trajectories that stop early (``stop_when_purified``) make
-    real runs faster. ``notes`` (when present) says where the estimate can be
-    too low.
+    result needs. Trajectories that stop early (``stop_when_purified``,
+    ``stop_when_distance``) make real runs faster. ``notes`` (when present) says
+    where the estimate can be too low.
 
     ``threads`` (a list of positive integers) adds ``by_threads``, the
     estimate for each count in the order given (threads beyond the number of
@@ -2694,7 +2706,11 @@ def _vector_stats(
 
     def compute(c: int, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         if probe.kind == "uncorrectable_counts":
-            counts = values[:, c, :] if rows is None else values[rows, c, :]
+            # rows None: every trajectory that reached the evaluation (NaN after a
+            # stop_when_distance stop)
+            counts = (
+                values[~np.isnan(values[:, c, 0]), c, :] if rows is None else values[rows, c, :]
+            )
             exact = analysis.exact_failure_by_size(counts, n)
             curves = np.concatenate([np.zeros((exact.shape[0], 1)), exact], axis=1)
             return analysis.mean_and_error(curves, axis=0)
@@ -2756,6 +2772,11 @@ _HOLDS_A_CODE = (
 _LOSES_NOTHING = (
     "averaged over all trajectories; trajectories without a code (k = 0) count as 0 bits lost"
 )
+_OVER_ALL = "averaged over all trajectories"
+_OVER_RUNNING = (
+    "averaged over the trajectories still running (a stop_when_distance stop leaves a "
+    "trajectory unknown after its stop; see 'count')"
+)
 
 
 def _loses_nothing_note(key: str) -> str:
@@ -2763,6 +2784,47 @@ def _loses_nothing_note(key: str) -> str:
     return (
         f"{key}: {_LOSES_NOTHING}, so the mean falls as codes are lost; select k > 0 in the "
         "saved arrays (output_dir) to average over the codes only"
+    )
+
+
+def _logical_sites_entry(
+    result: mipt.EnsembleResult, values: np.ndarray, layers: np.ndarray, shown: np.ndarray
+) -> dict[str, Any]:
+    """What the summary adds to a ``logical_sites`` probe when a code_dimension (or
+    erasure_first_failure) probe covers its layers: the mean over the trajectories that hold a
+    code (k > 0), their number, and the fraction of all trajectories with k > 0 and no
+    weight-one logical operator (contiguous distance at least 2), over those whose values are
+    known (a ``stop_when_distance`` stop leaves NaN)."""
+    holds = _code_holders_at(result, layers)
+    if holds is None:
+        return {}
+    known = ~np.isnan(values)
+    mean, err = analysis.mean_and_error(np.where(holds & known, values, np.nan), axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):  # no known value: NaN, shown as null
+        protected = (holds & known & (values == 0)).sum(axis=0) / known.sum(axis=0)
+    return {
+        "mean_with_code": mean[shown],
+        "stderr_with_code": err[shown],
+        "count_with_code": (holds & known).sum(axis=0)[shown],
+        "distance_two_fraction": protected[shown],
+    }
+
+
+def _logical_sites_note(key: str, conditioned: bool) -> str:
+    """The note on a ``logical_sites`` probe: what its means average over."""
+    note = (
+        f"{key}: N_log, the number of system qubits with I(i:R) > 0 (a weight-one logical "
+        "operator); 'mean' counts trajectories without a code (k = 0) as 0"
+    )
+    if conditioned:
+        return note + (
+            "; mean_with_code averages the trajectories with k > 0 (count_with_code of them), "
+            "and distance_two_fraction is the fraction of all trajectories with k > 0 and "
+            "N_log = 0 (contiguous distance >= 2)"
+        )
+    return note + (
+        "; add a code_dimension probe evaluated at the same layers for the mean over the codes "
+        "(k > 0) and the fraction with k > 0 and N_log = 0"
     )
 
 
@@ -2777,6 +2839,10 @@ _VECTOR_MEANING = {
     ),
     "uncorrectable_counts": (
         "exact P_C(m): fraction of all m-qubit erasures that are uncorrectable vs m (index)"
+    ),
+    "site_information": (
+        "mean I(i:R), the bits lost by erasing system qubit i alone (0, 1 or 2), vs qubit i "
+        "(index), " + _LOSES_NOTHING + "; I(i:R) > 0 marks a weight-one logical operator on i"
     ),
 }
 
@@ -2874,11 +2940,13 @@ def _correlated_summary(
     most_couplings, most_sizes, grid_most = _correlated_shown(shown, sizes_shown)
     picked = _spread_by_value(couplings, most_couplings)
     columns = _subsample(sizes.size, most_sizes)
+    # the rows known at that evaluation: a distance stop leaves every later value NaN
+    known = ~np.isnan(values[:, last].reshape(trajectories, -1)).all(axis=1)
     entry: dict[str, Any] = {
         "what": what,
         "vector": True,
         "at_layer": int(own[last]),
-        "count": trajectories,
+        "count": int(known.sum()),
     }
     if has_code is not None:
         entry["count_with_code"] = int(chosen.size)
@@ -3042,6 +3110,9 @@ def _summarize_ensemble(
                 )
             if probe.kind == "lost_information":
                 notes.append(_loses_nothing_note(keys[name]))
+            if probe.kind == "logical_sites":
+                entry.update(_logical_sites_entry(result, values, own, pidx))
+                notes.append(_logical_sites_note(keys[name], "count_with_code" in entry))
         elif probe.kind == "correlated_erasure":
             has_code = _code_holders_at(result, own)
             summary, cut_note = _correlated_summary(
@@ -3070,6 +3141,7 @@ def _summarize_ensemble(
             alive = (
                 ~np.isnan(values[:, :, 0])
                 if mipt._KINDS[probe.kind].after_purification == "nan"
+                or spec.stop_when_distance is not None  # every probe is NaN after such a stop
                 else np.ones(values.shape[:2], dtype=bool)
             )
             what = _VECTOR_MEANING.get(probe.kind, "a curve over size m (index)")
@@ -3098,7 +3170,19 @@ def _summarize_ensemble(
             entry = {"what": what, **summary}
         out["probes"][keys[name]] = entry
     if result.purification_layer is not None:
-        out["purification"] = _purification_summary(result.purification_layer, layers, shown)
+        out["purification"] = _purification_summary(
+            result.purification_layer, layers, shown, result.final_layer
+        )
+    if result.first_touch is not None:
+        out["first_touch"] = _first_touch_summary(result, layers, idx)
+        notes.append(
+            "first_touch: bare_mean is the mean N_bare(T), the number of system qubits that no "
+            "gate or measurement had reached by layer T (scramble gates count as layer 0); "
+            "fraction_with_bare is P(N_bare(T) > 0); tau_bare_median_all is the median of "
+            "tau_bare (the first layer with N_bare = 0), exact to the layer whatever the "
+            "checkpoints, when more than half of the trajectories ran out of bare qubits by the "
+            "earliest layer at which a trajectory was censored (null otherwise)"
+        )
     out["final_layer_mean"] = (
         float(np.mean(result.final_layer)) if result.num_trajectories else None
     )
@@ -3111,6 +3195,30 @@ def _summarize_ensemble(
             "(k = 0, nothing lost); entanglement probes average only trajectories still running "
             "(see 'count')"
         )
+    if spec.stop_when_distance is not None:
+        stopped = result.stopped_on_distance
+        stop_layers = np.asarray(result.final_layer)[stopped]
+        out["stop_when_distance"] = {
+            "at_least": spec.stop_when_distance,
+            "not_before": spec.stop_not_before,
+            "probe": keys[spec.stop_probe.name] if spec.stop_probe is not None else None,
+            "stopped": int(stopped.sum()),
+            "stop_layer_mean": float(stop_layers.mean()) if stop_layers.size else None,
+            "stop_layer_max": int(stop_layers.max()) if stop_layers.size else None,
+        }
+        notes.append(
+            f"stop_when_distance: {int(stopped.sum())} of {result.num_trajectories} "
+            f"trajectories stopped at the first layer >= {spec.stop_not_before} by which their "
+            f"contiguous distance had reached {spec.stop_when_distance}; every probe is NaN "
+            "(unknown) after such a stop, so later means average only the trajectories still "
+            "running (see 'count'), and the purification time is censored at the stop"
+        )
+        # The texts of the probes that are not conditioned on a code say "all trajectories";
+        # under the rule a stopped trajectory is unknown after its stop and left out.
+        for entry in out["probes"].values():
+            if isinstance(entry, dict) and isinstance(entry.get("what"), str):
+                entry["what"] = entry["what"].replace(_OVER_ALL, _OVER_RUNNING)
+        notes[:] = [note.replace(_OVER_ALL, _OVER_RUNNING) for note in notes]
     if correlated_cut:
         out["truncated"] = True
     if vectors_cut:
@@ -3125,9 +3233,59 @@ def _summarize_ensemble(
     return out
 
 
-def _purification_summary(
-    tau: np.ndarray, layers: np.ndarray, shown: int = MAX_CHECKPOINTS_SHOWN
+def _first_touch_summary(
+    result: mipt.EnsembleResult, layers: np.ndarray, shown: np.ndarray
 ) -> dict[str, Any]:
+    """The untouched ("bare") qubits of a run with ``record_first_touch``, at the checkpoints.
+
+    ``bare_mean`` (and ``count``, the trajectories it averages) is the mean N_bare at each
+    shown checkpoint over the trajectories whose N_bare is known there
+    (:meth:`~sparsegf2.mipt.EnsembleResult.bare_counts`: NaN only past the stop of a
+    trajectory that still had bare qubits). ``fraction_with_bare`` is P(N_bare > 0) = P(tau_bare
+    > layer), NaN (null) where it is not known for every trajectory; ``all_touched`` counts the
+    trajectories whose every qubit was touched by their final layer (tau_bare observed), and
+    ``tau_bare_median_all`` is the median of tau_bare over all trajectories, exact to the layer
+    whatever the checkpoints (first touches are recorded at every layer): the first layer T
+    with P(tau_bare > T) <= 1/2, defined (as ``tau_median_all`` for purification) only when
+    strictly more than half of the trajectories ran out of bare qubits by the earliest
+    censoring depth, below which P(tau_bare > T) is known for every trajectory; else None.
+    """
+    at, counts = result.bare_counts(layers)
+    known = ~np.isnan(counts)
+    mean, err = analysis.mean_and_error(counts, axis=0)
+    with np.errstate(invalid="ignore"):
+        some = np.where(known.all(axis=0), (counts > 0).mean(axis=0), np.nan)
+    time, observed = result.bare_times()
+    # tau_bare is exact where observed and known to exceed final_layer (its time here) where
+    # censored, so P(tau_bare > T) is known for every T up to the earliest censoring depth
+    known_to = int(time[~observed].min()) if not observed.all() else int(result.spec.layers)
+    done = np.sort(time[observed & (time <= known_to)])
+    total = int(time.size)
+    return {
+        "layers": at[shown],
+        "bare_mean": mean[shown],
+        "stderr": err[shown],
+        "count": known.sum(axis=0)[shown],
+        "fraction_with_bare": some[shown],
+        "all_touched": int(observed.sum()),
+        "censored": int(observed.size - observed.sum()),
+        "tau_bare_median_all": int(done[(total + 1) // 2 - 1]) if 2 * done.size > total else None,
+    }
+
+
+def _purification_summary(
+    tau: np.ndarray,
+    layers: np.ndarray,
+    shown: int = MAX_CHECKPOINTS_SHOWN,
+    final: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Purification statistics of the times ``tau`` (-1: censored) at the checkpoint ``layers``.
+
+    ``final`` (each trajectory's last simulated layer) marks what is known: a layer
+    beyond the stop of an unpurified trajectory (``stop_when_distance``) is not
+    known for every trajectory, so the survival there is NaN (shown as null) and
+    ``tau_median_all`` uses only the layers known for all.
+    """
     tau = np.asarray(tau)
     total = tau.size
     purified = tau[tau >= 0]
@@ -3151,12 +3309,16 @@ def _purification_summary(
         idx = _subsample(len(layers), shown)
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
         surviving = alive.mean(axis=1)
+        if final is not None:  # unknown where an unpurified trajectory had stopped earlier
+            known = (tau[None, :] >= 0) | (np.asarray(final)[None, :] >= layers[:, None])
+            surviving = np.where(known.all(axis=1), surviving, np.nan)
         # The median of tau over all trajectories is well defined despite
         # censoring only when strictly more than half purified within the
         # horizon (with exactly half it lies anywhere from the last purification
         # to beyond the horizon); it is then the first layer with S <= 1/2.
+        # S is non-increasing, and NaN only after the last layer known for all.
         below = np.flatnonzero(surviving <= 0.5)
-        out["tau_median_all"] = int(layers[below[0]]) if surviving[-1] < 0.5 else None
+        out["tau_median_all"] = int(layers[below[0]]) if (surviving < 0.5).any() else None
         out["survival"] = {"layers": layers[idx], "fraction_unpurified": surviving[idx]}
     return out
 
@@ -3576,6 +3738,7 @@ def _rows(result: mipt.EnsembleResult, keep: np.ndarray) -> mipt.EnsembleResult:
         elapsed_seconds=result.elapsed_seconds * share,
         snapshots={name: (g[keep], c[keep]) for name, (g, c) in result.snapshots.items()},
         first_passage=None if result.first_passage is None else result.first_passage[keep],
+        first_touch=None if result.first_touch is None else result.first_touch[keep],
     )
 
 
@@ -5959,7 +6122,8 @@ def _uniform_curves(
         best, col = max(found, key=lambda t: np.asarray(result.values[t[0].name]).shape[-1])
         counts = np.asarray(result.values[best.name][:, col, :])
         exact_info = {"probe": best.name, "max_size": int(counts.shape[-1])}
-    total = int(first.shape[0])
+    # the rows that reached the layer (NaN: stopped earlier by stop_when_distance)
+    total = int(np.count_nonzero(~np.isnan(first[:, 0]))) if first.shape[1] else 0
     k = int(code.sum())
     entry: dict[str, Any] = {
         "layer": layer,
@@ -6022,9 +6186,11 @@ def _correlated_curves(
     layer = int(result.layers(probe.name)[column])
     couplings, sizes, values = result.correlated(probe.name)
     sampled = np.asarray(values[:, column])  # (T, c, s)
-    total = int(sampled.shape[0])
+    # the rows that reached the layer (NaN: stopped earlier by stop_when_distance)
+    reached = ~np.isnan(sampled.reshape(sampled.shape[0], -1)).any(axis=1)
+    total = int(reached.sum())
     holders = _code_holders_at(result, np.array([layer]))
-    code = np.ones(total, dtype=bool) if holders is None else holders[:, 0]
+    code = reached if holders is None else holders[:, 0] & reached
     k = int(code.sum())
     unknown = np.ones(n + 1, dtype=bool)  # the sizes the probe did not sample
     unknown[sizes] = False
@@ -6143,7 +6309,9 @@ def erasure_curves(
     ``uncorrectable_region_counts`` for ``m <= w`` where one was evaluated at the same layer)
     and ``correlated_erasure`` probes (one curve per coupling), at ``layer`` (default: each
     probe's last evaluation), over the trajectories that hold a code (k > 0): ``q_plus``
-    (the fraction of trajectories that do) and ``count_with_code``; ``phi``, ``Phi(e)`` with
+    (the fraction of trajectories that do) and ``count_with_code``, out of ``count``, the
+    trajectories that reached the layer (a ``stop_when_distance`` stop ends some earlier);
+    ``phi``, ``Phi(e)`` with
     its standard error at each ``e`` (default eight values log-spaced from 1/n to 1/2); and
     ``e_delta``, the tolerance ``sup{e : Phi(e) <= delta}``. ``Phi(e)`` erases each qubit
     independently with probability ``e`` only for the ``uniform`` rows and for ``J = 0``; for a
@@ -6332,6 +6500,23 @@ _PROBE_EXTRAS: dict[str, dict[str, Any]] = {
             "contiguous_distance[cap=c] with a cap, unless 'name' is given"
         ),
     },
+    "logical_sites": {
+        "note": (
+            "N_log = #{i : I(i:R) > 0}: the number of system qubits carrying a weight-one logical "
+            "operator (not the sum of I(i:R), which is 2 at a qubit still paired with its "
+            "reference). d_cont >= 2 exactly when k > 0 and N_log = 0. One pass over the qubits, "
+            "O(n W) words, as cap-2 contiguous_distance on a code without such a qubit; 0 where "
+            "k = 0. The summary adds mean_with_code and distance_two_fraction when a "
+            "code_dimension probe covers its layers"
+        ),
+    },
+    "site_information": {
+        "note": (
+            "a vector of n values per evaluation, I(i:R) in {0, 1, 2} for qubit i (label "
+            "order); > 0 is the sitewise defect bitset. Same cost as logical_sites plus n "
+            "stored numbers: give it its own few checkpoints"
+        ),
+    },
     "uncorrectable_region_counts": {
         "params": {"max_size": 2},
         "forms": [
@@ -6464,6 +6649,16 @@ def _capability_sections() -> dict[str, Any]:
             "entropies are in bits; purification layer -1 means censored",
             "every probe and observable takes an optional 'name': its key in the results",
             "every probe takes optional 'checkpoints' (its own layers; default: the spec's)",
+            "stop_when_distance: c (>= 2) with stop_not_before: H ends a trajectory at the first "
+            "layer >= H by which its contiguous distance reached c (needs a reference and one "
+            "contiguous_distance probe at every layer, cap none or >= c); later evaluations are "
+            "NaN and the purification time is censored at the stop",
+            "logical_sites: N_log = #{i : I(i:R) > 0}, the qubits with a weight-one logical "
+            "operator (O(n W) per evaluation, as cap-2 contiguous_distance without a defect); "
+            "site_information: I(i:R) per qubit (the defect bitsets: > 0); both need a reference",
+            "record_first_touch: true saves first_touch (trajectories x n, int64): the first "
+            "layer each system qubit was in a gate or measured (scramble: 0; -1: untouched "
+            "through final_layer); the summary's first_touch block gives N_bare(T)",
         ],
         "examples": {
             "run_circuit": {

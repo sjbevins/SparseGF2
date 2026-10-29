@@ -54,6 +54,14 @@ completed layer, ``out_final``). Only measurements change ``k``, and never
 upward, so a drop from ``a`` to ``b`` sets ``tau_ell = t`` for
 ``ell = b .. a - 1``. This draws nothing and changes no other output.
 
+First touches (``record_first_touch``): ``out_touch[t, q]`` is the first layer in
+which system qubit ``q`` took part in a drawn gate (either end) or was measured,
+0 for a gate of the scramble (pairs, matchings and scramble layers), or -1 if
+neither happened through the last completed layer, ``out_final`` (the Bell
+pairing of the setup does not count). It reads the gate and measurement lists
+the layer already drew, so it draws nothing and changes no other output; with
+``out_touch`` of width 0 it costs one test per layer.
+
 Probes
 ------
 Every probe writes ``plen[j]`` numbers each time it is evaluated, into its own
@@ -64,9 +72,21 @@ evaluated at its own checkpoint layers ``pck[pck_ptr[j]:pck_ptr[j + 1]]``
 purification only where ``detect`` is set. Qubit sets are stored flat in
 ``idx``: probe ``j``'s block starts at ``ptr[j]`` and holds up to three
 consecutive regions of lengths ``region_len[j, 0..2]``. Evaluations that a
-trajectory never reaches (``stop_when_purified``) are filled with ``pfill[j]``,
-the probe's exact value once the reference is pure, or NaN where that value
-is not determined.
+trajectory never reaches after a purification stop (``stop_when_purified``)
+are filled with ``pfill[j]``, the probe's exact value once the reference is
+pure, or NaN where that value is not determined; after a distance stop
+(below) they are NaN, since the code was not followed further.
+
+Distance stop (``stop_when_distance``): with ``stop_distance = c > 0`` the
+``contiguous_distance`` probe ``stop_probe`` is evaluated at every layer, and
+a trajectory stops after the first layer ``L >= stop_not_before`` at which it
+still holds a code (``k > 0``) and that probe has recorded a value of at
+least ``c`` at some layer ``<= L``. The stop comes after every probe due at
+``L`` and after the first-passage update, so everything recorded through
+``L`` is what a run without the rule records; ``out_final`` is ``L`` and the
+purification time stays -1 (``k > 0`` at ``L``). A purified trajectory never
+stops on distance. With ``stop_distance = 0`` the rule costs one comparison
+per checkpoint.
 
 Snapshots: at most one probe per run writes generators into ``snap``, a
 ``code_snapshot`` (the rows outside ``ref_rows`` over the system qubits, the
@@ -122,6 +142,7 @@ from sparsegf2._kernel.entropy import (
     prefix_entropies,
     reference_rows,
     region_entropy,
+    site_information_rows,
     uncorrectable_counts_rows,
 )
 from sparsegf2._kernel.erasure_chain import (
@@ -161,6 +182,8 @@ PROBE_UNCORRECTABLE_COUNTS = 9
 PROBE_CODE_SNAPSHOT = 10
 PROBE_CORRELATED_ERASURE = 11
 PROBE_TABLEAU_SNAPSHOT = 12
+PROBE_LOGICAL_SITES = 13
+PROBE_SITE_INFORMATION = 14
 
 # Columns of ce_param (one row per probe; see correlated_erasure_rows): offsets into the
 # flat ce_int and ce_float tables, and the chain's settings.
@@ -193,6 +216,22 @@ def _pick_weighted(cum, u):
         else:
             lo = mid + 1
     return lo
+
+
+@njit(cache=True, inline="always")
+def _touch(touches, ga, gb, num_gates, mq, num_meas, layer):
+    """Give ``layer`` as first touch to the qubits of the first ``num_gates`` gates and
+    ``num_meas`` measurements that have none yet (-1); nothing when ``touches`` is empty."""
+    if touches.shape[0] == 0:
+        return
+    for j in range(num_gates):
+        if touches[ga[j]] < 0:
+            touches[ga[j]] = layer
+        if touches[gb[j]] < 0:
+            touches[gb[j]] = layer
+    for j in range(num_meas):
+        if touches[mq[j]] < 0:
+            touches[mq[j]] = layer
 
 
 @njit(cache=True)
@@ -389,6 +428,16 @@ def eval_probe(
         else:  # the row is float64: the exact int64 counts arrive rounded once
             exact = np.zeros(size_param[j], dtype=np.int64)
             uncorrectable_counts_rows(tab, ws, order, ref_rows, size_param[j], row, exact)
+    elif kind == PROBE_LOGICAL_SITES:  # N_log = #{i : I(i:R) > 0}, one pass over the sites
+        row[0] = 0 if s_ref == 0 else site_information_rows(tab, ws, n_sys, ref_rows, work[:0])
+    elif kind == PROBE_SITE_INFORMATION:  # I(i:R) of every system qubit i, in label order
+        if s_ref == 0:
+            for i in range(n_sys):
+                row[i] = 0.0
+        else:
+            site_information_rows(tab, ws, n_sys, ref_rows, work[:n_sys])
+            for i in range(n_sys):
+                row[i] = work[i]
     elif kind == PROBE_CODE_SNAPSHOT:  # the generators go to snap_out, the row holds their number
         row[0] = code_snapshot_rows(tab, n_sys, n, ref_rows, snap_out)
     else:  # PROBE_TABLEAU_SNAPSHOT: all n rows over all n qubits (a pure state has n generators)
@@ -486,11 +535,11 @@ def run_ensemble(
     n_sys, n_ref, ref_mode, fixed_partner, edges, graph_ptr, circuits_per_graph, edge_cum,
     color_ptr, color_ptr_ptr, color_idx, schedule_kind, gates_per_layer, pool, p, layers,
     scramble_gates, scramble_matchings, scramble_layers, orient, gck, detect, stop_purified,
-    pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
+    stop_distance, stop_not_before, stop_probe, pkind, plen, poff, pck_ptr, pck, pfill, ptr, region_len, idx, size_param, sample_param,
     order, periodic, key_struct, key_probe, phash, ce_param, ce_int, ce_float, geo_indptr,
     geo_indices, geo_order, geo_kind, ce_need_graph, indices, out, snap, snap_rows, out_tau,
-    out_final, out_meas, out_first, h_index, cx_index, lin1, anf1, ident1, lin2, anf2, ident2,
-    row_pad,
+    out_final, out_meas, out_first, out_touch, h_index, cx_index, lin1, anf1, ident1, lin2, anf2,
+    ident2, row_pad,
 ):  # fmt: skip
     """Simulate trajectory ``indices[t]`` into row ``t`` of the outputs, for every row ``t``.
 
@@ -515,8 +564,16 @@ def run_ensemble(
     ``wq = ceil(n / 64)``); evaluations a trajectory never reaches are marked
     -1 in ``snap_rows``.
 
+    ``stop_distance`` (0: off), ``stop_not_before`` and ``stop_probe`` (the index of
+    the every-layer ``contiguous_distance`` probe, or -1) set the distance stop
+    (module docstring).
+
     ``out_first`` (int64, ``(trajectories, n_sys + 1)`` filled with -1, or
     ``(trajectories, 0)`` without a reference) receives the first passages
+    (module docstring).
+
+    ``out_touch`` (int64, ``(trajectories, n_sys)`` filled with -1, or
+    ``(trajectories, 0)`` to record nothing) receives the first touches
     (module docstring).
 
     Each trajectory's tableau has ``ws + row_pad`` words per column (``ws = ceil(n / 64)``).
@@ -532,6 +589,11 @@ def run_ensemble(
     ws = (n + 63) // 64
     max_gates = _max_gates(n_sys, graph_ptr, gates_per_layer, scramble_gates)
     num_graphs = graph_ptr.shape[0] - 1
+    # The stop probe's place in the output, read here and only with the rule on: the parallel
+    # loop hoists reads that do not depend on t out of their conditions, and stop_probe is -1
+    # without the rule (poff may even be empty).
+    stop_j = stop_probe if stop_distance > 0 else 0
+    stop_base = poff[stop_j] if stop_distance > 0 else 0
     for t in prange(num_traj):
         u = indices[t]  # the trajectory this row simulates
         g = 0 if num_graphs == 1 else u // circuits_per_graph
@@ -589,14 +651,17 @@ def run_ensemble(
             ws,
         )
         reference_rows(tab, ws, refs, ref_rows)
+        touches = out_touch[t]  # first touches: empty when not recorded
 
         gen_scramble_pairs(rng, scramble_gates, n_sys, pool, ga, gb, gg)
         for j in range(scramble_gates):
             apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
+        _touch(touches, ga, gb, scramble_gates, mq, 0, 0)
         for _ in range(scramble_matchings):
             ng = gen_scramble_matching(rng, n_sys, pool, mperm, ga, gb, gg)
             for j in range(ng):
                 apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
+            _touch(touches, ga, gb, ng, mq, 0, 0)
         for s in range(scramble_layers):
             ng, _ = gen_layer(
                 rng, s, schedule_kind, g_edges, g_cum, g_cptr, g_cidx, gates_per_layer,
@@ -604,12 +669,15 @@ def run_ensemble(
             )  # fmt: skip
             for j in range(ng):
                 apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
+            _touch(touches, ga, gb, ng, mq, 0, 0)
 
         tau = -1
         ci = 0
         num_meas = 0
         final = 0
         stopped = False
+        reached = False  # stop_when_distance: the distance reached stop_distance at some layer
+        distance_stop = False
         k_prev = n_sys + 1  # above every threshold: layer 0 sets tau_ell = 0 for ell >= k_0
         for layer in range(layers + 1):
             if layer > 0:
@@ -622,6 +690,7 @@ def run_ensemble(
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
                 for j in range(nm):
                     measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
+                _touch(touches, ga, gb, ng, mq, nm, layer)
                 num_meas += nm
                 final = layer
             s_ref = -n_ref  # k = S(R) after this layer (0 without a reference)
@@ -673,14 +742,22 @@ def run_ensemble(
                 if detect[ci] and ref_mode != REF_NONE and tau < 0 and s_ref == 0:
                     tau = layer
                     stopped = stop_purified
+                if stop_distance > 0 and not stopped:
+                    # stop_probe runs at every layer: its evaluation here is the latest one
+                    if out[t, stop_base + next_eval[stop_j] - 1] >= stop_distance:
+                        reached = True  # NaN (no code) never compares >= c
+                    if reached and layer >= stop_not_before and s_ref > 0:
+                        stopped = True
+                        distance_stop = True
                 ci += 1
             if stopped:
                 break
         for j in range(num_probes):  # evaluations never reached: exact values for k = 0, or NaN
+            fill = np.nan if distance_stop else pfill[j]  # after a distance stop: unknown
             for c in range(next_eval[j], pck_ptr[j + 1] - pck_ptr[j]):
                 base = poff[j] + c * plen[j]
                 for i in range(plen[j]):
-                    out[t, base + i] = pfill[j]
+                    out[t, base + i] = fill
                 if pkind[j] == PROBE_CODE_SNAPSHOT or pkind[j] == PROBE_TABLEAU_SNAPSHOT:
                     snap_rows[t, c] = -1  # not evolved past the stop: nothing written
         out_tau[t] = tau

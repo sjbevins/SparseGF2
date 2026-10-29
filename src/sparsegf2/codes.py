@@ -423,6 +423,27 @@ class StabilizerCode:
         """Whether the erasure of A can be corrected perfectly (``l(A) = 0``)."""
         return self.lost_information(erased) == 0
 
+    def site_information(self) -> np.ndarray:
+        """``l({i}) = I(i:R)`` for every qubit i (int64, 0, 1 or 2): the single-qubit erasures.
+
+        Entry i is above 0 exactly when some single-qubit Pauli on i commutes with S
+        without being in S (a weight-one logical operator); the same values as the engine's
+        :func:`sparsegf2.mipt.site_information` probe, from two columns per qubit.
+        """
+        out = np.zeros(self._n, dtype=np.int64)
+        _ent.site_information_rows(self._tab, self._ws, self._n, self._marked, out)
+        return out
+
+    def logical_sites(self) -> int:
+        """N_log: the number of qubits that carry a weight-one logical operator (``I(i:R) > 0``).
+
+        0 for a code without logical qubits; the code's contiguous distance (in any order) is
+        at least 2 exactly when it has logical qubits and this is 0. The same value as the
+        engine's :func:`sparsegf2.mipt.logical_sites` probe.
+        """
+        empty = np.zeros(0, dtype=np.int64)
+        return int(_ent.site_information_rows(self._tab, self._ws, self._n, self._marked, empty))
+
     def first_failure_sizes(self, samples: int, *, seed) -> np.ndarray:
         """First-failure sizes along ``samples`` uniformly random orderings of the qubits.
 

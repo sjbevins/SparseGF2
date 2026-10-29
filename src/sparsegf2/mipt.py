@@ -59,6 +59,9 @@ follow):
    ``stop_when_purified`` ends the trajectory there, and later evaluations
    record each probe's exact value for a pure reference (k = 0, nothing lost,
    first failure n + 1), or NaN for entanglement probes, which keep changing.
+   ``stop_when_distance=c`` (with an every-layer ``contiguous_distance``
+   probe) ends a trajectory at the first layer ``>= stop_not_before`` by
+   which its contiguous distance has reached ``c``; later evaluations are NaN.
 5. **First passages.** With a reference, the code dimension k is also read
    after every layer, whatever the checkpoints, and
    ``result.first_passage[t, ell]`` records the exact first layer with
@@ -152,8 +155,10 @@ __all__ = [
     "erasure_first_failure",
     "erasure_lost_profile",
     "half_cut_entropy",
+    "logical_sites",
     "lost_information",
     "mutual_information",
+    "site_information",
     "tableau_snapshot",
     "tripartite_information",
     "uncorrectable_region_counts",
@@ -401,6 +406,41 @@ def contiguous_distance(
     return Probe(
         "contiguous_distance", name or default, size=size, checkpoints=_schedule(checkpoints)
     )
+
+
+def logical_sites(name: str | None = None, *, checkpoints=None) -> Probe:
+    """N_log: the number of system qubits that carry a weight-one logical operator (0 without a code). Needs a reference.
+
+    Qubit i counts when some single-qubit Pauli on i commutes with the code's stabilizer
+    group S without being in S, which is exactly when erasing i alone loses logical
+    information, ``I(i:R) > 0`` (:func:`site_information`). It is the number of such
+    *qubits*, not the sum of ``I(i:R)``, which is 2 at a qubit still Bell-paired with its
+    reference. The contiguous distance is at least 2 exactly when the code dimension is above
+    0 and this is 0, so ``contiguous_distance(cap=2)`` is 2 exactly where this is 0 and k > 0;
+    unlike that probe, which stops at the first such qubit, this counts them all. It equals
+    the count of uncorrectable one-qubit erasures, ``uncorrectable_region_counts(max_size=1)``,
+    without that probe's elimination: one pass over the n qubits reading two columns of
+    ``W = ceil(num_qubits / 64)`` words each, ``O(n W)``, what the cap-2 check costs on a code
+    with no such qubit. It is 0 where the code dimension is 0 (also after a
+    ``stop_when_purified`` stop) and NaN after a ``stop_when_distance`` stop.
+    """
+    return Probe("logical_sites", name or "logical_sites", checkpoints=_schedule(checkpoints))
+
+
+def site_information(name: str | None = None, *, checkpoints=None) -> Probe:
+    """Vector: I(i:R) for every system qubit i = 0..n-1 (0, 1 or 2 bits), in label order. Needs a reference.
+
+    Entry i is the logical information lost by erasing qubit i alone,
+    ``lost_information([i])``; it is above 0 exactly where qubit i carries a weight-one
+    logical operator, so ``values[name] > 0`` holds the sitewise defect bitsets, and their
+    count per evaluation is :func:`logical_sites`. Entry i is 2 at a qubit still
+    Bell-paired with its own reference (purification picture). The cost is that of
+    :func:`logical_sites` plus ``n`` stored numbers per evaluation, so give it checkpoints
+    of its own at the depths whose spatial pattern you need. Every entry is 0 where the code
+    dimension is 0 (also after a ``stop_when_purified`` stop) and NaN after a
+    ``stop_when_distance`` stop.
+    """
+    return Probe("site_information", name or "site_information", checkpoints=_schedule(checkpoints))
 
 
 def lost_information(region: Sequence[int], name: str | None = None, *, checkpoints=None) -> Probe:
@@ -918,8 +958,8 @@ class _Kind:
 
     code: int  # kernel probe code (``_kernel.ensemble.PROBE_*``)
     reference: bool  # needs a reference qubit system
-    # values per evaluation: "one", "profile" (n + 1), "samples", "size", "correlated"
-    # (couplings x sizes)
+    # values per evaluation: "one", "profile" (n + 1), "sites" (n), "samples", "size",
+    # "correlated" (couplings x sizes)
     length: str
     # value once the reference is pure: "nan", "zero", "n", "n+1", "qubits" (system plus
     # reference qubits)
@@ -936,6 +976,8 @@ _KINDS = {
     "code_dimension": _Kind(_ens.PROBE_CODE_DIMENSION, True, "one", "zero"),
     "contiguous_distance": _Kind(_ens.PROBE_CONTIGUOUS_DISTANCE, True, "one", "nan"),
     "lost_information": _Kind(_ens.PROBE_LOST_INFORMATION, True, "one", "zero"),
+    "logical_sites": _Kind(_ens.PROBE_LOGICAL_SITES, True, "one", "zero"),
+    "site_information": _Kind(_ens.PROBE_SITE_INFORMATION, True, "sites", "zero"),
     "erasure_lost_profile": _Kind(_ens.PROBE_ERASURE_LOST_PROFILE, True, "profile", "zero", True),
     "erasure_first_failure": _Kind(_ens.PROBE_FIRST_FAILURE, True, "samples", "n+1", True),
     "uncorrectable_counts": _Kind(_ens.PROBE_UNCORRECTABLE_COUNTS, True, "size", "zero"),
@@ -953,7 +995,7 @@ def _probe_length(p: Probe, n: int) -> int:
     rule = _KINDS[p.kind].length
     if rule == "correlated":  # coupling-major: len(couplings) x len(sizes)
         return len(p.couplings) * (len(p.sizes) if p.sizes else n - 1)
-    return {"one": 1, "profile": n + 1, "samples": p.samples, "size": p.size}[rule]
+    return {"one": 1, "profile": n + 1, "sites": n, "samples": p.samples, "size": p.size}[rule]
 
 
 def _probe_fill(p: Probe, n: int, num_qubits: int | None = None) -> float:
@@ -1073,6 +1115,35 @@ class MonitoredCircuit:
         Qubit ordering used by the half-cut entropy, default tripartite regions,
         entanglement profile and contiguous distance (default ``0..n-1``), and
         whether contiguous runs wrap around.
+    stop_when_distance, stop_not_before
+        A second stop rule (default off). With ``stop_when_distance=c`` (an
+        integer of at least 2) a trajectory ends at the first layer
+        ``L >= stop_not_before`` at which it still holds a code (k > 0) and its
+        contiguous distance has reached at least ``c`` at some layer ``<= L``:
+        with ``stop_not_before=0`` at the first layer with d >= c, later at
+        ``max(stop_not_before, T)`` (T that first layer). It needs a reference
+        and exactly one :func:`contiguous_distance` probe evaluated at every
+        layer (its own ``checkpoints="every_layer"`` or the spec's), with no
+        cap or a cap of at least ``c`` (``cap=2`` for ``c=2``). It combines
+        with ``stop_when_purified`` (whichever comes first); a purified
+        trajectory never stops on distance. The trajectory is the same up to
+        its stop, so every value recorded through :attr:`EnsembleResult.final_layer`
+        equals the run without the rule; later evaluations are NaN (unknown, not
+        the pure-reference values), the purification time is censored at the
+        stop and the first passages are censored there
+        (:attr:`EnsembleResult.stopped_on_distance` marks these rows). A
+        ``stop_not_before`` above ``layers`` never stops.
+    record_first_touch
+        Also record, per trajectory, the first layer in which each system qubit
+        took part in a drawn gate or was measured (default off):
+        :attr:`EnsembleResult.first_touch`, ``(trajectories, n)`` int64, 0 for a
+        gate of the scramble, -1 for a qubit untouched through the trajectory's
+        :attr:`~EnsembleResult.final_layer` (the setup's Bell pairing does not
+        count). :meth:`EnsembleResult.bare_counts` gives N_bare(T), the number
+        of qubits still untouched after layer T, and
+        :meth:`EnsembleResult.bare_times` the first layer with none left. It
+        draws nothing and changes no other output; off, it costs nothing and
+        stores nothing (on: 8 n bytes per trajectory).
     """
 
     num_system: int
@@ -1095,6 +1166,9 @@ class MonitoredCircuit:
     stop_when_purified: bool = False
     system_order: Sequence[int] | None = None
     periodic: bool = True
+    stop_when_distance: int | None = None
+    stop_not_before: int = 0
+    record_first_touch: bool = False
     # Per-instance caches, never copied by dataclasses.replace (init=False): a
     # derived spec always resolves and compiles its own fields.
     _checkpoint_layers: np.ndarray | None = field(
@@ -1174,7 +1248,7 @@ class MonitoredCircuit:
             object.__setattr__(self, name, _integer(getattr(self, name), name))
         if min(self.scramble_gates, self.scramble_matchings, self.scramble_layers) < 0:
             raise ValueError("scramble_gates, scramble_matchings and scramble_layers must be >= 0")
-        for name in ("random_orientation", "stop_when_purified", "periodic"):
+        for name in ("random_orientation", "stop_when_purified", "periodic", "record_first_touch"):
             object.__setattr__(self, name, _flag(getattr(self, name), name))
         pool = (
             _read_only(np.arange(num_cliffords(2), dtype=np.int64))
@@ -1215,12 +1289,82 @@ class MonitoredCircuit:
         )
         if self.stop_when_purified and self.reference == "none":
             raise ValueError("stop_when_purified needs a reference")
+        self._check_distance_stop()
         for p in self.probes:
             if p.kind == "correlated_erasure":
                 try:
                     self._plans[p.name] = self._plan_correlated(p)
                 except ValueError as exc:
                     raise ValueError(f"probe {p.name!r}: {exc}") from None
+
+    def _check_distance_stop(self) -> None:
+        """Validate ``stop_when_distance`` and ``stop_not_before`` (after the probes are resolved)."""
+        before = _integer(self.stop_not_before, "stop_not_before")
+        if before < 0:
+            raise ValueError(f"stop_not_before must be non-negative, got {before}")
+        object.__setattr__(self, "stop_not_before", before)
+        if self.stop_when_distance is None:
+            if before != 0:
+                raise ValueError(
+                    "stop_not_before applies only with stop_when_distance: set "
+                    "stop_when_distance (e.g. 2) or leave stop_not_before at 0"
+                )
+            return
+        at_least = _integer(self.stop_when_distance, "stop_when_distance")
+        if at_least < 2:
+            raise ValueError(
+                f"stop_when_distance must be at least 2 (every code has contiguous distance at "
+                f"least 1), got {at_least}; use None for no distance stop"
+            )
+        if at_least > self.num_system:
+            raise ValueError(
+                f"stop_when_distance={at_least} exceeds num_system={self.num_system}: the "
+                "contiguous distance is at most n, so the rule could never stop a trajectory"
+            )
+        object.__setattr__(self, "stop_when_distance", at_least)
+        if self.reference == "none":
+            raise ValueError(
+                "stop_when_distance needs a reference (purification or single): the contiguous "
+                "distance is a property of the code the reference defines"
+            )
+        found = [p for p in self.probes if p.kind == "contiguous_distance"]
+        add = (
+            f"contiguous_distance(cap={at_least}, checkpoints='every_layer') (JSON: "
+            f'{{"kind": "contiguous_distance", "cap": {at_least}, "checkpoints": "every_layer"}})'
+        )
+        if not found:
+            raise ValueError(
+                "stop_when_distance needs a contiguous_distance probe evaluated at every layer: "
+                f"add {add}"
+            )
+        if len(found) > 1:
+            raise ValueError(
+                f"stop_when_distance needs exactly one contiguous_distance probe, got "
+                f"{len(found)} ({', '.join(repr(p.name) for p in found)}): keep one (with no cap "
+                f"or a cap of at least {at_least}) and drop the others"
+            )
+        probe = found[0]
+        if 0 < probe.size < at_least:
+            raise ValueError(
+                f"the contiguous_distance probe {probe.name!r} has cap {probe.size}, below "
+                f"stop_when_distance={at_least}: min(d, {probe.size}) never reaches "
+                f"{at_least}; give it cap={at_least} (or more, or no cap)"
+            )
+        if not np.array_equal(
+            self.probe_layers(probe.name), np.arange(self.layers + 1, dtype=np.int64)
+        ):
+            raise ValueError(
+                f"the contiguous_distance probe {probe.name!r} must be evaluated at every layer "
+                f"0..{self.layers} for stop_when_distance (the stop reads it after each layer): "
+                "give it checkpoints='every_layer'"
+            )
+
+    @property
+    def stop_probe(self) -> Probe | None:
+        """The ``contiguous_distance`` probe that ``stop_when_distance`` reads, or None."""
+        if self.stop_when_distance is None:
+            return None
+        return next(p for p in self.probes if p.kind == "contiguous_distance")
 
     def _resolve_probe(self, p: Probe) -> Probe:
         """Validate a probe and fill in default regions and the exhaustive size for this n."""
@@ -1572,6 +1716,8 @@ class MonitoredCircuit:
                 phash=np.array([_name_hash(p.name) for p in self.probes], dtype=np.uint64),
                 **_correlated_tables(self),
                 snapshot=snapshot[0] if snapshot else -1,
+                # stop_when_distance: the probe the stop reads (-1 without the rule)
+                stop_probe=-1 if self.stop_probe is None else self.probes.index(self.stop_probe),
                 partner=-1 if self.reference_partner == "random" else int(self.reference_partner),
                 gpl=int(self.gates_per_layer or 0),
             )
@@ -1704,6 +1850,8 @@ class MonitoredCircuit:
         meas = np.zeros(trajectories, dtype=np.int64)
         thresholds = n + 1 if self.reference != "none" else 0  # tau_ell for ell = 0 .. n
         passages = np.full((trajectories, thresholds), -1, dtype=np.int64)
+        touched = n if self.record_first_touch else 0  # width 0: nothing recorded
+        touches = np.full((trajectories, touched), -1, dtype=np.int64)
         if trajectories:
             with threads(num_threads):
                 _ens.run_ensemble(
@@ -1713,14 +1861,18 @@ class MonitoredCircuit:
                     _SCHEDULES[self.schedule], a["gpl"], a["pool"], float(self.measurement_rate),
                     int(self.layers), int(self.scramble_gates), int(self.scramble_matchings),
                     int(self.scramble_layers), bool(self.random_orientation), a["gck"],
-                    a["detect"], bool(self.stop_when_purified), a["pkind"], a["plen"], a["poff"],
-                    a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"], a["idx"],
-                    a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
+                    a["detect"], bool(self.stop_when_purified),
+                    # clipped to equivalent values that fit int64 (d <= n; H > layers never stops)
+                    min(int(self.stop_when_distance or 0), n + 1),
+                    min(int(self.stop_not_before), int(self.layers) + 1), int(a["stop_probe"]),
+                    a["pkind"], a["plen"],
+                    a["poff"], a["pck_ptr"], a["pck"], a["pfill"], a["ptr"], a["region_len"],
+                    a["idx"], a["size"], a["samples"], a["order"], bool(self.periodic), key_struct,
                     key_probe, a["phash"], a["ce_param"], a["ce_int"], a["ce_float"],
                     a["geo_indptr"], a["geo_indices"], a["geo_order"], a["geo_kind"],
                     bool(a["ce_need_graph"]), index, out, snap, snap_rows, tau, final, meas,
-                    passages, _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2, ANF2,
-                    IDENTITY_SYM2, _row_padding((self.num_qubits + 63) // 64),
+                    passages, touches, _H_INDEX, _CX_INDEX, LIN1, ANF1, IDENTITY_SYM1, LIN2,
+                    ANF2, IDENTITY_SYM2, _row_padding((self.num_qubits + 63) // 64),
                 )  # fmt: skip
         elapsed = time.perf_counter() - start
         values, snapshots = {}, {}
@@ -1746,6 +1898,7 @@ class MonitoredCircuit:
             snapshots=snapshots,
             randomness_contract=RANDOMNESS_CONTRACT,
             first_passage=passages if self.reference != "none" else None,
+            first_touch=touches if self.record_first_touch else None,
         )
 
     def correlated_bytes_per_thread(self) -> int:
@@ -1796,12 +1949,29 @@ class MonitoredCircuit:
         samples, and nothing here can tell. For a saved run use
         :meth:`EnsembleResult.replay`, which takes the run's own spec and seed
         and refuses a result made under another contract.
+
+        With ``stop_when_distance`` the replay keeps the rule, so it stops where the
+        original trajectory stopped: the rule's :attr:`stop_probe` is pinned to every
+        layer, and added to ``probes`` when they leave it out (a probe of the same
+        name in ``probes`` replaces it, and must still satisfy the rule). To follow a
+        trajectory past its stop, replay a copy without the rule,
+        ``dataclasses.replace(spec, stop_when_distance=None, stop_not_before=0)``.
         """
         trajectory = _integer(trajectory, "trajectory")
         self._check_trajectories(trajectory, 1)
+        chosen = self.probes if probes is None else tuple(probes)
+        rule = self.stop_probe
+        if rule is not None:
+            pinned = replace(rule, checkpoints="every_layer")  # the layers it ran at
+            names = [p.name for p in chosen]
+            chosen = (
+                tuple(pinned if p == rule else p for p in chosen)
+                if rule.name in names
+                else (*chosen, pinned)
+            )
         spec = replace(
             self,
-            probes=self.probes if probes is None else tuple(probes),
+            probes=chosen,
             checkpoints=self.checkpoints if checkpoints is None else checkpoints,
         )
         for p in spec.probes:  # correlated_erasure: this spec's ladders (pinned by a load)
@@ -2079,6 +2249,9 @@ _SPEC_FIELDS = (
     "random_orientation",
     "stop_when_purified",
     "periodic",
+    "stop_when_distance",
+    "stop_not_before",
+    "record_first_touch",
 )
 
 
@@ -2286,7 +2459,8 @@ class EnsembleResult:
         ``values[probe_name]`` has shape ``(trajectories, evaluations)`` for a
         scalar probe and ``(trajectories, evaluations, length)`` for a vector
         probe, one evaluation per layer in :meth:`layers` (the probe's own
-        checkpoints, or the spec's). Evaluations after a trajectory stopped
+        checkpoints, or the spec's). Evaluations after a ``stop_when_distance``
+        stop are NaN (not simulated: unknown). Evaluations after a trajectory stopped
         (``stop_when_purified``) hold the probe's exact value for a pure
         reference (k = 0: code dimension and lost information 0, first-failure
         size n + 1, no uncorrectable regions) or NaN where that is not
@@ -2320,8 +2494,19 @@ class EnsembleResult:
         ``first_passage[:, 0]`` is the exact purification time; it equals
         :attr:`purification_layer` when every layer is a checkpoint. ``None``
         without a reference, and for files saved before it was recorded.
+    first_touch
+        With ``record_first_touch``: int64 ``(trajectories, n)``, where
+        ``first_touch[t, q]`` is the first layer in which system qubit ``q``
+        of row ``t`` took part in a drawn gate or was measured (0 for a gate
+        of the scramble), or -1 if neither happened through
+        :attr:`final_layer` (the setup's Bell pairing does not count). Exact
+        for every schedule, and the same in a chunk, a replay or a run
+        without probes. :meth:`bare_counts` and :meth:`bare_times` read it.
+        ``None`` without the option.
     final_layer
-        Last layer simulated for each trajectory.
+        Last layer simulated for each trajectory: ``layers``, or the layer of its
+        stop (``stop_when_purified``, ``stop_when_distance``;
+        :attr:`stopped_on_distance` tells them apart).
     num_measurements
         Number of measurements made in each trajectory.
     seed_entropy, seed_spawn_key, seed_pool_size
@@ -2353,6 +2538,7 @@ class EnsembleResult:
     snapshots: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     randomness_contract: int = RANDOMNESS_CONTRACT
     first_passage: np.ndarray | None = None
+    first_touch: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         # One normal form in memory and after a JSON round trip (tuples, lists and
@@ -2452,8 +2638,8 @@ class EnsembleResult:
         rows = int(counts[trajectory, evaluation])
         if rows < 0:
             raise ValueError(
-                f"trajectory row {trajectory} had stopped (reference pure) before evaluation "
-                f"{evaluation}: there is no code to return"
+                f"trajectory row {trajectory} had stopped (reference pure, or stop_when_distance) "
+                f"before evaluation {evaluation}: there is no code to return"
             )
         return StabilizerCode.from_packed(
             generators[trajectory, evaluation, :rows], self.spec.num_system
@@ -2472,8 +2658,8 @@ class EnsembleResult:
         entropies and ``I(A:R)``, and ``physical_code(num_system)`` the code.
         ``trajectory`` is a row index into this result (see :attr:`trajectories`
         for the trajectory index) and ``evaluation`` indexes ``layers(name)``.
-        Raises ``ValueError`` for an evaluation after a ``stop_when_purified`` stop,
-        where the state was not evolved and nothing was saved.
+        Raises ``ValueError`` for an evaluation after a stop (``stop_when_purified`` or
+        ``stop_when_distance``), where the state was not evolved and nothing was saved.
         """
         from sparsegf2.tableau import PhaseFreeTableau
 
@@ -2482,9 +2668,9 @@ class EnsembleResult:
         rows = int(counts[trajectory, evaluation])
         if rows < 0:
             raise ValueError(
-                f"trajectory row {trajectory} had stopped (reference pure) before evaluation "
-                f"{evaluation}: its joint state was not evolved further, so there is no "
-                "tableau to return"
+                f"trajectory row {trajectory} had stopped (reference pure, or stop_when_distance) "
+                f"before evaluation {evaluation}: its joint state was not evolved further, so "
+                "there is no tableau to return"
             )
         return PhaseFreeTableau.from_words(
             generators[trajectory, evaluation, :rows], self.spec.num_qubits
@@ -2496,8 +2682,9 @@ class EnsembleResult:
         """Every row's joint state at evaluation ``evaluation`` of a tableau_snapshot, at once.
 
         Entry ``t`` is ``tableau(t, evaluation, name)``, or ``None`` where row ``t`` had
-        stopped (``stop_when_purified``) and saved nothing. The canonical forms are computed
-        in parallel on ``num_threads`` threads (default: Numba's current count) by
+        stopped (``stop_when_purified`` or ``stop_when_distance``) and saved nothing. The
+        canonical forms are computed in parallel on ``num_threads`` threads (default:
+        Numba's current count) by
         :meth:`~sparsegf2.tableau.PhaseFreeTableau.from_words_batch`, and are exactly
         those of :meth:`tableau`; this is the way to canonicalize many snapshots.
         :func:`sparsegf2.tableau.physical_tableaux` gives their physical codes the same way.
@@ -2570,7 +2757,10 @@ class EnsembleResult:
         """Average of a probe over trajectories at each of its evaluations, ignoring NaN entries.
 
         NaN marks entanglement probes of trajectories that had stopped
-        (``stop_when_purified``) and ``contiguous_distance`` without a code.
+        (``stop_when_purified``), every probe of trajectories that ``stop_when_distance``
+        had stopped, and ``contiguous_distance`` without a code. After distance stops the
+        mean at a layer is therefore over the trajectories still running there, which are
+        not a random subset (they have not yet reached the distance).
         """
         v = self.values[name]
         if v.shape[0] == 0:
@@ -2584,16 +2774,86 @@ class EnsembleResult:
 
         Returns ``(layers, S)`` with ``S[i] = P(tau > layers[i])``, the fraction
         of trajectories whose reference is still mixed after that layer. Every
-        trajectory is observed up to the last checkpoint, so this is exact
-        (censoring only affects layers beyond the last checkpoint); with a
-        reference-qubit picture ``S(t)`` equals the mean reference entropy.
+        trajectory that did not stop on distance is observed up to the last
+        checkpoint, so this is exact (censoring only affects layers beyond the
+        last checkpoint); with a reference-qubit picture ``S(t)`` equals the mean
+        reference entropy. Beyond the stop of a row that ``stop_when_distance``
+        ended unpurified, the layer is not known for every trajectory and ``S`` is
+        NaN there; ``analysis.kaplan_meier(*self.purification_times())`` censors
+        those rows at their stops instead.
         """
         if self.purification_layer is None:
             raise ValueError("survival needs a reference (purification or single)")
         tau = self.purification_layer
         layers = self.checkpoint_layers
         alive = (tau[None, :] < 0) | (tau[None, :] > layers[:, None])
-        return layers.copy(), alive.mean(axis=1)
+        # known at a layer: purified (tau decides), or still simulated there
+        known = (tau[None, :] >= 0) | (self.final_layer[None, :] >= layers[:, None])
+        return layers.copy(), np.where(known.all(axis=1), alive.mean(axis=1), np.nan)
+
+    @property
+    def stopped_on_distance(self) -> np.ndarray:
+        """True for the rows that ``stop_when_distance`` ended (bool, one per trajectory).
+
+        Such a row stopped before ``layers`` without having purified (a purified row
+        never stops on distance, and a purification stop sets its purification
+        layer), so it is ``final_layer < layers`` with ``purification_layer == -1``:
+        its purification time is censored at its stop (:attr:`censoring_layer`), its
+        first passages at :attr:`final_layer`, and its evaluations after the stop are
+        NaN. A stop at layer ``layers`` itself leaves nothing out and is not counted.
+        Every row of a run without the rule is False.
+        """
+        tau = self.purification_layer
+        if self.spec.stop_when_distance is None or tau is None:
+            return np.zeros(self.num_trajectories, dtype=bool)
+        return (np.asarray(self.final_layer) < self.spec.layers) & (np.asarray(tau) < 0)
+
+    def first_distance_layer(
+        self, at_least: int | None = None, name: str | None = None
+    ) -> np.ndarray:
+        """Per row, the first evaluated layer at which a contiguous_distance probe was ``>= at_least``.
+
+        int64, -1 where no evaluation the row reached was (NaN, no code, never counts).
+        ``name`` defaults to the :attr:`MonitoredCircuit.stop_probe` of a
+        ``stop_when_distance`` run, else to the spec's one contiguous_distance probe;
+        ``at_least`` defaults to ``stop_when_distance``. With the rule and
+        ``stop_not_before = H``, a row that stopped on distance has
+        ``final_layer == max(H, first_distance_layer())``. Raises ``ValueError`` when
+        the probe or the threshold cannot be chosen, or the threshold is above the
+        probe's cap.
+        """
+        spec = self.spec
+        if name is None:
+            if spec.stop_probe is not None:
+                name = spec.stop_probe.name
+            else:
+                found = [p.name for p in spec.probes if p.kind == "contiguous_distance"]
+                if len(found) != 1:
+                    raise ValueError(
+                        f"give the name of a contiguous_distance probe: this result has "
+                        f"{len(found)} ({found})"
+                    )
+                name = found[0]
+        probe = next((p for p in spec.probes if p.name == name), None)
+        if probe is None or probe.kind != "contiguous_distance":
+            raise ValueError(f"{name!r} is not a contiguous_distance probe of this result")
+        if at_least is None:
+            if spec.stop_when_distance is None:
+                raise ValueError("give at_least: this run has no stop_when_distance")
+            at_least = spec.stop_when_distance
+        at_least = _integer(at_least, "at_least")
+        if 0 < probe.size < at_least:
+            raise ValueError(
+                f"{name!r} records min(d, {probe.size}): it cannot tell whether d >= {at_least}"
+            )
+        values = np.asarray(self.values[name], dtype=np.float64)
+        layers = np.asarray(self.layers(name), dtype=np.int64)
+        with np.errstate(invalid="ignore"):
+            hit = values >= at_least  # NaN compares False
+        out = np.full(values.shape[0], -1, dtype=np.int64)
+        rows = np.flatnonzero(hit.any(axis=1))
+        out[rows] = layers[np.argmax(hit[rows], axis=1)]
+        return out
 
     @property
     def censoring_layer(self) -> np.ndarray:
@@ -2602,7 +2862,11 @@ class EnsembleResult:
         Purification is tested only at the spec's checkpoints, so a trajectory
         that never purified is right-censored at the largest checkpoint layer
         not beyond its :attr:`final_layer`; that can be well below
-        ``final_layer`` when the checkpoints end before ``layers``. For a
+        ``final_layer`` when the checkpoints end before ``layers``. A row that
+        ``stop_when_distance`` ended is censored at the last checkpoint not beyond
+        its stop, or at the stop itself when no checkpoint precedes it (the rule
+        stops only a row that still holds a code, so its reference was not pure
+        there). For a
         trajectory that did purify (for instance one stopped by
         ``stop_when_purified``) the value is defined but not needed.
 
@@ -2611,9 +2875,10 @@ class EnsembleResult:
         if self.purification_layer is None:
             raise ValueError("censoring_layer needs a reference (purification or single)")
         layers = np.asarray(self.checkpoint_layers, dtype=np.int64)
-        at = np.searchsorted(layers, self.final_layer, side="right") - 1
-        # a trajectory that stopped before its first checkpoint was never tested
-        return layers[np.maximum(at, 0)].astype(np.int64)
+        final = np.asarray(self.final_layer, dtype=np.int64)
+        at = np.searchsorted(layers, final, side="right") - 1
+        # Only a distance stop ends a row before the first checkpoint: censored at its stop.
+        return np.where(at >= 0, layers[np.maximum(at, 0)], final).astype(np.int64)
 
     def purification_times(self) -> tuple[np.ndarray, np.ndarray]:
         """``(time, observed)`` for :func:`sparsegf2.analysis.kaplan_meier`.
@@ -2648,6 +2913,68 @@ class EnsembleResult:
             )
         observed = self.first_passage >= 0
         return np.where(observed, self.first_passage, self.final_layer[:, None]), observed
+
+    def _first_touch(self) -> np.ndarray:
+        if self.first_touch is None:
+            raise ValueError(
+                "this result has no first touches: run the protocol with "
+                'record_first_touch=True (JSON: "record_first_touch": true); a replay of '
+                "one of its trajectories with that option, dataclasses.replace(result.spec, "
+                "record_first_touch=True).replay(u, seed=result.seed_sequence), gives the "
+                "same trajectory"
+            )
+        return np.asarray(self.first_touch, dtype=np.int64)
+
+    def bare_counts(
+        self, layers: Sequence[int] | np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """N_bare(T) per row: how many system qubits no gate or measurement had reached after layer T.
+
+        Returns ``(layers, counts)``: ``layers`` (int64; default every layer ``0 ..
+        spec.layers``) and ``counts`` (float64, ``(trajectories, len(layers))``), where
+        ``counts[t, j]`` is the number of qubits ``q`` with ``first_touch[t, q] >
+        layers[j]`` or -1 (:attr:`first_touch`). Layer 0 is the state after setup and
+        scramble, so a qubit a scramble gate reached is not bare at 0. A count is known
+        through the row's :attr:`final_layer`; beyond a stop it is 0 where the count at the
+        stop was 0 (it never rises) and NaN otherwise (a qubit untouched at the stop might
+        have been touched later). In the purification picture every bare qubit is still
+        Bell-paired with its reference, so ``N_bare(T) <= N_log(T)`` and ``N_bare(T) <=
+        k(T)`` (:func:`logical_sites`, :func:`code_dimension`), and a purified row has none
+        left. Raises ``ValueError`` without first touches (``record_first_touch``).
+        """
+        touches = self._first_touch()
+        horizon = int(self.spec.layers)
+        if layers is None:
+            at = np.arange(horizon + 1, dtype=np.int64)
+        else:
+            at = np.array(_int_array(layers, "layers"), dtype=np.int64).ravel()
+            if at.size and (np.min(at) < 0 or np.max(at) > horizon):
+                raise ValueError(f"layers must lie in [0, layers={horizon}]")
+        n = touches.shape[1]
+        never = np.iinfo(np.int64).max
+        ordered = np.sort(np.where(touches < 0, never, touches), axis=1)
+        counts = np.empty((touches.shape[0], at.size), dtype=np.float64)
+        final = np.asarray(self.final_layer, dtype=np.int64)
+        for t in range(touches.shape[0]):
+            counts[t] = n - np.searchsorted(ordered[t], at, side="right")
+            at_stop = n - int(np.searchsorted(ordered[t], final[t], side="right"))
+            if at_stop > 0:
+                counts[t, at > final[t]] = np.nan  # not followed past its stop
+        return at, counts
+
+    def bare_times(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(time, observed)`` of tau_bare, the first layer after which no qubit is bare.
+
+        For :func:`sparsegf2.analysis.kaplan_meier`: where every qubit was touched by the
+        row's :attr:`final_layer` (``observed``), ``time`` is ``max_q first_touch[t, q]``,
+        the first layer with ``N_bare = 0`` (:meth:`bare_counts`); elsewhere it is the
+        censoring depth :attr:`final_layer`. Raises ``ValueError`` without first touches
+        (``record_first_touch``).
+        """
+        touches = self._first_touch()
+        observed = (touches >= 0).all(axis=1)
+        last = touches.max(axis=1, initial=0)
+        return np.where(observed, last, np.asarray(self.final_layer, dtype=np.int64)), observed
 
     def __repr__(self) -> str:
         return (
@@ -2734,6 +3061,8 @@ class EnsembleResult:
             arrays["purification_layer"] = self.purification_layer
         if self.first_passage is not None:
             arrays["first_passage"] = self.first_passage
+        if self.first_touch is not None:
+            arrays["first_touch"] = self.first_touch
         text = json.dumps(meta, default=_json_default)
         if compression == "default":
             np.savez_compressed(path, __meta__=np.array(text), **arrays)
@@ -2826,6 +3155,7 @@ class EnsembleResult:
                     if f"snapshot::{p.name}" in z.files
                 },
                 first_passage=z["first_passage"] if "first_passage" in z.files else None,
+                first_touch=z["first_touch"] if "first_touch" in z.files else None,
             )
 
     @staticmethod
@@ -2907,4 +3237,6 @@ class EnsembleResult:
             },
             # None as soon as one chunk lacks them (saved before they were recorded)
             first_passage=cat(lambda r: r.first_passage),
+            # every chunk has them or none does: record_first_touch is part of the protocol
+            first_touch=cat(lambda r: r.first_touch),
         )
