@@ -618,6 +618,35 @@ def single_qubit_lost(tab, ws, q, ref_rows):
 
 
 @njit(cache=True)
+def site_information_rows(tab, ws, num_sites, ref_rows, out):
+    """I({i}:R) for every system qubit i = 0 .. ``num_sites`` - 1, and how many of them are above 0.
+
+    With the reference-row invariant, the rows outside ``ref_rows`` generate the code's
+    stabilizer group S and all rows restricted to the system span its normalizer N(S), so
+    ``I({i}:R) = dim N_i - dim S_i`` (the cleaning lemma; ``_i``: the elements supported on
+    qubit i) is the rank of qubit i's two columns over all rows minus over the unmarked rows
+    (:func:`single_qubit_lost`). It is 0, 1 or 2, and above 0 exactly when some single-qubit
+    Pauli on i commutes with S without being in S: a weight-one logical operator. The count
+    returned is N_log, the number of such qubits; it is 0 when the code dimension is 0. ``out``
+    (int64, length ``num_sites``, or empty to count only) receives every value.
+
+    One pass over the sites, each reading its two columns once: ``2 n W`` words for ``n``
+    sites and ``W`` words per column, no elimination. That is what
+    :func:`contiguous_distance_rows_capped` with cap 2 spends when no single qubit fails (it
+    stops at the first that does).
+    """
+    count = 0
+    keep = out.shape[0] > 0
+    for i in range(num_sites):
+        lost = single_qubit_lost(tab, ws, i, ref_rows)
+        if keep:
+            out[i] = lost
+        if lost > 0:
+            count += 1
+    return count
+
+
+@njit(cache=True)
 def _echelon_add(vec, basis, pw, pm, top, ws):
     """:func:`_small_add` for a basis whose rows are views: reduce ``vec`` and append it if independent."""
     for b in range(top):

@@ -154,6 +154,21 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
     16.3 ms with the full distance and 0.119 ms with k alone. The check of the runs shorter
     than c costs about n c^2, so a cap with (c - 1)^2 > 2n takes the full distance instead
     (the same values);
+  * weight-one logical operators (need a reference): `logical_sites` records N_log, the
+    number of system qubits i with I(i:R) > 0, that is, carrying a single-qubit Pauli that
+    commutes with the code's stabilizers without being one (a qubit counts once: I(i:R) is
+    0, 1 or 2, and 2 at a qubit still Bell-paired with its reference, so N_log is not the
+    sum of I(i:R)). d_cont >= 2 exactly when k > 0 and N_log = 0, so it says what
+    `contiguous_distance` with `"cap": 2` says and also how many such qubits there are (cap
+    2 stops at the first). Cost: one pass over the n qubits reading two columns of
+    W = ceil(N / 64) words each, O(n W), what cap 2 costs on a code without such a qubit;
+    no elimination. The vector `site_information` records I(i:R) for every qubit i (label
+    order, n values): `> 0` is the sitewise defect bitset; give it its own few
+    checkpoints. Both are 0 where k = 0 (also after a `stop_when_purified` stop). The
+    summary adds, for `logical_sites` with a `code_dimension` probe on its layers,
+    `mean_with_code`, `count_with_code` and `distance_two_fraction` (P(k > 0, N_log = 0));
+    `StabilizerCode.logical_sites()` and `.site_information()` give the same for a saved
+    code;
   * erasure (need a reference): `erasure_first_failure` (`samples`, default 100) records,
     for each of `samples` random orderings of the system qubits, the first-failure size D:
     the smallest m such that erasing the first m qubits loses logical information (n + 1
@@ -199,12 +214,45 @@ The spec keys are the parameters of `sparsegf2.mipt.MonitoredCircuit`.
 * **Purification time tau:** the first of the spec's checkpoints at which the reference
   is pure (a probe's own checkpoints do not count). `-1` means censored: the reference
   never purified within the horizon.
+* **Distance stop:** `"stop_when_distance": c` (an integer >= 2) with `"stop_not_before": H`
+  (default 0) ends a trajectory at the first layer L >= H at which it still holds a code
+  (k > 0) and its contiguous distance has reached c at some layer <= L, that is at
+  max(H, T) with T the first layer with d >= c (H = 0: a pure first-passage run). It needs a
+  reference and exactly one `contiguous_distance` probe evaluated at every layer (its own
+  `"checkpoints": "every_layer"` or the spec's) with no cap or a cap >= c:
+  `{"kind": "contiguous_distance", "cap": 2, "checkpoints": "every_layer"}` for c = 2. It
+  combines with `stop_when_purified` (whichever comes first); a purified trajectory never
+  stops on distance. Everything recorded through the stop equals the run without the rule
+  (same random streams); after it every probe is NaN (unknown, not the pure-reference
+  fill), snapshots save nothing, `first_passage` is censored at the stop and tau is -1,
+  censored at the last spec checkpoint not beyond the stop (at the stop when none precedes
+  it). `final_layer[t]` is the stop layer; `result.stopped_on_distance` marks the rows
+  (`final_layer < layers` and tau = -1),
+  `result.first_distance_layer()` gives T per row, and the summary's `stop_when_distance`
+  entry counts the stops. `result.survival()` (and the summary's survival curve) is NaN at
+  layers beyond the earliest such stop: use `analysis.kaplan_meier` on
+  `result.purification_times()`. `result.replay(u)` keeps the rule (the stop's probe is
+  added if a replay leaves it out); to follow a trajectory past its stop, replay
+  `dataclasses.replace(spec, stop_when_distance=None, stop_not_before=0)`.
 * **First passages:** with a reference, the engine also reads k after every layer, whatever
   the checkpoints, and saves `first_passage` (int64, trajectories x (n + 1)):
   `first_passage[t, ell]` is the exact first layer with k <= ell, or `-1` if k stayed above
   ell through `final_layer`, the censoring depth (`result.first_passage_times()` gives
   `(time, observed)` for `analysis.kaplan_meier`). Column 0 is the exact purification time;
   the columns together give k at every layer (`docs/SWEEPS.md` section 7).
+* **First touches** (opt-in, `"record_first_touch": true`): `first_touch` (int64,
+  trajectories x n): `first_touch[t, q]` is the first layer in which system qubit q took
+  part in a drawn gate or was measured, 0 for a scramble gate (pairs, matchings, scramble
+  layers), `-1` if neither happened through `final_layer` (the Bell pairing of the setup
+  does not count). `result.bare_counts(layers)` gives N_bare(T), the number of qubits still
+  untouched after layer T (NaN past a stop unless it was already 0), and
+  `result.bare_times()` gives `(time, observed)` of tau_bare, the first layer with
+  N_bare = 0, for `analysis.kaplan_meier`. In the purification picture an untouched qubit
+  keeps I(i:R) = 2, so N_bare <= N_log and N_bare <= k. It draws nothing and changes no
+  other output; it is part of the protocol for `concatenate` and resume. The summary gets a
+  `first_touch` block (`bare_mean`, `fraction_with_bare`, `all_touched`, `censored`,
+  `tau_bare_median_all`). Off (the default) it stores nothing; on it adds 8 n bytes per
+  trajectory.
 
 ## Conventions
 
@@ -568,7 +616,7 @@ sparsegf2 sweep replay runs/ws 16 0.1 0.15 3          # rerun trajectory u = 3, 
 | `src/sparsegf2/mipt.py` | `MonitoredCircuit`, probes, `EnsembleResult` |
 | `src/sparsegf2/codes.py` | `StabilizerCode`: erasure analysis of a saved code, contiguous distance, correlated erasures (exact counts, J -> inf limits, sampled estimates) |
 | `src/sparsegf2/erasures.py` | geometry-correlated erasure regions on a graph: boundaries, exact densities of states, exact ring and path samplers, the swap chain with replica exchange, diagnostics |
-| `docs/observables/` | one document per observable family, from definition to kernel (`correlated-erasure.md` for correlated erasures) |
+| `docs/observables/` | one document per observable family, from definition to kernel (`correlated-erasure.md` for correlated erasures, `logical-sites.md` for N_log, I(i:R) per qubit and first touches) |
 | `src/sparsegf2/analysis.py` | P_C(m), Phi(e), e_delta, mu_D, distance bounds, Kaplan-Meier, means with errors; correlated curves P_J(m), Phi_J(e), e_delta(J) |
 | `src/sparsegf2/graphs.py` | graph families, statistics, graph files (`.json`, `.npz`) |
 | `src/sparsegf2/crosscheck.py` | tick-by-tick comparison of any circuit with Stim |

@@ -48,6 +48,11 @@ def _replay(spec: mipt.MonitoredCircuit, trajectory: int, seed):
             return ob.contiguous_code_distance(sim, order, refs, periodic=spec.periodic)
         if p.kind == "lost_information":
             return ob.lost_logical_information(sim, p.regions[0], refs)
+        if p.kind in ("logical_sites", "site_information"):  # I(i:R) of each qubit alone
+            sites = np.array(
+                [ob.lost_logical_information(sim, [i], refs) for i in spec.system_qubits]
+            )
+            return sites if p.kind == "site_information" else np.count_nonzero(sites)
         if p.kind == "entropy_profile":
             return ob.entropy_profile(sim, order)
         if p.kind == "uncorrectable_counts":
@@ -105,6 +110,8 @@ def _code_probes(region: list[int], layers: int) -> list[mipt.Probe]:
         mipt.uncorrectable_region_counts(2, checkpoints=[0, layers // 2, layers]),
         mipt.contiguous_distance(),
         mipt.code_snapshot(checkpoints=[0, layers]),
+        mipt.logical_sites(),
+        mipt.site_information(checkpoints=[0, layers]),
     ]
 
 
@@ -128,6 +135,8 @@ SPECS = {
             mipt.tripartite_information(),
             mipt.uncorrectable_region_counts(2, checkpoints=[0, 5, 20]),
             mipt.code_snapshot(checkpoints=[10, 20]),
+            mipt.logical_sites(),
+            mipt.site_information(checkpoints=[0, 3, 11, 20]),
         ],
     ),
     "random_edges_ws_single_random_partner": dict(
@@ -172,6 +181,8 @@ SPECS = {
             mipt.uncorrectable_region_counts(2, checkpoints=2),
             mipt.code_snapshot(checkpoints=3),
             mipt.half_cut_entropy(checkpoints=[0, 7, 30]),
+            mipt.logical_sites(),
+            mipt.site_information(checkpoints=[0, 2, 30]),
         ],
         stop_when_purified=True,
     ),

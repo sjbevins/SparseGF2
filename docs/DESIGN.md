@@ -513,9 +513,10 @@ higher one (common random numbers across a rate scan). In the JSON interface,
 A probe is a frozen `Probe` (kind, name, regions, size, samples, checkpoints)
 made by a factory: `entropy`, `half_cut_entropy`, `mutual_information`,
 `tripartite_information`, `entropy_profile`, `code_dimension`,
-`contiguous_distance(cap=None)`, `lost_information(region)`,
-`erasure_lost_profile(samples=10)`, `erasure_first_failure(samples=100)`,
-`uncorrectable_region_counts(max_size=2)` and `code_snapshot()`. Every factory
+`contiguous_distance(cap=None)`, `logical_sites()`, `site_information()`,
+`lost_information(region)`, `erasure_lost_profile(samples=10)`,
+`erasure_first_failure(samples=100)`, `uncorrectable_region_counts(max_size=2)`,
+`correlated_erasure(...)`, `code_snapshot()` and `tableau_snapshot()`. Every factory
 takes `checkpoints=` in the same forms as the spec's (`"final"`,
 `"every_layer"`, a positive stride, a list of layers); without it the probe
 follows the spec's checkpoints. `spec.probe_layers(name)` and
@@ -525,7 +526,8 @@ while an expensive one runs at a few depths.
 How the engine handles them (`_kernel/ensemble.py`):
 
 * **Flat rows.** Probe `j` writes `plen[j]` numbers per evaluation (1 for a
-  scalar, n + 1 for a profile, `samples` or `size` for the erasure vectors)
+  scalar, n + 1 for a profile, n for `site_information`, `samples` or `size`
+  for the erasure vectors)
   into its own slice of the trajectory's output row: evaluation `c` fills
   `out[t, poff[j] + c·plen[j] : ... + plen[j]]`. `values[name]` is that slice
   reshaped to `(trajectories, evaluations)` or `(trajectories, evaluations,
@@ -549,6 +551,39 @@ How the engine handles them (`_kernel/ensemble.py`):
   `contiguous_distance`, which is NaN wherever k = 0. Averages of code rates
   and erasure statistics over all trajectories therefore need no NaN
   handling.
+* **The distance stop.** `stop_when_distance = c` (with `stop_not_before = H`)
+  ends a trajectory after the first layer L >= H at which it still holds a
+  code and its every-layer `contiguous_distance` probe (`stop_probe`) has
+  recorded a value >= c at some layer <= L. The check runs after every probe
+  due at L, the purification test and the first-passage update, so the
+  trajectory is the run without the rule up to L, bit for bit (nothing is
+  drawn for the check). After the stop every evaluation is NaN, not `pfill`:
+  the code was not followed, so its values are unknown, and a snapshot saves
+  nothing (count -1). A purified trajectory never stops on distance (its later
+  code values are exact anyway), so a distance stop always leaves tau = -1 and
+  is recognized from the outputs alone (`final_layer < layers`, tau = -1:
+  `EnsembleResult.stopped_on_distance`). With the rule off the hot path pays
+  one integer comparison per checkpoint. Whatever counts on a trajectory being
+  followed to the horizon uses its own `final_layer` instead: `censoring_layer`
+  and `purification_times` (censored at the last checkpoint not beyond the
+  stop, or at the stop when none precedes it), `first_passage_times`
+  (censored at the stop), `survival` and the
+  summary's survival curve (NaN beyond the earliest unpurified stop), the
+  summary means (over the rows still running, with `count`), `erasure_curves`
+  (`count` and `q_plus` over the rows that reached the layer), `replay` (keeps
+  the rule and its probe) and `concatenate` (the rule is part of the
+  protocol).
+* **First touches.** `record_first_touch` gives `run_ensemble` an `out_touch`
+  array of shape `(trajectories, n)` filled with -1 (width 0 when off). After
+  the scramble's gates (layer 0) and after each layer's gates and
+  measurements, `_touch` writes the layer into the entries of the qubits in
+  the lists the layer already drew that are still -1: two tests per gate and
+  one per measured qubit, nothing drawn, so the trajectory and every other
+  output are unchanged, and a stopped trajectory keeps -1 for whatever it had
+  not touched by its stop. It is a protocol field (`_SPEC_FIELDS`), so
+  `concatenate` and a resume refuse to mix rows with and without it. It is
+  opt-in because it stores n int64 per trajectory, as much as the first
+  passages; off, the kernel pays one width test per layer.
 * **Snapshots.** `code_snapshot` writes the code's generators (the rows outside
   `ref_rows`, packed as X words then Z words over the system qubits) into a
   separate buffer of shape `(trajectories, evaluations, n, 2⌈n/64⌉)` and their
@@ -582,7 +617,7 @@ probe kind:
 |---|---|
 | `code` | the kernel code (`_kernel.ensemble.PROBE_*`) that `eval_probe` branches on |
 | `reference` | whether the probe needs a reference (`"purification"` or `"single"`); checked when the spec is built |
-| `length` | values per evaluation: `"one"`, `"profile"` (n + 1), `"samples"` (`Probe.samples`) or `"size"` (`Probe.size`); `_probe_length` applies it |
+| `length` | values per evaluation: `"one"`, `"profile"` (n + 1), `"sites"` (n), `"samples"` (`Probe.samples`), `"size"` (`Probe.size`) or `"correlated"` (couplings x sizes); `_probe_length` applies it |
 | `after_purification` | the value recorded after a stop: `"nan"`, `"zero"`, `"n"` or `"n+1"`; `_probe_fill` applies it |
 | `sampled` | whether the probe draws random orderings (`Probe.samples` must then be at least 1) |
 
@@ -684,6 +719,24 @@ with `l > 0`, for m = 1..w:
 
 The walk visits about C(n, w - 1) prefixes with up to 4^(w-1) lookups each,
 instead of C(n, w) rank computations.
+
+**Single qubits (`site_information_rows`).** For w = 1 none of this is
+needed: `l({i}) = rank(N(S)|_i) - rank(S|_i)` is a difference of ranks of
+two vectors each, qubit i's X and Z columns over all rows and over the rows
+outside `ref_rows`, and the rank of two vectors over GF(2) is read from
+whether each is zero and whether they are equal
+(`single_qubit_lost`, 2 W words). `logical_sites` (N_log = #{i : l({i}) > 0})
+and `site_information` (every `l({i})`) make one pass over the n qubits,
+O(n W) word operations and no elimination: the cost of the d = 1 step of the
+contiguous distance, which with `cap=2` is the whole check on a code without
+a failing qubit (it stops at the first that fails, so it is cheaper on codes
+with one). `uncorrectable_region_counts(max_size=1)` gives the same count,
+but only after `code_columns`, which tests every bit of the 2n system
+columns over all rows and row-reduces them (at least O(n N) bit operations
+for N = n + |R| rows, against 2 n W words for the pass): that is what the
+dedicated probes avoid. N_log is a count of
+qubits, not the sum of the `l({i})` (which is 2 at a qubit still Bell-paired
+with its own reference), and d_cont >= 2 exactly when k > 0 and N_log = 0.
 
 Measured costs per evaluation on one thread, at n = 256, for codes generated
 by random circuits (the engine runs trajectories in parallel over all cores):

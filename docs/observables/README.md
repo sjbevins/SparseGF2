@@ -19,6 +19,7 @@ For a shorter tour of the whole simulator, read
 | entanglement: $S(A)$, half-cut entropy, $I(A:B)$, $I_3(A:B:C)$, entropy profile | $S(A) = -\operatorname{tr}\rho_A \log_2 \rho_A$, and signed sums of it | `entropy(region)`, `half_cut_entropy()`, `mutual_information(a, b)`, `tripartite_information()`, `entropy_profile()` | `observables.entropy` (`Simulator.entropy`), `mutual_information`, `tripartite_information`, `entropy_profile` | `EnsembleResult.mean`, `mean_and_error` (both skip the NaN after `stop_when_purified`) | [entanglement.md](entanglement.md) |
 | code dimension $k_C$ | $S(R)$ | `code_dimension()` | `observables.code_dimension`, `StabilizerCode.num_logical` | `EnsembleResult.survival`, `kaplan_meier` | [code-dimension.md](code-dimension.md) |
 | lost information $\ell_C(A)$ | $I(A:R)$; correctable iff 0 | `lost_information(region)`, `erasure_lost_profile(samples)` | `observables.lost_logical_information`, `erasure_is_correctable`, `recovery_probability`, `erasure_profile`; `StabilizerCode.lost_information`, `is_correctable` | `bernoulli_erasure_curve` | [lost-information.md](lost-information.md) |
+| **new:** weight-one logical operators $N_{\log}$, site information $I(i:R)$, untouched qubits $N_{\mathrm{bare}}(T)$ | $N_{\log} = \lvert\lbrace i : I(i:R) > 0\rbrace\rvert$ (qubits carrying a single-qubit Pauli in $N(S) \setminus S$); $d_{\mathrm{cont}} \ge 2$ iff $k_C > 0$ and $N_{\log} = 0$; $N_{\mathrm{bare}}(T)$: qubits no gate or measurement reached by layer $T$ | `logical_sites()`, `site_information()`; spec option `record_first_touch` (`EnsembleResult.first_touch`) | `StabilizerCode.logical_sites`, `site_information` | `EnsembleResult.bare_counts`, `bare_times`, `kaplan_meier` | [logical-sites.md](logical-sites.md) |
 | random-region failure $P_C(m)$ | probability that a uniformly random $m$-qubit erasure is uncorrectable | `erasure_first_failure(samples)` (sampled), `uncorrectable_region_counts(max_size)` (exact), `code_snapshot()` | `StabilizerCode.first_failure_sizes`, `uncorrectable_counts`; `observables.random_erasure_statistics` | `failure_by_size`, `exact_failure_by_size`, `hybrid_failure_by_size`, `junction_dip` | [random-region-erasure.md](random-region-erasure.md) |
 | independent erasure $\Phi_C(e)$, $e_\delta$, $\mu_C$, distance bounds | $\Phi_C(e) = \sum_m b_m(e) P_C(m)$ with binomial weights $b_m(e)$; $e_\delta = \sup\lbrace e : \Phi(e) \le \delta\rbrace$; $\mu_C = \mathbb{E}[D]$ | (from the probes above) | (from a saved code, as above) | `erasure_failure_probability`, `erasure_tolerance`, `mean_first_failure`, `distance_bounds` | [random-region-erasure.md](random-region-erasure.md) |
 | **new:** geometry-correlated failure $P_{C,G,J}(m)$, $\Phi_{C,G,J}(\varepsilon)$, $\varepsilon_\delta(J)$ | probability that an $m$-qubit region drawn with weight $e^{-J b_G(A)}$ ($b_G$: edges of $G$ leaving $A$) is uncorrectable, and its binomial mixture | `correlated_erasure(couplings, sizes, samples)` (sampled; `EnsembleResult.correlated`) | `StabilizerCode.correlated_failure`, `boundary_failure_counts`, `interval_failure_by_size`, `end_window_failure_by_size`; regions from `erasures.sample_regions` | `exact_correlated_failure`, `correlated_failure_curve`, `failure_probability_from_curve`, `tolerance_from_curve`, `binomial_window`, `mean_over_codes` | [correlated-erasure.md](correlated-erasure.md) |
@@ -70,6 +71,12 @@ its own.
    counts, $\Phi_{C,G,J}$ and $\varepsilon_\delta(J)$, the in-run probe and
    the tools `sample_erasure_regions` and `erasure_curves`, and their cost.
    Read random-region-erasure.md first: $J = 0$ is its case.
+6. [logical-sites.md](logical-sites.md) (new): $I(i:R)$ for one qubit from two
+   column ranks, the count $N_{\log}$ of qubits carrying a weight-one logical
+   operator and why it decides $d_{\mathrm{cont}} \ge 2$, why membership in $S$
+   matters, the untouched qubits and their first touches, and the cost (the
+   $d = 1$ step of the contiguous distance, for every qubit). Read
+   lost-information.md first.
 
 Documents for purification and the contiguous distance will follow the same
 structure.

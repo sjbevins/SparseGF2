@@ -102,23 +102,22 @@ Example: {"circuit": "H 0\\nCX 0 1\\nTICK\\nM 0", "shots": 1, "seed": 1,
 _RUN_ENSEMBLE = """\
 Run random monitored-circuit trajectories: probe means and standard errors per
 checkpoint (<= 50 shown), purification statistics (censored_fraction, tau quantiles,
-survival) and throughput. num_threads: threads to run on (default <THREADS>, all this
-process may use; more run on <THREADS>). Runs estimated above max_seconds (default 60) on
-them are refused: use start_ensemble_job.
+survival), throughput. num_threads: threads (default and at most <THREADS>, all this
+process may use). Runs estimated above max_seconds (default 60) are refused: use
+start_ensemble_job.
 spec keys: <SPEC_KEYS>. graph: {"family": <GRAPHS>, params..., "seed" if random} (or
 give edges); "realizations": G gives G graphs, circuits_per_graph circuits each (omit
 trajectories to run all). schedule matching|random_edges|all_edges;
 reference none|purification|single; checkpoints "final"|"every_layer"|stride|list;
 probes [{"kind": <PROBES>, params..., "name"?, own "checkpoints"?}]. A layer: gates, then
 Z measurements at rate measurement_rate. tau=-1 means censored. Vector probes: a curve
-over m and a depth x m grid (vs_depth). P_C(m) is over trajectories with a code
-(count_with_code), for the counts only if code_dimension or erasure_first_failure covers
-their layers (else flagged).
+and a depth grid (vs_depth). P_C(m) averages codes (count_with_code; counts need
+code_dimension or erasure_first_failure on their layers).
 
 Example: {"spec": {"num_system": 32, "graph": {"family": "watts_strogatz", "k": 4,
  "beta": 0.1, "seed": 1}, "layers": 256, "measurement_rate": 0.1, "reference": "single",
  "checkpoints": "every_layer", "probes": [{"kind": "code_dimension"}],
- "stop_when_purified": true}, "trajectories": 500, "seed": 7, "num_threads": 8}"""
+ "stop_when_purified": true}, "trajectories": 500, "seed": 7}"""
 
 _ESTIMATE = """\
 Rough, deliberately pessimistic runtime estimate (seconds) for run_ensemble with this spec

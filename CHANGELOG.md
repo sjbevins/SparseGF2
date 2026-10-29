@@ -2,6 +2,96 @@
 
 ## Unreleased
 
+* **Weight-one logical operators** (`mipt.logical_sites()`, `mipt.site_information()`, JSON
+  kinds `"logical_sites"` and `"site_information"`, both needing a reference):
+  `logical_sites` records N_log = #{i : I(i:R) > 0}, the number of system qubits that carry
+  a single-qubit Pauli commuting with the code's stabilizers without being one (a count of
+  qubits, not the sum of I(i:R), which is 2 at a qubit still Bell-paired with its
+  reference); d_cont >= 2 exactly when k > 0 and N_log = 0. `site_information` records the
+  n values I(i:R) in {0, 1, 2} (the sitewise defect bitsets are `values > 0`).
+  - **Kernel:** `_kernel.entropy.site_information_rows`, one pass over the n qubits with
+    `single_qubit_lost` (the rank of a qubit's two columns over all rows minus over the rows
+    outside the reference rows): O(n W) words and no elimination, the cost of
+    `contiguous_distance(cap=2)` on a code without such a qubit (cap 2 stops at the first);
+    `uncorrectable_region_counts(max_size=1)` gives the same count after a full
+    `code_columns` reduction. Both probes record 0 where k = 0 (also after a
+    `stop_when_purified` stop) and NaN after a `stop_when_distance` stop.
+  - **Codes:** `StabilizerCode.site_information()` and `StabilizerCode.logical_sites()`
+    for saved codes.
+  - **Summaries:** `logical_sites` gets `mean_with_code`, `stderr_with_code`,
+    `count_with_code` and `distance_two_fraction` (P(k > 0, N_log = 0)) when a
+    `code_dimension` (or `erasure_first_failure`) probe covers its layers, and a note;
+    `site_information` is a curve over the qubit index. `estimate_ensemble` prices both as
+    the cap-2 check (plus n stored numbers for the vector).
+* **First touches** (`MonitoredCircuit(record_first_touch=True)`, JSON
+  `"record_first_touch": true`; default off): `EnsembleResult.first_touch`, int64
+  `(trajectories, n)`, the first layer in which each system qubit took part in a drawn gate
+  or was measured (0 for every scramble gate, -1 if neither happened through `final_layer`;
+  the setup's Bell pairing does not count). `EnsembleResult.bare_counts(layers=None)` gives
+  N_bare(T), the qubits still untouched after layer T (NaN past a stop unless already 0),
+  and `EnsembleResult.bare_times()` `(time, observed)` of tau_bare, the first layer with
+  N_bare = 0, for `analysis.kaplan_meier`. The engine reads the gate and measurement lists
+  each layer already drew: nothing is drawn, every other output is unchanged (randomness
+  contract 2), and off it costs one test per layer and stores nothing. The option is a
+  protocol field (saved, loaded, kept by `replay`; `concatenate`, resume and extend refuse
+  a mismatch); `api._rows`, the sweep reader and `sweep.verify` carry the array; the
+  summary gets a `first_touch` block (`bare_mean`, `fraction_with_bare`, `all_touched`,
+  `censored`, `tau_bare_median_all`) and `estimate_ensemble`'s layout and memory include
+  it.
+* **Docs and tests:** `docs/observables/logical-sites.md` (definitions, the proof that
+  `single_qubit_lost` is I(i:R) and that I(i:R) > 0 is a weight-one logical operator, the
+  cost, worked examples against brute force); `tests/test_logical_sites.py` (an exhaustive
+  oracle that enumerates the code's stabilizer group S from Stim states and tests every
+  single-qubit Pauli for commuting with S and membership in S, on every layer of
+  trajectories rebuilt from the documented draws at n <= 8 across graphs, schedules,
+  scrambles, both pictures and rates 0 to 1, on hand-built states and codes with known
+  distance, and in lock step with Stim under gates and X, Y, Z measurements; N_log = 0 iff
+  cap-2 gives 2 with k > 0, and N_log equal to the one-qubit erasure counts and the full
+  distance's d = 1, on every layer at n up to 64 for beta 0, 0.3, 1; bit identity of runs
+  with and without the new probes), `tests/test_first_touch.py` (first touches against the
+  circuit text and an independent regeneration of the draws for every schedule, stops,
+  chunks, indices, threads, replay, save and load, concatenate, the JSON API with resume
+  and extend; N_bare <= N_log and N_bare <= k on every layer), the new probes in
+  `tests/test_mipt.py`'s replay through `Simulator`, and the benchmark
+  `benchmarks/logical_sites_cost.py` (a layer, cap 2, `logical_sites`,
+  `site_information`, the full distance) with its smoke test.
+* **Stop on distance** (`MonitoredCircuit(stop_when_distance=c, stop_not_before=H)`, the JSON
+  keys `"stop_when_distance"` and `"stop_not_before"`): a trajectory ends at the first layer
+  L >= H at which it still holds a code and its contiguous distance has reached c at some layer
+  <= L, so a run that needs only the first layer with d >= c (and every circuit up to H) is not
+  simulated past it.
+  - **Requirements:** a reference and exactly one `contiguous_distance` probe evaluated at every
+    layer, with no cap or a cap of at least c (`contiguous_distance(cap=2,
+    checkpoints="every_layer")` for c = 2); anything else is refused with a message naming what
+    to change. It combines with `stop_when_purified` (whichever comes first); a purified
+    trajectory never stops on distance.
+  - **Results:** the trajectory is the run without the rule up to its stop (the check draws
+    nothing; the randomness contract is unchanged), and `final_layer[t]` is the stop layer.
+    After it every probe is NaN (unknown, not the pure-reference fill) and snapshots save
+    nothing; the first passages are censored at the stop and the purification time is -1,
+    censored at the last spec checkpoint not beyond it (at the stop itself when no checkpoint
+    precedes it). A rule that could never fire (c > n) is refused. New: `EnsembleResult.stopped_on_distance`
+    (`final_layer < layers` with tau = -1), `EnsembleResult.first_distance_layer(at_least, name)`
+    (the first evaluated layer with d >= c per row) and `MonitoredCircuit.stop_probe`.
+  - **Changed to use each row's own final layer:** `EnsembleResult.survival()` and the summary's
+    survival curve are NaN (`null`) at layers beyond the earliest unpurified distance stop, and
+    `tau_median_all` uses only the layers known for every trajectory (unchanged for runs without
+    the rule); `censoring_layer`, `purification_times` and `first_passage_times` already used
+    `final_layer`; `erasure_curves` takes `count` and `q_plus` over the rows that reached the
+    layer. `MonitoredCircuit.replay` and `EnsembleResult.replay` keep the rule, pinning
+    its probe to every layer and adding it when the replay's probes leave it out. The two keys
+    are part of the protocol (`concatenate`, resume and extend refuse a change), and are saved
+    and loaded with the result (files without them load with the rule off).
+  - **Summaries:** a `stop_when_distance` entry (`at_least`, `not_before`, `probe`, `stopped`,
+    `stop_layer_mean`, `stop_layer_max`) and a note; scalar means after the stops average the
+    rows still running (`count`), and vector probes skip the stopped rows.
+  - **Kernel:** `run_ensemble` takes `stop_distance`, `stop_not_before` and `stop_probe`; with
+    the rule off it adds one comparison per checkpoint.
+  - **Tests:** `tests/test_distance_stop.py` (bit identity up to the stop against runs without
+    the rule at several n, beta, rates, references and `stop_not_before`, the stop layer
+    max(H, T), with `stop_when_purified`, a stop at layer 0, chunks, indices and threads, replay,
+    save and load, concatenate, censoring and survival, snapshots, the JSON API and summary, and
+    every validation error).
 * **Capped contiguous distance** (`mipt.contiguous_distance(cap=c)`, `{"kind":
   "contiguous_distance", "cap": c}`): records min(d, c), exactly d below the cap and c at or
   above it, for questions that only ask whether d reaches c (`cap=2`: does any single qubit

@@ -910,6 +910,7 @@ def _take(result: mipt.EnsembleResult, rows_: np.ndarray) -> mipt.EnsembleResult
         num_measurements=result.num_measurements[rows_],
         snapshots={k: (g[rows_], c[rows_]) for k, (g, c) in result.snapshots.items()},
         first_passage=None if result.first_passage is None else result.first_passage[rows_],
+        first_touch=None if result.first_touch is None else result.first_touch[rows_],
     )
 
 
@@ -981,6 +982,8 @@ def verify(directory: str | Path, n: int, beta: Any, p: Any, u: int) -> dict[str
     # a part saved before first passages were recorded has none
     if part.first_passage is not None and replayed.first_passage is not None:
         arrays += [(part.first_passage[row], replayed.first_passage[0])]
+    if part.first_touch is not None and replayed.first_touch is not None:
+        arrays += [(part.first_touch[row], replayed.first_touch[0])]
     for k, (words, counts) in part.snapshots.items():
         arrays += [
             (words[row], replayed.snapshots[k][0][0]),
