@@ -44,7 +44,10 @@ support on the references, under the invariant of
 :func:`~sparsegf2._kernel.tableau.measure_1q_phase_free_tracked`. The code
 dimension S(R) is then a popcount, and the lost information I(R:E) of an
 erasure costs two column ranks over E only (see the ``*_rows`` routines in
-:mod:`~sparsegf2._kernel.entropy`).
+:mod:`~sparsegf2._kernel.entropy`). The references follow the system, so a
+measurement whose pivot is an unmarked row (no support on them) seeks that
+row's support among the ``n_sys`` system qubits only; in the purification
+picture that halves the search.
 
 First passages: the engine reads ``k = S(R)`` after every completed layer
 (and at layer 0, after setup and scramble), whatever the checkpoints, and
@@ -689,7 +692,7 @@ def run_ensemble(
                 for j in range(ng):
                     apply_2q(tab, ga[j], gb[j], gg[j], lin2, anf2, ident2, ws, False)
                 for j in range(nm):
-                    measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows)
+                    measure_1q_phase_free_tracked(tab, n, ws, mq[j], 2, anti, supp, ref_rows, n_sys)
                 _touch(touches, ga, gb, ng, mq, nm, layer)
                 num_meas += nm
                 final = layer

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+* **Faster random measurements in the purification picture**
+  (`_kernel.tableau.measure_1q_phase_free_tracked(..., n_sys)`): to multiply the pivot row into
+  the other anticommuting rows, a measurement first finds the pivot's support by reading one word
+  of both columns of every qubit. A pivot outside the reference rows (a code row) has no support
+  on the references, and the references are the qubits from `n_sys` on, so the ensemble engine
+  now searches the `n_sys` system qubits only for such a pivot. The pivot, the tableau and every
+  output are bit for bit as before. In the purification picture the search halves (2n to n
+  qubits) and 99.7 to 100% of the random measurements have a code-row pivot (n = 256 to 1024,
+  Watts–Strogatz k = 4, beta 0 and 1, p 0.05 to 0.235, saturated states); with one reference
+  or none it shrinks by one qubit or not at all, and runs are as fast as before. Measured on the
+  development machine (Ryzen 9 9950X3D, 32 threads), 32 trajectories to 16n layers with k and
+  N_log every layer, Watts–Strogatz k = 4, purification picture: 1.5 to 1.8 times faster at
+  n = 512 and 1024 for p from 0.065 to 0.235 (beta 0 and 1), less at lower p (an independent
+  check found 1.2 to 1.35 at n = 1024, beta 1, p 0.05 to 0.1, on shorter runs), and 1.0 to
+  1.55 times at n = 128 and 256 (128 trajectories). The kernel fingerprint changes, so a study
+  that pins the fingerprint must accept the new kernel (after reproducing stored trajectories).
+  - **Tests:** `tests/test_reference_rows.py::test_searching_the_system_only_changes_nothing`
+    (along whole trajectories, six cases, every measurement leaves the tableau, the reference rows
+    and the return value as the full search does, with both kinds of pivot) and
+    `::test_the_search_bound_is_used` (the bound is applied); the engine's existing oracle,
+    snapshot and pinned-value tests pass unchanged.
 * **Weight-one logical operators** (`mipt.logical_sites()`, `mipt.site_information()`, JSON
   kinds `"logical_sites"` and `"site_information"`, both needing a reference):
   `logical_sites` records N_log = #{i : I(i:R) > 0}, the number of system qubits that carry

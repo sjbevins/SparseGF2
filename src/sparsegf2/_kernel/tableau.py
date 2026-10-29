@@ -398,7 +398,7 @@ def measure_1q_phase_free(tab, n, ws, q, code, anti, supp):
 
 
 @njit(cache=True)
-def measure_1q_phase_free_tracked(tab, n, ws, q, code, anti, supp, ref_rows):
+def measure_1q_phase_free_tracked(tab, n, ws, q, code, anti, supp, ref_rows, n_sys=-1):
     """:func:`measure_1q_phase_free` that maintains the *reference rows* of a code.
 
     ``ref_rows`` (length ws) marks the stabilizer rows with support on a set R
@@ -415,14 +415,27 @@ def measure_1q_phase_free_tracked(tab, n, ws, q, code, anti, supp, ref_rows):
     their R-parts independent (and nonzero), and the pivot row, replaced by
     the measured Pauli, leaves the set. Either way the invariant holds and
     the stabilizer group is the same as with :func:`measure_1q_phase_free`.
-    With ``ref_rows`` all zero the two functions are identical.
+    With ``ref_rows`` all zero and the default ``n_sys`` the two functions are
+    identical.
+
+    ``n_sys`` (optional, a qubit count): the qubits ``n_sys .. n - 1`` all
+    belong to R, as when the references follow the system. An unmarked row
+    has no R-part, so an unmarked pivot's support is then sought among the
+    qubits below ``n_sys`` only: the same support and the same tableau, with
+    fewer columns read. A marked pivot is always searched over all ``n``
+    qubits. The value is trusted, not checked: with a smaller one the search
+    misses support and the tableau is wrong. ``-1`` (the default), or
+    ``n_sys >= n``: every qubit is searched.
     """
     _anticommuting_1q(tab, ws, q, code, anti)
     pivot = -1
+    n_search = n  # the pivot row's support lies on qubits below n_search
     for w in range(ws):
         free = anti[w] & ~ref_rows[w]
         if free != ZERO:
             pivot = (w << 6) + np.int64(ctz(free))
+            if 0 <= n_sys < n:
+                n_search = n_sys
             break
     if pivot < 0:
         for w in range(ws):
@@ -432,7 +445,7 @@ def measure_1q_phase_free_tracked(tab, n, ws, q, code, anti, supp, ref_rows):
         if pivot < 0:
             return 0
         ref_rows[pivot >> 6] &= ~(ONE << _U(pivot & 63))
-    _collapse_phase_free(tab, n, ws, q, code, anti, supp, pivot)
+    _collapse_phase_free(tab, n_search, ws, q, code, anti, supp, pivot)
     return 2
 
 
@@ -450,15 +463,20 @@ def _anticommuting_1q(tab, ws, q, code, anti):
 
 
 @njit(cache=True)
-def _collapse_phase_free(tab, n, ws, q, code, anti, supp, pivot):
-    """Multiply the rows in ``anti`` by row ``pivot`` and replace it by the measured Pauli."""
+def _collapse_phase_free(tab, n_search, ws, q, code, anti, supp, pivot):
+    """Multiply the rows in ``anti`` by row ``pivot`` and replace it by the measured Pauli.
+
+    The pivot row's support is sought among qubits ``0 .. n_search - 1``: every
+    qubit of the tableau, or fewer when the caller knows the row has no
+    support above them.
+    """
     xr = 2 * q
     pw = pivot >> 6
     pbit = ONE << _U(pivot & 63)
     nbit = ~pbit
     anti[pw] &= nbit
     ns = 0
-    for c in range(n):
+    for c in range(n_search):
         if ((tab[2 * c, pw] | tab[2 * c + 1, pw]) & pbit) != ZERO:
             supp[ns] = c
             ns += 1
